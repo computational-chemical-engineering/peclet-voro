@@ -1,0 +1,2354 @@
+#ifndef VOR_VORONOI_H
+#define VOR_VORONOI_H
+
+#include <vector>
+#include <stack>
+#include <deque>
+#include <boost/container/flat_set.hpp>
+#include <utility>
+#include <cstdio>
+#include <queue>
+#include <limits>
+#include "vor_types.hpp"
+#include "nbrlist.hpp"
+//#include <google/profiler.h>
+#include <algorithm>
+//#include <omp.h>
+
+
+using std::vector;
+using std::stack;
+using std::deque;
+using std::pair;
+using std::priority_queue;
+using std::sort;
+using std::merge;
+using std::numeric_limits;
+using vor::Array;
+using vor::Vertex;
+using vor::NbrInsert;
+using vor::uint1;
+using vor::uint0;
+using vor::uint2;
+using vor::NbrDist;
+using vor::CompareNbrDist;
+using vor::CompareNbrInsert;
+using vor::NbrList;
+using vor::Box;
+using vor::PosAndId;
+
+using boost::container::flat_set;
+
+namespace vor {
+
+  inline uint1 makeLabel(uint1 facet, uint1 vertex, uint1 edge)
+  {
+    return ((facet << shiftFacet) | (vertex<<2) | edge);
+  }
+ 
+  inline uint1 getFacet(uint1 label)
+  {
+    return ((label & maskFacet) >> shiftFacet);
+  }
+
+  inline uint1 getVertex(uint1 label)
+  {
+    return ((label & maskVertex) >> 2);
+  }
+
+  inline uint1 getEdge(uint1 label)
+  {
+    return (label & maskEdge);
+  }
+
+  template< typename real_t >
+  class CellMaker;
+  template< typename real_t >
+  class CellUpdater;
+  template< typename real_t >
+  class CellGeometry;
+
+  template< typename real_t >
+  class Cell
+  {
+  public:
+    Cell(): m_id(0), m_numVertices(0), m_numFacets(0), m_vertexPos(NULL), m_vertices(NULL), m_facets(NULL), m_nbr(NULL){}
+    Cell(const Cell<real_t> & cell);
+    ~Cell();
+    Cell & operator=(const Cell<real_t> & rhs);
+    Cell & operator=(CellMaker<real_t> & rhs);
+    void setId(uint2 id) {m_id=id;}
+    void reset(uint0 numVertices=0, uint0 numFacets=0);
+    void printTopology() const;
+    void printFacet(uint2 nbr) const;
+    void printNbrFacets(const vector<Cell<real_t> > & cells) const;
+    void drawGnuplot(Array<real_t, 3> p,FILE *fp) const;
+    inline uint0 numVertices() const {return m_numVertices;}
+    inline uint0 numFacets() const {return m_numFacets;}
+    inline uint2 getNbr(uint1 i) const {return m_nbr[i];}
+    inline bool hasNoNbr();
+    friend class CellMaker<real_t>;
+    friend class CellUpdater<real_t>;
+    friend class CellGeometry<real_t>;
+    Array<real_t, 3> * m_vertexPos;
+  protected:
+    uint2 m_id;
+    uint0 m_numFacets;
+    uint0 m_numVertices;
+    Vertex * m_vertices;
+    uint1 * m_facets;
+    uint2 * m_nbr;
+    inline uint1 getNextLabelCCW(uint1 label) const
+    {
+      uint1 facetMasked(label & maskFacet);
+      uint1 revLabel(m_vertices[getVertex(label)][getEdge(label)]);
+      uint1 vertexMasked(revLabel & maskVertex);
+      uint1 edge(getEdge(revLabel));
+      (edge==0 ? edge=2 : --edge);
+      return (facetMasked | vertexMasked | edge);
+    }
+    inline uint1 getReverseLabel(uint1 label) const
+    {
+      return m_vertices[getVertex(label)][getEdge(label)];
+    }
+  };
+
+  template< typename real_t >
+  class Cuboid: public Cell<real_t>
+  {
+  public:
+    Cuboid(const Array<real_t, 3> & L);
+    const Cell<real_t> & getCell() const {return *this;}
+  };
+
+  template <typename UInt>
+  class FreeIndxList
+  {
+  public:
+    FreeIndxList(UInt numMax): m_numMax(numMax), m_next(numMax), m_free(numMax)
+    {
+      reset(0);
+    }
+    inline UInt endIndx() const {return m_numMax;}
+    inline UInt beginIndx() const {return m_firstUsed;}
+    inline UInt nextIndx(UInt i) const {return m_next[i];}
+    inline bool isFree(UInt i) const {return m_free[i];}
+    bool release(UInt i);
+    UInt getFree();
+    void reset(UInt N=0);
+  private:
+    vector<bool> m_free;
+    vector<UInt> m_next;
+    const UInt m_numMax;
+    UInt m_firstFree, m_firstUsed;
+  };
+
+  template <typename UInt>
+  class VisitedIndx
+  {
+  public:
+    VisitedIndx();
+    VisitedIndx(UInt numMax);
+    ~VisitedIndx();
+    void init(UInt numMax);
+    inline void set(UInt i);
+    inline bool isVisited(UInt i){return m_visited[i];}
+    void reset();
+    UInt size() {return m_numMax;}
+  private:
+    UInt m_numMax;
+    bool * m_visited;
+    vector<UInt> m_visitedIndx;
+  };
+
+
+  template< typename real_t >
+  class CellMaker
+  {
+  public:
+    CellMaker();
+    ~CellMaker();
+    CellMaker & operator=(const Cell<real_t> & rhs);
+    CellMaker & operator=(const CellUpdater<real_t> & rhs);
+    bool build(uint2 id, const vector< Array<real_t, 3> > & pos,const NbrList<uint2, real_t> & nbrList, const Cell<real_t> & initCell);
+    bool rebuild(const vector< Array<real_t, 3> > & pos,const Box<real_t> & box, const Cell<real_t> & initCell);
+    inline bool processNbrs(const vector<uint2 > & nbr, const vector<Array<real_t, 3> > & pos,const  Box<real_t> & box);
+    inline bool processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const vector<Array<real_t, 3> > & pos,const Array<real_t, 3> pos0);
+
+    inline real_t getRsqMax() const {return m_rSq[m_vRsqMax];}
+    void computeAllRsq();
+    inline void computeRsq(uint1 i);
+    void findRsqMax();
+    void getCloseNbrs(NbrInsert & nbrs);
+    // void drawGnuplot(FILE *fp) const;
+    // void testTopo() const;
+    const vector<uint2> & getNbrs() const {return m_nbr;}
+    friend class Cell<real_t>;
+    friend class CellUpdater<real_t>;
+    void renumber();
+  protected:
+    void init(const Cell<real_t> & cell);
+    inline void resetDist();
+    inline void computeGCOrig(uint2 indx, const Array<real_t, 3> & pos);
+    real_t computeRsqMinGC() const;
+    Array<real_t,3> getClosestPointGC(uint1 indx) const;
+    inline real_t computeDist(uint1 i, const Array<real_t, 3> p, const real_t rSq);
+    inline real_t computeDist(uint1 i, const Array<real_t, 3> p);
+    void computeAllDist(const Array<real_t, 3> p, const real_t rSq);
+    inline real_t computeDistGC(uint1 i);
+    inline real_t computeMaxDistGC();
+    real_t  computeMaxDistGCVerb();
+    void getAllDistGCVerb();
+    void computeAllDistGC();
+    inline bool cutCell(const Array<real_t, 3> p, real_t rSq, uint2 nbr);
+    uint1 m_numVertices, m_numFacets; //only to be used after renumber()!
+  private:
+    inline uint1 getNextLabelCCW(uint1 label) const;
+    inline uint1 getReverseLabel(uint1 label) const;
+    uint2 m_id;
+    const NbrList<uint2, real_t> * p_nbrList;
+    Array<real_t, 3> * m_vertexPos;
+    real_t * m_rSq;
+    Vertex * m_vertices;
+    uint1 * m_facets;
+    uint2 * m_nbr;
+    FreeIndxList<uint1> m_freeV, m_freeF;
+    VisitedIndx<uint2> m_visited;
+    deque<uint2> m_checkGridCell;
+    real_t m_distMax, m_distGCMax;
+    uint1 m_vRsqMax;
+    bool m_isAllCut;
+    uint1 m_vDistMax, m_vDistGCMax;
+    real_t * m_dist;
+    bool * m_isKnownDist;
+    Array<real_t, 3> m_relOrigGC, m_dLGC;
+    real_t * m_distGC;
+    uint1 * m_renumVWrk;
+    uint1 * m_renumFWrk;
+    vector<uint1> m_newVerticesWrk;
+    vector<uint1> m_facetPrevWrk;
+    vector<uint2> m_indcsNbrsWrk;
+    vector<NbrDist<real_t> > m_nbrDistWrk;
+    stack<uint1> m_vStackWrk;
+  };
+
+  template< typename real_t >
+  class CellGeometry
+  {
+  public:
+    CellGeometry();
+    CellGeometry(Cell<real_t> & cell);
+    CellGeometry & operator=(Cell<real_t> & rhs);
+    CellGeometry & operator=(const CellGeometry<real_t> & rhs);
+    void computeConnectingVectors(const vector<Array<real_t, 3> > & pos, const Box<real_t> & box);
+    void computeEdgeInv();
+    void updateVertexPos();
+    void computeAreas();
+    void computeVolume();
+    void diffVolume();
+    void computeAll();
+    void gradFacetAreaSq(uint1 facetIndx, vector<uint2> & indx, vector<Array<real_t, 3> > & grad);
+    const vector< Array<real_t, 3> > & getdV() const {return m_dV;}
+    const vector< Array<real_t, 3> > & getAreas() const {return m_areas;}
+    real_t getVolume() const {return m_vol;}
+    bool isConvex() const;
+    inline Cell<real_t> & getCell() {return *p_cell;}
+  protected:
+    Cell<real_t> * p_cell;
+    vector< Array<real_t, 3> > m_connV;
+    vector<real_t> m_rSq;
+    vector< Array< Array<real_t, 3>, 3 > > m_edgeInv;
+    vector< Array<real_t, 3> > m_areas;
+    real_t m_vol;
+    // omega[i][j][l][k]
+    // neighbor corresponding to facet i differentiated into j-direction
+    // l: displacement direction, k: normal direction
+    vector< Array< Array< Array<real_t, 3>, 3 >, 3> > m_omega;
+    vector< Array<real_t, 3> > m_dV;
+  };
+
+  template< typename real_t >
+  class CellUpdater
+  {
+  public:
+    CellUpdater(): m_isSetup(false){}
+    CellUpdater(CellGeometry<real_t> & geom);
+    CellUpdater & operator=(CellGeometry<real_t> & rhs);
+    CellUpdater & operator=(const CellUpdater<real_t> & rhs);
+    inline void reset();
+    uint1 findFacet(uint2 nbr) const;
+    void updateNbrInserts();
+    inline const vector<NbrInsert> & getNbrInserts() {return m_nbrInserts;}
+    inline void clearNbrInserts() {m_nbrInserts.clear();}
+    bool processNbrInserts(NbrInsertItr begin, NbrInsertItr end, CellMaker<real_t> & maker, const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box);
+    friend class CellMaker<real_t>;
+    friend class CellGeometry<real_t>;
+    //inline bool isConvex2() const;
+  protected:
+    void setupNbrSet();
+    inline bool isSetupNbrSet() {return m_isSetup;}
+    inline bool isInNbrs(uint2 nbr) const;
+    //inline bool isConvex() const;
+    CellGeometry<real_t> * p_geom;
+    flat_set<uint2> m_nbrs;
+    vector<uint2> m_nbrsWrk;
+    vector<NbrInsert> m_nbrInserts;
+    bool m_isSetup;
+    vector<uint2> m_newNbrsWrk;
+    vector< Array< bool, 3> > m_visitedWrk;
+    //    vector< Array< Array<real_t, 3>, 3 > > m_edgeDirsWrk;
+  };
+
+  template<typename real_t>
+  class CellComplex
+  {
+  public:
+    CellComplex(Box<real_t> * box): m_nbrList(box), m_isBuild(false) {}
+    void build(const vector<Array<real_t, 3> > & p);
+    void update(const vector<Array<real_t, 3> > & p);
+    const vector<Cell<real_t> > & getCells() const {return m_cells;}
+    vector<Cell<real_t> > & getCells() {return m_cells;}
+    vector<CellGeometry<real_t> > & getGeoms() {return m_geom;}
+    const NbrList<uint2, real_t>  & getNbrList() const {return m_nbrList;}
+  private:
+    void repear(const vector<Array<real_t, 3> > & p);
+    void initNbrList(const vector<Array<real_t, 3> > & p);
+    NbrList<uint2, real_t> m_nbrList;
+    vector<Cell<real_t> > m_cells;
+    vector<CellGeometry<real_t> > m_geom;
+    vector<CellUpdater<real_t> > m_updaters;
+    vector<bool> m_hasChanged;
+    bool m_isBuild;
+  };
+
+  class NbrsToFacets
+  {
+  public:
+    NbrsToFacets() {}
+  template<typename real_t>
+    void init(const vector< Cell<real_t> > & cells);
+    void print() const;
+    //    void makeMatrixdVdV(const vector<real_t> & dV);
+  protected:
+    template<typename real_t>
+    NbrsToFacets transposedV(const vector<real_t> & values, vector<real_t> & valuesTr) const;
+    uint2 m_numCells;
+    vector<uint2> m_ptr;
+    vector<uint2> m_nbr;
+    vector<uint1> m_facet;
+  };
+
+  template<typename real_t>
+  void NbrsToFacets::init(const vector< Cell<real_t> > & cells)
+  {
+    m_numCells = cells.size();
+    m_ptr.resize(m_numCells+1);
+    m_ptr[0] = 0;
+    for(uint2 i=0; i< m_numCells; ++i)
+      m_ptr[i+1] = m_ptr[i] + cells[i].numFacets();
+    m_nbr.resize(m_ptr[m_numCells]);
+    m_facet.resize(m_ptr[m_numCells]);
+#pragma omp parallel
+    {
+      vector< pair<uint2, uint1> > nbrLoc;      
+#pragma omp for
+      for(uint2 i=0; i< m_numCells; ++i){
+	uint2 numFacets(m_ptr[i+1]-m_ptr[i]);
+	nbrLoc.resize(numFacets);
+	for(uint1 j=0; j< numFacets; ++j){
+	  nbrLoc[j].first = cells[i].getNbr(j);
+	  nbrLoc[j].second = j;
+	}
+	sort(nbrLoc.begin(), nbrLoc.end(), ComparePairFirst());
+	for(uint1 j=0; j< numFacets; ++j){
+	  m_nbr[m_ptr[i]+j] = nbrLoc[j].first;
+	  m_facet[m_ptr[i]+j] = nbrLoc[j].second;
+	}
+      }
+    }
+    // for(uint2 i=0; i < m_numCells; ++i){
+    //   printf("cell: %u, begin: %u, end: %u", i, m_ptr[i], m_ptr[i+1]);
+    //   for(uint1 j(m_ptr[i]); j< m_ptr[i+1]; ++j)
+    // 	printf(", nbr: %u, facet: %u", m_nbr[j], m_facet[j]);
+    //   printf("\n");
+    // }
+  }
+
+  void NbrsToFacets::print() const
+  {
+    for(uint2 i=0; i < m_numCells; ++i){
+      printf("cell: %u, begin: %u, end: %u", i, m_ptr[i], m_ptr[i+1]);
+      for(uint2 j(m_ptr[i]); j< m_ptr[i+1]; ++j)
+    	printf(", nbr: %u, facet: %u", m_nbr[j], m_facet[j]);
+      printf("\n");
+    }
+  }
+
+  template<typename real_t>
+  NbrsToFacets NbrsToFacets::transposedV(const vector<real_t> & values, vector<real_t> & valuesTr) const
+  {
+    NbrsToFacets tr;
+    tr.m_numCells = m_numCells;
+    tr.m_ptr.resize(m_numCells+1,0);
+ #pragma omp parallel for
+    for(uint2 i(0); i< m_nbr.size(); ++i){
+      if (m_nbr[i] < m_numCells){
+	uint2 indx(m_nbr[i]+1);
+#pragma omp atomic
+	++(tr.m_ptr[indx]);
+      }
+    }
+    for(uint2 i(0); i< m_numCells; ++i){
+      tr.m_ptr[i+1] += tr.m_ptr[i];
+    }
+    vector<uint2> ptrTmp(tr.m_ptr.size());
+    vector<pair<uint2, pair<uint1, Array<real_t, 3> > > > nbrTmp(m_nbr.size());
+#pragma omp parallel for
+    for(uint2 i(0); i< tr.m_ptr.size(); ++i)
+      ptrTmp[i] = tr.m_ptr[i];
+#pragma omp parallel for
+    for(uint2 i=0; i< m_numCells; ++i)
+      for(uint1 j(m_ptr[i]); j< m_ptr[i+1]; ++j){
+	if (m_nbr[j] < m_numCells){
+#pragma omp atomic capture
+	  uint2 ptrLoc = ptrTmp[m_nbr[j]]++;
+	  nbrTmp[ptrLoc].first = i;
+	  nbrTmp[ptrLoc].second.first = m_facet[j];
+	  nbrTmp[ptrLoc].second.second = values[j];
+	}
+      }
+#pragma omp parallel for
+    for(uint2 i(0); i< tr.m_numCells; ++i)
+      sort(nbrTmp.begin()+tr.m_ptr[i], nbrTmp.begin()+tr.m_ptr[i+1], ComparePairFirst());
+    tr.m_nbr.resize(nbrTmp.size());
+    tr.m_facet.resize(nbrTmp.size());
+    valuesTr.resize(nbrTmp.size());
+#pragma omp parallel for
+    for(size_t i(0); i< nbrTmp.size(); ++i){
+      tr.m_nbr[i] = nbrTmp[i].first;
+      tr.m_facet[i] = nbrTmp[i].second.first;
+      valuesTr[i] = nbrTmp[i].second.second;
+    } 
+    return tr;
+  }
+
+//   template<typename real_t>
+//   void NbrsToFacets::makeMatrixdVdV(const vector<CellGeometry<real_t> > & geoms, const vector<real_t> & masses)
+//   {
+//     vector< Array<real_t, 3> > values(m_nbr.size());
+// #pragma omp parallel for
+//     for(uint2 i=0; i< m_ptr.size()-1; ++i){
+//       const vector< Array<real_t, 3> > & dV(geoms[i].getdV());
+//       for(uint2 j=m_ptr[i]; j < m_ptr[i+1]; ++j)
+// 	for(uint0 k(0); k<3; ++k)
+// 	  values[j][k] = dV[m_facet[j]][k];
+//     }
+//     vector< Array<real_t, 3> > valuesTr();
+//     NbrsToFacets tr(this->transposedV(values, valuesTr));
+      
+//     vector<CoordMatrix<real_t> > cMat;
+//     cMat.reserve(m_numCells*300);
+//     for(uint2 i(0); i< m_numCells; ++i){
+//       const vector<Array, 3> & dV1(geom[i].getdV());
+//       for(uint2 j(m_ptr[i]); j< m_ptr[i+1]; ++j){
+// 	uint2 partIndx(m_nbr[j]);
+// 	for(uint2 m(tr.m_ptr[partIndx]); m < tr.m_ptr[partIndx+1]; ++m){
+// 	  coord.push_back();
+// 	}
+	
+
+//       }
+
+//     }
+//   }
+
+  
+  template<typename real_t>
+  Cell<real_t>::Cell(const Cell<real_t> & rhs): m_id(rhs.m_id), m_numVertices(0), m_numFacets(0), m_vertexPos(NULL), m_vertices(NULL), m_facets(NULL), m_nbr(NULL)
+  {
+    this->reset(rhs.m_numVertices, rhs.m_numFacets);
+    for(uint0 i(0); i<m_numVertices; ++i)
+      this->m_vertexPos[i] = rhs.m_vertexPos[i];
+    for(uint0 i(0); i<m_numVertices; ++i)
+      this->m_vertices[i] = rhs.m_vertices[i];
+    for(uint0 i(0); i<m_numFacets; ++i)
+      this->m_facets[i] = rhs.m_facets[i];
+    for(uint0 i(0); i<m_numFacets; ++i)
+      this->m_nbr[i] = rhs.m_nbr[i];
+  }
+
+  template<typename real_t>
+  void Cell<real_t>::reset(uint0 numVertices, uint0 numFacets){
+    delete[] m_vertexPos;
+    delete[] m_vertices;
+    delete[] m_facets;
+    delete[] m_nbr;
+    m_numVertices = numVertices;
+    m_numFacets = numFacets;
+    m_vertexPos = new Array<real_t,3>[numVertices];
+    m_vertices = new Vertex[numVertices];
+    m_facets = new uint1[numFacets];
+    m_nbr = new uint2[numFacets];
+  }
+
+  template<typename real_t>
+  Cell<real_t>::~Cell()
+  {
+    if (m_vertexPos != NULL) {
+      delete[] m_vertexPos;
+      delete[] m_vertices;
+      delete[] m_facets;
+      delete[] m_nbr;
+    }
+  }
+
+  template<typename real_t>
+  Cell<real_t> & Cell<real_t>::operator=(const Cell<real_t> & rhs)
+  {
+    if (&rhs == this) return *this;
+    m_id = rhs.m_id;
+    this->reset(rhs.m_numVertices, rhs.m_numFacets);
+    for(uint0 i(0); i<m_numVertices; ++i)
+      this->m_vertexPos[i] = rhs.m_vertexPos[i];
+    for(uint0 i(0); i<m_numVertices; ++i)
+      this->m_vertices[i] = rhs.m_vertices[i];
+    for(uint0 i(0); i<m_numFacets; ++i)
+      this->m_facets[i] = rhs.m_facets[i];
+    for(uint0 i(0); i<m_numFacets; ++i)
+      this->m_nbr[i] = rhs.m_nbr[i];
+    return *this;
+  }
+
+  template<typename real_t>
+  Cell<real_t> & Cell<real_t>::operator=(CellMaker<real_t> & rhs)
+  {
+    m_id = rhs.m_id;
+    rhs.renumber();
+    this->reset(rhs.m_numVertices, rhs.m_numFacets);
+    //    printf("numVertices: %u, numFacets: %u\n", m_numVertices, m_numFacets);
+    for(uint0 i(0); i<m_numVertices; ++i)
+      this->m_vertexPos[i] = rhs.m_vertexPos[i];
+    for(uint0 i(0); i<m_numVertices; ++i)
+      this->m_vertices[i] = rhs.m_vertices[i];
+    for(uint0 i(0); i<m_numFacets; ++i)
+      this->m_facets[i] = rhs.m_facets[i];
+    for(uint0 i(0); i<m_numFacets; ++i)
+      this->m_nbr[i] = rhs.m_nbr[i];
+    return *this;
+  }
+
+  template<typename real_t>
+  void Cell<real_t>::printTopology() const
+  {
+    printf("cell: %u\n", m_id);
+    for (uint1 i(0); i< m_numVertices; ++i){
+      printf("%u: %f ", i, m_vertexPos[i][0]);
+    	printf("%f ", m_vertexPos[i][1]);
+    	printf("%f\n", m_vertexPos[i][2]);
+    }
+    // for (uint1 i(0); i< m_numVertices; ++i){
+    //   for (uint0 k(0); k< 3; ++k){
+    //  	uint2 label = m_vertices[i][k];
+    // 	printf("%u %u %u - ", getFacet(label), getVertex(label), getEdge(label));
+    // 	uint2 labelNext(getNextLabelCCW(label));
+    // 	printf("%u %u %u, ", getFacet(labelNext), getVertex(labelNext), getEdge(labelNext));
+    //  	label = getReverseLabel(label);
+    // 	printf("%u %u %u - ", getFacet(label), getVertex(label), getEdge(label));
+    // 	labelNext = getNextLabelCCW(label);
+    // 	printf("%u %u %u, ", getFacet(labelNext), getVertex(labelNext), getEdge(labelNext));
+    //  	label = getReverseLabel(label);
+    // 	printf("%u %u %u - ", getFacet(label), getVertex(label), getEdge(label));
+    // 	labelNext = getNextLabelCCW(label);
+    // 	printf("%u %u %u\n", getFacet(labelNext), getVertex(labelNext), getEdge(labelNext));
+    //   }
+    // }
+    printf("number of vertices %u\n", m_numVertices);
+    printf("number of facets %u\n", m_numFacets);
+    for (uint1 i(0); i< m_numFacets; ++i){
+      uint1 labelStart(m_facets[i]);
+      printf("facet %u, neihgbor %u: ", i, m_nbr[i]);
+      uint1 label = labelStart;
+      uint1 labelNext = getNextLabelCCW(label);
+      while (labelNext != labelStart){
+	printf("%d %d %d - ", getFacet(label), getVertex(label) ,getEdge(label));
+	label = labelNext;
+	labelNext = getNextLabelCCW(label);
+      }
+      printf("%d %d %d\n", getFacet(label), getVertex(label) ,getEdge(label));
+    } 
+  }
+
+  template<typename real_t>
+  void Cell<real_t>::printFacet(uint2 nbr) const
+  {
+    uint1 i(0);
+    for (; i< m_numFacets; ++i)
+      if (m_nbr[i] == nbr) break;
+    if (i==m_numFacets) {
+      printf("facet not found\n");
+      return;
+    }
+    uint1 labelStart(m_facets[i]);
+    printf("facet %u, neihgbor %u: ", i, m_nbr[i]);
+    uint1 label = labelStart;
+    uint1 labelNext = getNextLabelCCW(label);
+    while (labelNext != labelStart){
+      printf("%u - ", m_nbr[getFacet(getReverseLabel(label))]);
+      label = labelNext;
+      labelNext = getNextLabelCCW(label);
+    }
+    printf("%u\n", m_nbr[getFacet(getReverseLabel(label))]);
+  }
+
+  template<typename real_t>
+  void Cell<real_t>::printNbrFacets(const vector<Cell<real_t> > & cells) const
+  {
+    printf("number of facets %u\n", m_numFacets);
+    for (uint1 i(0); i< m_numFacets; ++i){
+      uint1 labelStart(m_facets[i]);
+      printf("facet %u, neihgbor %u: ", i, m_nbr[i]);
+      uint1 label = labelStart;
+      uint1 labelNext = getNextLabelCCW(label);
+      while (labelNext != labelStart){
+	printf("%u - ", m_nbr[getFacet(getReverseLabel(label))]);
+	label = labelNext;
+	labelNext = getNextLabelCCW(label);
+      }
+      printf("%u\n", m_nbr[getFacet(getReverseLabel(label))]);
+      printf("neihgbor of facet %u: %u ", i, m_nbr[i]);
+      cells[m_nbr[i]].printFacet(m_id);
+    }
+  }
+
+  template<typename real_t>
+  void Cell<real_t>::drawGnuplot(Array<real_t, 3> p,FILE *fp) const
+  {
+    for (uint1 i(0); i< m_numFacets; ++i){
+      uint1 labelStart(m_facets[i]);
+      uint1 label = labelStart;
+      uint1 vertex;
+      vertex = getVertex(label);
+      fprintf(fp,"%g ",p[0] + m_vertexPos[vertex][0]);
+      fprintf(fp,"%g ",p[1] + m_vertexPos[vertex][1]);
+      fprintf(fp,"%g\n",p[2] + m_vertexPos[vertex][2]);
+      label = getNextLabelCCW(label);
+      while (label != labelStart){
+	vertex = getVertex(label);
+      	fprintf(fp,"%g ",p[0] + m_vertexPos[vertex][0]);
+	fprintf(fp,"%g ",p[1] + m_vertexPos[vertex][1]);
+	fprintf(fp,"%g\n", p[2] + m_vertexPos[vertex][2]);
+	label = getNextLabelCCW(label);
+      }
+      vertex = getVertex(label);
+      fprintf(fp,"%g ",p[0] + m_vertexPos[vertex][0]);
+      fprintf(fp,"%g ",p[1] + m_vertexPos[vertex][1]);
+      fprintf(fp,"%g\n",p[2] + m_vertexPos[vertex][2]);
+      fputs("\n\n",fp);
+    } 
+  }
+  
+  template<typename real_t>
+  bool Cell<real_t>::hasNoNbr()
+  {
+    bool has(false);
+    for(uint0 i(0); i < m_numFacets; ++i) 
+      (m_nbr[i] == noNbr ? has = true: has);
+    return has;
+  }
+
+  template<typename real_t>
+  Cuboid<real_t>::Cuboid(const Array<real_t, 3> & L)
+  {
+    this->reset(8, 6);
+    for(uint0 i(0); i<6; ++i)
+      this->m_nbr[i] = noNbr;
+
+    this->m_vertexPos[0][0] = -0.5*L[0];
+    this->m_vertexPos[0][1] = -0.5*L[1];
+    this->m_vertexPos[0][2] = -0.5*L[2];
+    this->m_vertexPos[1][0] =  0.5*L[0];
+    this->m_vertexPos[1][1] = -0.5*L[1];
+    this->m_vertexPos[1][2] = -0.5*L[2];
+    this->m_vertexPos[2][0] = -0.5*L[0];
+    this->m_vertexPos[2][1] =  0.5*L[1];
+    this->m_vertexPos[2][2] = -0.5*L[2];
+    this->m_vertexPos[3][0] =  0.5*L[0];
+    this->m_vertexPos[3][1] =  0.5*L[1];
+    this->m_vertexPos[3][2] = -0.5*L[2];
+    this->m_vertexPos[4][0] = -0.5*L[0];
+    this->m_vertexPos[4][1] = -0.5*L[1];
+    this->m_vertexPos[4][2] =  0.5*L[2];
+    this->m_vertexPos[5][0] =  0.5*L[0];
+    this->m_vertexPos[5][1] = -0.5*L[1];
+    this->m_vertexPos[5][2] =  0.5*L[2];
+    this->m_vertexPos[6][0] = -0.5*L[0];
+    this->m_vertexPos[6][1] =  0.5*L[1];
+    this->m_vertexPos[6][2] =  0.5*L[2];
+    this->m_vertexPos[7][0] =  0.5*L[0];
+    this->m_vertexPos[7][1] =  0.5*L[1];
+    this->m_vertexPos[7][2] =  0.5*L[2];
+
+    //vertex and edge point to the next label (counter clock wise) on the boundary of a facet
+    this->m_facets[0] = makeLabel(0,0,0);
+    this->m_vertices[0][0] = makeLabel(2,1,2);
+    this->m_vertices[1][1] = makeLabel(4,5,2);
+    this->m_vertices[5][1] = makeLabel(5,4,0);
+    this->m_vertices[4][2] = makeLabel(1,0,1);
+    this->m_facets[1] = makeLabel(1,0,1);
+    this->m_vertices[0][1] = makeLabel(0,4,2);
+    this->m_vertices[4][1] = makeLabel(5,6,0);
+    this->m_vertices[6][2] = makeLabel(3,2,1);
+    this->m_vertices[2][0] = makeLabel(2,0,2);
+    this->m_facets[2] = makeLabel(2,0,2);
+    this->m_vertices[0][2] = makeLabel(1,2,0);
+    this->m_vertices[2][2] = makeLabel(3,3,0);
+    this->m_vertices[3][2] = makeLabel(4,1,0);
+    this->m_vertices[1][2] = makeLabel(0,0,0);
+    this->m_facets[3] = makeLabel(3,3,0);
+    this->m_vertices[3][0] = makeLabel(2,2,2);
+    this->m_vertices[2][1] = makeLabel(1,6,2);
+    this->m_vertices[6][1] = makeLabel(5,7,0);
+    this->m_vertices[7][2] = makeLabel(4,3,1);
+    this->m_facets[4] = makeLabel(4,1,0);
+    this->m_vertices[1][0] = makeLabel(2,3,2);
+    this->m_vertices[3][1] = makeLabel(3,7,2);
+    this->m_vertices[7][1] = makeLabel(5,5,0);
+    this->m_vertices[5][2] = makeLabel(0,1,1);
+    this->m_facets[5] = makeLabel(5,4,0);
+    this->m_vertices[4][0] = makeLabel(0,5,1);
+    this->m_vertices[5][0] = makeLabel(4,7,1);
+    this->m_vertices[7][0] = makeLabel(3,6,1);
+    this->m_vertices[6][0] = makeLabel(1,4,1);    
+  }
+  
+  template <typename UInt>
+  bool FreeIndxList<UInt>::release(UInt i)
+  {
+    if ( i >= m_numMax) return false;
+    if (m_free[i]) return false;
+    UInt nextUsed(m_next[i]);
+    UInt prev;
+    for(prev = i; !m_free[prev] && prev !=0; --prev){}
+    if(m_free[prev]){
+      m_next[i] = m_next[prev];
+      m_next[prev] = i;
+    } else {
+      m_next[i] = m_firstFree;
+      m_firstFree = i;
+    }
+    m_free[i] = true;
+    for(prev = i; m_free[prev] && prev !=0; --prev){}
+    if(!m_free[prev])
+      m_next[prev] = nextUsed;
+    else
+      m_firstUsed = nextUsed;
+    return true;
+  }
+  
+  template <typename UInt>
+  UInt FreeIndxList<UInt>::getFree()
+  {
+    if (m_firstFree == m_numMax) return m_numMax;
+    UInt i = m_firstFree;
+    m_firstFree = m_next[i];
+    if (i ==0 ) {
+      m_next[i] = m_firstUsed;
+      m_firstUsed = i;
+    } else {
+      m_next[i] = m_next[i-1]; 
+      m_next[i-1] = i;
+    }
+    m_free[i] = false;
+    return i;
+  }
+
+  template <typename UInt>
+  void FreeIndxList<UInt>::reset(UInt N)
+  {
+    for(UInt i(0); i < m_numMax; )
+      m_next[i] = ++i;
+    {
+      UInt j(0);
+      for(; j < N; ++j)
+	m_free[j] = false;
+      for(; j < m_numMax; ++j)
+	m_free[j] = true;
+    }
+    if (N > m_numMax) {N = m_numMax;}
+    if (N ==0 ){
+      m_firstFree = 0;
+      m_firstUsed = m_numMax;
+    } else {
+      m_firstFree = N;
+      m_firstUsed = 0;
+      m_next[N-1] = m_numMax;
+    }
+  }
+
+  template <typename UInt>
+  VisitedIndx<UInt>::VisitedIndx(): m_numMax(0), m_visited(NULL){}
+
+  template <typename UInt>
+  VisitedIndx<UInt>::VisitedIndx(UInt numMax)
+  {
+    init(numMax);
+  }
+
+  template <typename UInt>
+  void VisitedIndx<UInt>::init(UInt numMax)
+  {
+    m_numMax = numMax;
+    if(m_visited != NULL)
+      delete [] m_visited;
+    m_visited = new bool[m_numMax];
+    for(UInt i(0); i< m_numMax; ++i)
+      m_visited[i] = false;
+    m_visitedIndx.clear();  
+  }
+
+  template <typename UInt>
+  VisitedIndx<UInt>::~VisitedIndx()
+  {
+    if(m_visited != NULL)
+      delete [] m_visited;
+  }
+
+  template <typename UInt>
+  void VisitedIndx<UInt>::set(UInt i)
+  {
+    if (i >= m_numMax || m_visited[i]) return;
+    m_visited[i] = true;
+    m_visitedIndx.push_back(i);
+  }
+
+  template <typename UInt>
+  void VisitedIndx<UInt>::reset()
+  {
+    if (m_visitedIndx.size() < (m_numMax / 5)){
+      for(UInt i(0); i< m_visitedIndx.size(); ++i)
+	m_visited[m_visitedIndx[i]] = false;
+    } else {
+      for(UInt i(0); i< m_numMax; ++i)
+	m_visited[i] = false;
+    }
+    m_visitedIndx.clear();
+  }
+
+  template<typename real_t>
+  CellMaker<real_t>::CellMaker(): m_freeV(vor::maxNumVertices-1), m_freeF(vor::maxNumFacets-1)
+  {
+    uint1 maxV = vor::maxNumVertices-1;
+    uint1 maxF = vor::maxNumFacets-1;
+    m_vertexPos = new Array<real_t,3>[maxV];
+    m_rSq = new real_t[maxV];
+    m_vertices = new Vertex[maxV];
+    m_facets = new uint1[maxF];
+    m_nbr = new uint2[maxF];
+    m_renumVWrk = new uint1[maxV];
+    m_renumFWrk = new uint1[maxF];
+    m_dist = new real_t[maxV];
+    m_isKnownDist = new bool[maxV];
+    m_distGC = new real_t[maxV];
+    m_newVerticesWrk.reserve(20);
+    m_facetPrevWrk.reserve(20);
+    m_indcsNbrsWrk.reserve(40);
+
+  }
+
+  template<typename real_t>
+  CellMaker<real_t>::~CellMaker()
+  {
+    delete[] m_vertexPos;
+    delete[] m_rSq;
+    delete[] m_vertices;
+    delete[] m_facets;
+    delete[] m_nbr;
+    delete[] m_renumVWrk;
+    delete[] m_renumFWrk;
+    delete[] m_dist;
+    delete[] m_isKnownDist;
+    delete[] m_distGC;    
+  }
+
+  template<typename real_t>
+  CellMaker<real_t> & CellMaker<real_t>::operator=(const Cell<real_t> & rhs)
+  {
+    m_id = rhs.m_id;
+    init(rhs);
+    return *this;
+  }
+
+  template<typename real_t>
+  CellMaker<real_t> & CellMaker<real_t>::operator=(const CellUpdater<real_t> & rhs)
+  {
+    m_id = rhs.p_cell->m_id;
+    init(*(rhs.p_cell));
+    return *this;
+  }
+
+  template<typename real_t>
+  uint1 CellMaker<real_t>::getNextLabelCCW(uint1 label) const
+  {
+     uint1 facetMasked(label & maskFacet);
+     uint1 revLabel(m_vertices[getVertex(label)][getEdge(label)]);
+     uint1 vertexMasked(revLabel & maskVertex);
+     uint1 edge(getEdge(revLabel));
+     (edge==0 ? edge=2 : --edge);
+     return (facetMasked | vertexMasked | edge);
+   }
+
+  template<typename real_t>
+  uint1 CellMaker<real_t>::getReverseLabel(uint1 label) const
+  {
+    return m_vertices[getVertex(label)][getEdge(label)];
+  }
+
+  template<typename real_t>
+  void CellMaker<real_t>::init(const Cell<real_t> & cell)
+  {
+    m_freeV.reset(cell.m_numVertices);
+    for (uint1 i(0); i < cell.m_numVertices; ++i){
+      m_vertexPos[i] = cell.m_vertexPos[i];
+      m_vertices[i] = cell.m_vertices[i];
+    }
+    m_freeF.reset(cell.m_numFacets);
+    for (uint1 i(0); i < cell.m_numFacets; ++i){
+      m_facets[i] = cell.m_facets[i];
+      m_nbr[i] = cell.m_nbr[i];
+    }
+    computeAllRsq();
+    resetDist();
+    const numeric_limits<real_t> lim;
+    m_distGCMax = -lim.max();
+    m_vDistGCMax = maxNumVertices;
+  }
+
+  template<typename real_t>
+  void CellMaker<real_t>::computeGCOrig(uint2 indx, const Array<real_t,3> & pos)
+  {
+    Indx indcs(p_nbrList->getGrid().expand(indx));
+    for(uint0 k(0); k<3; ++k)
+      m_relOrigGC[k] = static_cast<real_t>(indcs[k])*m_dLGC[k]-pos[k];
+    p_nbrList->getBox().makeShortestDistance(m_relOrigGC);
+  }
+
+
+  template<typename real_t>
+  void CellMaker<real_t>::computeAllRsq()
+  {
+    m_vRsqMax = m_freeV.beginIndx();
+    for(uint1 i=m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i))
+      computeRsq(i);
+  }
+
+  template<typename real_t>
+  void CellMaker<real_t>::computeRsq(uint1 i)
+  {
+    m_rSq[i] = m_vertexPos[i][0]*m_vertexPos[i][0];
+    for (uint0 k(1); k<3; ++k)
+      m_rSq[i] += m_vertexPos[i][k]*m_vertexPos[i][k];
+    if (m_rSq[i] > m_rSq[m_vRsqMax]){
+      m_vRsqMax = i;
+    }
+  }
+
+  template<typename real_t>
+  void CellMaker<real_t>::findRsqMax()
+  {
+    real_t rSqMax=0;
+    for(uint1 i=m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i))
+      if (m_rSq[i] > rSqMax){
+	rSqMax = m_rSq[i];
+	m_vRsqMax = i;
+      }
+  }
+
+
+  template<typename real_t>
+  void CellMaker<real_t>::resetDist()
+  {
+    const numeric_limits<real_t> lim;
+    m_distMax = -lim.max();
+    m_vDistMax = maxNumVertices;
+    for(uint1 i=m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i))
+      m_isKnownDist[i] = false;
+  }
+
+  template<typename real_t>
+  real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p, const real_t rSq)
+  {
+    if(!m_isKnownDist[i]){
+      m_dist[i] = m_vertexPos[i][0]*p[0] + m_vertexPos[i][1]*p[1]+m_vertexPos[i][2]*p[2]-rSq;
+      if(m_dist[i]> m_distMax){ 
+	m_vDistMax = i;
+	m_distMax = m_dist[i];
+      }
+      m_isKnownDist[i]=true;
+    }
+    return m_dist[i];
+  }
+
+  template<typename real_t>
+  real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p)
+  {
+    if(!m_isKnownDist[i]){
+      m_dist[i] = 0;
+      for(uint0 k(0); k<3; ++k)
+	m_dist[i] += (m_vertexPos[i][k]-0.5*p[k])*p[k];
+      if(m_dist[i]> m_distMax){ 
+	m_vDistMax = i;
+	m_distMax = m_dist[i];
+      }
+      m_isKnownDist[i]=true;
+    }
+    return m_dist[i];
+  }
+
+  template<typename real_t>
+  void CellMaker<real_t>::computeAllDist(const Array<real_t, 3> p, const real_t rSq)
+  {
+    const numeric_limits<real_t> lim;
+    m_distMax = -lim.max();
+    m_vDistMax = maxNumVertices;
+    for (uint1 i(m_freeV.beginIndx()); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i)){
+      m_dist[i] = m_vertexPos[i][0]*p[0] + m_vertexPos[i][1]*p[1]+m_vertexPos[i][2]*p[2]-rSq;
+      if(m_dist[i]> m_distMax){ 
+	m_vDistMax = i;
+	m_distMax = m_dist[i];
+      }
+      m_isKnownDist[i] = true;
+    }
+  }
+
+  template<typename real_t>
+  void CellMaker<real_t>::renumber()
+  {
+    m_numVertices = 0;
+    {
+      uint1 i = m_freeV.beginIndx();
+      for (; i != m_freeV.endIndx() && i==m_numVertices; i = m_freeV.nextIndx(i),++m_numVertices){
+	m_renumVWrk[i] = m_numVertices;
+      }
+      for (; i != m_freeV.endIndx(); i = m_freeV.nextIndx(i),++m_numVertices){
+	m_renumVWrk[i] = m_numVertices;
+	for(uint0 k(0); k<3; ++k){
+	  m_vertices[m_numVertices][k] = m_vertices[i][k];
+	  m_vertexPos[m_numVertices][k] = m_vertexPos[i][k];
+	}
+      }
+    }
+    m_freeV.reset(m_numVertices);
+    m_numFacets = 0;
+    {
+      uint1 i = m_freeF.beginIndx();
+      for (; i != m_freeF.endIndx() && i==m_numFacets; i = m_freeF.nextIndx(i),++m_numFacets){
+	m_renumFWrk[i] = m_numFacets;
+      }
+      for (; i != m_freeF.endIndx(); i = m_freeF.nextIndx(i),++m_numFacets){
+	m_renumFWrk[i] = m_numFacets;
+	m_facets[m_numFacets] = m_facets[i];
+	m_nbr[m_numFacets] = m_nbr[i];
+      }
+    }
+    m_freeF.reset(m_numFacets);
+    m_vRsqMax = m_renumVWrk[m_vRsqMax];
+    for(uint1 i(0); i< m_numVertices; ++i){
+      for(uint0 k(0); k<3; ++k){
+	uint1 f = getFacet(m_vertices[i][k]);
+	uint1 v = getVertex(m_vertices[i][k]);
+	uint1 e = getEdge(m_vertices[i][k]);
+	m_vertices[i][k] = makeLabel(m_renumFWrk[f], m_renumVWrk[v], e);
+      }
+    }
+    for(uint1 i(0); i< m_numFacets; ++i){
+      uint1 f = getFacet(m_facets[i]);
+      uint1 v = getVertex(m_facets[i]);
+      uint1 e = getEdge(m_facets[i]);
+      m_facets[i] = makeLabel(m_renumFWrk[f], m_renumVWrk[v], e);
+    }
+  }
+
+  template<typename real_t>
+  real_t CellMaker<real_t>::computeRsqMinGC() const
+  {
+    Array<real_t, 3> dx(m_relOrigGC);
+    real_t rSq(0);
+    for(uint0 k(0); k<3 ; ++k){
+      (dx[k] < 0 ? (dx[k] < -m_dLGC[k] ? dx[k] += m_dLGC[k] : dx[k]= 0): dx[k]);
+      rSq += dx[k]*dx[k];
+    }
+    return rSq;
+  }
+
+
+  template<typename real_t>
+  real_t CellMaker<real_t>::computeDistGC(uint1 indx)
+  {
+    real_t vDiffSq = 0, vSq = 0;
+    for(uint0 k(0); k<3 ; ++k){
+      real_t vDiff(m_vertexPos[indx][k] - m_relOrigGC[k]);
+      (vDiff >0 ? (vDiff > m_dLGC[k] ? vDiff -= m_dLGC[k] : vDiff= 0): vDiff);
+      vDiffSq += vDiff*vDiff;
+      vSq += m_vertexPos[indx][k]*m_vertexPos[indx][k];
+    }
+    m_distGC[indx] = 0.5*(vSq-vDiffSq);
+    if (m_distGC[indx] > m_distGCMax){
+      m_vDistGCMax = indx;
+      m_distGCMax = m_distGC[indx];
+    }
+    return m_distGC[indx];
+  }
+
+  template<typename real_t>
+  Array<real_t,3> CellMaker<real_t>::getClosestPointGC(uint1 indx) const
+  {
+    Array<real_t, 3> pos;
+    real_t vDiffSq = 0, vSq = 0;
+    for(uint0 k(0); k<3 ; ++k){
+      if (m_relOrigGC[k] > m_vertexPos[indx][k])
+	pos[k] = m_relOrigGC[k];
+      else if (m_relOrigGC[k] + m_dLGC[k]< m_vertexPos[indx][k])
+	pos[k] = m_relOrigGC[k]+ m_dLGC[k];
+      else
+	pos[k] = m_vertexPos[indx][k];
+    }
+    return pos;
+  }
+
+  template<typename real_t>
+  real_t CellMaker<real_t>::computeMaxDistGC()
+  {
+    if (m_freeV.beginIndx() == m_freeV.endIndx()) return 0;
+    uint1 v1 = m_freeV.beginIndx();
+    real_t distMax = computeDistGC(v1);
+    uint0 k(0);
+    while(k<3){
+      uint1 v2 = getVertex(m_vertices[v1][k]);
+      real_t dist = computeDistGC(v2);
+      if (dist > distMax){
+	distMax = dist;
+	v1 = v2;
+	k = 0;
+      } else {
+	++k;
+      }
+    }
+    return distMax;
+  }
+
+  template<typename real_t>
+  real_t CellMaker<real_t>::computeMaxDistGCVerb()
+  {
+    if (m_freeV.beginIndx() == m_freeV.endIndx()) return 0;
+    uint1 v1 = m_freeV.beginIndx();
+    Array<real_t, 3> posGC(getClosestPointGC(v1));
+    real_t rSq = 0.5*(posGC[0]*posGC[0]+posGC[1]*posGC[1]+posGC[2]*posGC[2]);
+    real_t distMax = m_vertexPos[v1][0]*posGC[0]+m_vertexPos[v1][1]*posGC[1]+m_vertexPos[v1][2]*posGC[2] -rSq;
+    printf("vertex %u, dist %f\n", v1, distMax);
+    bool hasMoved;
+    do {
+      hasMoved = false;
+      uint0 k(0);
+      do {
+	uint1 v2 = getVertex(m_vertices[v1][k]);
+	real_t dist = m_vertexPos[v2][0]*posGC[0]+m_vertexPos[v2][1]*posGC[1]+m_vertexPos[v2][2]*posGC[2] -rSq;
+	printf("vertex %u, edge %u -> vertex %u,  dist %f, distMax %f\n", v1, k, v2, dist, distMax);
+	if (dist > distMax){
+	  v1 = v2;
+	  posGC = getClosestPointGC(v1);
+	  rSq = 0.5*(posGC[0]*posGC[0]+posGC[1]*posGC[1]+posGC[2]*posGC[2]);
+	  distMax = m_vertexPos[v1][0]*posGC[0]+m_vertexPos[v1][1]*posGC[1]+m_vertexPos[v1][2]*posGC[2] -rSq;
+	  hasMoved=true;
+	  k = 0;
+	} else {
+	  ++k;
+	}
+      } while (k<3);
+    } while (hasMoved);
+    return distMax;
+  }
+
+  template<typename real_t>
+  void CellMaker<real_t>::computeAllDistGC()
+  {
+    const numeric_limits<real_t> lim;
+    m_distGCMax = -lim.max();
+    m_vDistGCMax = maxNumVertices;
+    //compute 0.5 [v^2 - (p-v)^2]
+    for (uint1 indx = m_freeV.beginIndx(); indx != m_freeV.endIndx() ; indx = m_freeV.nextIndx(indx))
+      computeDistGC(indx);
+  }
+
+  template<typename real_t>
+  void CellMaker<real_t>::getAllDistGCVerb()
+  {
+    //compute 0.5 [v^2 - (p-v)^2]
+    // for (uint1 indx = m_freeV.beginIndx(); indx != m_freeV.endIndx() ; indx = m_freeV.nextIndx(indx))
+    //   printf("vertex %u, dist %f\n", indx, m_distGC[indx]);
+    printf("maximum vertex: %u, %f, ", m_vDistGCMax, m_distGC[m_vDistGCMax]);
+    printf("neighbor vertex: %u, %f, ", getVertex(m_vertices[m_vDistGCMax][0]), m_distGC[getVertex(m_vertices[m_vDistGCMax][0])]);
+    printf("neighbor vertex: %u, %f, ", getVertex(m_vertices[m_vDistGCMax][1]), m_distGC[getVertex(m_vertices[m_vDistGCMax][1])]);
+    printf("neighbor vertex: %u, %f\n", getVertex(m_vertices[m_vDistGCMax][2]), m_distGC[getVertex(m_vertices[m_vDistGCMax][2])]);
+  }
+
+
+  template<typename real_t>
+  bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSq, uint2 nbr)
+  {
+    //    printf("entering cutCell\n");
+    resetDist();
+    if (m_freeV.beginIndx() == m_freeV.endIndx()) return false;
+    uint1 v1;
+    if (m_vDistMax !=  maxNumVertices && !m_freeV.isFree(m_vDistMax))
+      v1 = m_vDistMax;
+    else
+      v1 = m_freeV.beginIndx();
+    
+    //find an edge where the sign of m_dist changes
+    bool found(false);
+    uint1 edgeStart;
+    //    printf("computeDist(%u, p, rSq): %f\n", v1, computeDist(v1, p, rSq));
+    if(computeDist(v1, p, rSq) > 0) {
+      //find the first negative vertex by going down
+      uint0 k(0);
+      while(m_dist[v1]>0 && k<3){
+	k = 0;
+	while(k<3 && computeDist(getVertex(m_vertices[v1][k]), p, rSq) >= m_dist[v1])
+	  ++k;
+	if (k<3){
+	  //smaller value found
+	  edgeStart = (v1<<2 | k);
+	  v1 = getVertex(m_vertices[v1][k]);
+	}
+      }
+      if (m_dist[v1] <= 0){
+	found = true;
+      } else {
+	// all found distances larger than zero
+	// for Voronoi construction this can only occur due to round-off errors...
+	// lets do an exhaustive search to find a possible negative distance
+	computeAllDist(p, rSq);
+	real_t distMax = 0;
+	for (uint1 i = m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i)){
+	  if(m_dist[i] <= 0){
+	    for (uint1 k(0); k<3; ++k){
+	      uint1 nbrVertex(getVertex(m_vertices[i][k]));
+	      bool isKnown = m_isKnownDist[nbrVertex];
+	      real_t nbrDist = computeDist(nbrVertex, p, rSq);
+	      if( nbrDist > 0) {
+		found = true;
+		real_t newDist(nbrDist-m_dist[i]);
+		if (newDist > distMax){
+		  edgeStart = m_vertices[i][k];
+		  distMax = newDist;
+		}
+	      }
+	    }
+	  }
+	}	
+      }
+      if (!found) {
+	//all vertices on negative side of cut-plane -> delete all
+	m_freeV.reset(0);
+	m_freeF.reset(0);
+	return true;
+      }
+    } else {
+      uint0 k(0);
+      while(m_dist[v1]<=0 && k<3){
+	k = 0;
+	while(k<3 && computeDist(getVertex(m_vertices[v1][k]), p, rSq) <= m_dist[v1])
+	  ++k;
+	if (k<3){
+	  //larger value found
+	  edgeStart = m_vertices[v1][k];
+	  v1 = getVertex(edgeStart);
+	}
+      }
+      found = (m_dist[v1] > 0);
+    }
+    if (!found) return found;
+    //    printf("cutCell %u, found: %i\n", m_id, found);
+ 
+    //Starting from edgeStart trace out a path that bounds a connected region
+    //The edges where the sign changes are traced out
+    //If there are disconnected patches with the same sign only one connected region is removed
+    //In this way the topology remains consistent
+    uint1 label(getReverseLabel(edgeStart));
+    uint1 labelRev(getReverseLabel(label));
+    const uint1 vDummy = vor::maxNumVertices-1;
+    const uint1 fDummy = vor::maxNumFacets-1;
+    const uint1 fDummyShifted = (fDummy << shiftFacet);
+    const uint1 lDummy = makeLabel(fDummy,vDummy,3);
+    m_newVerticesWrk.clear();
+    m_facetPrevWrk.clear();
+    uint1 v = getVertex(label);
+    uint1 e = getEdge(label);
+    uint1 fPrev = getFacet(labelRev);
+    uint1 vRev = getVertex(labelRev);
+    uint1 eRev = getEdge(labelRev);
+    do {
+      //      printf("startLabel: %u %u %u\n", getFacet(label), getVertex(label), getEdge(label));
+      //printf("previous facet: %u\n",fPrev);
+      m_facetPrevWrk.push_back(fPrev);
+      m_vertices[vRev][eRev] = lDummy;
+      uint1 vNew = m_freeV.getFree();
+      //printf("new vertex %u\n", vNew);
+      m_newVerticesWrk.push_back(vNew);
+      //compute new positions
+      {
+	real_t lambda(computeDist(vRev, p, rSq)/(computeDist(vRev, p, rSq)-computeDist(v, p, rSq)));
+	for (uint0 k(0); k<3; ++k)
+	  m_vertexPos[vNew][k] = lambda*m_vertexPos[v][k]+(1.0-lambda)*m_vertexPos[vRev][k];
+      }
+      m_vertices[vNew][0] = label;
+      //printf("connect %u %u to %u %u %u\n", v, e, fPrev, vNew, 0);
+      m_vertices[v][e] = makeLabel(fPrev, vNew, 0);
+      m_facets[fPrev] = m_vertices[v][e]; //avoid that m_facets points to a deleted label
+      do {
+	v = vRev;
+	e = (eRev ==0? 2 : eRev-1);
+	label = labelRev;
+	labelRev = m_vertices[v][e];
+	vRev = getVertex(labelRev);
+	eRev = getEdge(labelRev);
+	fPrev = getFacet(m_vertices[vRev][eRev]);
+	if (vRev == vDummy) break;
+	//printf("label: %u %u %u\n", getFacet(m_vertices[vRev][eRev]), getVertex(m_vertices[vRev][eRev]), getEdge(m_vertices[vRev][eRev]));
+	m_vertices[vRev][eRev] = 
+	  (fDummyShifted | (m_vertices[vRev][eRev] & (~maskFacet)));
+      } while (computeDist(vRev, p, rSq) > 0);
+      //printf("test: vRev %u\n", vRev);
+      uint1 vSwap = vRev;
+      uint1 eSwap = eRev;
+      vRev = v;
+      eRev = e;
+      label = labelRev;
+      v = vSwap;
+      e = eSwap;
+    } while (v != vDummy);
+
+    //form a new facet and interconnect the new vertices
+    {
+      uint1 facetNew = m_freeF.getFree();
+      //printf("new facet: %u\n",facetNew);
+      uint1 imin = m_newVerticesWrk.size()-1;
+      uint1 numNewV = (uint1) m_newVerticesWrk.size();
+      for(uint1 i(0); i< numNewV; ++i){
+	uint1 iplus= i+1;
+	if (iplus == numNewV) iplus=0;
+	uint1 vNew(m_newVerticesWrk[i]);
+	m_vertices[vNew][1] = makeLabel(m_facetPrevWrk[i], m_newVerticesWrk[imin], 2);
+	m_vertices[vNew][2] = makeLabel(facetNew, m_newVerticesWrk[iplus], 1);
+	imin = i;
+      }
+      m_facets[facetNew] = makeLabel(facetNew, m_newVerticesWrk[0], 1);
+      m_nbr[facetNew] = nbr;
+    }
+    for(uint i(0); i< m_newVerticesWrk.size(); ++i){
+      computeRsq(m_newVerticesWrk[i]);
+      computeDistGC(m_newVerticesWrk[i]);
+    }
+
+    //remove old vertices and facets using depth-first search
+    bool isLargestDeleted(false);
+    //    bool isVCloseGCDeleted(false);
+    {
+      uint1 v(getVertex(edgeStart));
+      m_freeV.release(v);
+      //printf("deteled vertex %u\n", v);
+      isLargestDeleted = (v == m_vRsqMax ? true: isLargestDeleted);
+      //      isVCloseGCDeleted = (v == m_vDistGCMax ? true: isVCloseGCDeleted);
+      m_vStackWrk.push(v);
+      while (!m_vStackWrk.empty()) {
+	v = m_vStackWrk.top();
+	m_vStackWrk.pop();
+	for(uint0 k(0); k<3; ++k){
+	  uint1 vNxt(getVertex(m_vertices[v][k]));
+	  if (vNxt == vDummy) continue;
+	  uint facet(getFacet(m_vertices[v][k]));
+	  if (facet != fDummy && !m_freeF.isFree(facet))
+	    m_freeF.release(facet);
+	  if (m_freeV.isFree(vNxt)) continue;
+	  m_freeV.release(vNxt);
+	  isLargestDeleted = (vNxt == m_vRsqMax ? true: isLargestDeleted);
+	  //	  isVCloseGCDeleted = (vNxt == m_vDistGCMax ? true: isVCloseGCDeleted);
+	  m_vStackWrk.push(vNxt);
+	  //	  printf("deteled vertex %u\n", vNxt);
+	}  
+      }
+    }
+    if (isLargestDeleted)
+      findRsqMax();
+    // if (isVCloseGCDeleted){
+    //   const numeric_limits<real_t> lim;
+    //   m_distGCMax = -lim.max();
+    //   m_vDistGCMax = maxNumVertices;
+    //   for(uint1 i=m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i)){
+    // 	if(m_distGC[i] > m_distGCMax){
+    // 	  m_vDistGCMax = i;
+    // 	  m_distGCMax = m_distGC[i];
+    // 	}
+    //   }
+    //    }
+    return true;
+  }
+
+ template<typename real_t>
+  bool CellMaker<real_t>::rebuild(const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box, const Cell<real_t> & initCell)
+  {
+    m_indcsNbrsWrk.clear();
+    for(uint1 i=m_freeF.beginIndx(); i != m_freeF.endIndx() ; i = m_freeF.nextIndx(i))
+      if(m_nbr[i] != noNbr)
+	m_indcsNbrsWrk.push_back(m_nbr[i]);
+    m_isAllCut = true;
+    // for(uint2 i(0); i< m_indcsNbrsWrk.size(); ++i)
+    //   printf("cell %u, neigb: %u\n", m_id, m_indcsNbrsWrk[i]);
+    // printf("\n");
+    this->init(initCell);
+    processNbrs(m_indcsNbrsWrk, pos, box);
+    return m_isAllCut;
+  }
+
+  template<typename real_t>
+  bool CellMaker<real_t>::build(uint2 id, const vector<Array<real_t, 3> > & pos, const  NbrList<uint2, real_t> & nbrList, const Cell<real_t> & initCell)
+  {
+    p_nbrList = &nbrList;
+    {
+      const Array<real_t, 3> & L(p_nbrList->getBox().getL());
+      const Indx & N(p_nbrList->getGrid().getN());
+      for(uint0 k(0); k<3; ++k)
+	m_dLGC[k] = L[k] / static_cast<real_t>(N[k]);
+    }
+
+    bool isUpdated;
+    m_id = id;
+    this->init(initCell);
+    if (p_nbrList->getGrid().numCells() != m_visited.size())
+      m_visited.init(p_nbrList->getGrid().numCells());
+    else
+      m_visited.reset();
+    m_checkGridCell.clear();
+    vector<uint2 > nbrGC;
+    p_nbrList->getGridNbrs(pos[id], nbrGC);
+    for(uint2 j(0); j < nbrGC.size(); ++j){
+      if (!m_visited.isVisited(nbrGC[j])){
+    	m_checkGridCell.push_back(nbrGC[j]);
+    	m_visited.set(nbrGC[j]);
+      }
+    }
+
+    typename vector<PosAndId<uint2, real_t> >::const_iterator begin;
+    typename vector<PosAndId<uint2, real_t> >::const_iterator end;
+    //one try loop without checking of nbr cells
+    size_t n = m_checkGridCell.size();
+    for(uint2 i(0); i < n; ++i){
+      uint2 indx = m_checkGridCell.front();
+      m_checkGridCell.pop_front();
+      p_nbrList->getCellContent(indx, begin, end);
+      if (end != begin){
+	//this needs to be refined for small systems
+	Array<real_t, 3> pos0;
+	for(uint0 k(0); k<3; ++k)
+	  pos0[k] = pos[m_id][k] - begin->pos[k];
+	p_nbrList->getBox().makeShortestDistance(pos0);
+	for(uint0 k(0); k<3; ++k)
+	  pos0[k] += begin->pos[k];
+	(processNbrs(begin, end, pos, pos0) == true? isUpdated = true: isUpdated);
+      }
+      p_nbrList->getGrid().getNbrs(indx, nbrGC);
+      for(uint2 j(0); j < nbrGC.size(); ++j){
+	if (!m_visited.isVisited(nbrGC[j])){
+	  m_checkGridCell.push_back(nbrGC[j]);
+	  m_visited.set(nbrGC[j]);
+	}
+      }
+    }
+    //one loop with distance checking for nbr cells
+    n = m_checkGridCell.size();
+    for(uint2 i(0); i < n; ++i){
+      //      start = clock();
+      uint2 indx = m_checkGridCell.front();
+      m_checkGridCell.pop_front();
+      computeGCOrig(indx, pos[m_id]);
+      real_t rSqMin = computeRsqMinGC();
+      if (rSqMin > 4.0*m_rSq[m_vRsqMax]) continue;
+      p_nbrList->getCellContent(indx, begin, end);
+      if (end != begin){
+	//this needs to be refined for small systems
+	Array<real_t, 3> pos0;
+	for(uint0 k(0); k<3; ++k)
+	  pos0[k] = pos[m_id][k] - begin->pos[k];
+	p_nbrList->getBox().makeShortestDistance(pos0);
+	for(uint0 k(0); k<3; ++k)
+	  pos0[k] += begin->pos[k];
+	(processNbrs(begin, end, pos, pos0) == true? isUpdated = true: isUpdated);
+      }
+      p_nbrList->getGrid().getNbrs(indx, nbrGC); //for LE b.c. this needs to be adapted
+      for(uint2 j(0); j < nbrGC.size(); ++j){
+	if (!m_visited.isVisited(nbrGC[j])){
+	  m_checkGridCell.push_back(nbrGC[j]);
+	  m_visited.set(nbrGC[j]);
+	}
+      }
+    }
+    //outer loop with exhautive nbr cell checking
+    while(!m_checkGridCell.empty()){
+      uint2 indx = m_checkGridCell.front();
+      m_checkGridCell.pop_front();
+      computeGCOrig(indx, pos[m_id]);
+      real_t rSqMin = computeRsqMinGC();
+      if (rSqMin > 4.0*m_rSq[m_vRsqMax]) continue;
+      computeAllDistGC();
+      if (m_distGCMax < 0) continue;
+      p_nbrList->getCellContent(indx, begin, end);
+      if (end != begin){
+	//this needs to be refined for small systems
+	Array<real_t, 3> pos0;
+	for(uint0 k(0); k<3; ++k)
+	  pos0[k] = pos[m_id][k] - begin->pos[k];
+	p_nbrList->getBox().makeShortestDistance(pos0);
+	for(uint0 k(0); k<3; ++k)
+	  pos0[k] += begin->pos[k];
+	(processNbrs(begin, end, pos, pos0) == true? isUpdated = true: isUpdated);
+      }
+      p_nbrList->getGrid().getNbrs(indx, nbrGC);
+      for(uint2 j(0); j < nbrGC.size(); ++j){
+	if (!m_visited.isVisited(nbrGC[j])){
+	  m_checkGridCell.push_back(nbrGC[j]);
+	  m_visited.set(nbrGC[j]);
+	}
+      }
+    }
+    //    printf("cell: %u num checked:%u\n", m_id, numChecked);
+    return isUpdated;
+  }
+  
+  template<typename real_t>
+  bool CellMaker<real_t>::processNbrs(const vector<uint2 > & idsNbrs, const vector<Array<real_t, 3> > & pos,const  Box<real_t> & box)
+  {
+    m_nbrDistWrk.clear();
+    m_nbrDistWrk.reserve(idsNbrs.size());
+    NbrDist<real_t>  nbrDist;
+    for(size_t i(0); i< idsNbrs.size(); ++i){
+      nbrDist.id = idsNbrs[i];
+      Array<real_t, 3> relPos;
+      for(uint0 k(0); k<3; ++k)
+       	relPos[k] = pos[idsNbrs[i]][k] - pos[m_id][k];
+      box.makeShortestDistance(relPos);
+      for(uint0 k(0); k<3; ++k)
+      	nbrDist[k] = relPos[k];
+      nbrDist.rSq = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
+      if (nbrDist.rSq < 2.0*m_rSq[m_vRsqMax])
+	m_nbrDistWrk.push_back(nbrDist);
+    }
+    std::sort(m_nbrDistWrk.begin(), m_nbrDistWrk.end(), CompareNbrDist<real_t>());
+    bool isCut(false);
+    for(size_t i(0); i < m_nbrDistWrk.size() && (m_nbrDistWrk[i].rSq < 2.0*m_rSq[m_vRsqMax]); ++i){
+      const NbrDist<real_t> & p(m_nbrDistWrk[i]);
+      (cutCell(p, p.rSq, p.id) ? isCut=true : m_isAllCut=false);
+    }
+    return isCut;
+  }
+
+  template<typename real_t>
+  bool CellMaker<real_t>::processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const vector<Array<real_t, 3> > & pos,const Array<real_t, 3> pos0)
+  {
+    //    printf("number of nbrs: %lu\n", end-begin);
+    bool isCut(false);
+    m_nbrDistWrk.clear();
+    m_nbrDistWrk.reserve(end-begin);
+    NbrDist<real_t>  nbrDist;
+    for(typename vector<PosAndId<uint2, real_t> >::const_iterator itr(begin); itr != end; ++itr){
+      if (itr->id == m_id) continue;
+      nbrDist.id = itr->id;
+      //      printf("nbr: %u ", itr->id);
+      Array<real_t, 3> relPos;
+      for(uint0 k(0); k<3; ++k)
+	relPos[k] = (itr->pos)[k] - pos0[k];
+      for(uint0 k(0); k<3; ++k)
+      	nbrDist[k] = relPos[k];
+      nbrDist.rSq = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
+      if (nbrDist.rSq < 2.0*m_rSq[m_vRsqMax])
+	m_nbrDistWrk.push_back(nbrDist);
+    }
+    std::sort(m_nbrDistWrk.begin(), m_nbrDistWrk.end(), CompareNbrDist<real_t>());
+    for(size_t i(0); (i < m_nbrDistWrk.size()) && (m_nbrDistWrk[i].rSq < 2.0*m_rSq[m_vRsqMax]); ++i){
+      const NbrDist<real_t> & p(m_nbrDistWrk[i]);
+      (cutCell(p, p.rSq, p.id) ? isCut=true : m_isAllCut=false);
+    }
+    return isCut;
+  }
+
+  template<typename real_t>
+  void CellMaker<real_t>::getCloseNbrs(NbrInsert & nbrs)
+  {
+    for(uint k(0); k<3; ++k){
+      uint1 facet(getFacet(m_vertices[m_vDistMax][k]));
+      nbrs[k] = m_nbr[facet];
+    }
+  }  
+    
+  template<typename real_t>
+  CellUpdater<real_t>::CellUpdater(CellGeometry<real_t> & geom): m_isSetup(false)
+  {
+    p_geom = &geom;
+  }
+
+  template<typename real_t>
+  CellUpdater<real_t> & CellUpdater<real_t>::operator=(CellGeometry<real_t> & geom)
+  {
+    p_geom = &geom;
+    reset();
+    return *this;
+  }
+
+template<typename real_t>
+  CellUpdater<real_t> & CellUpdater<real_t>::operator=(const CellUpdater<real_t> & rhs)
+  {
+    if (&rhs == this) return *this;
+    p_geom = this->p_geom;
+    m_nbrs = this->m_nbrs;
+    m_nbrsWrk = this->m_nbrsWrk;
+    m_nbrInserts = this->m_nbrInserts;
+    m_isSetup = this->m_isSetup;
+    m_newNbrsWrk = this->m_newNbrsWrk;
+    m_visitedWrk = this->m_visitedWrk;
+    return *this;
+  }
+  
+  template<typename real_t>
+  void CellUpdater<real_t>::reset()
+  {
+    m_nbrs.clear();
+    clearNbrInserts();
+    m_isSetup=false;
+  }
+
+  template<typename real_t>
+  void CellUpdater<real_t>::setupNbrSet()
+  {
+    const uint1 numFacets(p_geom->getCell().m_numFacets);
+    const uint2 * const nbr(p_geom->getCell().m_nbr);
+    m_nbrsWrk.clear();
+    m_nbrsWrk.reserve(numFacets);
+    for(uint0 i(0); i< (numFacets); ++i)
+      if (nbr[i] != noNbr)
+	m_nbrsWrk.push_back(nbr[i]);
+    std::sort(m_nbrsWrk.begin(), m_nbrsWrk.end());
+    m_nbrs.clear();
+    m_nbrs.insert(m_nbrsWrk.begin(), m_nbrsWrk.end());
+    m_isSetup = true;
+  }
+  
+  template<typename real_t>
+  bool CellUpdater<real_t>::isInNbrs(uint2 nbr) const
+  {
+    return (m_nbrs.find(nbr) != m_nbrs.end());
+  }
+
+  template<typename real_t>
+  uint1 CellUpdater<real_t>::findFacet(uint2 nbr) const{
+    const uint1 numFacets(p_geom->getCell().m_numFacets);
+    const vector<uint2> & nbrs(p_geom->getCell().m_nbr);
+    uint1 indx(~0);
+    for(uint0 i(0); i< numFacets; ++i)
+      (nbrs[i]==nbr ? indx=i : indx);
+    return indx;
+  }
+
+  template<typename real_t>
+  void CellUpdater<real_t>::updateNbrInserts()
+  {
+    const Cell<real_t> & cell(p_geom->getCell());
+    const uint1 numFacets(cell.m_numFacets);
+    const uint2 * const nbr(cell.m_nbr);
+    const uint1 * const facets(cell.m_facets);
+    NbrInsert nbrIns;
+    nbrIns[1] = cell.m_id;
+    for (uint1 i(0); i< numFacets; ++i){
+      if(nbr[i] != noNbr){
+	nbrIns[0] = nbr[i];
+	nbrIns[2] = nbrIns[1];
+	m_nbrInserts.push_back(nbrIns);
+	uint1 labelStart(facets[i]);
+	uint1 label(labelStart);
+	do {
+	  if(nbr[getFacet(cell.getReverseLabel(label))] != noNbr){
+	    nbrIns[2] = nbr[getFacet(cell.getReverseLabel(label))];
+	    m_nbrInserts.push_back(nbrIns);
+	  }
+	  label = cell.getNextLabelCCW(label);
+	} while (label != labelStart);	
+      }
+    }
+  }
+  
+  template<typename real_t>
+  bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end, CellMaker<real_t> & maker, const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box)
+  {
+    //    printf("begin %u %u %u\n", (*begin)[0], (*begin)[1], (*begin)[2]);
+    bool hasChanged(false);
+    if (begin == end) return hasChanged;
+    NbrInsert nbrClose, nbrIns;
+    if (!m_isSetup) setupNbrSet();
+    m_newNbrsWrk.clear();
+    Cell<real_t> & cell(p_geom->getCell());
+    bool hasSetMaker(false);
+    for(NbrInsertItr itr(begin); itr!=end; ++itr){
+      // printf("trying %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
+      if (isInNbrs((*itr)[2])) continue;
+      if ((*itr)[0] != cell.m_id) continue;
+      if ((*itr)[1] == (*itr)[2]){
+	//printf("testing %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
+	if (!hasSetMaker) {
+	  maker = cell;
+	  hasSetMaker = true;
+	}
+	Array<real_t, 3> relPos;
+	real_t rSq;
+	for(uint0 k(0); k<3; ++k)
+	  relPos[k] = pos[(*itr)[1]][k] - pos[cell.m_id][k];
+	box.makeShortestDistance(relPos);
+	rSq = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
+	m_nbrs.insert((*itr)[1]);
+	bool isInserted = maker.cutCell(relPos, rSq, (*itr)[1]);
+	(isInserted ? hasChanged = true: hasChanged);
+	if(!isInserted) {
+	  //	  printf("not inserted: %u %u %u\n",(*itr)[0],(*itr)[1],(*itr)[2]);
+	  // const vector<uint2> & nbrs(maker.getNbrs());
+	  // for(size_t i(0); i<nbrs.size(); ++i)
+	  //   if (nbrs[i] != noNbr){
+	  //     nbrIns[0] = (*itr)[1];
+	  //     nbrIns[1] = nbrs[i];
+	  //     nbrIns[2] = nbrs[i];
+	  // 	m_nbrInserts.push_back(nbrIns);
+	  //   }
+	//   //If (*itr)[1] is not a neigbor of (*itr)[0] then (*itr)[0] is not a neighbor of (*itr)[1]
+	//   //Propose other neighbors to cell (*itr)[1] that might be closerby
+	  maker.getCloseNbrs(nbrClose);
+	  nbrIns[0] = (*itr)[1];
+	  for(uint k(0); k<3; ++k){
+	    if (nbrClose[k] != noNbr){
+	      nbrIns[1] = nbrClose[k];
+	      nbrIns[2] = nbrClose[k];
+	      m_nbrInserts.push_back(nbrIns);
+	    }
+	  }
+          //skip other neighbor suggestions proposed by (*itr)[1]
+          uint2 nbr((*itr)[1]);
+          for(; (itr+1)!=end && (*itr)[1]==nbr && (*itr)[0]==cell.m_id; ++itr){}
+        }
+      } else {
+	//	printf("inserting %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
+	m_newNbrsWrk.push_back((*itr)[2]);
+	m_nbrs.insert((*itr)[2]);
+      }
+    }
+    if (!m_newNbrsWrk.empty()){
+      //printf("starting processing\n");
+      if (!hasSetMaker) maker = cell;
+      (maker.processNbrs(m_newNbrsWrk, pos, box) ? hasChanged= true : hasChanged);
+    }
+    if (hasChanged)
+      cell = maker;
+    return hasChanged;
+  }
+  
+  template<typename real_t>
+  CellGeometry<real_t>::CellGeometry():p_cell(NULL) {}
+
+  template<typename real_t>
+  CellGeometry<real_t>::CellGeometry(Cell<real_t> & cell)
+  {
+    p_cell = &cell;
+  }
+
+  template<typename real_t>
+  CellGeometry<real_t> & CellGeometry<real_t>::operator=(Cell<real_t> & rhs)
+  {
+    p_cell = &rhs;
+    m_connV.clear();
+    m_rSq.clear();
+    m_edgeInv.clear();
+    m_areas.clear();
+    m_vol= 0.0;
+    m_omega.clear();
+    m_dV.clear();
+    return *this;
+  }
+
+  template<typename real_t>
+  CellGeometry<real_t> & CellGeometry<real_t>::operator=(const CellGeometry<real_t> & rhs)
+  {
+    if (&rhs == this) return *this;
+    this->p_cell = rhs.p_cell;
+    this->m_connV = rhs.m_connV;
+    this->m_rSq = rhs.m_rSq;
+    this->m_edgeInv = rhs.m_edgeInv;
+    this->m_areas = rhs.m_areas;
+    this->m_vol = rhs.m_vol;
+    this->m_omega = rhs.m_omega;
+    this->m_dV = rhs.m_dV;
+    return *this;
+  }
+
+  template<typename real_t>
+  void CellGeometry<real_t>::computeConnectingVectors(const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box)
+  {
+    m_connV.resize(p_cell->m_numFacets);
+    m_rSq.resize(p_cell->m_numFacets);
+    for (uint1 i(0); i< p_cell->m_numFacets; ++i){
+      for(uint0 k(0); k<3; ++k)
+       	m_connV[i][k] = pos[p_cell->m_nbr[i]][k] - pos[(p_cell->m_id)][k];
+      box.makeShortestDistance(m_connV[i]);
+      m_rSq[i] = 0.5*(m_connV[i][0]*m_connV[i][0]+m_connV[i][1]*m_connV[i][1]+m_connV[i][2]*m_connV[i][2]);
+    }
+  }
+
+  template<typename real_t>
+  void CellGeometry<real_t>::computeEdgeInv()
+  {
+    m_edgeInv.resize(p_cell->m_numVertices);
+    for (uint1 i(0); i< p_cell->m_numVertices; ++i)
+      for (uint0 k(0); k<3; ++k){
+	uint1 label0(p_cell->m_vertices[i][k]);
+	uint1 label1(p_cell->getReverseLabel(label0));
+	if (label0 > label1) continue;
+	uint1 e0(getEdge(label0));
+	uint1 v0(getVertex(label0));
+	uint1 f0(getFacet(label0));
+	uint1 e1(getEdge(label1));
+	uint1 v1(getVertex(label1));
+	uint1 f1(getFacet(label1));
+	m_edgeInv[v0][e0][0] = m_connV[f0][1]*m_connV[f1][2] - m_connV[f0][2]*m_connV[f1][1];
+	m_edgeInv[v0][e0][1] = m_connV[f0][2]*m_connV[f1][0] - m_connV[f0][0]*m_connV[f1][2];
+	m_edgeInv[v0][e0][2] = m_connV[f0][0]*m_connV[f1][1] - m_connV[f0][1]*m_connV[f1][0];
+	m_edgeInv[v1][e1][0] = -m_edgeInv[v0][e0][0];
+	m_edgeInv[v1][e1][1] = -m_edgeInv[v0][e0][1];
+	m_edgeInv[v1][e1][2] = -m_edgeInv[v0][e0][2];
+      }
+    for (uint1 i(0); i< p_cell->m_numVertices; ++i){
+      uint1 indxF;
+      indxF = getFacet(p_cell->m_vertices[i][2]);
+      real_t vol(m_connV[indxF][0]*m_edgeInv[i][0][0]+
+		 m_connV[indxF][1]*m_edgeInv[i][0][1]+
+		 m_connV[indxF][2]*m_edgeInv[i][0][2]);
+      for(uint0 m(0); m<3; ++m)
+	for(uint0 k(0); k<3; ++k)
+	  m_edgeInv[i][m][k] /= vol;
+    }
+  }
+
+  template<typename real_t>
+  void CellGeometry<real_t>::updateVertexPos()
+  {
+    for (uint1 i(0); i< p_cell->m_numVertices; ++i){
+      Array < uint1, 3 > indxF;
+      indxF[0] = getFacet(p_cell->m_vertices[i][2]);
+      indxF[1] = getFacet(p_cell->m_vertices[i][0]);
+      indxF[2] = getFacet(p_cell->m_vertices[i][1]);
+      for(uint0 k(0); k<3; ++k)
+	p_cell->m_vertexPos[i][k] = (m_rSq[indxF[0]]*m_edgeInv[i][0][k] + 
+				     m_rSq[indxF[1]]*m_edgeInv[i][1][k] + 
+				     m_rSq[indxF[2]]*m_edgeInv[i][2][k]);
+    }
+  }
+
+  template<typename real_t>
+  bool CellGeometry<real_t>::isConvex() const
+  {
+    bool valid(true);
+    for (uint1 i(0); i< p_cell->m_numVertices; ++i){
+      for(uint0 k(0); k<3; ++k){
+	uint1 v(getVertex(p_cell->m_vertices[i][k]));
+	uint0 kmin(k==0?2:k-1);
+	uint1 f(getFacet(p_cell->m_vertices[i][kmin]));
+	real_t dist(p_cell->m_vertexPos[v][0]*m_connV[f][0]+p_cell->m_vertexPos[v][1]*m_connV[f][1]+p_cell->m_vertexPos[v][2]*m_connV[f][2]-m_rSq[f]);
+	(dist > 0 ?  valid = false : valid);
+      }
+    }
+    return valid;
+  }
+
+  template<typename real_t>
+  void CellGeometry<real_t>::computeVolume()
+  {
+    m_vol = 0;
+    for (uint1 i(0); i< p_cell->m_numVertices; ++i)
+      for (uint0 k(0); k<3; ++k){
+	uint1 label0(p_cell->m_vertices[i][k]);
+	uint1 label1(p_cell->getReverseLabel(label0));
+	if (label0 > label1) continue;
+	uint1 e0(getEdge(label0));
+	uint1 v0(getVertex(label0));
+	uint1 f0(getFacet(label0));
+	uint1 e1(getEdge(label1));
+	uint1 v1(getVertex(label1));
+	uint1 f1(getFacet(label1));
+	m_vol += (m_connV[f0][0]-m_connV[f1][0])*(p_cell->m_vertexPos[v0][1]*p_cell->m_vertexPos[v1][2]-p_cell->m_vertexPos[v0][2]*p_cell->m_vertexPos[v1][1]);
+	m_vol += (m_connV[f0][1]-m_connV[f1][1])*(p_cell->m_vertexPos[v0][2]*p_cell->m_vertexPos[v1][0]-p_cell->m_vertexPos[v0][0]*p_cell->m_vertexPos[v1][2]);
+	m_vol += (m_connV[f0][2]-m_connV[f1][2])*(p_cell->m_vertexPos[v0][0]*p_cell->m_vertexPos[v1][1]-p_cell->m_vertexPos[v0][1]*p_cell->m_vertexPos[v1][0]);
+      }
+    m_vol /= 12.0;
+  }
+
+  template<typename real_t>
+  void CellGeometry<real_t>::computeAreas()
+  {
+    m_vol = 0;
+    m_areas.clear();
+    m_areas.resize(p_cell->m_numFacets);
+    for(uint i(0); i < p_cell->m_numFacets; ++i)
+      for(uint0 k(0); k<3; ++k)
+	m_areas[i][k] = 0;
+    Array<real_t, 3> dA;
+    for (uint1 i(0); i< p_cell->m_numVertices; ++i)
+      for (uint0 k(0); k<3; ++k){
+	uint1 label0(p_cell->m_vertices[i][k]);
+	uint1 label1(p_cell->getReverseLabel(label0));
+	if (label0 > label1) continue;
+	uint1 e0(getEdge(label0));
+	uint1 v0(getVertex(label0));
+	uint1 f0(getFacet(label0));
+	uint1 e1(getEdge(label1));
+	uint1 v1(getVertex(label1));
+	uint1 f1(getFacet(label1));
+	dA[0] = p_cell->m_vertexPos[v0][1]*p_cell->m_vertexPos[v1][2]-p_cell->m_vertexPos[v0][2]*p_cell->m_vertexPos[v1][1];
+	dA[1] = p_cell->m_vertexPos[v0][2]*p_cell->m_vertexPos[v1][0]-p_cell->m_vertexPos[v0][0]*p_cell->m_vertexPos[v1][2];
+	dA[2] = p_cell->m_vertexPos[v0][0]*p_cell->m_vertexPos[v1][1]-p_cell->m_vertexPos[v0][1]*p_cell->m_vertexPos[v1][0];
+	for(uint0 k(0); k<3; ++k){
+	  m_areas[f0][k] += dA[k];
+	  m_areas[f1][k] -= dA[k];
+	}
+      }
+    for(uint1 i(0); i< m_areas.size(); ++i){   
+      for(uint0 k(0); k<3; ++k){
+	m_areas[i][k] *= 0.5;
+	m_vol += m_areas[i][k]*m_connV[i][k];
+      }
+    }
+    m_vol /= 6.0;
+    printf("volume: %f\n", m_vol);
+  }
+
+  template<typename real_t>
+  void CellGeometry<real_t>::diffVolume()
+  {
+    m_vol = 0;
+    m_dV.clear();
+    m_dV.resize(p_cell->m_numFacets);
+    m_areas.resize(p_cell->m_numFacets);
+    for(uint1 i(0); i < p_cell->m_numFacets; ++i)
+      for(uint0 k(0); k<3; ++k){
+	m_dV[i][k] = 0;
+	m_areas[i][k] =0;
+      }
+    real_t dA[3];
+    real_t ddA[3];
+    real_t dVertex[3][3][3];
+    real_t vol(0);
+    uint1 f[3];
+    uint1 vNbr[3];
+    const uint0 eOpp[3]={2,0,1};//edge opposite to facet
+    real_t dv[3][3];
+    for(uint1 vc(0); vc < p_cell->m_numVertices; ++vc){
+      vNbr[0] = getVertex(p_cell->m_vertices[vc][0]);
+      f[2] = getFacet(p_cell->m_vertices[vc][0]);
+      vNbr[1] = getVertex(p_cell->m_vertices[vc][1]);
+      f[0] = getFacet(p_cell->m_vertices[vc][1]);
+      vNbr[2] = getVertex(p_cell->m_vertices[vc][2]);
+      f[1] = getFacet(p_cell->m_vertices[vc][2]);
+      for(uint0 k(0); k<3; ++k){
+	dv[0][k] = p_cell->m_vertexPos[vNbr[0]][k]-p_cell->m_vertexPos[vNbr[1]][k];
+	dv[1][k] = p_cell->m_vertexPos[vNbr[1]][k]-p_cell->m_vertexPos[vNbr[2]][k];
+	dv[2][k] = p_cell->m_vertexPos[vNbr[2]][k]-p_cell->m_vertexPos[vNbr[0]][k];
+      }
+      //vertex vc (direction l) differentiated to position of m_connV[f[m]] (direction j)
+      for (uint0 j(0); j<3; ++j)
+	for (uint0 i(0); i<3; ++i)
+	  for (uint0 l(0); l<3; ++l)
+	    dVertex[j][i][l] = m_edgeInv[vc][eOpp[i]][l]*(m_connV[f[i]][j]-p_cell->m_vertexPos[vc][j]);
+      for(uint0 m(0); m<3; ++m){
+	dA[0] = p_cell->m_vertexPos[vc][1]*dv[m][2]-p_cell->m_vertexPos[vc][2]*dv[m][1];
+	dA[1] = p_cell->m_vertexPos[vc][2]*dv[m][0]-p_cell->m_vertexPos[vc][0]*dv[m][2];
+	dA[2] = p_cell->m_vertexPos[vc][0]*dv[m][1]-p_cell->m_vertexPos[vc][1]*dv[m][0];
+	for(uint0 k(0); k<3; ++k){
+	  m_areas[f[m]][k] += 0.25*dA[k];
+	  vol += m_connV[f[m]][k]*dA[k]/24.0;	  
+	}
+	for (uint0 j(0); j<3; ++j){
+	  for (uint0 i(0); i<3; ++i){
+	    ddA[0] = dVertex[j][i][1]*dv[m][2]-dVertex[j][i][2]*dv[m][1];
+	    ddA[1] = dVertex[j][i][2]*dv[m][0]-dVertex[j][i][0]*dv[m][2];
+	    ddA[2] = dVertex[j][i][0]*dv[m][1]-dVertex[j][i][1]*dv[m][0];
+	    for(uint0 k(0); k<3; ++k)
+	      m_dV[f[i]][j] += m_connV[f[m]][k]*ddA[k]/12.0;
+	  }
+	  m_dV[f[m]][j] += dA[j]/24.0;
+	}
+      }
+    }  
+    for(uint1 i(0); i<p_cell->m_numFacets; ++i)
+      for(uint0 k(0); k<3; ++k)
+	m_vol += m_areas[i][k]*m_connV[i][k];
+    m_vol /= 6.0;
+    printf("connecting vector: %f %f %f\n", m_connV[0][0], m_connV[0][1], m_connV[0][2]);
+    printf("volume: %f %f\n", m_vol, vol);
+    //    printf("nbr: %u\n",p_cell->m_nbr[0]);
+  }
+
+  template<typename real_t>
+  void CellGeometry<real_t>::computeAll()
+  {
+    m_vol = 0;
+    m_dV.resize(p_cell->m_numFacets);
+    m_areas.resize(p_cell->m_numFacets);
+    m_omega.resize(p_cell->m_numFacets);
+    real_t dA[p_cell->m_numVertices][3][3];
+    real_t dv[p_cell->m_numVertices][3][3];
+    real_t xcm[p_cell->m_numFacets][3];
+    //    real_t dVertex[3][3][3];
+    real_t volFacet[p_cell->m_numFacets];
+    uint1 f[3];
+    uint1 vNbr[3];
+    //    real_t omega[p_cell->m_numFacets][3][3][3];
+    real_t dx[3];
+    for(uint1 i(0); i < p_cell->m_numFacets; ++i){
+      for(uint0 k(0); k<3; ++k){
+	m_dV[i][k] = 0;
+	m_areas[i][k] =0;
+	xcm[i][k] =0;
+      }
+      volFacet[i] =0;
+    }
+    const uint0 eOpp[3]={2,0,1};//edge opposite to facet
+    for(uint1 vc(0); vc < p_cell->m_numVertices; ++vc){
+      vNbr[0] = getVertex(p_cell->m_vertices[vc][0]);
+      f[2] = getFacet(p_cell->m_vertices[vc][0]);
+      vNbr[1] = getVertex(p_cell->m_vertices[vc][1]);
+      f[0] = getFacet(p_cell->m_vertices[vc][1]);
+      vNbr[2] = getVertex(p_cell->m_vertices[vc][2]);
+      f[1] = getFacet(p_cell->m_vertices[vc][2]);
+      for(uint0 k(0); k<3; ++k){
+	dv[vc][0][k] = p_cell->m_vertexPos[vNbr[0]][k]-p_cell->m_vertexPos[vNbr[1]][k];
+	dv[vc][1][k] = p_cell->m_vertexPos[vNbr[1]][k]-p_cell->m_vertexPos[vNbr[2]][k];
+	dv[vc][2][k] = p_cell->m_vertexPos[vNbr[2]][k]-p_cell->m_vertexPos[vNbr[0]][k];
+      }
+      for(uint0 m(0); m<3; ++m){
+	for(uint0 k(0); k<3; ++k)
+	  dx[k] = p_cell->m_vertexPos[vc][k]-0.5*m_connV[f[m]][k];
+	dA[vc][m][0] = dx[1]*dv[vc][m][2]-dx[2]*dv[vc][m][1];
+	dA[vc][m][1] = dx[2]*dv[vc][m][0]-dx[0]*dv[vc][m][2];
+	dA[vc][m][2] = dx[0]*dv[vc][m][1]-dx[1]*dv[vc][m][0];
+	real_t dVol=0;
+	for(uint0 k(0); k<3; ++k){
+	  m_areas[f[m]][k] += dA[vc][m][k];
+	  dVol+= m_connV[f[m]][k]*dA[vc][m][k];
+	}
+	volFacet[f[m]] += dVol;
+	for(uint0 k(0); k<3; ++k)
+	  xcm[f[m]][k] += dVol* p_cell->m_vertexPos[vc][k];
+      }
+    }
+    for(uint1 i(0); i<p_cell->m_numFacets; ++i){
+      //printf("xcm[%u]: ", i);
+      for(uint0 k(0); k<3; ++k){
+	xcm[i][k] /= volFacet[i];
+	xcm[i][k] *= 2.0;
+	xcm[i][k] += 0.5*m_connV[i][k];
+	xcm[i][k] /= 3.0;
+	m_areas[i][k] *=0.25;
+      }
+      m_vol += volFacet[i];
+    }
+    m_vol /= 24;
+    real_t dAtot[3];
+    for(uint1 vc(0); vc < p_cell->m_numVertices; ++vc){
+      f[2] = getFacet(p_cell->m_vertices[vc][0]);
+      f[0] = getFacet(p_cell->m_vertices[vc][1]);
+      f[1] = getFacet(p_cell->m_vertices[vc][2]);
+      for(uint0 m(0); m<3; ++m){
+	for(uint0 k(0); k<3; ++k)
+	  dx[k] = 0.5*m_connV[f[m]][k]-xcm[f[m]][k];
+	dA[vc][m][0] += dx[1]*dv[vc][m][2]-dx[2]*dv[vc][m][1];
+	dA[vc][m][1] += dx[2]*dv[vc][m][0]-dx[0]*dv[vc][m][2];
+	dA[vc][m][2] += dx[0]*dv[vc][m][1]-dx[1]*dv[vc][m][0];
+      }
+      for(uint0 k(0); k<3; ++k)
+	dAtot[k] = 0.25*(dA[vc][0][k]+dA[vc][1][k]+dA[vc][2][k]);
+      for(uint0 i(0); i<3; ++i) //facet indicating nbr particle-position towards what is differentiated
+	for(uint0 j(0); j<3; ++j){ //direction of derivative
+	  for(uint0 l(0); l<3; ++l){ //direction of displacement
+	    //vertex vc (direction l) differentiated to position of m_connV[f[i]] (direction j)
+	    real_t dVertex = m_edgeInv[vc][eOpp[i]][l]*(m_connV[f[i]][j]-p_cell->m_vertexPos[vc][j]);
+	    for(uint0 k(0); k<3; ++k) //normal direction
+	      m_omega[f[i]][j][l][k]  = dVertex * dAtot[k];
+	    m_dV[f[i]][j] += m_omega[f[i]][j][l][l];
+	  }
+	}
+    }
+    //    printf("volume: %f\n", m_vol);
+    //    printf("nbr: %u\n",p_cell->m_nbr[0]);
+  }
+ 
+  template<typename real_t>
+  void CellGeometry<real_t>::gradFacetAreaSq(uint1 indxFacet, vector<uint2> & indxFacets, vector<Array<real_t, 3> > & grad)
+  {
+    vector<uint1> labels;
+    labels.reserve(10);
+    uint1 labelStart(p_cell->m_facets[indxFacet]);
+    labels.push_back(labelStart);
+    uint1 labelNext = p_cell->getNextLabelCCW(labelStart);
+    while (labelNext != labelStart){
+      labels.push_back(labelNext);
+      labelNext = p_cell->getNextLabelCCW(labelNext);
+    }
+    uint1 numV(labels.size());
+    uint1 numF(numV+1);
+    indxFacets.resize(labels.size()+1);
+    indxFacets[0] = indxFacet;
+    for(uint1 i(0); i< numV; ++i)
+      indxFacets[i+1] = getFacet(p_cell->getReverseLabel(labels[i]));
+    grad.resize(numF);
+    for(uint1 i(0); i< numF; ++i)
+      for(uint0 k(0); k<3; ++k)
+	grad[i][k] = 0;
+    uint1 nbrPrev = numV;
+    uint1 nbrNext = 1;
+    real_t dv[3], dVertex[3];
+    for(uint1 i(0); i< numV; ++i){
+      uint1 vc = getVertex(labels[i]);
+      uint1 e0 = getEdge(labels[i]);
+      uint1 e1 = (e0 ==2 ? 0 : e0+1);
+      uint1 e2 = (e0 ==0 ? 2 : e0-1);
+      uint1 f0 = getFacet(p_cell->m_vertices[vc][e1]);
+      uint1 f1 = getFacet(p_cell->m_vertices[vc][e2]);
+      uint1 f2 = getFacet(p_cell->m_vertices[vc][e0]);
+      uint1 v0 = getVertex(p_cell->m_vertices[vc][e0]);
+      uint1 v1 = getVertex(p_cell->m_vertices[vc][e1]);
+      real_t dASq;
+      for(uint0 k(0); k<3; ++k)
+	dv[k] = p_cell->m_vertexPos[v0][k]-p_cell->m_vertexPos[v1][k];
+      for(uint0 j(0); j<3; ++j){ //direction of displacement
+	for(uint0 l(0); l<3; ++l) //direction of displacement
+	  //vertex vc (direction l) differentiated to position of m_connV[fs] (direction j)
+	  dVertex[l] = m_edgeInv[vc][e0][l]*(m_connV[f1][j]-p_cell->m_vertexPos[vc][j]);
+	dASq  = m_areas[indxFacet][0]*(dVertex[1]*dv[2]-dVertex[2]*dv[1]);
+	dASq += m_areas[indxFacet][1]*(dVertex[2]*dv[0]-dVertex[0]*dv[2]);
+	dASq += m_areas[indxFacet][2]*(dVertex[0]*dv[1]-dVertex[1]*dv[0]);
+	grad[nbrPrev][j] += dASq;
+      }
+      for(uint0 j(0); j<3; ++j){ //direction of displacement
+	for(uint0 l(0); l<3; ++l) //direction of displacement
+	  //vertex vc (direction l) differentiated to position of m_connV[f2] (direction j)
+	  dVertex[l] = m_edgeInv[vc][e1][l]*(m_connV[f2][j]-p_cell->m_vertexPos[vc][j]);
+	dASq  = m_areas[indxFacet][0]*(dVertex[1]*dv[2]-dVertex[2]*dv[1]);
+	dASq += m_areas[indxFacet][1]*(dVertex[2]*dv[0]-dVertex[0]*dv[2]);
+	dASq += m_areas[indxFacet][2]*(dVertex[0]*dv[1]-dVertex[1]*dv[0]);
+	grad[nbrNext][j] += dASq;
+      }
+      for(uint0 j(0); j<3; ++j){ //direction of displacement
+	for(uint0 l(0); l<3; ++l) //direction of displacement
+	  //vertex vc (direction l) differentiated to position of m_connV[f0] (direction j)
+	  dVertex[l] = m_edgeInv[vc][e2][l]*(m_connV[f0][j]-p_cell->m_vertexPos[vc][j]);
+	dASq  = m_areas[indxFacet][0]*(dVertex[1]*dv[2]-dVertex[2]*dv[1]);
+	dASq += m_areas[indxFacet][1]*(dVertex[2]*dv[0]-dVertex[0]*dv[2]);
+	dASq += m_areas[indxFacet][2]*(dVertex[0]*dv[1]-dVertex[1]*dv[0]);
+	grad[0][j] += dASq;
+      }
+      nbrPrev = nbrNext;
+      ++nbrNext;
+    }
+  }
+
+  template<typename real_t>
+  void CellComplex<real_t>::initNbrList(const vector<Array<real_t, 3> > & p)
+  {
+    const Array<real_t, 3> & L(m_nbrList.getBox().getL());
+    real_t density = real_t(p.size())/(L[0]*L[1]*L[2]);
+    real_t rcut = 1.75*(pow(density,-1.0/3.0));
+    m_nbrList.setup(p, rcut);
+    printf("number grid cells: %u\n", m_nbrList.getGrid().getN()[0]);
+  }
+
+  template<typename real_t>
+  void CellComplex<real_t>::build(const vector<Array<real_t, 3> > & p)
+  {
+    initNbrList(p);
+    printf("nbr list build\n");
+    const Array<real_t, 3> & L(m_nbrList.getBox().getL());
+    Cuboid<real_t> cub(L);
+    const Cell<real_t> & cellCub(cub.getCell());
+    m_cells.resize(p.size());
+#pragma omp parallel
+    {
+      CellMaker<real_t> maker;
+#pragma omp for
+      for(uint2 i=0; i< p.size(); ++i){
+	maker.build(i, p, m_nbrList, cellCub);
+	m_cells[i] = maker;
+      }
+    }
+//     m_updaters.resize(p.size());
+// #pragma omp parallel for
+//     for(size_t i=0; i < m_updaters.size(); ++i){
+//       m_updaters[i] = m_cells[i];
+//       m_updaters[i].reset();
+//     }
+//     repear(p, changedCells);
+    m_nbrList.clear();
+    m_geom.resize(p.size());
+    m_updaters.resize(p.size());
+#pragma omp parallel for
+    for(size_t i=0; i < m_updaters.size(); ++i){
+      m_geom[i] = m_cells[i];
+      m_geom[i].computeConnectingVectors(p, m_nbrList.getBox());
+      m_geom[i].computeEdgeInv();
+      m_updaters[i] = m_geom[i];
+      m_updaters[i].reset();
+    }
+    m_hasChanged.resize(p.size());
+    m_isBuild = true;
+  }
+
+  template<typename real_t>
+  void CellComplex<real_t>::update(const vector<Array<real_t, 3> > & p)
+  {
+    (p.size() == m_cells.size()? m_isBuild : m_isBuild = false);
+    if (!m_isBuild) {
+      build(p);
+      return;
+    }
+#pragma omp parallel for
+    for(size_t i=0; i < m_updaters.size(); ++i){
+      m_updaters[i].reset();
+      m_hasChanged[i] = false;
+    }
+    uint2 numChanged(0);
+    const Box<real_t> & box(m_nbrList.getBox());
+#pragma omp parallel for
+    for(size_t i=0; i < m_geom.size(); ++i){
+      m_geom[i].computeConnectingVectors(p, box);
+      m_geom[i].computeEdgeInv();
+      m_geom[i].updateVertexPos();
+      bool isConvex = m_geom[i].isConvex();
+      if (!m_geom[i].isConvex()){
+	m_hasChanged[i]=true;
+#pragma omp atomic
+	++numChanged;
+      }
+    }
+    printf("number changed cells: %u\n",numChanged);
+    if (numChanged==0) return;
+    const Array<real_t, 3> & L(box.getL());
+    Cuboid<real_t> cub(L);
+    const Cell<real_t> & cellCub(cub.getCell());
+    vector<uint2> emptyCells;
+#pragma omp parallel
+    {
+      CellMaker<real_t> maker;
+      vector<uint2> emptyCellsPriv;
+#pragma omp for
+      for(size_t i=0; i < m_updaters.size(); ++i){
+	if (!m_hasChanged[i]) continue;
+	maker = m_cells[i];
+	maker.rebuild(p, box, cellCub);
+	m_cells[i] = maker;
+	if (m_cells[i].numVertices()==0 || m_cells[i].hasNoNbr())
+	  emptyCellsPriv.push_back(i);
+      }
+      if(!emptyCellsPriv.empty())
+#pragma omp critical
+	emptyCells.insert(emptyCells.end(), emptyCellsPriv.begin(), emptyCellsPriv.end());
+    }
+    printf("number empty cells: %lu\n",emptyCells.size());
+    if(!emptyCells.empty()) {
+      initNbrList(p);
+#pragma omp parallel
+      {
+	CellMaker<real_t> maker;
+#pragma omp for
+	for(size_t i=0; i< emptyCells.size(); ++i){
+	  maker.build(emptyCells[i], p, m_nbrList, cellCub);
+	  m_cells[emptyCells[i]] = maker;
+	}
+      }
+    }    
+    repear(p);
+#pragma omp for
+    for(size_t i=0; i< m_geom.size(); ++i){
+      if (!m_hasChanged[i]) continue;
+      m_geom[i].computeConnectingVectors(p, box);
+      m_geom[i].computeEdgeInv();
+    }
+  }
+
+  template<typename real_t>
+  void CellComplex<real_t>::repear(const vector<Array<real_t, 3> > & p)
+  {
+    //    ProfilerStart("test.prof");
+#pragma omp parallel for
+    for(size_t i=0; i < m_updaters.size(); ++i){
+      if(!m_hasChanged[i]) continue;
+      m_updaters[i].updateNbrInserts();
+    }
+    bool needsUpdate(true);
+    while (needsUpdate){
+      needsUpdate = false;
+      vector<NbrInsert> nbrInserts, nbrInsTmp;
+#pragma omp parallel
+      {
+	vector<NbrInsert> nbrInsPriv;
+#pragma omp for
+	for(size_t i=0; i < m_updaters.size(); ++i){
+	  const vector<NbrInsert> & inserts(m_updaters[i].getNbrInserts());
+	  if (!inserts.empty()){
+	    nbrInsPriv.insert(nbrInsPriv.end(), inserts.begin(), inserts.end());
+	    m_updaters[i].clearNbrInserts();
+#pragma omp atomic write
+	    needsUpdate = true;
+	  }
+	}
+	sort(nbrInsPriv.begin(), nbrInsPriv.end(), CompareNbrInsert());
+#pragma omp critical
+	{
+	  nbrInsTmp.resize(nbrInserts.size()+nbrInsPriv.size());
+	  merge(nbrInserts.begin(), nbrInserts.end(), nbrInsPriv.begin(), nbrInsPriv.end(), nbrInsTmp.begin(), CompareNbrInsert());
+	  nbrInserts.swap(nbrInsTmp);
+	}
+// #pragma omp critical
+// 	nbrInserts.insert(nbrInserts.end(), nbrInsPriv.begin(), nbrInsPriv.end());
+      }
+      //      std::__parallel::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
+      // std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
+      NbrInsertItr begin, end;
+      begin = nbrInserts.begin();
+      end = begin;
+#pragma omp parallel
+      {
+	CellMaker<real_t> maker;
+	NbrInsertItr beginPriv;
+	NbrInsertItr endPriv;
+	while(end != nbrInserts.end()){
+#pragma omp task
+	  {
+#pragma omp critical
+	    {
+	      for(uint2 cellId((*begin)[0]); (end != nbrInserts.end()) && ((*end)[0]==cellId); ++end) {} 
+	      beginPriv=begin;
+	      endPriv=end;
+	      begin = end;
+	    }
+	    bool hasChanged = m_updaters[(*beginPriv)[0]].processNbrInserts(beginPriv, endPriv, maker, p, m_nbrList.getBox());
+	    m_hasChanged[(*beginPriv)[0]] = true;
+	    if(hasChanged) m_updaters[(*beginPriv)[0]].updateNbrInserts();
+	  }
+	}
+      }
+    }
+  }
+
+}
+
+#endif
