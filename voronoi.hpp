@@ -325,7 +325,7 @@ namespace vor {
   {
   public:
     NbrsToFacets() {}
-  template<typename real_t>
+    template<typename real_t>
     void init(const vector< Cell<real_t> > & cells);
     void print() const;
     //    void makeMatrixdVdV(const vector<real_t> & dV);
@@ -337,131 +337,6 @@ namespace vor {
     vector<uint2> m_nbr;
     vector<uint1> m_facet;
   };
-
-  template<typename real_t>
-  void NbrsToFacets::init(const vector< Cell<real_t> > & cells)
-  {
-    m_numCells = cells.size();
-    m_ptr.resize(m_numCells+1);
-    m_ptr[0] = 0;
-    for(uint2 i=0; i< m_numCells; ++i)
-      m_ptr[i+1] = m_ptr[i] + cells[i].numFacets();
-    m_nbr.resize(m_ptr[m_numCells]);
-    m_facet.resize(m_ptr[m_numCells]);
-#pragma omp parallel
-    {
-      vector< pair<uint2, uint1> > nbrLoc;      
-#pragma omp for
-      for(uint2 i=0; i< m_numCells; ++i){
-	uint2 numFacets(m_ptr[i+1]-m_ptr[i]);
-	nbrLoc.resize(numFacets);
-	for(uint1 j=0; j< numFacets; ++j){
-	  nbrLoc[j].first = cells[i].getNbr(j);
-	  nbrLoc[j].second = j;
-	}
-	sort(nbrLoc.begin(), nbrLoc.end(), ComparePairFirst());
-	for(uint1 j=0; j< numFacets; ++j){
-	  m_nbr[m_ptr[i]+j] = nbrLoc[j].first;
-	  m_facet[m_ptr[i]+j] = nbrLoc[j].second;
-	}
-      }
-    }
-    // for(uint2 i=0; i < m_numCells; ++i){
-    //   printf("cell: %u, begin: %u, end: %u", i, m_ptr[i], m_ptr[i+1]);
-    //   for(uint1 j(m_ptr[i]); j< m_ptr[i+1]; ++j)
-    // 	printf(", nbr: %u, facet: %u", m_nbr[j], m_facet[j]);
-    //   printf("\n");
-    // }
-  }
-
-  void NbrsToFacets::print() const
-  {
-    for(uint2 i=0; i < m_numCells; ++i){
-      printf("cell: %u, begin: %u, end: %u", i, m_ptr[i], m_ptr[i+1]);
-      for(uint2 j(m_ptr[i]); j< m_ptr[i+1]; ++j)
-    	printf(", nbr: %u, facet: %u", m_nbr[j], m_facet[j]);
-      printf("\n");
-    }
-  }
-
-  template<typename real_t>
-  NbrsToFacets NbrsToFacets::transposedV(const vector<real_t> & values, vector<real_t> & valuesTr) const
-  {
-    NbrsToFacets tr;
-    tr.m_numCells = m_numCells;
-    tr.m_ptr.resize(m_numCells+1,0);
- #pragma omp parallel for
-    for(uint2 i(0); i< m_nbr.size(); ++i){
-      if (m_nbr[i] < m_numCells){
-	uint2 indx(m_nbr[i]+1);
-#pragma omp atomic
-	++(tr.m_ptr[indx]);
-      }
-    }
-    for(uint2 i(0); i< m_numCells; ++i){
-      tr.m_ptr[i+1] += tr.m_ptr[i];
-    }
-    vector<uint2> ptrTmp(tr.m_ptr.size());
-    vector<pair<uint2, pair<uint1, Array<real_t, 3> > > > nbrTmp(m_nbr.size());
-#pragma omp parallel for
-    for(uint2 i(0); i< tr.m_ptr.size(); ++i)
-      ptrTmp[i] = tr.m_ptr[i];
-#pragma omp parallel for
-    for(uint2 i=0; i< m_numCells; ++i)
-      for(uint1 j(m_ptr[i]); j< m_ptr[i+1]; ++j){
-	if (m_nbr[j] < m_numCells){
-#pragma omp atomic capture
-	  uint2 ptrLoc = ptrTmp[m_nbr[j]]++;
-	  nbrTmp[ptrLoc].first = i;
-	  nbrTmp[ptrLoc].second.first = m_facet[j];
-	  nbrTmp[ptrLoc].second.second = values[j];
-	}
-      }
-#pragma omp parallel for
-    for(uint2 i(0); i< tr.m_numCells; ++i)
-      sort(nbrTmp.begin()+tr.m_ptr[i], nbrTmp.begin()+tr.m_ptr[i+1], ComparePairFirst());
-    tr.m_nbr.resize(nbrTmp.size());
-    tr.m_facet.resize(nbrTmp.size());
-    valuesTr.resize(nbrTmp.size());
-#pragma omp parallel for
-    for(size_t i(0); i< nbrTmp.size(); ++i){
-      tr.m_nbr[i] = nbrTmp[i].first;
-      tr.m_facet[i] = nbrTmp[i].second.first;
-      valuesTr[i] = nbrTmp[i].second.second;
-    } 
-    return tr;
-  }
-
-//   template<typename real_t>
-//   void NbrsToFacets::makeMatrixdVdV(const vector<CellGeometry<real_t> > & geoms, const vector<real_t> & masses)
-//   {
-//     vector< Array<real_t, 3> > values(m_nbr.size());
-// #pragma omp parallel for
-//     for(uint2 i=0; i< m_ptr.size()-1; ++i){
-//       const vector< Array<real_t, 3> > & dV(geoms[i].getdV());
-//       for(uint2 j=m_ptr[i]; j < m_ptr[i+1]; ++j)
-// 	for(uint0 k(0); k<3; ++k)
-// 	  values[j][k] = dV[m_facet[j]][k];
-//     }
-//     vector< Array<real_t, 3> > valuesTr();
-//     NbrsToFacets tr(this->transposedV(values, valuesTr));
-      
-//     vector<CoordMatrix<real_t> > cMat;
-//     cMat.reserve(m_numCells*300);
-//     for(uint2 i(0); i< m_numCells; ++i){
-//       const vector<Array, 3> & dV1(geom[i].getdV());
-//       for(uint2 j(m_ptr[i]); j< m_ptr[i+1]; ++j){
-// 	uint2 partIndx(m_nbr[j]);
-// 	for(uint2 m(tr.m_ptr[partIndx]); m < tr.m_ptr[partIndx+1]; ++m){
-// 	  coord.push_back();
-// 	}
-	
-
-//       }
-
-//     }
-//   }
-
   
   template<typename real_t>
   Cell<real_t>::Cell(const Cell<real_t> & rhs): m_id(rhs.m_id), m_numVertices(0), m_numFacets(0), m_vertexPos(NULL), m_vertices(NULL), m_facets(NULL), m_nbr(NULL)
@@ -562,8 +437,8 @@ namespace vor {
     // 	printf("%u %u %u\n", getFacet(labelNext), getVertex(labelNext), getEdge(labelNext));
     //   }
     // }
-    printf("number of vertices %u\n", m_numVertices);
-    printf("number of facets %u\n", m_numFacets);
+    //    printf("number of vertices %u\n", m_numVertices);
+    //printf("number of facets %u\n", m_numFacets);
     for (uint1 i(0); i< m_numFacets; ++i){
       uint1 labelStart(m_facets[i]);
       printf("facet %u, neihgbor %u: ", i, m_nbr[i]);
@@ -2169,14 +2044,14 @@ template<typename real_t>
     real_t density = real_t(p.size())/(L[0]*L[1]*L[2]);
     real_t rcut = 1.75*(pow(density,-1.0/3.0));
     m_nbrList.setup(p, rcut);
-    printf("number grid cells: %u\n", m_nbrList.getGrid().getN()[0]);
+    //    printf("number grid cells: %u\n", m_nbrList.getGrid().getN()[0]);
   }
 
   template<typename real_t>
   void CellComplex<real_t>::build(const vector<Array<real_t, 3> > & p)
   {
     initNbrList(p);
-    printf("nbr list build\n");
+    //    printf("nbr list build\n");
     const Array<real_t, 3> & L(m_nbrList.getBox().getL());
     Cuboid<real_t> cub(L);
     const Cell<real_t> & cellCub(cub.getCell());
@@ -2239,7 +2114,7 @@ template<typename real_t>
 	++numChanged;
       }
     }
-    printf("number changed cells: %u\n",numChanged);
+    //    printf("number changed cells: %u\n",numChanged);
     if (numChanged==0) return;
     const Array<real_t, 3> & L(box.getL());
     Cuboid<real_t> cub(L);
@@ -2262,7 +2137,7 @@ template<typename real_t>
 #pragma omp critical
 	emptyCells.insert(emptyCells.end(), emptyCellsPriv.begin(), emptyCellsPriv.end());
     }
-    printf("number empty cells: %lu\n",emptyCells.size());
+    //    printf("number empty cells: %lu\n",emptyCells.size());
     if(!emptyCells.empty()) {
       initNbrList(p);
 #pragma omp parallel
@@ -2349,6 +2224,131 @@ template<typename real_t>
     }
   }
 
+  template<typename real_t>
+  void NbrsToFacets::init(const vector< Cell<real_t> > & cells)
+  {
+    m_numCells = cells.size();
+    m_ptr.resize(m_numCells+1);
+    m_ptr[0] = 0;
+    for(uint2 i=0; i< m_numCells; ++i)
+      m_ptr[i+1] = m_ptr[i] + cells[i].numFacets();
+    m_nbr.resize(m_ptr[m_numCells]);
+    //    printf("total number of facets: %u\n", m_ptr[m_numCells]);
+    m_facet.resize(m_ptr[m_numCells]);
+#pragma omp parallel
+    {
+      vector< pair<uint2, uint1> > nbrLoc;      
+#pragma omp for
+      for(uint2 i=0; i< m_numCells; ++i){
+	uint2 numFacets(m_ptr[i+1]-m_ptr[i]);
+	nbrLoc.resize(numFacets);
+	for(uint1 j=0; j< numFacets; ++j){
+	  nbrLoc[j].first = cells[i].getNbr(j);
+	  nbrLoc[j].second = j;
+	}
+	sort(nbrLoc.begin(), nbrLoc.end(), ComparePairFirst());
+	for(uint1 j=0; j< numFacets; ++j){
+	  m_nbr[m_ptr[i]+j] = nbrLoc[j].first;
+	  m_facet[m_ptr[i]+j] = nbrLoc[j].second;
+	}
+      }
+    }
+    // for(uint2 i=0; i < m_numCells; ++i){
+    //   printf("cell: %u, begin: %u, end: %u", i, m_ptr[i], m_ptr[i+1]);
+    //   for(uint1 j(m_ptr[i]); j< m_ptr[i+1]; ++j)
+    // 	printf(", nbr: %u, facet: %u", m_nbr[j], m_facet[j]);
+    //   printf("\n");
+    // }
+  }
+
+  void NbrsToFacets::print() const
+  {
+    for(uint2 i=0; i < m_numCells; ++i){
+           printf("cell: %u, begin: %u, end: %u", i, m_ptr[i], m_ptr[i+1]);
+           for(uint2 j(m_ptr[i]); j< m_ptr[i+1]; ++j)
+      	printf(", nbr: %u, facet: %u", m_nbr[j], m_facet[j]);
+      printf("\n");
+    }
+  }
+
+  template<typename real_t>
+  NbrsToFacets NbrsToFacets::transposedV(const vector<real_t> & values, vector<real_t> & valuesTr) const
+  {
+    NbrsToFacets tr;
+    tr.m_numCells = m_numCells;
+    tr.m_ptr.resize(m_numCells+1,0);
+ #pragma omp parallel for
+    for(uint2 i(0); i< m_nbr.size(); ++i){
+      if (m_nbr[i] < m_numCells){
+	uint2 indx(m_nbr[i]+1);
+#pragma omp atomic
+	++(tr.m_ptr[indx]);
+      }
+    }
+    for(uint2 i(0); i< m_numCells; ++i){
+      tr.m_ptr[i+1] += tr.m_ptr[i];
+    }
+    vector<uint2> ptrTmp(tr.m_ptr.size());
+    vector<pair<uint2, pair<uint1, Array<real_t, 3> > > > nbrTmp(m_nbr.size());
+#pragma omp parallel for
+    for(uint2 i(0); i< tr.m_ptr.size(); ++i)
+      ptrTmp[i] = tr.m_ptr[i];
+#pragma omp parallel for
+    for(uint2 i=0; i< m_numCells; ++i)
+      for(uint1 j(m_ptr[i]); j< m_ptr[i+1]; ++j){
+	if (m_nbr[j] < m_numCells){
+#pragma omp atomic capture
+	  uint2 ptrLoc = ptrTmp[m_nbr[j]]++;
+	  nbrTmp[ptrLoc].first = i;
+	  nbrTmp[ptrLoc].second.first = m_facet[j];
+	  nbrTmp[ptrLoc].second.second = values[j];
+	}
+      }
+#pragma omp parallel for
+    for(uint2 i(0); i< tr.m_numCells; ++i)
+      sort(nbrTmp.begin()+tr.m_ptr[i], nbrTmp.begin()+tr.m_ptr[i+1], ComparePairFirst());
+    tr.m_nbr.resize(nbrTmp.size());
+    tr.m_facet.resize(nbrTmp.size());
+    valuesTr.resize(nbrTmp.size());
+#pragma omp parallel for
+    for(size_t i(0); i< nbrTmp.size(); ++i){
+      tr.m_nbr[i] = nbrTmp[i].first;
+      tr.m_facet[i] = nbrTmp[i].second.first;
+      valuesTr[i] = nbrTmp[i].second.second;
+    } 
+    return tr;
+  }
+
+//   template<typename real_t>
+//   void NbrsToFacets::makeMatrixdVdV(const vector<CellGeometry<real_t> > & geoms, const vector<real_t> & masses)
+//   {
+//     vector< Array<real_t, 3> > values(m_nbr.size());
+// #pragma omp parallel for
+//     for(uint2 i=0; i< m_ptr.size()-1; ++i){
+//       const vector< Array<real_t, 3> > & dV(geoms[i].getdV());
+//       for(uint2 j=m_ptr[i]; j < m_ptr[i+1]; ++j)
+// 	for(uint0 k(0); k<3; ++k)
+// 	  values[j][k] = dV[m_facet[j]][k];
+//     }
+//     vector< Array<real_t, 3> > valuesTr();
+//     NbrsToFacets tr(this->transposedV(values, valuesTr));
+      
+//     vector<CoordMatrix<real_t> > cMat;
+//     cMat.reserve(m_numCells*300);
+//     for(uint2 i(0); i< m_numCells; ++i){
+//       const vector<Array, 3> & dV1(geom[i].getdV());
+//       for(uint2 j(m_ptr[i]); j< m_ptr[i+1]; ++j){
+// 	uint2 partIndx(m_nbr[j]);
+// 	for(uint2 m(tr.m_ptr[partIndx]); m < tr.m_ptr[partIndx+1]; ++m){
+// 	  coord.push_back();
+// 	}
+	
+
+//       }
+
+//     }
+//   }
+  
 }
 
 #endif
