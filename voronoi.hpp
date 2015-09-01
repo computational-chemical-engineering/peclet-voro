@@ -1,3 +1,9 @@
+/**
+ * \file voronoi.hpp
+ * \brief header file for classes of voronoi cells, complexes of cells, their creation and manipulation
+ *
+ */
+
 #ifndef VOR_VORONOI_H
 #define VOR_VORONOI_H
 
@@ -13,7 +19,7 @@
 #include "nbrlist.hpp"
 //#include <google/profiler.h>
 #include <algorithm>
-//#include <omp.h>
+#include <omp.h>
 
 
 using std::vector;
@@ -68,6 +74,10 @@ namespace vor {
   template< typename real_t >
   class CellGeometry;
 
+  /**
+   * \class Cell
+   * \brief Class for storage of single (Voronoi) cells
+   */
   template< typename real_t >
   class Cell
   {
@@ -311,7 +321,7 @@ namespace vor {
     vector<CellGeometry<real_t> > & getGeoms() {return m_geom;}
     const NbrList<uint2, real_t>  & getNbrList() const {return m_nbrList;}
   private:
-    void repear(const vector<Array<real_t, 3> > & p);
+    void repair(const vector<Array<real_t, 3> > & p);
     void initNbrList(const vector<Array<real_t, 3> > & p);
     NbrList<uint2, real_t> m_nbrList;
     vector<Cell<real_t> > m_cells;
@@ -375,6 +385,7 @@ namespace vor {
       delete[] m_facets;
       delete[] m_nbr;
     }
+    m_vertexPos = NULL;
   }
 
   template<typename real_t>
@@ -710,7 +721,8 @@ namespace vor {
   }
 
   template<typename real_t>
-  CellMaker<real_t>::CellMaker(): m_freeV(vor::maxNumVertices-1), m_freeF(vor::maxNumFacets-1)
+  CellMaker<real_t>::CellMaker(): m_freeV(vor::maxNumVertices-1), m_freeF(vor::maxNumFacets-1), m_vertexPos(NULL), m_rSq(NULL), m_vertices(NULL),
+    m_facets(NULL), m_nbr(NULL), m_renumVWrk(NULL), m_renumFWrk(NULL), m_dist(NULL), m_isKnownDist(NULL), m_distGC(NULL)
   {
     uint1 maxV = vor::maxNumVertices-1;
     uint1 maxF = vor::maxNumFacets-1;
@@ -727,22 +739,21 @@ namespace vor {
     m_newVerticesWrk.reserve(20);
     m_facetPrevWrk.reserve(20);
     m_indcsNbrsWrk.reserve(40);
-
   }
-
+  
   template<typename real_t>
   CellMaker<real_t>::~CellMaker()
   {
-    delete[] m_vertexPos;
-    delete[] m_rSq;
-    delete[] m_vertices;
-    delete[] m_facets;
-    delete[] m_nbr;
-    delete[] m_renumVWrk;
-    delete[] m_renumFWrk;
-    delete[] m_dist;
-    delete[] m_isKnownDist;
-    delete[] m_distGC;    
+      delete[] m_vertexPos;
+      delete[] m_rSq;
+      delete[] m_vertices;
+      delete[] m_facets;
+      delete[] m_nbr;
+      delete[] m_renumVWrk;
+      delete[] m_renumFWrk;
+      delete[] m_dist;
+      delete[] m_isKnownDist;
+      delete[] m_distGC;
   }
 
   template<typename real_t>
@@ -1187,8 +1198,8 @@ namespace vor {
 	labelRev = m_vertices[v][e];
 	vRev = getVertex(labelRev);
 	eRev = getEdge(labelRev);
-	fPrev = getFacet(m_vertices[vRev][eRev]);
 	if (vRev == vDummy) break;
+	fPrev = getFacet(m_vertices[vRev][eRev]);
 	//printf("label: %u %u %u\n", getFacet(m_vertices[vRev][eRev]), getVertex(m_vertices[vRev][eRev]), getEdge(m_vertices[vRev][eRev]));
 	m_vertices[vRev][eRev] = 
 	  (fDummyShifted | (m_vertices[vRev][eRev] & (~maskFacet)));
@@ -1222,7 +1233,7 @@ namespace vor {
     }
     for(uint i(0); i< m_newVerticesWrk.size(); ++i){
       computeRsq(m_newVerticesWrk[i]);
-      computeDistGC(m_newVerticesWrk[i]);
+      //computeDistGC(m_newVerticesWrk[i]);
     }
 
     //remove old vertices and facets using depth-first search
@@ -2071,7 +2082,7 @@ template<typename real_t>
 //       m_updaters[i] = m_cells[i];
 //       m_updaters[i].reset();
 //     }
-//     repear(p, changedCells);
+//     repair(p, changedCells);
     m_nbrList.clear();
     m_geom.resize(p.size());
     m_updaters.resize(p.size());
@@ -2150,7 +2161,7 @@ template<typename real_t>
 	}
       }
     }    
-    repear(p);
+    repair(p);
 #pragma omp for
     for(size_t i=0; i< m_geom.size(); ++i){
       if (!m_hasChanged[i]) continue;
@@ -2160,7 +2171,7 @@ template<typename real_t>
   }
 
   template<typename real_t>
-  void CellComplex<real_t>::repear(const vector<Array<real_t, 3> > & p)
+  void CellComplex<real_t>::repair(const vector<Array<real_t, 3> > & p)
   {
     //    ProfilerStart("test.prof");
 #pragma omp parallel for
@@ -2200,14 +2211,18 @@ template<typename real_t>
       NbrInsertItr begin, end;
       begin = nbrInserts.begin();
       end = begin;
-#pragma omp parallel
+      //      vector< CellMaker<real_t> > makers(omp_get_num_threads());
+      //printf("start repair\n");
+#pragma omp parallel 
       {
+	//printf("%d entering parallel region\n", omp_get_thread_num());
 	CellMaker<real_t> maker;
 	NbrInsertItr beginPriv;
 	NbrInsertItr endPriv;
 	while(end != nbrInserts.end()){
-#pragma omp task
+	  //#pragma omp task
 	  {
+	    //printf("thread %d entering task\n", omp_get_thread_num());
 #pragma omp critical
 	    {
 	      for(uint2 cellId((*begin)[0]); (end != nbrInserts.end()) && ((*end)[0]==cellId); ++end) {} 
@@ -2215,11 +2230,17 @@ template<typename real_t>
 	      endPriv=end;
 	      begin = end;
 	    }
+	    //printf("%d continuing task after critical region\n", omp_get_thread_num());
+#if defined(_OPENMP) && (_OPENMP > 0)
+	    //printf("thead %d updates cell %d\n", omp_get_thread_num(), (*beginPriv)[0]);
+#endif
 	    bool hasChanged = m_updaters[(*beginPriv)[0]].processNbrInserts(beginPriv, endPriv, maker, p, m_nbrList.getBox());
 	    m_hasChanged[(*beginPriv)[0]] = true;
 	    if(hasChanged) m_updaters[(*beginPriv)[0]].updateNbrInserts();
+	    //printf("%d leaving task\n", omp_get_thread_num());
 	  }
 	}
+	//printf("thead %d leaves parallel region\n",omp_get_thread_num());
       }
     }
   }
@@ -2278,40 +2299,41 @@ template<typename real_t>
     tr.m_numCells = m_numCells;
     tr.m_ptr.resize(m_numCells+1,0);
  #pragma omp parallel for
-    for(uint2 i(0); i< m_nbr.size(); ++i){
+    for(uint2 i=0; i< m_nbr.size(); ++i){
       if (m_nbr[i] < m_numCells){
 	uint2 indx(m_nbr[i]+1);
 #pragma omp atomic
 	++(tr.m_ptr[indx]);
       }
     }
-    for(uint2 i(0); i< m_numCells; ++i){
+    for(uint2 i=0; i< m_numCells; ++i){
       tr.m_ptr[i+1] += tr.m_ptr[i];
     }
     vector<uint2> ptrTmp(tr.m_ptr.size());
     vector<pair<uint2, pair<uint1, Array<real_t, 3> > > > nbrTmp(m_nbr.size());
 #pragma omp parallel for
-    for(uint2 i(0); i< tr.m_ptr.size(); ++i)
+    for(uint2 i=0; i< tr.m_ptr.size(); ++i)
       ptrTmp[i] = tr.m_ptr[i];
 #pragma omp parallel for
     for(uint2 i=0; i< m_numCells; ++i)
       for(uint1 j(m_ptr[i]); j< m_ptr[i+1]; ++j){
 	if (m_nbr[j] < m_numCells){
+	  uint2 ptrLoc;
 #pragma omp atomic capture
-	  uint2 ptrLoc = ptrTmp[m_nbr[j]]++;
+	  ptrLoc = ptrTmp[m_nbr[j]]++;
 	  nbrTmp[ptrLoc].first = i;
 	  nbrTmp[ptrLoc].second.first = m_facet[j];
 	  nbrTmp[ptrLoc].second.second = values[j];
 	}
       }
 #pragma omp parallel for
-    for(uint2 i(0); i< tr.m_numCells; ++i)
+    for(uint2 i=0; i< tr.m_numCells; ++i)
       sort(nbrTmp.begin()+tr.m_ptr[i], nbrTmp.begin()+tr.m_ptr[i+1], ComparePairFirst());
     tr.m_nbr.resize(nbrTmp.size());
     tr.m_facet.resize(nbrTmp.size());
     valuesTr.resize(nbrTmp.size());
 #pragma omp parallel for
-    for(size_t i(0); i< nbrTmp.size(); ++i){
+    for(size_t i=0; i< nbrTmp.size(); ++i){
       tr.m_nbr[i] = nbrTmp[i].first;
       tr.m_facet[i] = nbrTmp[i].second.first;
       valuesTr[i] = nbrTmp[i].second.second;

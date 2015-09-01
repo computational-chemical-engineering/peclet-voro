@@ -32,7 +32,7 @@ int main()
   typedef boost::mt11213b base_generator_type;
   typedef boost::uniform_01<real_t> distribution_type;
   typedef boost::variate_generator<base_generator_type&, distribution_type> gen_type;
-  base_generator_type rng;
+  base_generator_type rng(1);
   gen_type pointGen(rng, distribution_type());
 
   //generate random particle positions
@@ -45,7 +45,7 @@ int main()
   vector<Cell<real_t> > & cells(complex.getCells());
   vector<CellGeometry<real_t> > & geoms(complex.getGeoms());
 
-  vector<Array<real_t, 3> > p(1000);
+  vector<Array<real_t, 3> > p(1000000);
   for (int i =0; i< p.size(); ++i){
     for(uint k(0); k<3; ++k)
     p[i][k] = L[k]*pointGen();
@@ -63,7 +63,7 @@ int main()
    
    {
      real_t vol(0);
-#pragma omp parallel for private(areas) reduction(+:vol)
+#pragma omp parallel for reduction(+:vol)
      for(size_t i=0; i< geoms.size(); ++i){
        geoms[i].computeVolume();
        vol += geoms[i].getVolume();
@@ -85,6 +85,7 @@ int main()
      //   // p[i][1] = L*(pointGen()-0.5);
      //   // p[i][2] = L*(pointGen()-0.5);
      // }
+     printf("%d\n",j);
      real_t dShear = 0.01;
      for(size_t i(0); i< p.size(); ++i)
        p[i][0] += dShear*p[i][1];
