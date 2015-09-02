@@ -45,7 +45,7 @@ int main()
   vector<Cell<real_t> > & cells(complex.getCells());
   vector<CellGeometry<real_t> > & geoms(complex.getGeoms());
 
-  vector<Array<real_t, 3> > p(1000000);
+  vector<Array<real_t, 3> > p(10000);
   for (int i =0; i< p.size(); ++i){
     for(uint k(0); k<3; ++k)
     p[i][k] = L[k]*pointGen();

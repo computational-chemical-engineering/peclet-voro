@@ -19,7 +19,7 @@
 #include "nbrlist.hpp"
 //#include <google/profiler.h>
 #include <algorithm>
-#include <omp.h>
+//#include <omp.h>
 
 
 using std::vector;
@@ -47,21 +47,42 @@ using boost::container::flat_set;
 
 namespace vor {
 
+  /**
+   * \brief make a 1 unsigned integer label that contains information of a neigbor vertex
+   * \param facet index of facet
+   * \param vertex index of neigbor vertex
+   * \param edge index of the edge (0 to 2) of the neighbor vertex that points back to current vertex
+   */
   inline uint1 makeLabel(uint1 facet, uint1 vertex, uint1 edge)
   {
     return ((facet << shiftFacet) | (vertex<<2) | edge);
   }
- 
+
+  /**
+   * \brief get the facet index from a label
+   * \param label 
+   * \sa makeLabel
+   */  
   inline uint1 getFacet(uint1 label)
   {
     return ((label & maskFacet) >> shiftFacet);
   }
 
+  /**
+   * \brief get the neighbor vertex index from a label
+   * \param label 
+   * \sa makeLabel
+   */  
   inline uint1 getVertex(uint1 label)
   {
     return ((label & maskVertex) >> 2);
   }
 
+  /**
+   * \brief get the neighbor edge index from a label
+   * \param label 
+   * \sa makeLabel
+   */  
   inline uint1 getEdge(uint1 label)
   {
     return (label & maskEdge);
@@ -76,35 +97,67 @@ namespace vor {
 
   /**
    * \class Cell
-   * \brief Class for storage of single (Voronoi) cells
+   * \brief class for storage of a single (Voronoi) cell
+   * \tparam real_t real type used for floating point numbers (e.g. real or double)
    */
   template< typename real_t >
   class Cell
   {
   public:
+    //! constructor.
     Cell(): m_id(0), m_numVertices(0), m_numFacets(0), m_vertexPos(NULL), m_vertices(NULL), m_facets(NULL), m_nbr(NULL){}
+    //! copy constructor.
     Cell(const Cell<real_t> & cell);
+    //! destructor.
     ~Cell();
+    //! copy operator.
+    //! \param rhs of type Cell
+    //! \return reference to the copied cell
     Cell & operator=(const Cell<real_t> & rhs);
+    //! copy operator.
+    //! \param rhs of type CellMaker (\sa CellMaker)
+    //! \return reference to the copied cell
     Cell & operator=(CellMaker<real_t> & rhs);
+    //! set the id of a cell.
+    //! \param id the id to be set
     void setId(uint2 id) {m_id=id;}
+    //! reset the internal storage for the cell information.
+    //! \param numVertices number of vertices of the cell
+    //! \param numFacets number of facets of the cell
     void reset(uint0 numVertices=0, uint0 numFacets=0);
+    //! print the topological information of a cell.
     void printTopology() const;
+    //! print the facet information (such as cell id's of its neighbors).
+    //! \param nbr id of neighbor cell. The facet corresponding to this neighbor is searched in the current cell
     void printFacet(uint2 nbr) const;
+    //! print all the information of the facets of the current cell.
+    //! \param cells vector of cells that should include the neighbors of the current cell
     void printNbrFacets(const vector<Cell<real_t> > & cells) const;
+    //! output the cell geometry in a Gnuplot format.
+    //! \param p coordinate of the center of the cell (Note that internal vertex coordinates are relative to the center.)
     void drawGnuplot(Array<real_t, 3> p,FILE *fp) const;
+    //! number of vertices the cell contains.
+    //! \return number of vertices
     inline uint0 numVertices() const {return m_numVertices;}
+    //! number of facets the cell contains.
+    //! \return number of facets
     inline uint0 numFacets() const {return m_numFacets;}
+    //! get the id of the neighbor cell corresponding to a facet index.
+    //! \param i index of a facet
+    //! \return id of neighbor cell
     inline uint2 getNbr(uint1 i) const {return m_nbr[i];}
+    //! check of the cell has a facet that does not correspond to a neighbor cell.
+    //! Not every facet need necesarrily have an neighbor cell associated to it.
+    //! \return true, if there are 1 or more facets without neighbors in a cell. false otherwise
     inline bool hasNoNbr();
     friend class CellMaker<real_t>;
     friend class CellUpdater<real_t>;
     friend class CellGeometry<real_t>;
-    Array<real_t, 3> * m_vertexPos;
   protected:
     uint2 m_id;
     uint0 m_numFacets;
     uint0 m_numVertices;
+    Array<real_t, 3> * m_vertexPos;
     Vertex * m_vertices;
     uint1 * m_facets;
     uint2 * m_nbr;
