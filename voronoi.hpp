@@ -104,49 +104,49 @@ namespace vor {
   class Cell
   {
   public:
-    //! constructor.
+    //! \brief constructor
     Cell(): m_id(0), m_numVertices(0), m_numFacets(0), m_vertexPos(NULL), m_vertices(NULL), m_facets(NULL), m_nbr(NULL){}
-    //! copy constructor.
+    //! \brief copy constructor
     Cell(const Cell<real_t> & cell);
     //! destructor.
     ~Cell();
-    //! copy operator.
+    //! \brief copy operator
     //! \param rhs of type Cell
     //! \return reference to the copied cell
     Cell & operator=(const Cell<real_t> & rhs);
-    //! copy operator.
+    //! \brief copy operator
     //! \param rhs of type CellMaker (\sa CellMaker)
     //! \return reference to the copied cell
     Cell & operator=(CellMaker<real_t> & rhs);
-    //! set the id of a cell.
+    //! \brief set the id of a cell
     //! \param id the id to be set
     void setId(uint2 id) {m_id=id;}
-    //! reset the internal storage for the cell information.
+    //! \brief reset the internal storage for the cell information
     //! \param numVertices number of vertices of the cell
     //! \param numFacets number of facets of the cell
     void reset(uint0 numVertices=0, uint0 numFacets=0);
-    //! print the topological information of a cell.
+    //! \brief print the topological information of a cell
     void printTopology() const;
-    //! print the facet information (such as cell id's of its neighbors).
+    //! \brief print the facet information (such as cell id's of its neighbors)
     //! \param nbr id of neighbor cell. The facet corresponding to this neighbor is searched in the current cell
     void printFacet(uint2 nbr) const;
-    //! print all the information of the facets of the current cell.
+    //! \brief print all the information of the facets of the current cell
     //! \param cells vector of cells that should include the neighbors of the current cell
     void printNbrFacets(const vector<Cell<real_t> > & cells) const;
-    //! output the cell geometry in a Gnuplot format.
+    //! \brief output the cell geometry in a Gnuplot format
     //! \param p coordinate of the center of the cell (Note that internal vertex coordinates are relative to the center.)
     void drawGnuplot(Array<real_t, 3> p,FILE *fp) const;
-    //! number of vertices the cell contains.
+    //! \brief number of vertices the cell contains
     //! \return number of vertices
     inline uint0 numVertices() const {return m_numVertices;}
-    //! number of facets the cell contains.
+    //! \brief number of facets the cell contains
     //! \return number of facets
     inline uint0 numFacets() const {return m_numFacets;}
-    //! get the id of the neighbor cell corresponding to a facet index.
+    //! \brief get the id of the neighbor cell corresponding to a facet index
     //! \param i index of a facet
     //! \return id of neighbor cell
     inline uint2 getNbr(uint1 i) const {return m_nbr[i];}
-    //! check of the cell has a facet that does not correspond to a neighbor cell.
+    //! \brief check of the cell has a facet that does not correspond to a neighbor cell
     //! Not every facet need necesarrily have an neighbor cell associated to it.
     //! \return true, if there are 1 or more facets without neighbors in a cell. false otherwise
     inline bool hasNoNbr();
@@ -176,54 +176,20 @@ namespace vor {
     }
   };
 
+  /**
+   * \class Cuboid
+   * \brief class for creating a cuboid cell
+   * This is typically used as a starting cell to carve out a Voronoi cell using plane cuts
+   * \tparam real_t real type used for floating point numbers (e.g. real or double)
+   */
   template< typename real_t >
   class Cuboid: public Cell<real_t>
   {
   public:
+    //! \brief constructor
+    //! \param L contains the lengths of the 3 sides of the cuboid
     Cuboid(const Array<real_t, 3> & L);
-    const Cell<real_t> & getCell() const {return *this;}
   };
-
-  template <typename UInt>
-  class FreeIndxList
-  {
-  public:
-    FreeIndxList(UInt numMax): m_numMax(numMax), m_next(numMax), m_free(numMax)
-    {
-      reset(0);
-    }
-    inline UInt endIndx() const {return m_numMax;}
-    inline UInt beginIndx() const {return m_firstUsed;}
-    inline UInt nextIndx(UInt i) const {return m_next[i];}
-    inline bool isFree(UInt i) const {return m_free[i];}
-    bool release(UInt i);
-    UInt getFree();
-    void reset(UInt N=0);
-  private:
-    vector<bool> m_free;
-    vector<UInt> m_next;
-    const UInt m_numMax;
-    UInt m_firstFree, m_firstUsed;
-  };
-
-  template <typename UInt>
-  class VisitedIndx
-  {
-  public:
-    VisitedIndx();
-    VisitedIndx(UInt numMax);
-    ~VisitedIndx();
-    void init(UInt numMax);
-    inline void set(UInt i);
-    inline bool isVisited(UInt i){return m_visited[i];}
-    void reset();
-    UInt size() {return m_numMax;}
-  private:
-    UInt m_numMax;
-    bool * m_visited;
-    vector<UInt> m_visitedIndx;
-  };
-
 
   template< typename real_t >
   class CellMaker
@@ -275,7 +241,7 @@ namespace vor {
     Vertex * m_vertices;
     uint1 * m_facets;
     uint2 * m_nbr;
-    FreeIndxList<uint1> m_freeV, m_freeF;
+    IndxList<uint1> m_freeV, m_freeF;
     VisitedIndx<uint2> m_visited;
     deque<uint2> m_checkGridCell;
     real_t m_distMax, m_distGCMax;
@@ -660,119 +626,6 @@ namespace vor {
     this->m_vertices[6][0] = makeLabel(1,4,1);    
   }
   
-  template <typename UInt>
-  bool FreeIndxList<UInt>::release(UInt i)
-  {
-    if ( i >= m_numMax) return false;
-    if (m_free[i]) return false;
-    UInt nextUsed(m_next[i]);
-    UInt prev;
-    for(prev = i; !m_free[prev] && prev !=0; --prev){}
-    if(m_free[prev]){
-      m_next[i] = m_next[prev];
-      m_next[prev] = i;
-    } else {
-      m_next[i] = m_firstFree;
-      m_firstFree = i;
-    }
-    m_free[i] = true;
-    for(prev = i; m_free[prev] && prev !=0; --prev){}
-    if(!m_free[prev])
-      m_next[prev] = nextUsed;
-    else
-      m_firstUsed = nextUsed;
-    return true;
-  }
-  
-  template <typename UInt>
-  UInt FreeIndxList<UInt>::getFree()
-  {
-    if (m_firstFree == m_numMax) return m_numMax;
-    UInt i = m_firstFree;
-    m_firstFree = m_next[i];
-    if (i ==0 ) {
-      m_next[i] = m_firstUsed;
-      m_firstUsed = i;
-    } else {
-      m_next[i] = m_next[i-1]; 
-      m_next[i-1] = i;
-    }
-    m_free[i] = false;
-    return i;
-  }
-
-  template <typename UInt>
-  void FreeIndxList<UInt>::reset(UInt N)
-  {
-    for(UInt i(0); i < m_numMax; )
-      m_next[i] = ++i;
-    {
-      UInt j(0);
-      for(; j < N; ++j)
-	m_free[j] = false;
-      for(; j < m_numMax; ++j)
-	m_free[j] = true;
-    }
-    if (N > m_numMax) {N = m_numMax;}
-    if (N ==0 ){
-      m_firstFree = 0;
-      m_firstUsed = m_numMax;
-    } else {
-      m_firstFree = N;
-      m_firstUsed = 0;
-      m_next[N-1] = m_numMax;
-    }
-  }
-
-  template <typename UInt>
-  VisitedIndx<UInt>::VisitedIndx(): m_numMax(0), m_visited(NULL){}
-
-  template <typename UInt>
-  VisitedIndx<UInt>::VisitedIndx(UInt numMax)
-  {
-    init(numMax);
-  }
-
-  template <typename UInt>
-  void VisitedIndx<UInt>::init(UInt numMax)
-  {
-    m_numMax = numMax;
-    if(m_visited != NULL)
-      delete [] m_visited;
-    m_visited = new bool[m_numMax];
-    for(UInt i(0); i< m_numMax; ++i)
-      m_visited[i] = false;
-    m_visitedIndx.clear();  
-  }
-
-  template <typename UInt>
-  VisitedIndx<UInt>::~VisitedIndx()
-  {
-    if(m_visited != NULL)
-      delete [] m_visited;
-  }
-
-  template <typename UInt>
-  void VisitedIndx<UInt>::set(UInt i)
-  {
-    if (i >= m_numMax || m_visited[i]) return;
-    m_visited[i] = true;
-    m_visitedIndx.push_back(i);
-  }
-
-  template <typename UInt>
-  void VisitedIndx<UInt>::reset()
-  {
-    if (m_visitedIndx.size() < (m_numMax / 5)){
-      for(UInt i(0); i< m_visitedIndx.size(); ++i)
-	m_visited[m_visitedIndx[i]] = false;
-    } else {
-      for(UInt i(0); i< m_numMax; ++i)
-	m_visited[i] = false;
-    }
-    m_visitedIndx.clear();
-  }
-
   template<typename real_t>
   CellMaker<real_t>::CellMaker(): m_freeV(vor::maxNumVertices-1), m_freeF(vor::maxNumFacets-1), m_vertexPos(NULL), m_rSq(NULL), m_vertices(NULL),
     m_facets(NULL), m_nbr(NULL), m_renumVWrk(NULL), m_renumFWrk(NULL), m_dist(NULL), m_isKnownDist(NULL), m_distGC(NULL)
@@ -2118,14 +1971,13 @@ template<typename real_t>
     //    printf("nbr list build\n");
     const Array<real_t, 3> & L(m_nbrList.getBox().getL());
     Cuboid<real_t> cub(L);
-    const Cell<real_t> & cellCub(cub.getCell());
     m_cells.resize(p.size());
 #pragma omp parallel
     {
       CellMaker<real_t> maker;
 #pragma omp for
       for(uint2 i=0; i< p.size(); ++i){
-	maker.build(i, p, m_nbrList, cellCub);
+	maker.build(i, p, m_nbrList, cub);
 	m_cells[i] = maker;
       }
     }
@@ -2182,7 +2034,6 @@ template<typename real_t>
     if (numChanged==0) return;
     const Array<real_t, 3> & L(box.getL());
     Cuboid<real_t> cub(L);
-    const Cell<real_t> & cellCub(cub.getCell());
     vector<uint2> emptyCells;
 #pragma omp parallel
     {
@@ -2192,7 +2043,7 @@ template<typename real_t>
       for(size_t i=0; i < m_updaters.size(); ++i){
 	if (!m_hasChanged[i]) continue;
 	maker = m_cells[i];
-	maker.rebuild(p, box, cellCub);
+	maker.rebuild(p, box, cub);
 	m_cells[i] = maker;
 	if (m_cells[i].numVertices()==0 || m_cells[i].hasNoNbr())
 	  emptyCellsPriv.push_back(i);
@@ -2209,7 +2060,7 @@ template<typename real_t>
 	CellMaker<real_t> maker;
 #pragma omp for
 	for(size_t i=0; i< emptyCells.size(); ++i){
-	  maker.build(emptyCells[i], p, m_nbrList, cellCub);
+	  maker.build(emptyCells[i], p, m_nbrList, cub);
 	  m_cells[emptyCells[i]] = maker;
 	}
       }
