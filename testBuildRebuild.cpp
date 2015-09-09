@@ -1,3 +1,8 @@
+/**
+ * \file testBuildRebuild.cpp
+ * \brief test program: build a Voronoi tesselation and rebuild it after deformation
+ *
+ */
 //#include <omp.h>
 #include <cstdio>
 #include <vector>
