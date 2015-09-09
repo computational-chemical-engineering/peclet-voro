@@ -21,7 +21,6 @@
 #include <algorithm>
 //#include <omp.h>
 
-
 using std::vector;
 using std::stack;
 using std::deque;
@@ -179,7 +178,7 @@ namespace vor {
   /**
    * \class Cuboid
    * \brief class for creating a cuboid cell
-   * This is typically used as a starting cell to carve out a Voronoi cell using plane cuts
+   * This is typically used as a starting cell to carve out a Voronoi cell using plane cuts.
    * \tparam real_t real type used for floating point numbers (e.g. real or double)
    */
   template< typename real_t >
@@ -191,23 +190,70 @@ namespace vor {
     Cuboid(const Array<real_t, 3> & L);
   };
 
+
+  /**
+   * \class CellMaker
+   * \brief class for making a cell using planar cuts
+   * \tparam real_t real type used for floating point numbers (e.g. real or double)
+   */
   template< typename real_t >
   class CellMaker
   {
   public:
+    //! \brief constructot
     CellMaker();
+    //! \brief destructor
     ~CellMaker();
+    //! \brief initialize a cellmaker by equating it to a cell
+    //! \param rhs cell used to initialize the cellmaker
     CellMaker & operator=(const Cell<real_t> & rhs);
+    //! \brief initialize a cellmaker by equating it to a cellUpdatet
+    //! \param rhs cellupdater used to initialize the cellmaker
     CellMaker & operator=(const CellUpdater<real_t> & rhs);
+    /**
+     * \brief build a Voronoi cell
+     *
+     * The Voronoi cell of the particle with index id and coordinated pos[id] is build.
+     * Typically the vector pos contains all positions of the particles in the system. 
+     * Therefore a cell list is used to efficiently pick the closest particles and stop when it is guaranteed that there are no particles left that might contribute to the Voronoi cell.
+     * Also the periodic simulation box is used to compute the smallest distance between a particle and the center of the Voronoi cell
+     * Note that for a small number of particles more than 1 periodic image of a particle can be a neighbor of a cell.
+     * Since this is not considered in the current version, this means that the final Voronoi cell is not correct when the number of particles considered is relatively small.
+    * \param id the unique id of the cell to be build. It also refers to the particle index.
+    * \param pos positions of all particles to be considered
+    * \param nbrList neighbor list used to efficiently find the closest particles
+    * \param initCell initial cell used to carve out the Voronoi cell
+    * \return true if the final cell is different form initCell
+    */
     bool build(uint2 id, const vector< Array<real_t, 3> > & pos,const NbrList<uint2, real_t> & nbrList, const Cell<real_t> & initCell);
-    bool rebuild(const vector< Array<real_t, 3> > & pos,const Box<real_t> & box, const Cell<real_t> & initCell);
+    /**
+     * \brief rebuild a Voronoi cell 
+     *
+     * The Voronoi cell is carved out using only the neighbors as stored in initCell.
+     * \param pos positions of all particles
+     * \param box simulation box used to determine minimal image in the case of periodic boundary conditions
+     * \param initCell initial cell used to carve out the Voronoi cell
+     * \return true if all neighbors of initCell are associated with a facet of the newly created cell
+     */
+    bool rebuild(const vector< Array<real_t, 3> > & pos, const Box<real_t> & box, const Cell<real_t> & initCell);
+    /** 
+     * \brief further refine the Voronoi cell by performing additional plane cuts corresponding to neighbors
+     * \param nbr vector of indices of neighbor particles to be considered
+     * \param pos vector with coordinates of all particles
+     * \param box simulation box used to determine minimal image in the case of periodic boundary conditions
+     * \return true if any of the neighbors caused a plane cut to add a facet to the cell
+     **/
     inline bool processNbrs(const vector<uint2 > & nbr, const vector<Array<real_t, 3> > & pos,const  Box<real_t> & box);
-    inline bool processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const vector<Array<real_t, 3> > & pos,const Array<real_t, 3> pos0);
-
-    inline real_t getRsqMax() const {return m_rSq[m_vRsqMax];}
-    void computeAllRsq();
-    inline void computeRsq(uint1 i);
-    void findRsqMax();
+    /** 
+     * \brief further refine the Voronoi cell by performing additional plane cuts corresponding to neighbors
+     * The id's and positions of the neighbors are accessed by means of an iterator of type PosAndId
+     * \param begin starting value for the iterator
+     * \param end end value of the iterator
+     * \param pos0 position of the particle corresponding to the Voronoi cell under consideration
+     * \return true if any of the neighbors caused a plane cut to add a facet to the cell
+     **/    
+    inline bool processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0);
+    //    inline real_t getRsqMax() const {return m_rSq[m_vRsqMax];}
     void getCloseNbrs(NbrInsert & nbrs);
     // void drawGnuplot(FILE *fp) const;
     // void testTopo() const;
@@ -216,22 +262,47 @@ namespace vor {
     friend class CellUpdater<real_t>;
     void renumber();
   protected:
+    //! \brief initialize the cell to be cut
+    //! \param cell used for the initialization
     void init(const Cell<real_t> & cell);
+    inline bool cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
+    //! \brief compute squared distance between vertex i and the center of the cell
+    //! Result is stored in private member m_rSq[i]
+    //! \param i index of the vertex
+    inline void computeRsq(uint1 i);
+    //! \brief compute the squared distances of all cells
+    void computeAllRsq();
+    //! \brief find the vertex with the largest distance from the center
+    //! The index of the vertex with the largest distance form the center will be stored in m_vRsqMax. 
+    void findRsqMax();
+    //! \brief compute distance between the vertex i and a plane
+    //! \param i index of the vertex
+    //! \param p the poisition of a point relative to the cell center. The plane is the perpendicular plane halfway between the center and p.
+    //! \param rSqHalf = 0.5|p|^2
+    inline real_t computeDist(uint1 i, const Array<real_t, 3> p, const real_t rSqHalf);
+    //! \brief compute distance between the vertex i and a plane
+    //! \param i index of the vertex
+    //! \param p the poisition of a point relative to the cell center. The plane is the perpendicular plane halfway between the center and p.
+    inline real_t computeDist(uint1 i, const Array<real_t, 3> p);
+    //! \brief compute distance between a plane and all vertices
+    //! \param p the poisition of a point relative to the cell center. The plane is the perpendicular plane halfway between the center and p.
+    //! \param rSqHalf = 0.5|p|^2    
+    void computeAllDist(const Array<real_t, 3> p, const real_t rSqHalf);
+    //! \brief reset internal variables that indicate distances of vertices to a plane are computed
     inline void resetDist();
+    
     inline void computeGCOrig(uint2 indx, const Array<real_t, 3> & pos);
     real_t computeRsqMinGC() const;
     Array<real_t,3> getClosestPointGC(uint1 indx) const;
-    inline real_t computeDist(uint1 i, const Array<real_t, 3> p, const real_t rSq);
-    inline real_t computeDist(uint1 i, const Array<real_t, 3> p);
-    void computeAllDist(const Array<real_t, 3> p, const real_t rSq);
     inline real_t computeDistGC(uint1 i);
     inline real_t computeMaxDistGC();
     real_t  computeMaxDistGCVerb();
     void getAllDistGCVerb();
     void computeAllDistGC();
-    inline bool cutCell(const Array<real_t, 3> p, real_t rSq, uint2 nbr);
     uint1 m_numVertices, m_numFacets; //only to be used after renumber()!
   private:
+    CellMaker(const CellMaker<real_t> & rhs);
+    CellMaker & operator=(const CellMaker<real_t> & rhs);
     inline uint1 getNextLabelCCW(uint1 label) const;
     inline uint1 getReverseLabel(uint1 label) const;
     uint2 m_id;
@@ -716,16 +787,6 @@ namespace vor {
   }
 
   template<typename real_t>
-  void CellMaker<real_t>::computeGCOrig(uint2 indx, const Array<real_t,3> & pos)
-  {
-    Indx indcs(p_nbrList->getGrid().expand(indx));
-    for(uint0 k(0); k<3; ++k)
-      m_relOrigGC[k] = static_cast<real_t>(indcs[k])*m_dLGC[k]-pos[k];
-    p_nbrList->getBox().makeShortestDistance(m_relOrigGC);
-  }
-
-
-  template<typename real_t>
   void CellMaker<real_t>::computeAllRsq()
   {
     m_vRsqMax = m_freeV.beginIndx();
@@ -755,7 +816,6 @@ namespace vor {
       }
   }
 
-
   template<typename real_t>
   void CellMaker<real_t>::resetDist()
   {
@@ -767,10 +827,10 @@ namespace vor {
   }
 
   template<typename real_t>
-  real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p, const real_t rSq)
+  real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p, const real_t rSqHalf)
   {
     if(!m_isKnownDist[i]){
-      m_dist[i] = m_vertexPos[i][0]*p[0] + m_vertexPos[i][1]*p[1]+m_vertexPos[i][2]*p[2]-rSq;
+      m_dist[i] = m_vertexPos[i][0]*p[0] + m_vertexPos[i][1]*p[1]+m_vertexPos[i][2]*p[2]-rSqHalf;
       if(m_dist[i]> m_distMax){ 
 	m_vDistMax = i;
 	m_distMax = m_dist[i];
@@ -797,13 +857,13 @@ namespace vor {
   }
 
   template<typename real_t>
-  void CellMaker<real_t>::computeAllDist(const Array<real_t, 3> p, const real_t rSq)
+  void CellMaker<real_t>::computeAllDist(const Array<real_t, 3> p, const real_t rSqHalf)
   {
     const numeric_limits<real_t> lim;
     m_distMax = -lim.max();
     m_vDistMax = maxNumVertices;
     for (uint1 i(m_freeV.beginIndx()); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i)){
-      m_dist[i] = m_vertexPos[i][0]*p[0] + m_vertexPos[i][1]*p[1]+m_vertexPos[i][2]*p[2]-rSq;
+      m_dist[i] = m_vertexPos[i][0]*p[0] + m_vertexPos[i][1]*p[1]+m_vertexPos[i][2]*p[2]-rSqHalf;
       if(m_dist[i]> m_distMax){ 
 	m_vDistMax = i;
 	m_distMax = m_dist[i];
@@ -859,6 +919,16 @@ namespace vor {
       m_facets[i] = makeLabel(m_renumFWrk[f], m_renumVWrk[v], e);
     }
   }
+
+  template<typename real_t>
+  void CellMaker<real_t>::computeGCOrig(uint2 indx, const Array<real_t,3> & pos)
+  {
+    Indx indcs(p_nbrList->getGrid().expand(indx));
+    for(uint0 k(0); k<3; ++k)
+      m_relOrigGC[k] = static_cast<real_t>(indcs[k])*m_dLGC[k]-pos[k];
+    p_nbrList->getBox().makeShortestDistance(m_relOrigGC);
+  }
+
 
   template<typename real_t>
   real_t CellMaker<real_t>::computeRsqMinGC() const
@@ -934,8 +1004,8 @@ namespace vor {
     if (m_freeV.beginIndx() == m_freeV.endIndx()) return 0;
     uint1 v1 = m_freeV.beginIndx();
     Array<real_t, 3> posGC(getClosestPointGC(v1));
-    real_t rSq = 0.5*(posGC[0]*posGC[0]+posGC[1]*posGC[1]+posGC[2]*posGC[2]);
-    real_t distMax = m_vertexPos[v1][0]*posGC[0]+m_vertexPos[v1][1]*posGC[1]+m_vertexPos[v1][2]*posGC[2] -rSq;
+    real_t rSqHalf = 0.5*(posGC[0]*posGC[0]+posGC[1]*posGC[1]+posGC[2]*posGC[2]);
+    real_t distMax = m_vertexPos[v1][0]*posGC[0]+m_vertexPos[v1][1]*posGC[1]+m_vertexPos[v1][2]*posGC[2] -rSqHalf;
     printf("vertex %u, dist %f\n", v1, distMax);
     bool hasMoved;
     do {
@@ -943,13 +1013,13 @@ namespace vor {
       uint0 k(0);
       do {
 	uint1 v2 = getVertex(m_vertices[v1][k]);
-	real_t dist = m_vertexPos[v2][0]*posGC[0]+m_vertexPos[v2][1]*posGC[1]+m_vertexPos[v2][2]*posGC[2] -rSq;
+	real_t dist = m_vertexPos[v2][0]*posGC[0]+m_vertexPos[v2][1]*posGC[1]+m_vertexPos[v2][2]*posGC[2] -rSqHalf;
 	printf("vertex %u, edge %u -> vertex %u,  dist %f, distMax %f\n", v1, k, v2, dist, distMax);
 	if (dist > distMax){
 	  v1 = v2;
 	  posGC = getClosestPointGC(v1);
-	  rSq = 0.5*(posGC[0]*posGC[0]+posGC[1]*posGC[1]+posGC[2]*posGC[2]);
-	  distMax = m_vertexPos[v1][0]*posGC[0]+m_vertexPos[v1][1]*posGC[1]+m_vertexPos[v1][2]*posGC[2] -rSq;
+	  rSqHalf = 0.5*(posGC[0]*posGC[0]+posGC[1]*posGC[1]+posGC[2]*posGC[2]);
+	  distMax = m_vertexPos[v1][0]*posGC[0]+m_vertexPos[v1][1]*posGC[1]+m_vertexPos[v1][2]*posGC[2] -rSqHalf;
 	  hasMoved=true;
 	  k = 0;
 	} else {
@@ -985,7 +1055,7 @@ namespace vor {
 
 
   template<typename real_t>
-  bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSq, uint2 nbr)
+  bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr)
   {
     //    printf("entering cutCell\n");
     resetDist();
@@ -999,13 +1069,13 @@ namespace vor {
     //find an edge where the sign of m_dist changes
     bool found(false);
     uint1 edgeStart;
-    //    printf("computeDist(%u, p, rSq): %f\n", v1, computeDist(v1, p, rSq));
-    if(computeDist(v1, p, rSq) > 0) {
+    //    printf("computeDist(%u, p, rSqHalf): %f\n", v1, computeDist(v1, p, rSqHalf));
+    if(computeDist(v1, p, rSqHalf) > 0) {
       //find the first negative vertex by going down
       uint0 k(0);
       while(m_dist[v1]>0 && k<3){
 	k = 0;
-	while(k<3 && computeDist(getVertex(m_vertices[v1][k]), p, rSq) >= m_dist[v1])
+	while(k<3 && computeDist(getVertex(m_vertices[v1][k]), p, rSqHalf) >= m_dist[v1])
 	  ++k;
 	if (k<3){
 	  //smaller value found
@@ -1019,14 +1089,14 @@ namespace vor {
 	// all found distances larger than zero
 	// for Voronoi construction this can only occur due to round-off errors...
 	// lets do an exhaustive search to find a possible negative distance
-	computeAllDist(p, rSq);
+	computeAllDist(p, rSqHalf);
 	real_t distMax = 0;
 	for (uint1 i = m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i)){
 	  if(m_dist[i] <= 0){
 	    for (uint1 k(0); k<3; ++k){
 	      uint1 nbrVertex(getVertex(m_vertices[i][k]));
 	      bool isKnown = m_isKnownDist[nbrVertex];
-	      real_t nbrDist = computeDist(nbrVertex, p, rSq);
+	      real_t nbrDist = computeDist(nbrVertex, p, rSqHalf);
 	      if( nbrDist > 0) {
 		found = true;
 		real_t newDist(nbrDist-m_dist[i]);
@@ -1049,7 +1119,7 @@ namespace vor {
       uint0 k(0);
       while(m_dist[v1]<=0 && k<3){
 	k = 0;
-	while(k<3 && computeDist(getVertex(m_vertices[v1][k]), p, rSq) <= m_dist[v1])
+	while(k<3 && computeDist(getVertex(m_vertices[v1][k]), p, rSqHalf) <= m_dist[v1])
 	  ++k;
 	if (k<3){
 	  //larger value found
@@ -1089,7 +1159,7 @@ namespace vor {
       m_newVerticesWrk.push_back(vNew);
       //compute new positions
       {
-	real_t lambda(computeDist(vRev, p, rSq)/(computeDist(vRev, p, rSq)-computeDist(v, p, rSq)));
+	real_t lambda(computeDist(vRev, p, rSqHalf)/(computeDist(vRev, p, rSqHalf)-computeDist(v, p, rSqHalf)));
 	for (uint0 k(0); k<3; ++k)
 	  m_vertexPos[vNew][k] = lambda*m_vertexPos[v][k]+(1.0-lambda)*m_vertexPos[vRev][k];
       }
@@ -1109,7 +1179,7 @@ namespace vor {
 	//printf("label: %u %u %u\n", getFacet(m_vertices[vRev][eRev]), getVertex(m_vertices[vRev][eRev]), getEdge(m_vertices[vRev][eRev]));
 	m_vertices[vRev][eRev] = 
 	  (fDummyShifted | (m_vertices[vRev][eRev] & (~maskFacet)));
-      } while (computeDist(vRev, p, rSq) > 0);
+      } while (computeDist(vRev, p, rSqHalf) > 0);
       //printf("test: vRev %u\n", vRev);
       uint1 vSwap = vRev;
       uint1 eSwap = eRev;
@@ -1186,22 +1256,6 @@ namespace vor {
     return true;
   }
 
- template<typename real_t>
-  bool CellMaker<real_t>::rebuild(const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box, const Cell<real_t> & initCell)
-  {
-    m_indcsNbrsWrk.clear();
-    for(uint1 i=m_freeF.beginIndx(); i != m_freeF.endIndx() ; i = m_freeF.nextIndx(i))
-      if(m_nbr[i] != noNbr)
-	m_indcsNbrsWrk.push_back(m_nbr[i]);
-    m_isAllCut = true;
-    // for(uint2 i(0); i< m_indcsNbrsWrk.size(); ++i)
-    //   printf("cell %u, neigb: %u\n", m_id, m_indcsNbrsWrk[i]);
-    // printf("\n");
-    this->init(initCell);
-    processNbrs(m_indcsNbrsWrk, pos, box);
-    return m_isAllCut;
-  }
-
   template<typename real_t>
   bool CellMaker<real_t>::build(uint2 id, const vector<Array<real_t, 3> > & pos, const  NbrList<uint2, real_t> & nbrList, const Cell<real_t> & initCell)
   {
@@ -1229,7 +1283,6 @@ namespace vor {
     	m_visited.set(nbrGC[j]);
       }
     }
-
     typename vector<PosAndId<uint2, real_t> >::const_iterator begin;
     typename vector<PosAndId<uint2, real_t> >::const_iterator end;
     //one try loop without checking of nbr cells
@@ -1246,7 +1299,7 @@ namespace vor {
 	p_nbrList->getBox().makeShortestDistance(pos0);
 	for(uint0 k(0); k<3; ++k)
 	  pos0[k] += begin->pos[k];
-	(processNbrs(begin, end, pos, pos0) == true? isUpdated = true: isUpdated);
+	(processNbrs(begin, end, pos0) == true? isUpdated = true: isUpdated);
       }
       p_nbrList->getGrid().getNbrs(indx, nbrGC);
       for(uint2 j(0); j < nbrGC.size(); ++j){
@@ -1274,7 +1327,7 @@ namespace vor {
 	p_nbrList->getBox().makeShortestDistance(pos0);
 	for(uint0 k(0); k<3; ++k)
 	  pos0[k] += begin->pos[k];
-	(processNbrs(begin, end, pos, pos0) == true? isUpdated = true: isUpdated);
+	(processNbrs(begin, end, pos0) == true? isUpdated = true: isUpdated);
       }
       p_nbrList->getGrid().getNbrs(indx, nbrGC); //for LE b.c. this needs to be adapted
       for(uint2 j(0); j < nbrGC.size(); ++j){
@@ -1302,7 +1355,7 @@ namespace vor {
 	p_nbrList->getBox().makeShortestDistance(pos0);
 	for(uint0 k(0); k<3; ++k)
 	  pos0[k] += begin->pos[k];
-	(processNbrs(begin, end, pos, pos0) == true? isUpdated = true: isUpdated);
+	(processNbrs(begin, end, pos0) == true? isUpdated = true: isUpdated);
       }
       p_nbrList->getGrid().getNbrs(indx, nbrGC);
       for(uint2 j(0); j < nbrGC.size(); ++j){
@@ -1315,7 +1368,23 @@ namespace vor {
     //    printf("cell: %u num checked:%u\n", m_id, numChecked);
     return isUpdated;
   }
-  
+
+  template<typename real_t>
+  bool CellMaker<real_t>::rebuild(const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box, const Cell<real_t> & initCell)
+  {
+    m_indcsNbrsWrk.clear();
+    for(uint1 i=m_freeF.beginIndx(); i != m_freeF.endIndx() ; i = m_freeF.nextIndx(i))
+      if(m_nbr[i] != noNbr)
+	m_indcsNbrsWrk.push_back(m_nbr[i]);
+    m_isAllCut = true;
+    // for(uint2 i(0); i< m_indcsNbrsWrk.size(); ++i)
+    //   printf("cell %u, neigb: %u\n", m_id, m_indcsNbrsWrk[i]);
+    // printf("\n");
+    this->init(initCell);
+    processNbrs(m_indcsNbrsWrk, pos, box);
+    return m_isAllCut;
+  }
+
   template<typename real_t>
   bool CellMaker<real_t>::processNbrs(const vector<uint2 > & idsNbrs, const vector<Array<real_t, 3> > & pos,const  Box<real_t> & box)
   {
@@ -1330,21 +1399,21 @@ namespace vor {
       box.makeShortestDistance(relPos);
       for(uint0 k(0); k<3; ++k)
       	nbrDist[k] = relPos[k];
-      nbrDist.rSq = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
-      if (nbrDist.rSq < 2.0*m_rSq[m_vRsqMax])
+      nbrDist.rSqHalf = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
+      if (nbrDist.rSqHalf < 2.0*m_rSq[m_vRsqMax])
 	m_nbrDistWrk.push_back(nbrDist);
     }
     std::sort(m_nbrDistWrk.begin(), m_nbrDistWrk.end(), CompareNbrDist<real_t>());
     bool isCut(false);
-    for(size_t i(0); i < m_nbrDistWrk.size() && (m_nbrDistWrk[i].rSq < 2.0*m_rSq[m_vRsqMax]); ++i){
+    for(size_t i(0); i < m_nbrDistWrk.size() && (m_nbrDistWrk[i].rSqHalf < 2.0*m_rSq[m_vRsqMax]); ++i){
       const NbrDist<real_t> & p(m_nbrDistWrk[i]);
-      (cutCell(p, p.rSq, p.id) ? isCut=true : m_isAllCut=false);
+      (cutCell(p, p.rSqHalf, p.id) ? isCut=true : m_isAllCut=false);
     }
     return isCut;
   }
 
   template<typename real_t>
-  bool CellMaker<real_t>::processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const vector<Array<real_t, 3> > & pos,const Array<real_t, 3> pos0)
+  bool CellMaker<real_t>::processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0)
   {
     //    printf("number of nbrs: %lu\n", end-begin);
     bool isCut(false);
@@ -1360,14 +1429,14 @@ namespace vor {
 	relPos[k] = (itr->pos)[k] - pos0[k];
       for(uint0 k(0); k<3; ++k)
       	nbrDist[k] = relPos[k];
-      nbrDist.rSq = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
-      if (nbrDist.rSq < 2.0*m_rSq[m_vRsqMax])
+      nbrDist.rSqHalf = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
+      if (nbrDist.rSqHalf < 2.0*m_rSq[m_vRsqMax])
 	m_nbrDistWrk.push_back(nbrDist);
     }
     std::sort(m_nbrDistWrk.begin(), m_nbrDistWrk.end(), CompareNbrDist<real_t>());
-    for(size_t i(0); (i < m_nbrDistWrk.size()) && (m_nbrDistWrk[i].rSq < 2.0*m_rSq[m_vRsqMax]); ++i){
+    for(size_t i(0); (i < m_nbrDistWrk.size()) && (m_nbrDistWrk[i].rSqHalf < 2.0*m_rSq[m_vRsqMax]); ++i){
       const NbrDist<real_t> & p(m_nbrDistWrk[i]);
-      (cutCell(p, p.rSq, p.id) ? isCut=true : m_isAllCut=false);
+      (cutCell(p, p.rSqHalf, p.id) ? isCut=true : m_isAllCut=false);
     }
     return isCut;
   }
@@ -1498,13 +1567,13 @@ template<typename real_t>
 	  hasSetMaker = true;
 	}
 	Array<real_t, 3> relPos;
-	real_t rSq;
+	real_t rSqHalf;
 	for(uint0 k(0); k<3; ++k)
 	  relPos[k] = pos[(*itr)[1]][k] - pos[cell.m_id][k];
 	box.makeShortestDistance(relPos);
-	rSq = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
+	rSqHalf = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
 	m_nbrs.insert((*itr)[1]);
-	bool isInserted = maker.cutCell(relPos, rSq, (*itr)[1]);
+	bool isInserted = maker.cutCell(relPos, rSqHalf, (*itr)[1]);
 	(isInserted ? hasChanged = true: hasChanged);
 	if(!isInserted) {
 	  //	  printf("not inserted: %u %u %u\n",(*itr)[0],(*itr)[1],(*itr)[2]);

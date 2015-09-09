@@ -1,3 +1,9 @@
+/**
+ * \file nbrlist.hpp
+ * \brief header file for neighbor list and related classes such as the underlying grid and the cell list
+ *
+ */
+
 #ifndef VOR_NBRLIST_H
 #define VOR_NBRLIST_H
 
@@ -69,12 +75,21 @@ namespace vor
   private:
     real_t m_shear;
   };
-  
+
+
+  /**
+   * \class PosAndId
+   * \brief struct for storing position and id of a particle
+   * \tparam UInt integer type used to store id
+   * \tparam real_t floating point type used to store pos
+   */
   template<typename UInt = uint2, typename real_t = float>
   struct PosAndId
   {
   public:
+    //! \brief position stored as a 3D array
     Array<real_t, 3> pos;
+    //! \brief id of particle
     UInt id;
   };
 

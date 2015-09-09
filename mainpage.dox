@@ -6,5 +6,5 @@
  * 
  * \section intro Introduction
  *
- * The library of header files define classes for creation and dynamic maintenance of Voronoi cells for moving points.
+ * The library of header files define classes for creation and dynamic maintenance of Voronoi cells for moving particles.
  */

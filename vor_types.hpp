@@ -61,7 +61,7 @@ namespace vor {
   {
   public:
     uint2 id;
-    real_t rSq;
+    real_t rSqHalf;
   };
 
   template<typename real_t>
@@ -98,7 +98,7 @@ namespace vor {
   public:
     inline bool operator()(const NbrDist<real_t> & a, const NbrDist<real_t> & b) const
     {
-      return a.rSq < b.rSq;
+      return a.rSqHalf < b.rSqHalf;
     }
   };
 
