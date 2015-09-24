@@ -135,6 +135,11 @@ namespace vor {
     //! \brief output the cell geometry in a Gnuplot format
     //! \param p coordinate of the center of the cell (Note that internal vertex coordinates are relative to the center.)
     void drawGnuplot(Array<real_t, 3> p,FILE *fp) const;
+    //! \brief facet information of a cell with all the verticies on it
+    void printFacetInfo(Array<real_t, 3> p,uint facet_id) const;
+    //! \brief get the id if this cell
+    //! \return ID of cell
+    inline uint2 getID() const {return m_id;}
     //! \brief number of vertices the cell contains
     //! \return number of vertices
     inline uint0 numVertices() const {return m_numVertices;}
@@ -145,6 +150,9 @@ namespace vor {
     //! \param i index of a facet
     //! \return id of neighbor cell
     inline uint2 getNbr(uint1 i) const {return m_nbr[i];}
+    //! \brief get the array of id's of the neighbor cells
+    //! \return array of id's of neighbor cells
+    inline const uint2 * const getNbrs() const {return m_nbr;}
     //! \brief check of the cell has a facet that does not correspond to a neighbor cell
     //! Not every facet need necesarrily have an neighbor cell associated to it.
     //! \return true, if there are 1 or more facets without neighbors in a cell. false otherwise
@@ -266,6 +274,7 @@ namespace vor {
     //! \param cell used for the initialization
     void init(const Cell<real_t> & cell);
     inline bool cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
+    inline bool cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
     //! \brief compute squared distance between vertex i and the center of the cell
     //! Result is stored in private member m_rSq[i]
     //! \param i index of the vertex
@@ -347,6 +356,8 @@ namespace vor {
     void computeVolume();
     void diffVolume();
     void computeAll();
+    Array<Array<real_t, 3>, 3> velocityGradient(const vector<Array<real_t, 3> > & velocity) const;
+    Array<real_t, 3> force(const vector<Array<Array<real_t, 3>, 3> > & stresses) const;
     void gradFacetAreaSq(uint1 facetIndx, vector<uint2> & indx, vector<Array<real_t, 3> > & grad);
     const vector< Array<real_t, 3> > & getdV() const {return m_dV;}
     const vector< Array<real_t, 3> > & getAreas() const {return m_areas;}
@@ -624,6 +635,30 @@ namespace vor {
   }
   
   template<typename real_t>
+  void Cell<real_t>::printFacetInfo(Array<real_t, 3> p,uint facet_id) const
+  {
+      uint1 labelStart,label,vertex,numfacevertex(1);
+      labelStart = m_facets[facet_id];
+      label = labelStart;
+      vertex = getVertex(label);
+      printf("%g ",p[0] + m_vertexPos[vertex][0]);
+      printf("%g ",p[1] + m_vertexPos[vertex][1]);
+      printf("%g\n",p[2] + m_vertexPos[vertex][2]);
+      label = getNextLabelCCW(label);
+
+      while (label != labelStart)
+      {
+        vertex = getVertex(label);
+        printf("%g ",p[0] + m_vertexPos[vertex][0]);
+        printf("%g ",p[1] + m_vertexPos[vertex][1]);
+        printf("%g\n",p[2] + m_vertexPos[vertex][2]);
+        label = getNextLabelCCW(label);
+        numfacevertex++;
+      }
+      printf("Total verticies on this facet : %u\n\n",numfacevertex);
+  }
+
+  template<typename real_t>
   bool Cell<real_t>::hasNoNbr()
   {
     bool has(false);
@@ -839,7 +874,7 @@ namespace vor {
     }
     return m_dist[i];
   }
-
+  
   template<typename real_t>
   real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p)
   {
@@ -1055,7 +1090,7 @@ namespace vor {
 
 
   template<typename real_t>
-  bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr)
+  bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr)
   {
     //    printf("entering cutCell\n");
     resetDist();
@@ -1063,7 +1098,7 @@ namespace vor {
     uint1 v1;
     if (m_vDistMax !=  maxNumVertices && !m_freeV.isFree(m_vDistMax))
       v1 = m_vDistMax;
-    else
+    else 
       v1 = m_freeV.beginIndx();
     
     //find an edge where the sign of m_dist changes
@@ -1256,6 +1291,158 @@ namespace vor {
     return true;
   }
 
+  template<typename real_t>
+  bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr)
+  {
+    //    printf("entering cutCell\n");
+    computeAllDist(p, rSqHalf);
+    if (m_distMax <=0) return false; //no cell cut
+    //Find an edge for which the vertices change sign
+    //edgeStart will be the edge where the change is largest
+    real_t distMax = 0;
+    uint1 edgeStart(0);
+    for (uint1 i = m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i)){
+      if(m_dist[i] <= 0) continue;
+      for (uint1 k(0); k<3; ++k){
+	uint1 nbrVertex(getVertex(m_vertices[i][k]));
+	real_t nbrDist = m_dist[nbrVertex];
+	if( nbrDist >0) continue;
+	real_t newDist(m_dist[i]-nbrDist);
+	if (newDist > distMax){
+	  edgeStart = (i<<2 | k);
+	  distMax = newDist;
+	}
+      }
+    }
+    if (distMax==0){ //the full cell will be deleted
+      m_freeV.reset(0);
+      m_freeF.reset(0);
+      return true;
+    }
+    //Starting from edgeStart trace out a path that bounds a connected region
+    //The edges where the sign changes are traced out
+    //If there are disconnected patches with the same sign only one connected region is removed
+    //In this way the topology remains consistent
+    uint1 label(getReverseLabel(edgeStart));
+    uint1 labelRev(getReverseLabel(label));
+    const uint1 vDummy = vor::maxNumVertices-1;
+    const uint1 fDummy = vor::maxNumFacets-1;
+    const uint1 fDummyShifted = (fDummy << shiftFacet);
+    const uint1 lDummy = makeLabel(fDummy,vDummy,3);
+    m_newVerticesWrk.clear();
+    m_facetPrevWrk.clear();
+    uint1 v = getVertex(label);
+    uint1 e = getEdge(label);
+    uint1 fPrev = getFacet(labelRev);
+    uint1 vRev = getVertex(labelRev);
+    uint1 eRev = getEdge(labelRev);
+    do {
+      //      printf("startLabel: %u %u %u\n", getFacet(label), getVertex(label), getEdge(label));
+      //printf("previous facet: %u\n",fPrev);
+      m_facetPrevWrk.push_back(fPrev);
+      m_vertices[vRev][eRev] = lDummy;
+      uint1 vNew = m_freeV.getFree();
+      //printf("new vertex %u\n", vNew);
+      m_newVerticesWrk.push_back(vNew);
+      //compute new positions
+      {
+	real_t lambda(computeDist(vRev, p, rSqHalf)/(computeDist(vRev, p, rSqHalf)-computeDist(v, p, rSqHalf)));
+	for (uint0 k(0); k<3; ++k)
+	  m_vertexPos[vNew][k] = lambda*m_vertexPos[v][k]+(1.0-lambda)*m_vertexPos[vRev][k];
+      }
+      m_vertices[vNew][0] = label;
+      //printf("connect %u %u to %u %u %u\n", v, e, fPrev, vNew, 0);
+      m_vertices[v][e] = makeLabel(fPrev, vNew, 0);
+      m_facets[fPrev] = m_vertices[v][e]; //avoid that m_facets points to a deleted label
+      do {
+	v = vRev;
+	e = (eRev ==0? 2 : eRev-1);
+	label = labelRev;
+	labelRev = m_vertices[v][e];
+	vRev = getVertex(labelRev);
+	eRev = getEdge(labelRev);
+	if (vRev == vDummy) break;
+	fPrev = getFacet(m_vertices[vRev][eRev]);
+	//printf("label: %u %u %u\n", getFacet(m_vertices[vRev][eRev]), getVertex(m_vertices[vRev][eRev]), getEdge(m_vertices[vRev][eRev]));
+	m_vertices[vRev][eRev] = 
+	  (fDummyShifted | (m_vertices[vRev][eRev] & (~maskFacet)));
+      } while (computeDist(vRev, p, rSqHalf) > 0);
+      //printf("test: vRev %u\n", vRev);
+      uint1 vSwap = vRev;
+      uint1 eSwap = eRev;
+      vRev = v;
+      eRev = e;
+      label = labelRev;
+      v = vSwap;
+      e = eSwap;
+    } while (v != vDummy);
+
+    //form a new facet and interconnect the new vertices
+    {
+      uint1 facetNew = m_freeF.getFree();
+      //printf("new facet: %u\n",facetNew);
+      uint1 imin = m_newVerticesWrk.size()-1;
+      uint1 numNewV = (uint1) m_newVerticesWrk.size();
+      for(uint1 i(0); i< numNewV; ++i){
+	uint1 iplus= i+1;
+	if (iplus == numNewV) iplus=0;
+	uint1 vNew(m_newVerticesWrk[i]);
+	m_vertices[vNew][1] = makeLabel(m_facetPrevWrk[i], m_newVerticesWrk[imin], 2);
+	m_vertices[vNew][2] = makeLabel(facetNew, m_newVerticesWrk[iplus], 1);
+	imin = i;
+      }
+      m_facets[facetNew] = makeLabel(facetNew, m_newVerticesWrk[0], 1);
+      m_nbr[facetNew] = nbr;
+    }
+    for(uint i(0); i< m_newVerticesWrk.size(); ++i){
+      computeRsq(m_newVerticesWrk[i]);
+      //computeDistGC(m_newVerticesWrk[i]);
+    }
+
+    //remove old vertices and facets using depth-first search
+    bool isLargestDeleted(false);
+    //    bool isVCloseGCDeleted(false);
+    {
+      uint1 v(getVertex(edgeStart));
+      m_freeV.release(v);
+      //printf("deteled vertex %u\n", v);
+      isLargestDeleted = (v == m_vRsqMax ? true: isLargestDeleted);
+      //      isVCloseGCDeleted = (v == m_vDistGCMax ? true: isVCloseGCDeleted);
+      m_vStackWrk.push(v);
+      while (!m_vStackWrk.empty()) {
+	v = m_vStackWrk.top();
+	m_vStackWrk.pop();
+	for(uint0 k(0); k<3; ++k){
+	  uint1 vNxt(getVertex(m_vertices[v][k]));
+	  if (vNxt == vDummy) continue;
+	  uint facet(getFacet(m_vertices[v][k]));
+	  if (facet != fDummy && !m_freeF.isFree(facet))
+	    m_freeF.release(facet);
+	  if (m_freeV.isFree(vNxt)) continue;
+	  m_freeV.release(vNxt);
+	  isLargestDeleted = (vNxt == m_vRsqMax ? true: isLargestDeleted);
+	  //	  isVCloseGCDeleted = (vNxt == m_vDistGCMax ? true: isVCloseGCDeleted);
+	  m_vStackWrk.push(vNxt);
+	  //	  printf("deteled vertex %u\n", vNxt);
+	}  
+      }
+    }
+    if (isLargestDeleted)
+      findRsqMax();
+    // if (isVCloseGCDeleted){
+    //   const numeric_limits<real_t> lim;
+    //   m_distGCMax = -lim.max();
+    //   m_vDistGCMax = maxNumVertices;
+    //   for(uint1 i=m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i)){
+    // 	if(m_distGC[i] > m_distGCMax){
+    // 	  m_vDistGCMax = i;
+    // 	  m_distGCMax = m_distGC[i];
+    // 	}
+    //   }
+    //    }
+    return true;
+  }
+  
   template<typename real_t>
   bool CellMaker<real_t>::build(uint2 id, const vector<Array<real_t, 3> > & pos, const  NbrList<uint2, real_t> & nbrList, const Cell<real_t> & initCell)
   {
@@ -1808,7 +1995,7 @@ template<typename real_t>
     real_t dA[3];
     real_t ddA[3];
     real_t dVertex[3][3][3];
-    real_t vol(0);
+    //    real_t vol(0);
     uint1 f[3];
     uint1 vNbr[3];
     const uint0 eOpp[3]={2,0,1};//edge opposite to facet
@@ -1836,7 +2023,7 @@ template<typename real_t>
 	dA[2] = p_cell->m_vertexPos[vc][0]*dv[m][1]-p_cell->m_vertexPos[vc][1]*dv[m][0];
 	for(uint0 k(0); k<3; ++k){
 	  m_areas[f[m]][k] += 0.25*dA[k];
-	  vol += m_connV[f[m]][k]*dA[k]/24.0;	  
+	  //	  vol += m_connV[f[m]][k]*dA[k]/24.0;	  
 	}
 	for (uint0 j(0); j<3; ++j){
 	  for (uint0 i(0); i<3; ++i){
@@ -1854,28 +2041,29 @@ template<typename real_t>
       for(uint0 k(0); k<3; ++k)
 	m_vol += m_areas[i][k]*m_connV[i][k];
     m_vol /= 6.0;
-    printf("connecting vector: %f %f %f\n", m_connV[0][0], m_connV[0][1], m_connV[0][2]);
-    printf("volume: %f %f\n", m_vol, vol);
+    //    printf("connecting vector: %f %f %f\n", m_connV[0][0], m_connV[0][1], m_connV[0][2]);
+    //printf("volume: %f %f\n", m_vol, vol);
     //    printf("nbr: %u\n",p_cell->m_nbr[0]);
   }
 
   template<typename real_t>
   void CellGeometry<real_t>::computeAll()
   {
+    const uint0 numFacets(p_cell->m_numFacets);
     m_vol = 0;
-    m_dV.resize(p_cell->m_numFacets);
-    m_areas.resize(p_cell->m_numFacets);
-    m_omega.resize(p_cell->m_numFacets);
+    m_dV.resize(numFacets);
+    m_areas.resize(numFacets);
+    m_omega.resize(numFacets);
     real_t dA[p_cell->m_numVertices][3][3];
     real_t dv[p_cell->m_numVertices][3][3];
-    real_t xcm[p_cell->m_numFacets][3];
+    real_t xcm[numFacets][3];
     //    real_t dVertex[3][3][3];
-    real_t volFacet[p_cell->m_numFacets];
+    real_t volFacet[numFacets];
     uint1 f[3];
     uint1 vNbr[3];
-    //    real_t omega[p_cell->m_numFacets][3][3][3];
+    //    real_t omega[numFacets][3][3][3];
     real_t dx[3];
-    for(uint1 i(0); i < p_cell->m_numFacets; ++i){
+    for(uint1 i(0); i < numFacets; ++i){
       for(uint0 k(0); k<3; ++k){
 	m_dV[i][k] = 0;
 	m_areas[i][k] =0;
@@ -1912,7 +2100,7 @@ template<typename real_t>
 	  xcm[f[m]][k] += dVol* p_cell->m_vertexPos[vc][k];
       }
     }
-    for(uint1 i(0); i<p_cell->m_numFacets; ++i){
+    for(uint1 i(0); i< numFacets; ++i){
       //printf("xcm[%u]: ", i);
       for(uint0 k(0); k<3; ++k){
 	xcm[i][k] /= volFacet[i];
@@ -1953,6 +2141,56 @@ template<typename real_t>
     //    printf("nbr: %u\n",p_cell->m_nbr[0]);
   }
  
+  template<typename real_t>
+  Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const vector<Array<real_t, 3> > & velocities) const
+  {
+    Array<Array<real_t, 3>, 3> gradV; //gradV[i][j] = dv[i]/dx[j]
+    Array<real_t, 3> vCenter = velocities[p_cell->m_id];
+    // omega[i][j][l][k]
+    // neighbor corresponding to facet i differentiated into j-direction
+    // l: displacement direction, k: normal direction
+    for(int l(0); l<3; ++l)
+      for(int k(0); k<3; ++k)
+	gradV[l][k] = 0.0;
+    for(int i(0); i< m_omega.size(); ++i){
+      Array<real_t, 3> v = velocities[p_cell->m_nbr[i]];
+      for(int j(0); j<3; ++j){
+	real_t dv = v[j] - vCenter[j];
+	  for(int l(0); l<3; ++l)
+	    for(int k(0); k<3; ++k)
+	      gradV[l][k] += m_omega[i][j][l][k]*dv;
+      }
+    }
+    for(int l(0); l<3; ++l)
+      for(int k(0); k<3; ++k)
+	gradV[l][k] /= m_vol;    
+    return gradV;
+  }
+
+  template<typename real_t>
+  Array<real_t, 3> CellGeometry<real_t>::force(const vector<Array<Array<real_t, 3>, 3> > & stresses) const
+  {
+    Array<real_t, 3> f; //gradV[i][j] = dv[i]/dx[j]
+    Array<Array<real_t, 3>, 3> stressCenter = stresses[p_cell->id];
+    // omega[i][j][l][k]
+    // neighbor corresponding to facet i differentiated into j-direction
+    // l: displacement direction, k: normal direction
+    for(int j(0); j<3; ++j)
+      f[j] = 0.0;
+    for(int i(0); i< m_omega.size(); ++i){
+      Array<Array<real_t, 3>, 3> stress = stresses[p_cell->m_nbr[i]];
+      Array<Array<real_t, 3>, 3> dStress;
+      for(int l(0); l<3; ++l)
+	for(int k(0); k<3; ++k)
+	  dStress[l][k] = stress[l][k] - stressCenter[l][k];
+      for(int j(0); j<3; ++j)
+	for(int l(0); l<3; ++l)
+	  for(int k(0); k<3; ++k)
+	    f[j] -= m_omega[i][j][l][k]*dStress[l][k];
+    }
+    return f;
+  }
+  
   template<typename real_t>
   void CellGeometry<real_t>::gradFacetAreaSq(uint1 indxFacet, vector<uint2> & indxFacets, vector<Array<real_t, 3> > & grad)
   {
@@ -2048,6 +2286,16 @@ template<typename real_t>
       for(uint2 i=0; i< p.size(); ++i){
 	maker.build(i, p, m_nbrList, cub);
 	m_cells[i] = maker;
+	// if (m_cells[i].hasNoNbr()){
+	//   printf("cell %d has non-defined neighbors\n", i);
+	//   FILE *printFile;
+	//   printFile = fopen ("GNUPlotfile.txt","w");
+	//   m_cells[i].drawGnuplot(p[i],printFile);
+	//   fclose(printFile);
+	//   cub.printTopology();
+	//   printf("\n");
+	//   m_cells[i].printTopology();
+	// }
       }
     }
 //     m_updaters.resize(p.size());

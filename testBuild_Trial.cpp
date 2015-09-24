@@ -6,6 +6,7 @@
 //#include <omp.h>
 #include <cstdio>
 #include <vector>
+#include <stdio.h>
 
 #include "voronoi.hpp"
 #include <boost/random.hpp>
@@ -27,6 +28,8 @@ using vor::CellGeometry;
 using vor::NbrsToFacets;
 using std::clock;
 using std::clock_t;
+using namespace std;
+using namespace vor;
 
 //using voro::container;
 
@@ -50,69 +53,118 @@ int main()
   vector<Cell<real_t> > & cells(complex.getCells());
   vector<CellGeometry<real_t> > & geoms(complex.getGeoms());
 
-  vector<Array<real_t, 3> > p(100000);
-  for (int i =0; i< p.size(); ++i){
-    for(uint k(0); k<3; ++k)
-    p[i][k] = L[k]*pointGen();
+  uint particle_type,no_particles,no_particles_x,no_particles_y,no_particles_z;
+  printf("Type 1 for random and 2 for regular particle generation\n");
+  scanf("%u",&particle_type);
+  if (particle_type == 1)
+  {
+      printf("Enter total number of particles to generate at random locations\n");
+      scanf("%u",&no_particles);
+  }
+  else if (particle_type == 2)
+  {
+      printf("Enter number of particles in x direction\n");
+      scanf("%u",&no_particles_x);
+      printf("Enter number of particles in y direction\n");
+      scanf("%u",&no_particles_y);
+      printf("Enter number of particles in z direction\n");
+      scanf("%u",&no_particles_z);
+      no_particles = no_particles_x*no_particles_y*no_particles_z;
   }
 
-   clock_t start;
-   real_t duration;
-   int N=1;
+  vector<Array<real_t, 3> > p(no_particles);
 
-   start = clock();
-   for (uint i=0; i<N; ++i)
-     complex.build(p);
-   duration = real_t( clock() - start );
-   printf("%lu Voronoi cells created in %f seconds\n", complex.getCells().size(), duration/(real_t(N)*real_t(CLOCKS_PER_SEC)));
-   
-   {
-     real_t vol(0);
-#pragma omp parallel for reduction(+:vol)
-     for(size_t i=0; i< geoms.size(); ++i){
-       geoms[i].computeVolume();
-       vol += geoms[i].getVolume();
-     }
-     printf("summed volume cells: %f\n", vol);
-   }
+  if (particle_type == 1)
+  {
+      for (int i =0; i< p.size(); ++i)
+      {
+          for(uint k(0); k<3; ++k)
+          {
+              p[i][k] = L[k]*pointGen();
+          }
 
-   real_t fraction = 0.01;
-   real_t density = real_t(p.size())/(L[0]*L[1]*L[2]);
-   int nRepeat(10);
-   duration = 0;
-   for (int j(0); j<nRepeat; ++j){
-     // real_t dx = fraction*pow(density,-1./3.);
-     // for(size_t i(0); i< p.size(); ++i){
-     //   p[i][0] += dx*(pointGen()-0.5);
-     //   p[i][1] += dx*(pointGen()-0.5);
-     //   p[i][2] += dx*(pointGen()-0.5);
-     //   // p[i][0] = L*(pointGen()-0.5);
-     //   // p[i][1] = L*(pointGen()-0.5);
-     //   // p[i][2] = L*(pointGen()-0.5);
-     // }
-     printf("%d\n",j);
-     real_t dShear = 0.01;
-     for(size_t i(0); i< p.size(); ++i)
-       p[i][0] += dShear*p[i][1];
-     box.putInBox(p);
-     box.addShear(dShear);
+      }
+  }
+  else if (particle_type == 2)
+  {
+      real_t spacing_x,spacing_y,spacing_z;
+      spacing_x = L[0]/no_particles_x;
+      spacing_y = L[1]/no_particles_y;
+      spacing_z = L[2]/no_particles_z;
 
-     start = clock();
-     complex.update(p);
-     duration += real_t( clock() - start );
-   }
-   printf("repairing took %f s on average\n", duration/(real_t(CLOCKS_PER_SEC)*real_t(nRepeat)));
+      uint m=0;
+      for(uint i=0;i<no_particles_x;i++)
+      {
+          for(uint j=0;j<no_particles_y;j++)
+          {
+	    for(uint k=0;k<no_particles_z;k++, m++)
+              {
+                  p[m][0] = (spacing_x/2) + (i*spacing_x);
+                  p[m][1] = (spacing_y/2) + (j*spacing_y);
+                  p[m][2] = (spacing_z/2) + (k*spacing_z);
 
-   {
-     real_t vol(0);
-#pragma omp parallel for reduction(+:vol)
-     for(size_t i=0; i< geoms.size(); ++i){
-       geoms[i].computeVolume();
-       //    printf("volume cell %lu: %f\n", i, dVol);
-       vol += geoms[i].getVolume();
-     }
-     printf("summed volume cells: %f\n", vol);
-   }
+              }
+          }
+      }
+
+  }
+  printf("start tesselation\n");
+  complex.build(p);
+
+  printf("built tesselation\n");
+//     real_t vol(0);
+// #pragma omp parallel for reduction(+:vol)
+//     for(size_t i=0; i< geoms.size(); ++i)
+//     {
+//         geoms[i].computeVolume();
+//         vol += geoms[i].getVolume();
+//     }
+//     printf("summed volume cells: %f\n", vol);
+
+
+
+
+// // additional stuff
+
+//   uint cell_id,facet_id;
+
+//   printf("Please enter the cell number to investigate : ");
+//   scanf("%u",&cell_id);
+//   printf("Cell number %u information\n",cells[cell_id].getID());
+//   printf("Cell Volume : %f\n",geoms[cell_id].getVolume());
+//   printf("Total number of facets in cell : %u \n",cells[cell_id].numFacets());
+//   printf("Total number of verticies in cell : %u \n\n",cells[cell_id].numVertices());
+//   printf("Please enter the facet number to investigate : ");
+//   scanf("%u",&facet_id);
+//   //printf("Facet area : %f\n",geoms[cell_id].getVolume());
+//   printf("Neighbour cell id : %u\n",cells[cell_id].getNbr(facet_id));
+//   printf("Running CCW on facet : %u\n",facet_id);
+//   cells[cell_id].printFacetInfo(p[cell_id],facet_id);
+
+//   FILE *printFile;
+//   printFile = fopen ("GNUPlotfile.txt","w");
+//   cells[cell_id].drawGnuplot(p[cell_id],printFile);
+//   fclose(printFile);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
   // start = clock();
   // container con(0,L[0],0,L[1],0,L[2],57,57,57,true,true,true,8);
