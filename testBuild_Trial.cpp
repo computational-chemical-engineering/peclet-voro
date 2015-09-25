@@ -108,43 +108,39 @@ int main()
       }
 
   }
-  printf("start tesselation\n");
   complex.build(p);
 
-  printf("built tesselation\n");
-//     real_t vol(0);
-// #pragma omp parallel for reduction(+:vol)
-//     for(size_t i=0; i< geoms.size(); ++i)
-//     {
-//         geoms[i].computeVolume();
-//         vol += geoms[i].getVolume();
-//     }
-//     printf("summed volume cells: %f\n", vol);
+    real_t vol(0);
+#pragma omp parallel for reduction(+:vol)
+    for(size_t i=0; i< geoms.size(); ++i)
+    {
+        geoms[i].computeVolume();
+        vol += geoms[i].getVolume();
+    }
+    printf("summed volume cells: %f\n", vol);
 
 
+// additional stuff
 
+  uint cell_id,facet_id;
 
-// // additional stuff
+  printf("Please enter the cell number to investigate : ");
+  scanf("%u",&cell_id);
+  printf("Cell number %u information\n",cells[cell_id].getID());
+  printf("Cell Volume : %f\n",geoms[cell_id].getVolume());
+  printf("Total number of facets in cell : %u \n",cells[cell_id].numFacets());
+  printf("Total number of verticies in cell : %u \n\n",cells[cell_id].numVertices());
+  printf("Please enter the facet number to investigate : ");
+  scanf("%u",&facet_id);
+  //printf("Facet area : %f\n",geoms[cell_id].getVolume());
+  printf("Neighbour cell id : %u\n",cells[cell_id].getNbr(facet_id));
+  printf("Running CCW on facet : %u\n",facet_id);
+  cells[cell_id].printFacetInfo(p[cell_id],facet_id);
 
-//   uint cell_id,facet_id;
-
-//   printf("Please enter the cell number to investigate : ");
-//   scanf("%u",&cell_id);
-//   printf("Cell number %u information\n",cells[cell_id].getID());
-//   printf("Cell Volume : %f\n",geoms[cell_id].getVolume());
-//   printf("Total number of facets in cell : %u \n",cells[cell_id].numFacets());
-//   printf("Total number of verticies in cell : %u \n\n",cells[cell_id].numVertices());
-//   printf("Please enter the facet number to investigate : ");
-//   scanf("%u",&facet_id);
-//   //printf("Facet area : %f\n",geoms[cell_id].getVolume());
-//   printf("Neighbour cell id : %u\n",cells[cell_id].getNbr(facet_id));
-//   printf("Running CCW on facet : %u\n",facet_id);
-//   cells[cell_id].printFacetInfo(p[cell_id],facet_id);
-
-//   FILE *printFile;
-//   printFile = fopen ("GNUPlotfile.txt","w");
-//   cells[cell_id].drawGnuplot(p[cell_id],printFile);
-//   fclose(printFile);
+  FILE *printFile;
+  printFile = fopen ("GNUPlotfile.txt","w");
+  cells[cell_id].drawGnuplot(p[cell_id],printFile);
+  fclose(printFile);
 
 
 

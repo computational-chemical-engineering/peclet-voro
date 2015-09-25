@@ -246,21 +246,13 @@ namespace vor {
     bool rebuild(const vector< Array<real_t, 3> > & pos, const Box<real_t> & box, const Cell<real_t> & initCell);
     /** 
      * \brief further refine the Voronoi cell by performing additional plane cuts corresponding to neighbors
-     * \param nbr vector of indices of neighbor particles to be considered
-     * \param pos vector with coordinates of all particles
-     * \param box simulation box used to determine minimal image in the case of periodic boundary conditions
-     * \return true if any of the neighbors caused a plane cut to add a facet to the cell
-     **/
-    inline bool processNbrs(const vector<uint2 > & nbr, const vector<Array<real_t, 3> > & pos,const  Box<real_t> & box);
-    /** 
-     * \brief further refine the Voronoi cell by performing additional plane cuts corresponding to neighbors
      * The id's and positions of the neighbors are accessed by means of an iterator of type PosAndId
      * \param begin starting value for the iterator
      * \param end end value of the iterator
      * \param pos0 position of the particle corresponding to the Voronoi cell under consideration
      * \return true if any of the neighbors caused a plane cut to add a facet to the cell
      **/    
-    inline bool processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0);
+    inline bool processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0, const  Box<real_t> & box);
     //    inline real_t getRsqMax() const {return m_rSq[m_vRsqMax];}
     void getCloseNbrs(NbrInsert & nbrs);
     // void drawGnuplot(FILE *fp) const;
@@ -336,7 +328,8 @@ namespace vor {
     uint1 * m_renumFWrk;
     vector<uint1> m_newVerticesWrk;
     vector<uint1> m_facetPrevWrk;
-    vector<uint2> m_indcsNbrsWrk;
+    //    vector<uint2> m_indcsNbrsWrk;
+    vector<PosAndId<uint2, real_t> > m_nbrsWrk;
     vector<NbrDist<real_t> > m_nbrDistWrk;
     stack<uint1> m_vStackWrk;
   };
@@ -405,9 +398,8 @@ namespace vor {
     vector<uint2> m_nbrsWrk;
     vector<NbrInsert> m_nbrInserts;
     bool m_isSetup;
-    vector<uint2> m_newNbrsWrk;
+    vector< PosAndId<uint2, real_t> > m_newNbrsWrk;
     vector< Array< bool, 3> > m_visitedWrk;
-    //    vector< Array< Array<real_t, 3>, 3 > > m_edgeDirsWrk;
   };
 
   template<typename real_t>
@@ -750,7 +742,7 @@ namespace vor {
     m_distGC = new real_t[maxV];
     m_newVerticesWrk.reserve(20);
     m_facetPrevWrk.reserve(20);
-    m_indcsNbrsWrk.reserve(40);
+    m_nbrsWrk.reserve(40);
   }
   
   template<typename real_t>
@@ -1472,22 +1464,14 @@ namespace vor {
     }
     typename vector<PosAndId<uint2, real_t> >::const_iterator begin;
     typename vector<PosAndId<uint2, real_t> >::const_iterator end;
-    //one try loop without checking of nbr cells
+    //one trial loop without checking of nbr cells
     size_t n = m_checkGridCell.size();
     for(uint2 i(0); i < n; ++i){
       uint2 indx = m_checkGridCell.front();
       m_checkGridCell.pop_front();
       p_nbrList->getCellContent(indx, begin, end);
-      if (end != begin){
-	//this needs to be refined for small systems
-	Array<real_t, 3> pos0;
-	for(uint0 k(0); k<3; ++k)
-	  pos0[k] = pos[m_id][k] - begin->pos[k];
-	p_nbrList->getBox().makeShortestDistance(pos0);
-	for(uint0 k(0); k<3; ++k)
-	  pos0[k] += begin->pos[k];
-	(processNbrs(begin, end, pos0) == true? isUpdated = true: isUpdated);
-      }
+      if (end != begin)
+	(processNbrs(begin, end, pos[m_id], p_nbrList->getBox()) == true? isUpdated = true: isUpdated);
       p_nbrList->getGrid().getNbrs(indx, nbrGC);
       for(uint2 j(0); j < nbrGC.size(); ++j){
 	if (!m_visited.isVisited(nbrGC[j])){
@@ -1506,16 +1490,8 @@ namespace vor {
       real_t rSqMin = computeRsqMinGC();
       if (rSqMin > 4.0*m_rSq[m_vRsqMax]) continue;
       p_nbrList->getCellContent(indx, begin, end);
-      if (end != begin){
-	//this needs to be refined for small systems
-	Array<real_t, 3> pos0;
-	for(uint0 k(0); k<3; ++k)
-	  pos0[k] = pos[m_id][k] - begin->pos[k];
-	p_nbrList->getBox().makeShortestDistance(pos0);
-	for(uint0 k(0); k<3; ++k)
-	  pos0[k] += begin->pos[k];
-	(processNbrs(begin, end, pos0) == true? isUpdated = true: isUpdated);
-      }
+      if (end != begin)
+	(processNbrs(begin, end, pos[m_id], p_nbrList->getBox()) == true? isUpdated = true: isUpdated);
       p_nbrList->getGrid().getNbrs(indx, nbrGC); //for LE b.c. this needs to be adapted
       for(uint2 j(0); j < nbrGC.size(); ++j){
 	if (!m_visited.isVisited(nbrGC[j])){
@@ -1534,16 +1510,8 @@ namespace vor {
       computeAllDistGC();
       if (m_distGCMax < 0) continue;
       p_nbrList->getCellContent(indx, begin, end);
-      if (end != begin){
-	//this needs to be refined for small systems
-	Array<real_t, 3> pos0;
-	for(uint0 k(0); k<3; ++k)
-	  pos0[k] = pos[m_id][k] - begin->pos[k];
-	p_nbrList->getBox().makeShortestDistance(pos0);
-	for(uint0 k(0); k<3; ++k)
-	  pos0[k] += begin->pos[k];
-	(processNbrs(begin, end, pos0) == true? isUpdated = true: isUpdated);
-      }
+      if (end != begin)
+	(processNbrs(begin, end, pos[m_id], p_nbrList->getBox()) == true? isUpdated = true: isUpdated);
       p_nbrList->getGrid().getNbrs(indx, nbrGC);
       for(uint2 j(0); j < nbrGC.size(); ++j){
 	if (!m_visited.isVisited(nbrGC[j])){
@@ -1559,48 +1527,27 @@ namespace vor {
   template<typename real_t>
   bool CellMaker<real_t>::rebuild(const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box, const Cell<real_t> & initCell)
   {
-    m_indcsNbrsWrk.clear();
+    m_nbrsWrk.clear();
     for(uint1 i=m_freeF.beginIndx(); i != m_freeF.endIndx() ; i = m_freeF.nextIndx(i))
-      if(m_nbr[i] != noNbr)
-	m_indcsNbrsWrk.push_back(m_nbr[i]);
+      if(m_nbr[i] != noNbr){
+	PosAndId<uint2, real_t> newNbr;
+	newNbr.id = m_nbr[i];
+	newNbr.pos = pos[newNbr.id];
+	m_nbrsWrk.push_back(newNbr);
+      }
     m_isAllCut = true;
     // for(uint2 i(0); i< m_indcsNbrsWrk.size(); ++i)
     //   printf("cell %u, neigb: %u\n", m_id, m_indcsNbrsWrk[i]);
     // printf("\n");
     this->init(initCell);
-    processNbrs(m_indcsNbrsWrk, pos, box);
+    //typename vector<PosAndId<uint2, real_t> >::const_iterator begin = m_indcsNbrsWrk.begin();
+    //typename vector<PosAndId<uint2, real_t> >::const_iterator end = m_indcsNbrsWrk.end();
+    processNbrs(m_nbrsWrk.begin(), m_nbrsWrk.end(), pos[m_id], box);
     return m_isAllCut;
   }
 
   template<typename real_t>
-  bool CellMaker<real_t>::processNbrs(const vector<uint2 > & idsNbrs, const vector<Array<real_t, 3> > & pos,const  Box<real_t> & box)
-  {
-    m_nbrDistWrk.clear();
-    m_nbrDistWrk.reserve(idsNbrs.size());
-    NbrDist<real_t>  nbrDist;
-    for(size_t i(0); i< idsNbrs.size(); ++i){
-      nbrDist.id = idsNbrs[i];
-      Array<real_t, 3> relPos;
-      for(uint0 k(0); k<3; ++k)
-       	relPos[k] = pos[idsNbrs[i]][k] - pos[m_id][k];
-      box.makeShortestDistance(relPos);
-      for(uint0 k(0); k<3; ++k)
-      	nbrDist[k] = relPos[k];
-      nbrDist.rSqHalf = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
-      if (nbrDist.rSqHalf < 2.0*m_rSq[m_vRsqMax])
-	m_nbrDistWrk.push_back(nbrDist);
-    }
-    std::sort(m_nbrDistWrk.begin(), m_nbrDistWrk.end(), CompareNbrDist<real_t>());
-    bool isCut(false);
-    for(size_t i(0); i < m_nbrDistWrk.size() && (m_nbrDistWrk[i].rSqHalf < 2.0*m_rSq[m_vRsqMax]); ++i){
-      const NbrDist<real_t> & p(m_nbrDistWrk[i]);
-      (cutCell(p, p.rSqHalf, p.id) ? isCut=true : m_isAllCut=false);
-    }
-    return isCut;
-  }
-
-  template<typename real_t>
-  bool CellMaker<real_t>::processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0)
+  bool CellMaker<real_t>::processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0, const  Box<real_t> & box)
   {
     //    printf("number of nbrs: %lu\n", end-begin);
     bool isCut(false);
@@ -1614,6 +1561,7 @@ namespace vor {
       Array<real_t, 3> relPos;
       for(uint0 k(0); k<3; ++k)
 	relPos[k] = (itr->pos)[k] - pos0[k];
+      box.makeShortestDistance(relPos);
       for(uint0 k(0); k<3; ++k)
       	nbrDist[k] = relPos[k];
       nbrDist.rSqHalf = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
@@ -1741,12 +1689,14 @@ template<typename real_t>
     NbrInsert nbrClose, nbrIns;
     if (!m_isSetup) setupNbrSet();
     m_newNbrsWrk.clear();
+    PosAndId<uint2, real_t> newNbr;
     Cell<real_t> & cell(p_geom->getCell());
+    uint2 id(cell.getID());
     bool hasSetMaker(false);
     for(NbrInsertItr itr(begin); itr!=end; ++itr){
       // printf("trying %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
       if (isInNbrs((*itr)[2])) continue;
-      if ((*itr)[0] != cell.m_id) continue;
+      if ((*itr)[0] != id) continue;
       if ((*itr)[1] == (*itr)[2]){
 	//printf("testing %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
 	if (!hasSetMaker) {
@@ -1756,7 +1706,7 @@ template<typename real_t>
 	Array<real_t, 3> relPos;
 	real_t rSqHalf;
 	for(uint0 k(0); k<3; ++k)
-	  relPos[k] = pos[(*itr)[1]][k] - pos[cell.m_id][k];
+	  relPos[k] = pos[(*itr)[1]][k] - pos[id][k];
 	box.makeShortestDistance(relPos);
 	rSqHalf = 0.5*(relPos[0]*relPos[0]+relPos[1]*relPos[1]+relPos[2]*relPos[2]);
 	m_nbrs.insert((*itr)[1]);
@@ -1789,14 +1739,15 @@ template<typename real_t>
         }
       } else {
 	//	printf("inserting %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
-	m_newNbrsWrk.push_back((*itr)[2]);
+	newNbr.id = (*itr)[2];
+	newNbr.pos = pos[newNbr.id];
+	m_newNbrsWrk.push_back(newNbr);
 	m_nbrs.insert((*itr)[2]);
       }
     }
     if (!m_newNbrsWrk.empty()){
-      //printf("starting processing\n");
       if (!hasSetMaker) maker = cell;
-      (maker.processNbrs(m_newNbrsWrk, pos, box) ? hasChanged= true : hasChanged);
+      (maker.processNbrs(m_newNbrsWrk.begin(), m_newNbrsWrk.end(), pos[id], box) ? hasChanged= true : hasChanged);
     }
     if (hasChanged)
       cell = maker;
@@ -2286,16 +2237,16 @@ template<typename real_t>
       for(uint2 i=0; i< p.size(); ++i){
 	maker.build(i, p, m_nbrList, cub);
 	m_cells[i] = maker;
-	// if (m_cells[i].hasNoNbr()){
-	//   printf("cell %d has non-defined neighbors\n", i);
-	//   FILE *printFile;
-	//   printFile = fopen ("GNUPlotfile.txt","w");
-	//   m_cells[i].drawGnuplot(p[i],printFile);
-	//   fclose(printFile);
-	//   cub.printTopology();
-	//   printf("\n");
-	//   m_cells[i].printTopology();
-	// }
+	if (m_cells[i].hasNoNbr()){
+	  printf("cell %d has non-defined neighbors\n", i);
+	  FILE *printFile;
+	  printFile = fopen ("GNUPlotfile.txt","w");
+	  m_cells[i].drawGnuplot(p[i],printFile);
+	  fclose(printFile);
+	  cub.printTopology();
+	  printf("\n");
+	  m_cells[i].printTopology();
+	}
       }
     }
 //     m_updaters.resize(p.size());
