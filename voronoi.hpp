@@ -2237,16 +2237,16 @@ template<typename real_t>
       for(uint2 i=0; i< p.size(); ++i){
 	maker.build(i, p, m_nbrList, cub);
 	m_cells[i] = maker;
-	if (m_cells[i].hasNoNbr()){
-	  printf("cell %d has non-defined neighbors\n", i);
-	  FILE *printFile;
-	  printFile = fopen ("GNUPlotfile.txt","w");
-	  m_cells[i].drawGnuplot(p[i],printFile);
-	  fclose(printFile);
-	  cub.printTopology();
-	  printf("\n");
-	  m_cells[i].printTopology();
-	}
+	// if (m_cells[i].hasNoNbr()){
+	//   printf("cell %d has non-defined neighbors\n", i);
+	//   FILE *printFile;
+	//   printFile = fopen ("GNUPlotfile.txt","w");
+	//   m_cells[i].drawGnuplot(p[i],printFile);
+	//   fclose(printFile);
+	//   cub.printTopology();
+	//   printf("\n");
+	//   m_cells[i].printTopology();
+	// }
       }
     }
 //     m_updaters.resize(p.size());
