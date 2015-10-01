@@ -237,16 +237,16 @@ namespace vor {
   template <typename UInt>
   void IndxList<UInt>::reset(UInt N)
   {
-    for(UInt i(0); i < m_endIndx; )
-      m_next[i] = ++i;
+    for(UInt i(0); i < m_endIndx; ++i)
+      m_next[i] = i+1;
     {
+      if (N > m_endIndx) {N = m_endIndx;}
       UInt j(0);
       for(; j < N; ++j)
 	m_free[j] = false;
       for(; j < m_endIndx; ++j)
 	m_free[j] = true;
     }
-    if (N > m_endIndx) {N = m_endIndx;}
     if (N ==0 ){
       m_firstFree = 0;
       m_firstUsed = m_endIndx;

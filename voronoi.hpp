@@ -152,7 +152,7 @@ namespace vor {
     inline uint2 getNbr(uint1 i) const {return m_nbr[i];}
     //! \brief get the array of id's of the neighbor cells
     //! \return array of id's of neighbor cells
-    inline const uint2 * const getNbrs() const {return m_nbr;}
+    inline const uint2 * getNbrs() const {return m_nbr;}
     //! \brief check of the cell has a facet that does not correspond to a neighbor cell
     //! Not every facet need necesarrily have an neighbor cell associated to it.
     //! \return true, if there are 1 or more facets without neighbors in a cell. false otherwise
@@ -1445,7 +1445,6 @@ namespace vor {
       for(uint0 k(0); k<3; ++k)
 	m_dLGC[k] = L[k] / static_cast<real_t>(N[k]);
     }
-
     bool isUpdated;
     m_id = id;
     this->init(initCell);
