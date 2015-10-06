@@ -135,6 +135,10 @@ namespace vor {
     //! \brief output the cell geometry in a Gnuplot format
     //! \param p coordinate of the center of the cell (Note that internal vertex coordinates are relative to the center.)
     void drawGnuplot(Array<real_t, 3> p,FILE *fp) const;
+    //! \brief output a facet in a Gnuplot format
+    //! \param iFacet index of the facet to be drawn
+    //! \param p coordinate of the center of the cell (Note that internal vertex coordinates are relative to the center.)    
+    inline void drawFacetGnuplot(uint1 iFacet, Array<real_t, 3> p,FILE *fp) const;
     //! \brief facet information of a cell with all the verticies on it
     void printFacetInfo(Array<real_t, 3> p,uint facet_id) const;
     //! \brief get the id if this cell
@@ -351,7 +355,7 @@ namespace vor {
     void computeAll();
     Array<Array<real_t, 3>, 3> velocityGradient(const vector<Array<real_t, 3> > & velocity) const;
     Array<real_t, 3> force(const vector<Array<Array<real_t, 3>, 3> > & stresses) const;
-    void gradFacetAreaSq(uint1 facetIndx, vector<uint2> & indx, vector<Array<real_t, 3> > & grad);
+    void gradFacetAreaSq(uint1 facetIndx, vector<uint2> & indx, vector<Array<real_t, 3> > & grad) const;
     const vector< Array<real_t, 3> > & getdV() const {return m_dV;}
     const vector< Array<real_t, 3> > & getAreas() const {return m_areas;}
     real_t getVolume() const {return m_vol;}
@@ -411,12 +415,17 @@ namespace vor {
     void update(const vector<Array<real_t, 3> > & p);
     const vector<Cell<real_t> > & getCells() const {return m_cells;}
     vector<Cell<real_t> > & getCells() {return m_cells;}
+    vector<uint0> & getTypes() {return m_types;}
+    const vector<uint0> & getTypes() const {return m_types;}
     vector<CellGeometry<real_t> > & getGeoms() {return m_geom;}
+    const vector<CellGeometry<real_t> > & getGeoms() const {return m_geom;}
     const NbrList<uint2, real_t>  & getNbrList() const {return m_nbrList;}
+    void drawInterfaceGnuplot(uint0 iType, uint0 jType, const vector<Array<real_t, 3> > & p, FILE *fp) const;
   private:
     void repair(const vector<Array<real_t, 3> > & p);
     void initNbrList(const vector<Array<real_t, 3> > & p);
     NbrList<uint2, real_t> m_nbrList;
+    vector<uint0> m_types;
     vector<Cell<real_t> > m_cells;
     vector<CellGeometry<real_t> > m_geom;
     vector<CellUpdater<real_t> > m_updaters;
@@ -603,7 +612,15 @@ namespace vor {
   void Cell<real_t>::drawGnuplot(Array<real_t, 3> p,FILE *fp) const
   {
     for (uint1 i(0); i< m_numFacets; ++i){
-      uint1 labelStart(m_facets[i]);
+      drawFacetGnuplot(i, p, fp);
+      fputs("\n\n",fp);
+    } 
+  }
+
+  template<typename real_t>
+  void Cell<real_t>::drawFacetGnuplot(uint1 iFacet, Array<real_t, 3> p,FILE *fp) const
+  {
+      uint1 labelStart(m_facets[iFacet]);
       uint1 label = labelStart;
       uint1 vertex;
       vertex = getVertex(label);
@@ -622,10 +639,8 @@ namespace vor {
       fprintf(fp,"%g ",p[0] + m_vertexPos[vertex][0]);
       fprintf(fp,"%g ",p[1] + m_vertexPos[vertex][1]);
       fprintf(fp,"%g\n",p[2] + m_vertexPos[vertex][2]);
-      fputs("\n\n",fp);
-    } 
   }
-  
+    
   template<typename real_t>
   void Cell<real_t>::printFacetInfo(Array<real_t, 3> p,uint facet_id) const
   {
@@ -1962,7 +1977,7 @@ template<typename real_t>
 	dv[1][k] = p_cell->m_vertexPos[vNbr[1]][k]-p_cell->m_vertexPos[vNbr[2]][k];
 	dv[2][k] = p_cell->m_vertexPos[vNbr[2]][k]-p_cell->m_vertexPos[vNbr[0]][k];
       }
-      //vertex vc (direction l) differentiated to position of m_connV[f[m]] (direction j)
+      //vertex vc (direction l) differentiated to position of m_connV[f[i]] (direction j)
       for (uint0 j(0); j<3; ++j)
 	for (uint0 i(0); i<3; ++i)
 	  for (uint0 l(0); l<3; ++l)
@@ -2142,7 +2157,7 @@ template<typename real_t>
   }
   
   template<typename real_t>
-  void CellGeometry<real_t>::gradFacetAreaSq(uint1 indxFacet, vector<uint2> & indxFacets, vector<Array<real_t, 3> > & grad)
+  void CellGeometry<real_t>::gradFacetAreaSq(uint1 indxFacet, vector<uint2> & indxFacets, vector<Array<real_t, 3> > & grad) const
   {
     vector<uint1> labels;
     labels.reserve(10);
@@ -2155,7 +2170,7 @@ template<typename real_t>
     }
     uint1 numV(labels.size());
     uint1 numF(numV+1);
-    indxFacets.resize(labels.size()+1);
+    indxFacets.resize(numF);
     indxFacets[0] = indxFacet;
     for(uint1 i(0); i< numV; ++i)
       indxFacets[i+1] = getFacet(p_cell->getReverseLabel(labels[i]));
@@ -2165,7 +2180,7 @@ template<typename real_t>
 	grad[i][k] = 0;
     uint1 nbrPrev = numV;
     uint1 nbrNext = 1;
-    real_t dv[3], dVertex[3];
+    real_t dv[3], dVertex[3], dv_out_A[3];
     for(uint1 i(0); i< numV; ++i){
       uint1 vc = getVertex(labels[i]);
       uint1 e0 = getEdge(labels[i]);
@@ -2176,36 +2191,26 @@ template<typename real_t>
       uint1 f2 = getFacet(p_cell->m_vertices[vc][e0]);
       uint1 v0 = getVertex(p_cell->m_vertices[vc][e0]);
       uint1 v1 = getVertex(p_cell->m_vertices[vc][e1]);
-      real_t dASq;
       for(uint0 k(0); k<3; ++k)
 	dv[k] = p_cell->m_vertexPos[v0][k]-p_cell->m_vertexPos[v1][k];
-      for(uint0 j(0); j<3; ++j){ //direction of displacement
-	for(uint0 l(0); l<3; ++l) //direction of displacement
-	  //vertex vc (direction l) differentiated to position of m_connV[fs] (direction j)
-	  dVertex[l] = m_edgeInv[vc][e0][l]*(m_connV[f1][j]-p_cell->m_vertexPos[vc][j]);
-	dASq  = m_areas[indxFacet][0]*(dVertex[1]*dv[2]-dVertex[2]*dv[1]);
-	dASq += m_areas[indxFacet][1]*(dVertex[2]*dv[0]-dVertex[0]*dv[2]);
-	dASq += m_areas[indxFacet][2]*(dVertex[0]*dv[1]-dVertex[1]*dv[0]);
-	grad[nbrPrev][j] += dASq;
-      }
-      for(uint0 j(0); j<3; ++j){ //direction of displacement
-	for(uint0 l(0); l<3; ++l) //direction of displacement
-	  //vertex vc (direction l) differentiated to position of m_connV[f2] (direction j)
-	  dVertex[l] = m_edgeInv[vc][e1][l]*(m_connV[f2][j]-p_cell->m_vertexPos[vc][j]);
-	dASq  = m_areas[indxFacet][0]*(dVertex[1]*dv[2]-dVertex[2]*dv[1]);
-	dASq += m_areas[indxFacet][1]*(dVertex[2]*dv[0]-dVertex[0]*dv[2]);
-	dASq += m_areas[indxFacet][2]*(dVertex[0]*dv[1]-dVertex[1]*dv[0]);
-	grad[nbrNext][j] += dASq;
-      }
-      for(uint0 j(0); j<3; ++j){ //direction of displacement
-	for(uint0 l(0); l<3; ++l) //direction of displacement
-	  //vertex vc (direction l) differentiated to position of m_connV[f0] (direction j)
-	  dVertex[l] = m_edgeInv[vc][e2][l]*(m_connV[f0][j]-p_cell->m_vertexPos[vc][j]);
-	dASq  = m_areas[indxFacet][0]*(dVertex[1]*dv[2]-dVertex[2]*dv[1]);
-	dASq += m_areas[indxFacet][1]*(dVertex[2]*dv[0]-dVertex[0]*dv[2]);
-	dASq += m_areas[indxFacet][2]*(dVertex[0]*dv[1]-dVertex[1]*dv[0]);
-	grad[0][j] += dASq;
-      }
+      dv_out_A[0] = dv[1]*m_areas[indxFacet][2]-dv[2]*m_areas[indxFacet][1];
+      dv_out_A[1] = dv[2]*m_areas[indxFacet][0]-dv[0]*m_areas[indxFacet][2];
+      dv_out_A[2] = dv[0]*m_areas[indxFacet][1]-dv[1]*m_areas[indxFacet][0];
+      real_t sum=0;
+      for(uint0 l(0); l<3; ++l) //coordinate of vertex
+	sum += m_edgeInv[vc][e0][l]*dv_out_A[l]; //vertex vc (direction l) differentiated to position of m_connV[fs] (direction j)
+      for(uint0 j(0); j<3; ++j) //direction of displacement
+	grad[nbrPrev][j] += (m_connV[f1][j]-p_cell->m_vertexPos[vc][j])*sum;
+      sum=0;
+      for(uint0 l(0); l<3; ++l) //coordinate of vertex
+	sum += m_edgeInv[vc][e1][l]*dv_out_A[l];
+      for(uint0 j(0); j<3; ++j) //direction of displacement
+	grad[nbrNext][j] += (m_connV[f2][j]-p_cell->m_vertexPos[vc][j])*sum;
+      sum=0;
+      for(uint0 l(0); l<3; ++l) //coordinate of vertex
+	sum += m_edgeInv[vc][e2][l]*dv_out_A[l];
+      for(uint0 j(0); j<3; ++j) //direction of displacement
+	grad[0][j] += (m_connV[f0][j]-p_cell->m_vertexPos[vc][j])*sum;
       nbrPrev = nbrNext;
       ++nbrNext;
     }
@@ -2269,7 +2274,7 @@ template<typename real_t>
     m_hasChanged.resize(p.size());
     m_isBuild = true;
   }
-
+  
   template<typename real_t>
   void CellComplex<real_t>::update(const vector<Array<real_t, 3> > & p)
   {
@@ -2416,6 +2421,23 @@ template<typename real_t>
     }
   }
 
+  template<typename real_t>
+  void CellComplex<real_t>::drawInterfaceGnuplot(uint0 iType, uint0 jType, const vector<Array<real_t, 3> > & pos, FILE *fp) const
+  {
+#pragma omp parallel for
+    for(size_t i=0; i<m_types.size(); ++i){
+      if(m_types[i] == iType){
+	for(uint1 j=0; j< m_cells[i].numFacets(); ++j){
+	  if(m_types[m_cells[i].getNbr(j)] == jType){
+	    m_cells[i].drawFacetGnuplot(j, pos[i], fp);
+	    fputs("\n\n",fp);
+	  }
+	}
+      }
+    }
+  }
+
+    
   template<typename real_t>
   void NbrsToFacets::init(const vector< Cell<real_t> > & cells)
   {
