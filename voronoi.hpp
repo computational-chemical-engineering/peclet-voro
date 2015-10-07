@@ -359,6 +359,7 @@ namespace vor {
     const vector< Array<real_t, 3> > & getdV() const {return m_dV;}
     const vector< Array<real_t, 3> > & getAreas() const {return m_areas;}
     real_t getVolume() const {return m_vol;}
+    const vector< Array< Array< Array<real_t, 3>, 3 >, 3> > & getOmega() const {return m_omega;}
     bool isConvex() const;
     inline Cell<real_t> & getCell() {return *p_cell;}
   protected:
@@ -2100,6 +2101,7 @@ template<typename real_t>
 	      m_omega[f[i]][j][l][k]  = dVertex * dAtot[k];
 	    m_dV[f[i]][j] += m_omega[f[i]][j][l][l];
 	  }
+	  //	  printf("%d, %d: m_dV = %f\n", f[i], j, m_dV[f[i]][j]); 
 	}
     }
     //    printf("volume: %f\n", m_vol);

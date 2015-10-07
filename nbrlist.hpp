@@ -51,9 +51,11 @@ namespace vor
   class Box
   {
   public:
-    Box(Array<real_t, 3> L);
-    Box(real_t L);
-    inline Array<real_t, 3> & getL() {return m_L;}
+    Box() {}
+    Box(Array<real_t, 3> L): m_L(L) {}
+    Box(real_t L) {setL(L);}
+    inline void setL(Array<real_t, 3> L);
+    inline void setL(real_t L);
     inline const Array<real_t, 3> & getL() const {return m_L;}
     virtual void makeShortestDistance(Array<real_t, 3> & pos) const;
     //    inline void makeShortestDistance(Array<real_t, 3> & pos, real_t shear) const;
@@ -66,6 +68,7 @@ namespace vor
   class BoxLE: public Box<real_t>
   {
   public:
+    BoxLE(): m_shear(0){} 
     BoxLE(Array<real_t, 3> L): Box<real_t>(L), m_shear(0) {}
     BoxLE(real_t L): Box<real_t>(L), m_shear(0) {}
     virtual void makeShortestDistance(Array<real_t, 3> & pos) const;
@@ -331,10 +334,10 @@ namespace vor
   }
 
   template<typename real_t>
-  Box<real_t>::Box(const Array<real_t, 3> L) : m_L(L){}
-  
+  void Box<real_t>::setL(Array<real_t, 3> L){m_L=L;}
+
   template<typename real_t>
-  Box<real_t>::Box(real_t L)
+  void Box<real_t>::setL(real_t L)
   {
     for(uint0 i(0); i<3; ++i)
       m_L[i] = L;
