@@ -12,12 +12,12 @@
 #include "simulation.hpp"
 
 using vor::Array;
-using vor::ExplicitEuler;
+using vor::NavierStokes;
 
 int main()
 {
   typedef double real_t;
-  ExplicitEuler<real_t> sim;
+  NavierStokes<real_t> sim;
   Array<real_t, 3> L;
   L[0] = 1;
   L[1] = 1;
@@ -25,9 +25,11 @@ int main()
   sim.setL(L);
   sim.setPressure(1);
   sim.setMassDensity(1);
-  real_t dt(0.01);
+  sim.setViscosity(0.1);
+  sim.setBulkViscosity(0.1);
+  real_t dt(0.001);
   {
-    int numPart= 1000;
+    int numPart=10000;
     vector<Array<real_t, 3> > pos(numPart);
     vector<Array<real_t, 3> > vel(numPart);
     FILE *pFile;
@@ -83,8 +85,8 @@ int main()
   }
 
   for(int m=0; m<100; ++m){
-    for(int i=0; i< 1; ++i){
-      sim.step(2,dt);
+    for(int i=0; i< 10; ++i){
+      sim.step(10,dt);
       printf("%16.8g %16.8g %16.8g\n", sim.getTime(), sim.getKineticEnergy(), sim.getInternalEnergy());
       //       vector<Array<real_t,3> > & vel(sim.getVelocities());
       // #pragma omp parallel for
@@ -93,6 +95,7 @@ int main()
       // 	  vel[i][k] *= 0.995;
     }
     const vector<Array<real_t,3> > & pos(sim.getPositions());
+    const vector<Array<real_t,3> > & vel(sim.getVelocities());
     //    sim.getCellComplex().getNbrList().getBox().putInBox(pos);
     sim.putInBox();
     char filename[50];

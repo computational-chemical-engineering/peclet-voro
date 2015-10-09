@@ -2031,9 +2031,11 @@ template<typename real_t>
     real_t dx[3];
     for(uint1 i(0); i < numFacets; ++i){
       for(uint0 k(0); k<3; ++k){
-	m_dV[i][k] = 0;
 	m_areas[i][k] =0;
 	xcm[i][k] =0;
+	for(uint0 l(0); l<3; ++l)
+	  for(uint0 m(0); m<3; ++m)
+	    m_omega[i][k][l][m]=0.0;
       }
       volFacet[i] =0;
     }
@@ -2098,12 +2100,16 @@ template<typename real_t>
 	    //vertex vc (direction l) differentiated to position of m_connV[f[i]] (direction j)
 	    real_t dVertex = m_edgeInv[vc][eOpp[i]][l]*(m_connV[f[i]][j]-p_cell->m_vertexPos[vc][j]);
 	    for(uint0 k(0); k<3; ++k) //normal direction
-	      m_omega[f[i]][j][l][k]  = dVertex * dAtot[k];
-	    m_dV[f[i]][j] += m_omega[f[i]][j][l][l];
+	      m_omega[f[i]][j][l][k]  += dVertex * dAtot[k];
 	  }
-	  //	  printf("%d, %d: m_dV = %f\n", f[i], j, m_dV[f[i]][j]); 
 	}
     }
+    for(uint1 i(0); i < numFacets; ++i)
+      for(uint0 k(0); k<3; ++k){
+	m_dV[i][k] = 0;
+	for(uint0 m(0); m<3; ++m)
+	  m_dV[i][k] += m_omega[i][k][m][m];
+      }
     //    printf("volume: %f\n", m_vol);
     //    printf("nbr: %u\n",p_cell->m_nbr[0]);
   }

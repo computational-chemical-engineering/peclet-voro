@@ -12,93 +12,6 @@
 #include "simulation.hpp"
 
 using vor::Array;
-using vor::ExplicitEuler;
-
-namespace vor {
-  
-  template<typename real_t = float>
-  class IntfDyn: public ExplicitEuler<real_t>
-  {
-  public:
-    IntfDyn(): ExplicitEuler<real_t>(), m_intfTension(0) {}
-    void setIntfTension(real_t intfTension) {m_intfTension = intfTension;}
-    real_t getIntfEnergy() const;
-  private:
-    virtual void computeForces();
-    void computeIntfForces();
-    real_t m_intfTension;  
-  };
-
-    
-  template<typename real_t>
-  void IntfDyn<real_t>::computeForces()
-  {
-    this->ExplicitEuler<real_t>::computeForces();
-    computeIntfForces();
-  }
-
-  template<typename real_t>
-  void IntfDyn<real_t>::computeIntfForces()
-  {
-    const uint0 iType=0, jType=1;
-    const vector<uint0> & types(this->m_complex.getTypes());
-    vector<uint2> indxFacets;
-    vector<Array<real_t, 3> > grad;
-#pragma omp parallel for
-    for(size_t i=0; i< types.size(); ++i){
-      if(types[i] == iType){
-	const Cell<real_t> & cell(this->m_complex.getCells()[i]);
-	const CellGeometry<real_t> & geom(this->m_complex.getGeoms()[i]);
-	for(uint1 j=0; j< cell.numFacets(); ++j){
-	  uint2 nbr = cell.getNbr(j);
-	  if(types[nbr] == jType){
-	    const Array<real_t, 3> & areaV(geom.getAreas()[j]);
-	    real_t area= sqrt(areaV[0]*areaV[0]+areaV[1]*areaV[1]+areaV[2]*areaV[2]);
-	    geom.gradFacetAreaSq(j, indxFacets, grad);
-	    for(int m=0; m< indxFacets.size(); ++m){
-	      uint2 nbr2 = cell.getNbr(indxFacets[m]);
-	      for(uint0 k=0; k<3; ++k){
-		real_t df = -m_intfTension*grad[m][k]/(2.0*area);
-#pragma omp atomic
-		this->m_forces[nbr2][k] += df;
-#pragma omp atomic
-		this->m_forces[i][k] -= df;
-	      }
-	    }
-	  }
-	}
-      }
-    }
-  }
-
-  template<typename real_t>
-  real_t IntfDyn<real_t>::getIntfEnergy() const
-  {
-    real_t E = 0;
-    const uint0 iType=0, jType=1;
-    const vector<uint0> & types(this->m_complex.getTypes());
-    vector<uint2> indxFacets;
-    vector<Array<real_t, 3> > grad;
-#pragma omp parallel for reduction(+:E)
-    for(size_t i=0; i< types.size(); ++i){
-      if(types[i] == iType){
-	const Cell<real_t> & cell(this->m_complex.getCells()[i]);
-	const CellGeometry<real_t> & geom(this->m_complex.getGeoms()[i]);
-	for(uint1 j=0; j< cell.numFacets(); ++j){
-	  uint2 nbr = cell.getNbr(j);
-	  if(types[nbr] == jType){
-	    //printf("%d: type %d, %d: type %d\n", i, types[i], nbr,types[nbr]);
-	    const Array<real_t, 3> & areaV(geom.getAreas()[j]);
-	    real_t area= sqrt(areaV[0]*areaV[0]+areaV[1]*areaV[1]+areaV[2]*areaV[2]);
-	    E += m_intfTension*area;
-	  }
-	}
-      }
-    }
-    return E;
-  }
-}
-
 using vor::IntfDyn;
 
 int main()
@@ -193,7 +106,7 @@ int main()
       fprintf(pFile, "%d ",i);
       for(int k=0; k<3; ++k)
 	fprintf(pFile, "%16.8f ", pos[i][k]);
-      fprintf(pFile, "%u3", types[i]);
+      fprintf(pFile, "%3u", types[i]);
       fprintf(pFile, "\n");
     }
     fclose(pFile);

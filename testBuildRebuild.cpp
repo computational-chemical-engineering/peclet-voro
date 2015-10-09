@@ -50,7 +50,7 @@ int main()
   vector<Cell<real_t> > & cells(complex.getCells());
   vector<CellGeometry<real_t> > & geoms(complex.getGeoms());
 
-  vector<Array<real_t, 3> > p(100000);
+  vector<Array<real_t, 3> > p(1000);
   for (int i =0; i< p.size(); ++i){
     for(uint k(0); k<3; ++k)
     p[i][k] = L[k]*pointGen();
@@ -76,6 +76,17 @@ int main()
      printf("summed volume cells: %f\n", vol);
    }
 
+#pragma omp parallel for
+   for(size_t i=0; i< geoms.size(); ++i){
+     geoms[i].computeAll();
+     vector<Array<real_t, 3> > dV1(geoms[i].getdV());
+     geoms[i].diffVolume();
+     const vector<Array<real_t, 3> > & dV2(geoms[i].getdV());
+     for(int j=0; j<dV1.size(); ++j)
+       for(int k=0; k<3; ++k)
+	 printf("%d %d %d dV: %f %f\n", i, j, k, dV1[j][k], dV2[j][k]);
+   }
+   
    real_t fraction = 0.01;
    real_t density = real_t(p.size())/(L[0]*L[1]*L[2]);
    int nRepeat(10);
