@@ -17,7 +17,7 @@ clear('A', 'F');
 A = [];
 
 n = 300;
-F(n) = struct('cdata',[],'olormap',[]);
+F(n) = struct('cdata',[],'colormap',[]);
 
 for k=1:n
     s=strcat('00000',num2str(k));
