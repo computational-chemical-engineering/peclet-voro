@@ -356,12 +356,14 @@ namespace vor {
     Array<Array<real_t, 3>, 3> velocityGradient(const vector<Array<real_t, 3> > & velocity) const;
     Array<real_t, 3> force(const vector<Array<Array<real_t, 3>, 3> > & stresses) const;
     void gradFacetAreaSq(uint1 facetIndx, vector<uint2> & indx, vector<Array<real_t, 3> > & grad) const;
-    const vector< Array<real_t, 3> > & getdV() const {return m_dV;}
-    const vector< Array<real_t, 3> > & getAreas() const {return m_areas;}
+    inline const vector< Array<real_t, 3> > & getdV() const {return m_dV;}
+    inline const vector< Array<real_t, 3> > & getAreas() const {return m_areas;}
     real_t getVolume() const {return m_vol;}
     const vector< Array< Array< Array<real_t, 3>, 3 >, 3> > & getOmega() const {return m_omega;}
     bool isConvex() const;
     inline Cell<real_t> & getCell() {return *p_cell;}
+    inline const vector< Array<real_t, 3> > & getConnVect() const {return m_connV;}
+    inline const vector< real_t > & getConnVectSq() const {return m_rSq;}
   protected:
     Cell<real_t> * p_cell;
     vector< Array<real_t, 3> > m_connV;
@@ -741,7 +743,8 @@ namespace vor {
   }
   
   template<typename real_t>
-  CellMaker<real_t>::CellMaker(): m_freeV(vor::maxNumVertices-1), m_freeF(vor::maxNumFacets-1), m_vertexPos(NULL), m_rSq(NULL), m_vertices(NULL),
+  CellMaker<real_t>::CellMaker(): m_freeV(vor::maxNumVertices-1), m_freeF(vor::maxNumFacets-1),
+						 m_vertexPos(NULL), m_rSq(NULL), m_vertices(NULL),
     m_facets(NULL), m_nbr(NULL), m_renumVWrk(NULL), m_renumFWrk(NULL), m_dist(NULL), m_isKnownDist(NULL), m_distGC(NULL)
   {
     uint1 maxV = vor::maxNumVertices-1;
@@ -1304,7 +1307,7 @@ namespace vor {
   {
     //    printf("entering cutCell\n");
     computeAllDist(p, rSqHalf);
-    if (m_distMax <=0) return false; //no cell cut
+    if (m_distMax <= 0) return false; //no cell cut
     //Find an edge for which the vertices change sign
     //edgeStart will be the edge where the change is largest
     real_t distMax = 0;
@@ -1981,8 +1984,10 @@ template<typename real_t>
       //vertex vc (direction l) differentiated to position of m_connV[f[i]] (direction j)
       for (uint0 j(0); j<3; ++j)
 	for (uint0 i(0); i<3; ++i)
-	  for (uint0 l(0); l<3; ++l)
+	  for (uint0 l(0); l<3; ++l){
 	    dVertex[j][i][l] = m_edgeInv[vc][eOpp[i]][l]*(m_connV[f[i]][j]-p_cell->m_vertexPos[vc][j]);
+	    //	    dVertex[j][i][l] = (fabs(dVertex[j][i][l])>5e0? copysign(0, dVertex[j][i][l]) :dVertex[j][i][l]);
+	  }
       for(uint0 m(0); m<3; ++m){
 	dA[0] = p_cell->m_vertexPos[vc][1]*dv[m][2]-p_cell->m_vertexPos[vc][2]*dv[m][1];
 	dA[1] = p_cell->m_vertexPos[vc][2]*dv[m][0]-p_cell->m_vertexPos[vc][0]*dv[m][2];
@@ -2015,6 +2020,7 @@ template<typename real_t>
   template<typename real_t>
   void CellGeometry<real_t>::computeAll()
   {
+    bool isDetected = false;
     const uint0 numFacets(p_cell->m_numFacets);
     m_vol = 0;
     m_dV.resize(numFacets);
@@ -2069,12 +2075,8 @@ template<typename real_t>
       }
     }
     for(uint1 i(0); i< numFacets; ++i){
-      //printf("xcm[%u]: ", i);
       for(uint0 k(0); k<3; ++k){
 	xcm[i][k] /= volFacet[i];
-	xcm[i][k] *= 2.0;
-	xcm[i][k] += 0.5*m_connV[i][k];
-	xcm[i][k] /= 3.0;
 	m_areas[i][k] *=0.25;
       }
       m_vol += volFacet[i];
@@ -2104,16 +2106,18 @@ template<typename real_t>
 	  }
 	}
     }
-    for(uint1 i(0); i < numFacets; ++i)
+    for(uint1 i(0); i < numFacets; ++i){
       for(uint0 k(0); k<3; ++k){
 	m_dV[i][k] = 0;
 	for(uint0 m(0); m<3; ++m)
 	  m_dV[i][k] += m_omega[i][k][m][m];
       }
+    }
+    
     //    printf("volume: %f\n", m_vol);
     //    printf("nbr: %u\n",p_cell->m_nbr[0]);
   }
- 
+  
   template<typename real_t>
   Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const vector<Array<real_t, 3> > & velocities) const
   {
@@ -2130,13 +2134,17 @@ template<typename real_t>
       for(int j(0); j<3; ++j){
 	real_t dv = v[j] - vCenter[j];
 	  for(int l(0); l<3; ++l)
-	    for(int k(0); k<3; ++k)
+	    for(int k(0); k<3; ++k){
 	      gradV[l][k] += m_omega[i][j][l][k]*dv;
+	      //printf("cell: %d, dv: %f, omega[%d][%d][%d][%d]: %f\n", p_cell->getID(), dv, i,j, l, k, m_omega[i][j][l][k]);
+	    }
       }
     }
     for(int l(0); l<3; ++l)
-      for(int k(0); k<3; ++k)
-	gradV[l][k] /= m_vol;    
+      for(int k(0); k<3; ++k){
+	gradV[l][k] /= m_vol;
+	//	printf("cell %d gradVel[%d][%d]: %f\n", p_cell->getID(), l, k,  gradV[l][k]);
+      }
     return gradV;
   }
 
@@ -2159,7 +2167,7 @@ template<typename real_t>
       for(int j(0); j<3; ++j)
 	for(int l(0); l<3; ++l)
 	  for(int k(0); k<3; ++k)
-	    f[j] -= m_omega[i][j][l][k]*dStress[l][k];
+	    f[j] = -m_omega[i][j][l][k]*dStress[l][k];
     }
     return f;
   }
