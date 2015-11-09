@@ -93,6 +93,25 @@ namespace vor {
     vector<real_t> m_intfTension;
   };
 
+  template<typename real_t = float>
+  class StressModel
+  {
+  public:
+    virtual void update(Array<Array<real_t, 3>, 3> & stress, const Array<Array<real_t, 3>, 3> & gradV) {}
+    virtual void setParameter(char * name, real_t value);
+  };
+
+  template<typename real_t = float>
+  class ViscousStress: public StressModel<real_t>
+  {
+  public:
+    ViscousStress():m_two_third(2.0/3.0) {}
+    virtual void update(Array<Array<real_t, 3>, 3> & stress, const Array<Array<real_t, 3>, 3> & gradV);
+    virtual void setParameter(char * name, real_t value);
+  private:
+    const real_t m_two_third;
+    real_t m_visc, m_bulkVisc;
+  };
   
   template<typename real_t>
   bool Simulation<real_t>::init()
@@ -207,6 +226,7 @@ namespace vor {
   template<typename real_t>
   void ExplicitEuler<real_t>::computeForces()
   {
+#pragma omp parallel for
     for (int i =0; i< this->m_pos.size(); ++i)
        for(uint k(0); k<3; ++k)
  	m_forces[i][k] = 0.0;
@@ -231,103 +251,102 @@ namespace vor {
   }
 
 
-  template<typename real_t>
-  void NavierStokes<real_t>::computeForces()
-  {
-    for (int i =0; i< this->m_pos.size(); ++i)
-      for(uint k(0); k<3; ++k)
- 	this->m_forces[i][k] = 0.0;
-    const real_t two_third = 2.0/3.0;
-    vector<CellGeometry<real_t> > & geoms(this->m_complex.getGeoms());
-    const vector<Cell<real_t> > & cells(this->m_complex.getCells());
-#pragma omp parallel for
-    for(size_t i=0; i< geoms.size(); ++i){
-      //geoms[i].computeAll();
-      geoms[i].diffVolume();
-      real_t press = (this->m_pressEq*this->m_volAvg)/geoms[i].getVolume();
-      const vector< Array<real_t, 3> > & dV(geoms[i].getdV());
-      for(uint0 j=0; j< cells[i].numFacets(); ++j){
-	uint2 nbr = cells[i].getNbr(j);
-	for(uint0 k=0; k<3; ++k){
-	  real_t df = -press*dV[j][k];
-#pragma omp atomic
-	  this->m_forces[nbr][k] -= df;
-#pragma omp atomic
-	  this->m_forces[i][k] += df;
-	}
-	if (nbr > i){
-	  real_t visc, bulkVisc;
-	  visc = (this->m_masses[i]+this->m_masses[nbr])/(this->m_masses[i]/m_visc[i]+this->m_masses[nbr]/m_visc[nbr]);
-	  bulkVisc = (this->m_masses[i]+this->m_masses[nbr])/(this->m_masses[i]/m_bulkVisc[i]+this->m_masses[nbr]/m_bulkVisc[nbr]);
-	  const Array<real_t, 3> & r(geoms[i].getConnVect()[j]);
-	  real_t rSq = geoms[i].getConnVectSq()[j];
-	  const Array<real_t, 3> & area(geoms[i].getAreas()[j]);
-	  real_t inp1=0, inp2=0;
-	  Array<real_t, 3> dv;
-	  for(uint0 k=0; k<3; ++k){
-	    dv[k] = this->m_vel[nbr][k] - this->m_vel[i][k];
-	    inp1 += r[k]*dv[k];
-	    inp2 += r[k]*area[k];
-	  }
-	  real_t c1 = visc*inp2/(3.0*rSq);
-	  real_t c2 = (bulkVisc+visc/3.0)*inp1/(3.0*rSq);
-	  for(uint0 k=0; k<3; ++k){
-	    real_t df;
-	    df = c1*dv[k] + c2*area[k];
-#pragma omp atomic
-	    this->m_forces[nbr][k] -= df;
-#pragma omp atomic
-	    this->m_forces[i][k] += df;
-	  }
-	}
-      }
-    }
-  }
-  
 //   template<typename real_t>
 //   void NavierStokes<real_t>::computeForces()
 //   {
+// #pragma omp parallel for
 //     for (int i =0; i< this->m_pos.size(); ++i)
 //       for(uint k(0); k<3; ++k)
 //  	this->m_forces[i][k] = 0.0;
 //     const real_t two_third = 2.0/3.0;
 //     vector<CellGeometry<real_t> > & geoms(this->m_complex.getGeoms());
+//     const vector<Cell<real_t> > & cells(this->m_complex.getCells());
 // #pragma omp parallel for
 //     for(size_t i=0; i< geoms.size(); ++i){
-//       geoms[i].computeAll();
+//       //geoms[i].computeAll();
 //       geoms[i].diffVolume();
-//       const Cell<real_t> & cell(this->m_complex.getCells()[i]);
-//       Array<Array<real_t, 3>, 3> gradVel(geoms[i].velocityGradient(this->m_vel));
 //       real_t press = (this->m_pressEq*this->m_volAvg)/geoms[i].getVolume();
-//       real_t divVel=0;
-//       Array<Array<real_t, 3>, 3> stress;
-//       compute stress in cell
-//       for(uint0 k=0; k<3; ++k){
-// 	for(uint0 m=0; m<3; ++m){
-// 	  stress[k][m] = m_visc[i]*(gradVel[k][m]+gradVel[m][k]);
-// 	  	  printf("cell %d gradVel[%d][%d]: %f\n", i, k, m,  gradVel[k][m]);
-// 	}
-// 	divVel += gradVel[k][k];
-//       }
-//       for(uint0 k=0; k<3; ++k)
-// 	stress[k][k] += (-press + (m_bulkVisc[i]-two_third*m_visc[i])*divVel);
-//       const vector< Array< Array< Array<real_t, 3>, 3 >, 3> > & omega(geoms[i].getOmega());
-//       for(uint0 j=0; j< cell.numFacets(); ++j){
-// 	uint2 nbr = cell.getNbr(j);
+//       const vector< Array<real_t, 3> > & dV(geoms[i].getdV());
+//       for(uint0 j=0; j< cells[i].numFacets(); ++j){
+// 	uint2 nbr = cells[i].getNbr(j);
 // 	for(uint0 k=0; k<3; ++k){
-// 	  real_t df = 0;
-// 	  for(int l(0); l<3; ++l)
-// 	    for(int m(0); m<3; ++m)
-// 	      df -= omega[j][k][l][m]*stress[l][m];
-// 	  df = geoms[i].getdV()[j][k]*press;
+// 	  real_t df = -press*dV[j][k];
 // #pragma omp atomic
-// 	  this->m_forces[nbr][k] += df;
+// 	  this->m_forces[nbr][k] -= df;
 // #pragma omp atomic
-// 	  this->m_forces[i][k] -= df;
+// 	  this->m_forces[i][k] += df;
+// 	}
+// 	if (nbr > i){
+// 	  real_t visc, bulkVisc;
+// 	  visc = (this->m_masses[i]+this->m_masses[nbr])/(this->m_masses[i]/m_visc[i]+this->m_masses[nbr]/m_visc[nbr]);
+// 	  bulkVisc = (this->m_masses[i]+this->m_masses[nbr])/(this->m_masses[i]/m_bulkVisc[i]+this->m_masses[nbr]/m_bulkVisc[nbr]);
+// 	  const Array<real_t, 3> & r(geoms[i].getConnVect()[j]);
+// 	  real_t rSq = geoms[i].getConnVectSq()[j];
+// 	  const Array<real_t, 3> & area(geoms[i].getAreas()[j]);
+// 	  real_t inp1=0, inp2=0;
+// 	  Array<real_t, 3> dv;
+// 	  for(uint0 k=0; k<3; ++k){
+// 	    dv[k] = this->m_vel[nbr][k] - this->m_vel[i][k];
+// 	    inp1 += r[k]*dv[k];
+// 	    inp2 += r[k]*area[k];
+// 	  }
+// 	  real_t c1 = visc*inp2/(3.0*rSq);
+// 	  real_t c2 = (bulkVisc+visc/3.0)*inp1/(3.0*rSq);
+// 	  for(uint0 k=0; k<3; ++k){
+// 	    real_t df;
+// 	    df = c1*dv[k] + c2*area[k];
+// #pragma omp atomic
+// 	    this->m_forces[nbr][k] -= df;
+// #pragma omp atomic
+// 	    this->m_forces[i][k] += df;
+// 	  }
 // 	}
 //       }
 //     }
 //   }
+  
+  template<typename real_t>
+  void NavierStokes<real_t>::computeForces()
+  {
+#pragma omp parallel for
+    for (int i =0; i< this->m_pos.size(); ++i)
+      for(uint k(0); k<3; ++k)
+ 	this->m_forces[i][k] = 0.0;
+    const real_t two_third = 2.0/3.0;
+    vector<CellGeometry<real_t> > & geoms(this->m_complex.getGeoms());
+#pragma omp parallel for
+    for(size_t i=0; i< geoms.size(); ++i){
+      geoms[i].diffVolume();
+      const Cell<real_t> & cell(this->m_complex.getCells()[i]);
+      Array<Array<real_t, 3>, 3> gradVel(geoms[i].velocityGradient(this->m_vel));
+      real_t press = (this->m_pressEq*this->m_volAvg)/geoms[i].getVolume();
+      real_t divVel=0;
+      Array<Array<real_t, 3>, 3> stress;
+      // compute viscous stress in cell
+      for(uint0 k=0; k<3; ++k){
+	for(uint0 m=0; m<3; ++m){
+	  stress[k][m] = m_visc[i]*(gradVel[k][m]+gradVel[m][k]);
+	}
+	divVel += gradVel[k][k];
+      }
+      for(uint0 k=0; k<3; ++k)
+	stress[k][k] += (m_bulkVisc[i]-two_third*m_visc[i])*divVel;
+      const vector<Array<real_t, 3> > & areas(geoms[i].getAreas());
+      for(uint0 j=0; j< cell.numFacets(); ++j){
+	uint2 nbr = cell.getNbr(j);
+	for(uint0 k=0; k<3; ++k){
+	  real_t df = 0;
+	  for(int m(0); m<3; ++m)
+	    df -= areas[j][m]*stress[m][k];
+	  df += geoms[i].getdV()[j][k]*press;
+#pragma omp atomic
+	  this->m_forces[nbr][k] += df;
+#pragma omp atomic
+	  this->m_forces[i][k] -= df;
+	}
+      }
+    }
+  }
 
   
   template<typename real_t>
@@ -474,6 +493,20 @@ namespace vor {
     return E;
   }
 
+  template<typename real_t>
+  void ViscousStress<real_t>::update(Array<Array<real_t, 3>, 3> & stress, const Array<Array<real_t, 3>, 3> & gradV)
+  {
+    real_t divVel=0;
+    // compute viscous stress in cell
+    for(uint0 k=0; k<3; ++k){
+      for(uint0 m=0; m<3; ++m){
+	stress[k][m] = m_visc*(gradV[k][m]+gradV[m][k]);
+      }
+      divVel += gradV[k][k];
+    }
+    for(uint0 k=0; k<3; ++k)
+      stress[k][k] += (m_bulkVisc-m_two_third*m_visc)*divVel;
+  }
   
 }
 #endif

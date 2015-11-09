@@ -2118,31 +2118,53 @@ template<typename real_t>
     //    printf("nbr: %u\n",p_cell->m_nbr[0]);
   }
   
-  template<typename real_t>
+  // template<typename real_t>
+  // Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const vector<Array<real_t, 3> > & velocities) const
+  // {
+  //   Array<Array<real_t, 3>, 3> gradV; //gradV[i][j] = dv[i]/dx[j]
+  //   Array<real_t, 3> vCenter = velocities[p_cell->m_id];
+  //   // omega[i][j][l][k]
+  //   // neighbor corresponding to facet i differentiated into j-direction
+  //   // l: displacement direction, k: normal direction
+  //   for(int l(0); l<3; ++l)
+  //     for(int k(0); k<3; ++k)
+  // 	gradV[l][k] = 0.0;
+  //   for(int i(0); i< m_omega.size(); ++i){
+  //     Array<real_t, 3> v = velocities[p_cell->m_nbr[i]];
+  //     for(int j(0); j<3; ++j){
+  // 	real_t dv = v[j] - vCenter[j];
+  // 	  for(int l(0); l<3; ++l)
+  // 	    for(int k(0); k<3; ++k){
+  // 	      gradV[l][k] += m_omega[i][j][l][k]*dv;
+  // 	      //printf("cell: %d, dv: %f, omega[%d][%d][%d][%d]: %f\n", p_cell->getID(), dv, i,j, l, k, m_omega[i][j][l][k]);
+  // 	    }
+  //     }
+  //   }
+  //   for(int l(0); l<3; ++l)
+  //     for(int k(0); k<3; ++k){
+  // 	gradV[l][k] /= m_vol;
+  // 	//	printf("cell %d gradVel[%d][%d]: %f\n", p_cell->getID(), l, k,  gradV[l][k]);
+  //     }
+  //   return gradV;
+  // }
+
+    template<typename real_t>
   Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const vector<Array<real_t, 3> > & velocities) const
   {
     Array<Array<real_t, 3>, 3> gradV; //gradV[i][j] = dv[i]/dx[j]
-    Array<real_t, 3> vCenter = velocities[p_cell->m_id];
-    // omega[i][j][l][k]
-    // neighbor corresponding to facet i differentiated into j-direction
-    // l: displacement direction, k: normal direction
     for(int l(0); l<3; ++l)
       for(int k(0); k<3; ++k)
 	gradV[l][k] = 0.0;
-    for(int i(0); i< m_omega.size(); ++i){
+    for(int i(0); i< m_areas.size(); ++i){
       Array<real_t, 3> v = velocities[p_cell->m_nbr[i]];
-      for(int j(0); j<3; ++j){
-	real_t dv = v[j] - vCenter[j];
-	  for(int l(0); l<3; ++l)
-	    for(int k(0); k<3; ++k){
-	      gradV[l][k] += m_omega[i][j][l][k]*dv;
-	      //printf("cell: %d, dv: %f, omega[%d][%d][%d][%d]: %f\n", p_cell->getID(), dv, i,j, l, k, m_omega[i][j][l][k]);
-	    }
-      }
+      for(int j(0); j<3; ++j)
+	for(int k(0); k<3; ++k)
+	  gradV[j][k] += m_areas[i][j]*v[k];
     }
-    for(int l(0); l<3; ++l)
+    real_t factor = 0.5/m_vol;
+    for(int j(0); j<3; ++j)
       for(int k(0); k<3; ++k){
-	gradV[l][k] /= m_vol;
+	gradV[j][k] *= factor;
 	//	printf("cell %d gradVel[%d][%d]: %f\n", p_cell->getID(), l, k,  gradV[l][k]);
       }
     return gradV;
