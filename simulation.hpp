@@ -93,25 +93,25 @@ namespace vor {
     vector<real_t> m_intfTension;
   };
 
-  template<typename real_t = float>
-  class StressModel
-  {
-  public:
-    virtual void update(Array<Array<real_t, 3>, 3> & stress, const Array<Array<real_t, 3>, 3> & gradV) {}
-    virtual void setParameter(char * name, real_t value);
-  };
+  // template<typename real_t = float>
+  // class StressModel
+  // {
+  // public:
+  //   virtual void update(Array<Array<real_t, 3>, 3> & stress, const Array<Array<real_t, 3>, 3> & gradV) {}
+  //   virtual void setParameter(char * name, real_t value);
+  // };
 
-  template<typename real_t = float>
-  class ViscousStress: public StressModel<real_t>
-  {
-  public:
-    ViscousStress():m_two_third(2.0/3.0) {}
-    virtual void update(Array<Array<real_t, 3>, 3> & stress, const Array<Array<real_t, 3>, 3> & gradV);
-    virtual void setParameter(char * name, real_t value);
-  private:
-    const real_t m_two_third;
-    real_t m_visc, m_bulkVisc;
-  };
+  // template<typename real_t = float>
+  // class ViscousStress: public StressModel<real_t>
+  // {
+  // public:
+  //   ViscousStress():m_two_third(2.0/3.0) {}
+  //   virtual void update(Array<Array<real_t, 3>, 3> & stress, const Array<Array<real_t, 3>, 3> & gradV);
+  //   virtual void setParameter(char * name, real_t value);
+  // private:
+  //   const real_t m_two_third;
+  //   real_t m_visc, m_bulkVisc;
+  // };
   
   template<typename real_t>
   bool Simulation<real_t>::init()
@@ -339,6 +339,7 @@ namespace vor {
 	  for(int m(0); m<3; ++m)
 	    df -= areas[j][m]*stress[m][k];
 	  df += geoms[i].getdV()[j][k]*press;
+	  df *= 0.5;
 #pragma omp atomic
 	  this->m_forces[nbr][k] += df;
 #pragma omp atomic
@@ -493,20 +494,20 @@ namespace vor {
     return E;
   }
 
-  template<typename real_t>
-  void ViscousStress<real_t>::update(Array<Array<real_t, 3>, 3> & stress, const Array<Array<real_t, 3>, 3> & gradV)
-  {
-    real_t divVel=0;
-    // compute viscous stress in cell
-    for(uint0 k=0; k<3; ++k){
-      for(uint0 m=0; m<3; ++m){
-	stress[k][m] = m_visc*(gradV[k][m]+gradV[m][k]);
-      }
-      divVel += gradV[k][k];
-    }
-    for(uint0 k=0; k<3; ++k)
-      stress[k][k] += (m_bulkVisc-m_two_third*m_visc)*divVel;
-  }
+  // template<typename real_t>
+  // void ViscousStress<real_t>::update(Array<Array<real_t, 3>, 3> & stress, const Array<Array<real_t, 3>, 3> & gradV)
+  // {
+  //   real_t divVel=0;
+  //   // compute viscous stress in cell
+  //   for(uint0 k=0; k<3; ++k){
+  //     for(uint0 m=0; m<3; ++m){
+  // 	stress[k][m] = m_visc*(gradV[k][m]+gradV[m][k]);
+  //     }
+  //     divVel += gradV[k][k];
+  //   }
+  //   for(uint0 k=0; k<3; ++k)
+  //     stress[k][k] += (m_bulkVisc-m_two_third*m_visc)*divVel;
+  // }
   
 }
 #endif
