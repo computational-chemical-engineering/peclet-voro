@@ -354,11 +354,15 @@ namespace vor {
     void diffVolume();
     void computeAll();
     Array<Array<real_t, 3>, 3> velocityGradient(const vector<Array<real_t, 3> > & velocity) const;
+    void getDelaunayNbrs(uint1 iVertex, Array<uint2, 3> & nbrs) const;
+    void computeDelaunayForces(uint1 iVertex, const Array<Array<real_t, 3>, 3> & stress, Array<Array<real_t, 3>, 3> & forces);
+    Array<Array<real_t, 3>, 3> velocityGradientDelaunay(uint1 iVertex, const Array<uint2, 3> & nbrs, const vector<Array<real_t, 3> > & velocities) const;
     Array<real_t, 3> force(const vector<Array<Array<real_t, 3>, 3> > & stresses) const;
     void gradFacetAreaSq(uint1 facetIndx, vector<uint2> & indx, vector<Array<real_t, 3> > & grad) const;
     inline const vector< Array<real_t, 3> > & getdV() const {return m_dV;}
     inline const vector< Array<real_t, 3> > & getAreas() const {return m_areas;}
     real_t getVolume() const {return m_vol;}
+    const vector<real_t> & getVolumeDelaunay() const {return m_volDelaunay;}
     const vector< Array< Array< Array<real_t, 3>, 3 >, 3> > & getOmega() const {return m_omega;}
     bool isConvex() const;
     inline Cell<real_t> & getCell() {return *p_cell;}
@@ -369,6 +373,7 @@ namespace vor {
     vector< Array<real_t, 3> > m_connV;
     vector<real_t> m_rSq;
     vector< Array< Array<real_t, 3>, 3 > > m_edgeInv;
+    vector< real_t> m_volDelaunay;
     vector< Array<real_t, 3> > m_areas;
     real_t m_vol;
     // omega[i][j][l][k]
@@ -1803,6 +1808,7 @@ template<typename real_t>
     this->m_connV = rhs.m_connV;
     this->m_rSq = rhs.m_rSq;
     this->m_edgeInv = rhs.m_edgeInv;
+    this->m_volDelaunay = rhs.m_volDelaunay;
     this->m_areas = rhs.m_areas;
     this->m_vol = rhs.m_vol;
     this->m_omega = rhs.m_omega;
@@ -1827,6 +1833,7 @@ template<typename real_t>
   void CellGeometry<real_t>::computeEdgeInv()
   {
     m_edgeInv.resize(p_cell->m_numVertices);
+    m_volDelaunay.resize(p_cell->m_numVertices);
     for (uint1 i(0); i< p_cell->m_numVertices; ++i)
       for (uint0 k(0); k<3; ++k){
 	uint1 label0(p_cell->m_vertices[i][k]);
@@ -1851,6 +1858,7 @@ template<typename real_t>
       real_t vol(m_connV[indxF][0]*m_edgeInv[i][0][0]+
 		 m_connV[indxF][1]*m_edgeInv[i][0][1]+
 		 m_connV[indxF][2]*m_edgeInv[i][0][2]);
+      m_volDelaunay[i] = vol/(-6.0);
       for(uint0 m(0); m<3; ++m)
 	for(uint0 k(0); k<3; ++k)
 	  m_edgeInv[i][m][k] /= vol;
@@ -2148,7 +2156,7 @@ template<typename real_t>
   //   return gradV;
   // }
 
-    template<typename real_t>
+  template<typename real_t>
   Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const vector<Array<real_t, 3> > & velocities) const
   {
     Array<Array<real_t, 3>, 3> gradV; //gradV[i][j] = dv[i]/dx[j]
@@ -2170,6 +2178,49 @@ template<typename real_t>
     return gradV;
   }
 
+  template<typename real_t>
+  void CellGeometry<real_t>::getDelaunayNbrs(uint1 iVertex, Array<uint2, 3> & nbrs) const
+  {
+    Array < uint1, 3 > indxF;
+    indxF[0] = getFacet(p_cell->m_vertices[iVertex][2]);
+    indxF[1] = getFacet(p_cell->m_vertices[iVertex][0]);
+    indxF[2] = getFacet(p_cell->m_vertices[iVertex][1]);
+    for(uint0 m(0); m<3; ++m)
+      nbrs[m]= p_cell->getNbrs()[indxF[m]];
+  }
+  
+  template<typename real_t>
+  Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradientDelaunay(uint1 iVertex, const Array<uint2, 3> & nbrs, const vector<Array<real_t, 3> > & velocities) const
+  {
+    Array<Array<real_t, 3>, 3> gradV; //gradV[i][j] = dv[i]/dx[j]
+    for(int l(0); l<3; ++l)
+      for(int k(0); k<3; ++k)
+	gradV[l][k] = 0.0;
+    Array<real_t, 3> v0 = velocities[p_cell->getID()];
+    for(uint0 m(0); m<3; ++m){ 
+      Array<real_t, 3> v = velocities[nbrs[m]];
+      Array<real_t, 3> dv;
+      for(uint0 k(0); k<3; ++k)
+	dv[k] = v[k]-v0[k];
+      for(uint0 l(0); l<3; ++l)
+	for(uint0 k(0); k<3; ++k)
+	  gradV[l][k] += m_edgeInv[iVertex][m][l]*dv[k];
+    }
+    return gradV;
+  }
+
+  template<typename real_t>
+  void CellGeometry<real_t>::computeDelaunayForces(uint1 iVertex, const Array<Array<real_t, 3>, 3> & stress, Array<Array<real_t, 3>, 3> & forces)
+  {
+    for(uint0 m(0); m<3; ++m)
+      for(uint0 k(0); k<3; ++k){
+	forces[m][k] = 0;
+	for(uint0 l(0); l<3; ++l)
+	  forces[m][k]+=stress[k][l]*m_edgeInv[iVertex][m][l];
+	forces[m][k] *= -m_volDelaunay[iVertex];
+      }
+  }
+  
   template<typename real_t>
   Array<real_t, 3> CellGeometry<real_t>::force(const vector<Array<Array<real_t, 3>, 3> > & stresses) const
   {
