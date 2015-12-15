@@ -2017,8 +2017,9 @@ template<typename real_t>
       }
     }  
     for(uint1 i(0); i<p_cell->m_numFacets; ++i)
-      for(uint0 k(0); k<3; ++k)
+      for(uint0 k(0); k<3; ++k){
 	m_vol += m_areas[i][k]*m_connV[i][k];
+      }
     m_vol /= 6.0;
     //    printf("connecting vector: %f %f %f\n", m_connV[0][0], m_connV[0][1], m_connV[0][2]);
     //printf("volume: %f %f\n", m_vol, vol);
@@ -2357,8 +2358,8 @@ template<typename real_t>
       m_geom[i] = m_cells[i];
       m_geom[i].computeConnectingVectors(p, m_nbrList.getBox());
       m_geom[i].computeEdgeInv();
+      m_geom[i].diffVolume();
       m_updaters[i] = m_geom[i];
-      m_updaters[i].reset();
     }
     m_hasChanged.resize(p.size());
     m_isBuild = true;
@@ -2429,9 +2430,11 @@ template<typename real_t>
     repair(p);
 #pragma omp for
     for(size_t i=0; i< m_geom.size(); ++i){
-      if (!m_hasChanged[i]) continue;
-      m_geom[i].computeConnectingVectors(p, box);
-      m_geom[i].computeEdgeInv();
+      if (m_hasChanged[i]){
+	m_geom[i].computeConnectingVectors(p, box);
+	m_geom[i].computeEdgeInv();
+      }
+      m_geom[i].diffVolume();
     }
   }
 
