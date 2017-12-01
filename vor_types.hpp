@@ -65,22 +65,45 @@ namespace vor {
   };
 
   template<typename real_t>
-  class CoordMatrixEntry
+  class MatrixEntry
   {
-    uint2 i,j;
-    real_t value;
+  public:
+    inline size_t & col() { return m_col;}
+    inline size_t col() const { return m_col;}
+    inline size_t & row() { return m_row;}
+    inline size_t row() const { return m_row;}
+    inline real_t & value() { return m_value;}
+    inline real_t value() const { return m_value;}
+  private:
+    size_t m_col,m_row;
+    real_t m_value;
   };
 
   template<typename real_t>
-  class CompareCoordMatrixEntry
+  class CompareMatrixEntryRow
   {
   public:
-    inline bool operator()(const CoordMatrixEntry<real_t> & a, const CoordMatrixEntry<real_t> & b) const
+    inline bool operator()(const MatrixEntry<real_t> & a, const MatrixEntry<real_t> & b) const
     {
-      return (a.i==b.i ? a.j < b.j : a.i < b.i);
+      return (a.row()==b.row() ? a.col() < b.col() : a.row() < b.row());
     }
   };
 
+  template<typename real_t>
+  class CompressedRowStorage
+  {
+  public:
+    CompressedRowStorage(size_t numRows, size_t numNZ): m_numRows(numRows), m_row_ptr(numRows+1,0) {m_values.reserve(numNZ); m_row_ptr.reserve(numNZ);}
+    vector<real_t> & getValues() {return m_value;}
+    vector<size_t> & getColInd() {return m_colInd;}
+    vector<size_t> & getRowPtr() {return m_rowPtr;}
+  private:
+    vector<real_t> m_values;
+    vector<size_t> m_colInd;
+    vector<size_t> m_rowPtr;
+  };
+
+  
   class ComparePairFirst
   {
   public:

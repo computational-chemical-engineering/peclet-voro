@@ -86,6 +86,15 @@ namespace vor {
   };
 
   template<typename real_t = float>
+  class Incompressible: public NavierStokes<real_t>
+  {
+  public:
+    Incompressible():NavierStokes<real_t>(){}
+    void buildConstraintMatrix();
+  };
+
+  
+  template<typename real_t = float>
   class IntfDyn: public NavierStokes<real_t>
   {
   public:
@@ -276,8 +285,7 @@ namespace vor {
     if (!Simulation<real_t>::init())
       return false;
     if (m_pressEq==0){
-      fprintf(stderr,"pressure is not set\n");
-      return false;
+      fprintf(stderr,"pressure is not set, assuming zero pressure\n");
     }
     m_forces.resize(this->m_pos.size());
     this->computeForces();
@@ -591,8 +599,7 @@ namespace vor {
     if (!Simulation<real_t>::init())
       return false;
     if (this->m_pressEq==0){
-      fprintf(stderr,"equilibrium pressure is not set\n");
-      return false;
+      fprintf(stderr,"pressure is not set, assuming zero pressure\n");
     }
     size_t numPart = this->m_pos.size();
     this->m_forces.resize(numPart);
@@ -727,6 +734,114 @@ namespace vor {
     return E;
   }
 
+
+  template<typename real_t>
+  void Incompressible<real_t>::buildConstraintMatrix()
+  {
+    clock_t start;
+    real_t duration;
+    start = clock();
+    //find next nearest neighbors
+    vector<Cell<real_t> > & cells(this->m_complex.getCells());
+    for(size_t i=0; i<cells.size(); ++i){
+      vector<uint2> nbrs;
+      nbrs.reserve(300);
+      for(size_t j=0; j < cells[i].numFacets(); ++j){
+	uint2 nbr = cells[i].getNbr(j);
+	nbrs.push_back(nbr);
+	for(size_t k=0; k < cells[nbr].numFacets(); ++k)
+	  nbrs.push_back(cells[nbr].getNbr(k));
+      }
+      std::sort(nbrs.begin(), nbrs.end());
+      size_t iNew =0;
+      for (size_t iOld = 0; iOld < nbrs.size(); ++iNew){
+	nbrs[iNew] = nbrs[iOld];
+	++iOld;
+	for(; iOld < nbrs.size() && nbrs[iOld]== nbrs[iNew]; ++iOld){}
+      }
+      nbrs.resize(iNew+1);
+    }
+    duration = real_t( clock() - start );
+    printf("sparsity pattern in %f seconds\n", duration/(real_t(CLOCKS_PER_SEC)));
+	
+    const vector<CellGeometry<real_t> > & geoms(this->m_complex.getGeoms());
+    vector<MatrixEntry<real_t> > matdV;
+  
+  start = clock();
+    matdV.reserve(60*geoms.size());
+    for(size_t i=0; i< geoms.size(); ++i){
+      MatrixEntry<real_t> triplet;
+      const vector< Array<real_t, 3> > & dV(geoms[i].getdV());
+      const Cell<real_t> & cell(this->m_complex.getCells()[i]);
+      real_t dVii[3];
+      for(uint0 k=0; k<3; ++k) dVii[k]=0;
+      for(uint0 j=0; j< cell.numFacets(); ++j){
+	for(uint0 k=0; k<3; ++k){
+	  dVii[k] -= dV[j][k];
+	  triplet.col() = i;
+	  triplet.row() = (3*cell.getNbr(j)) + k;
+	  triplet.value() = dV[j][k];
+	  matdV.push_back(triplet);
+	}
+      }
+      for(uint0 k=0; k<3; ++k){
+	triplet.col() = i;
+	triplet.row() = 3*i+k;
+	triplet.value() = dVii[k];
+      }
+      matdV.push_back(triplet);
+    }
+    duration = real_t( clock() - start );
+    printf("collecting in %f seconds\n", duration/(real_t(CLOCKS_PER_SEC)));
+  start = clock();
+    //    printf("matdV size per cell: %lu\n", matdV.size()/geoms.size());
+    std::sort(matdV.begin(), matdV.end(), CompareMatrixEntryRow<real_t>());
+    duration = real_t( clock() - start );
+    printf("sort 1 in %f seconds\n", duration/(real_t(CLOCKS_PER_SEC)));
+
+    start = clock();
+    vector<MatrixEntry<real_t> > matConstr;
+    matConstr.reserve(450*geoms.size());
+    size_t iEnd=0;
+    while (iEnd < matdV.size()){
+      size_t row = matdV[iEnd].row();
+      size_t iCell = row/3;
+      size_t iBegin;
+      for(iBegin = iEnd; (matdV[iBegin].row() == matdV[iEnd].row()) && (iEnd < matdV.size()); ++iEnd){}
+      //printf("\n");
+      for(size_t i = iBegin; i< iEnd; ++i)
+	for(size_t j = iBegin; j< iEnd && matdV[j].col() <= matdV[i].col(); ++j){ //only construct lower triangular part of matrix
+	  //	  printf("i j: %lu %lu\n",i,j);
+	  MatrixEntry<real_t> triplet;
+	  triplet.col() = matdV[i].col();
+	  triplet.row() = matdV[j].col();
+	  triplet.value() = matdV[i].value()*matdV[j].value()/this->m_masses[iCell];
+	  matConstr.push_back(triplet);
+	}
+    }
+        duration = real_t( clock() - start );
+    printf("multiply in %f seconds\n", duration/(real_t(CLOCKS_PER_SEC)));
+
+    //    printf("matConstr size per cell: %lu\n", matConstr.size()/geoms.size());
+  start = clock();
+    std::sort(matConstr.begin(), matConstr.end(), CompareMatrixEntryRow<real_t>());
+    duration = real_t( clock() - start );
+    printf("sort 2 %f seconds\n", duration/(real_t(CLOCKS_PER_SEC)));
+  start = clock();
+    size_t iNew =0;
+    for (size_t iOld = 0; iOld < matConstr.size(); ++iNew){
+      matConstr[iNew] = matConstr[iOld];
+      ++iOld;
+      for(; iOld < matConstr.size() && matConstr[iOld].row()== matConstr[iNew].row() && matConstr[iOld].col()==matConstr[iNew].col(); ++iOld)
+	matConstr[iNew].value() += matConstr[iOld].value();
+    }
+    matConstr.resize(iNew+1);
+    duration = real_t( clock() - start );
+    printf("summation in %f seconds\n", duration/(real_t(CLOCKS_PER_SEC)));
+
+    printf("matConstr size per cell (after summation): %lu\n", matConstr.size()/geoms.size());
+  }
+  
   // template<typename real_t>
   // void ViscousStress<real_t>::update(Array<Array<real_t, 3>, 3> & stress, const Array<Array<real_t, 3>, 3> & gradV)
   // {
