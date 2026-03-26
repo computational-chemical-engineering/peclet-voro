@@ -45,17 +45,26 @@ template <typename real_t = float>
 class Box {
  public:
   Box() {}
-  Box(Array<real_t, 3> L) : m_L(L) {}
+  Box(Array<real_t, 3> L) : m_L(L) { computeInvL(); }
   Box(real_t L) { setL(L); }
   inline void setL(Array<real_t, 3> L);
   inline void setL(real_t L);
   inline const Array<real_t, 3>& getL() const { return m_L; }
+  /// Return precomputed 1/L[k] for each dimension.
+  inline const Array<real_t, 3>& getInvL() const { return m_invL; }
   virtual void makeShortestDistance(Array<real_t, 3>& pos) const;
   //    inline void makeShortestDistance(Array<real_t, 3> & pos, real_t shear) const;
   inline void putInBox(std::vector<Array<real_t, 3> >& pos) const;
 
  protected:
   Array<real_t, 3> m_L;
+  Array<real_t, 3> m_invL;  ///< precomputed 1/L[k] — avoids division in hot paths
+
+ private:
+  inline void computeInvL() {
+    for (uint0 k = 0; k < 3; ++k)
+      m_invL[k] = real_t(1) / m_L[k];
+  }
 };
 
 template <typename real_t = float>
@@ -329,19 +338,23 @@ void Grid<UInt>::getDirectNbrs(UInt indxCell, std::vector<UInt>& nbrs) const {
 template <typename real_t>
 void Box<real_t>::setL(Array<real_t, 3> L) {
   m_L = L;
+  for (uint0 k = 0; k < 3; ++k)
+    m_invL[k] = real_t(1) / m_L[k];
 }
 
 template <typename real_t>
 void Box<real_t>::setL(real_t L) {
-  for (uint0 i(0); i < 3; ++i)
+  for (uint0 i(0); i < 3; ++i) {
     m_L[i] = L;
+    m_invL[i] = real_t(1) / L;
+  }
 }
 
 template <typename real_t>
 void Box<real_t>::makeShortestDistance(Array<real_t, 3>& pos) const {
   for (uint1 k(0); k < 3; ++k) {
-    real_t r(pos[k] / m_L[k]);
-    r -= floor(r + 0.5);
+    real_t r(pos[k] * m_invL[k]);  // multiply by precomputed 1/L
+    r -= floor(r + real_t(0.5));
     pos[k] = r * m_L[k];
   }
 }
@@ -351,7 +364,7 @@ void Box<real_t>::putInBox(std::vector<Array<real_t, 3> >& pos) const {
 #pragma omp parallel for
   for (size_t i = 0; i < pos.size(); ++i)
     for (uint1 k(0); k < 3; ++k) {
-      real_t r(pos[i][k] / m_L[k]);
+      real_t r(pos[i][k] * m_invL[k]);
       r -= floor(r);
       pos[i][k] = r * m_L[k];
     }
@@ -359,19 +372,21 @@ void Box<real_t>::putInBox(std::vector<Array<real_t, 3> >& pos) const {
 
 template <typename real_t>
 void BoxLE<real_t>::makeShortestDistance(Array<real_t, 3>& pos) const {
-  real_t fl1(floor(pos[1] / this->m_L[1] + 0.5));
+  real_t fl1(floor(pos[1] * this->m_invL[1] + real_t(0.5)));
   real_t pos0(pos[0] - fl1 * (m_shear * this->m_L[1]));
-  pos[0] = this->m_L[0] * (pos0 - floor(pos0 / this->m_L[0] + 0.5));
-  pos[1] = this->m_L[1] * (pos[1] - fl1);
-  pos[2] = this->m_L[2] * (pos[2] - floor(pos[2] / this->m_L[2] + 0.5));
+  pos[0] = this->m_L[0] * (pos0 * this->m_invL[0] - floor(pos0 * this->m_invL[0] + real_t(0.5)));
+  pos[1] = this->m_L[1] * (pos[1] * this->m_invL[1] - fl1);
+  pos[2] =
+      this->m_L[2] * (pos[2] * this->m_invL[2] - floor(pos[2] * this->m_invL[2] + real_t(0.5)));
 }
 
 template <typename UInt, typename real_t>
 UInt NbrList<UInt, real_t>::computeCellIndex(const Array<real_t, 3>& pos) const {
   UInt indx(0);
   const Array<real_t, 3>& L(p_box->getL());
+  const Array<real_t, 3>& invL(p_box->getInvL());
   for (uint0 k(0); k < 3; ++k) {
-    real_t r(pos[k] / L[k]);
+    real_t r(pos[k] * invL[k]);
     r -= floor(r);
     indx *= static_cast<UInt>(m_grid.getN()[k]);
     indx += static_cast<UInt>(floor(r * m_grid.getN()[k]));
@@ -384,13 +399,14 @@ void NbrList<UInt, real_t>::getGridNbrs(const Array<real_t, 3>& pos,
                                         std::vector<UInt>& nbrs) const {
   Array<Indx, 2> indcs;
   const Array<real_t, 3>& L(p_box->getL());
+  const Array<real_t, 3>& invL(p_box->getInvL());
   for (uint0 k(0); k < 3; ++k) {
-    real_t r(pos[k] / L[k]);
+    real_t r(pos[k] * invL[k]);
     r -= floor(r);
     real_t indxR(r * m_grid.getN()[k]);
     real_t indxRFl = floor(indxR);
     indcs[0][k] = static_cast<UInt>(indxRFl);
-    if (indxR < indxRFl + 0.5)
+    if (indxR < indxRFl + real_t(0.5))
       indcs[1][k] = (indcs[0][k] == 0 ? m_grid.getN()[k] - 1 : indcs[0][k] - 1);
     else
       indcs[1][k] = ((indcs[0][k] + 1) == m_grid.getN()[k] ? 0 : indcs[0][k] + 1);
@@ -433,6 +449,7 @@ template <typename UInt, typename real_t>
 void NbrList<UInt, real_t>::setup(const std::vector<Array<real_t, 3> >& pos, real_t rcut) {
   Indx n;
   const Array<real_t, 3>& L(p_box->getL());
+  const Array<real_t, 3>& invL(p_box->getInvL());
   for (uint0 i(0); i < 3; ++i) {
     n[i] = static_cast<uint2>(floor(L[i] / rcut));
   }
@@ -461,7 +478,7 @@ void NbrList<UInt, real_t>::setup(const std::vector<Array<real_t, 3> >& pos, rea
     m_cell2Pos[head].id = i;
     m_cell2Pos[head].pos = pos[i];
     for (uint0 k(0); k < 3; ++k)
-      m_cell2Pos[head].pos[k] -= L[k] * floor(m_cell2Pos[head].pos[k] / L[k]);
+      m_cell2Pos[head].pos[k] -= L[k] * floor(m_cell2Pos[head].pos[k] * invL[k]);
   }
   // #pragma omp parallel for
   //     for(UInt i=0; i < m_headCell.size()-1; ++i){
