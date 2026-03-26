@@ -17,8 +17,8 @@
  * \image html "edges.png"
  * \image latex "edges.png" "Numbering of edges" width=2cm
  * 
- * Each (directional) edge is codfied using a label that combined three integer id's namely: label = makelabel(facet_id, vertex_id, edge_id)
- * Here the vertex_id is the id of the vertec the edge starts from.
+ * Each (directional) edge is codified using a label that combined three integer id's namely: label = makelabel(facet_id, vertex_id, edge_id)
+ * Here the vertex_id is the id of the vertex the edge starts from.
  * The edge_is equals 0, 1, 2 for either of the three edges starting from the specified edge.
  * The facet_id is the id of the facet that is on the left-hand side of the edge. (If you look at it from outside of the cell.)
  * In the figure below we show an example of a cell.
