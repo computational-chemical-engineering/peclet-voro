@@ -20,7 +20,6 @@ using vor::Array;
 using vor::Box;
 using vor::BoxLE;
 using vor::Cell;
-using vor::CellView;
 using vor::CellComplex;
 using vor::CellGeometry;
 using vor::NbrsToFacets;
@@ -44,7 +43,7 @@ int main() {
   L[2] = 1;
   BoxLE<real_t> box(L);
   CellComplex<real_t> complex(&box);
-  vector<CellView<real_t> >& cells(complex.getCells());
+  vector<Cell<real_t> >& cells(complex.getCells());
   vector<CellGeometry<real_t> >& geoms(complex.getGeoms());
 
   vector<Array<real_t, 3> > p(10000);

@@ -1,6 +1,7 @@
 # ── CMake build directories ───────────────────────────────────────────────────
 build/
-build-*/
+build*/
+build_*/
 cmake-build-*/
 CMakeCache.txt
 CMakeFiles/

@@ -10,7 +10,6 @@
 
 #pragma once
 
-#include <algorithm>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -311,81 +310,5 @@ void VisitedIndx<UInt>::reset() {
   }
   m_visitedIndx.clear();
 }
-
-/// Make a half-edge label encoding facet, vertex and edge indices.
-inline uint1 makeLabel(uint1 facet, uint1 vertex, uint1 edge) {
-  return static_cast<uint1>((facet << shiftFacet) | (vertex << 2) | edge);
-}
-/// Extract the facet index from a half-edge label.
-inline uint1 getFacet(uint1 label) { return static_cast<uint1>((label & maskFacet) >> shiftFacet); }
-/// Extract the vertex index from a half-edge label.
-inline uint1 getVertex(uint1 label) { return static_cast<uint1>((label & maskVertex) >> 2); }
-/// Extract the edge index (0-2) from a half-edge label.
-inline uint1 getEdge(uint1 label) { return static_cast<uint1>(label & maskEdge); }
-
-/**
- * @brief Dense slot allocator replacing IndxList for CellMaker vertex/facet tracking.
- * Stores active slot indices in a dense prefix of a fixed-size array.
- * - alloc(): O(1) – returns slots[numUsed++]
- * - free(i): O(numUsed) scan then swap-to-back, O(1) amortized
- * - Iteration: sequential scan of slots[0..numUsed-1]
- * - sort(): sorts active prefix for renumber() which requires ascending order
- *
- * @tparam maxSlots Maximum number of slots (should equal maxNumVertices-1 or maxNumFacets-1).
- */
-template <uint8_t maxSlots>
-class SlotAllocator {
- public:
-  SlotAllocator() : m_numUsed(0) {
-    for (uint8_t i = 0; i < maxSlots; ++i) m_slots[i] = i;
-  }
-
-  /// Reset: first n slots are in use (0..n-1), rest are free.
-  void reset(uint8_t n) {
-    m_numUsed = n;
-    for (uint8_t i = 0; i < maxSlots; ++i) m_slots[i] = i;
-  }
-
-  /// Allocate a free slot (returns the slot index).
-  inline uint8_t alloc() { return m_slots[m_numUsed++]; }
-
-  /// Free slot at index idx (O(numUsed) linear scan + swap-to-back).
-  inline void free(uint8_t idx) {
-    for (uint8_t i = 0; i < m_numUsed; ++i) {
-      if (m_slots[i] == idx) {
-        --m_numUsed;
-        m_slots[i] = m_slots[m_numUsed];
-        m_slots[m_numUsed] = idx;
-        return;
-      }
-    }
-  }
-
-  /// Check if slot idx is free (not in active prefix).
-  inline bool isFree(uint8_t idx) const {
-    for (uint8_t i = 0; i < m_numUsed; ++i)
-      if (m_slots[i] == idx) return false;
-    return true;
-  }
-
-  /// Number of active slots.
-  inline uint8_t numUsed() const { return m_numUsed; }
-
-  /// Access i-th active slot (0-based).
-  inline uint8_t operator[](uint8_t i) const { return m_slots[i]; }
-
-  /// Sentinel for end-of-iteration (one past last active slot).
-  inline uint8_t endIndx() const { return maxSlots; }
-
-  /// First active slot (for API compatibility with IndxList).
-  inline uint8_t beginIndx() const { return (m_numUsed > 0 ? m_slots[0] : maxSlots); }
-
-  /// Sort active slots in ascending order (required before renumber()).
-  inline void sort() { std::sort(m_slots, m_slots + m_numUsed); }
-
- private:
-  uint8_t m_slots[maxSlots];
-  uint8_t m_numUsed;
-};
 
 }  // namespace vor
