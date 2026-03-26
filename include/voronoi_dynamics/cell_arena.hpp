@@ -108,7 +108,7 @@ class CellView {
   // ── Identity ────────────────────────────────────────────────────────────────
 
   inline uint2 getID() const { return static_cast<uint2>(m_arena->cellId[m_cellIdx]); }
-  inline void setId(uint2 id) { m_arena->cellId[m_cellIdx] = id; }
+  inline void setID(uint2 id) { m_arena->cellId[m_cellIdx] = id; }
 
   // ── Size ────────────────────────────────────────────────────────────────────
 
@@ -148,7 +148,7 @@ class CellView {
 
   inline bool hasNoNbr() const {
     for (uint0 i = 0; i < numFacets(); ++i)
-      if (facetLabel(i) != noNbr && facetNbr(i) == noNbr) return true;
+      if (facetNbr(i) == noNbr) return true;
     return false;
   }
 

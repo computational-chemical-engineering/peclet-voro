@@ -335,9 +335,9 @@ void Box<real_t>::setL(Array<real_t, 3> L) {
 
 template <typename real_t>
 void Box<real_t>::setL(real_t L) {
-  for (uint0 i(0); i < 3; ++i) {
-    m_L[i] = L;
-    m_invL[i] = real_t(1) / L;
+  for (uint0 k(0); k < 3; ++k) {
+    m_L[k] = L;
+    m_invL[k] = real_t(1) / L;
   }
 }
 
