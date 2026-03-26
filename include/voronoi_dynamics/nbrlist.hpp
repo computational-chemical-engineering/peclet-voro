@@ -352,9 +352,10 @@ void Box<real_t>::setL(real_t L) {
 
 template <typename real_t>
 void Box<real_t>::makeShortestDistance(Array<real_t, 3>& pos) const {
+  static constexpr real_t half = real_t(0.5);
   for (uint1 k(0); k < 3; ++k) {
     real_t r(pos[k] * m_invL[k]);  // multiply by precomputed 1/L
-    r -= floor(r + real_t(0.5));
+    r -= floor(r + half);
     pos[k] = r * m_L[k];
   }
 }
@@ -372,12 +373,12 @@ void Box<real_t>::putInBox(std::vector<Array<real_t, 3> >& pos) const {
 
 template <typename real_t>
 void BoxLE<real_t>::makeShortestDistance(Array<real_t, 3>& pos) const {
-  real_t fl1(floor(pos[1] * this->m_invL[1] + real_t(0.5)));
+  static constexpr real_t half = real_t(0.5);
+  real_t fl1(floor(pos[1] * this->m_invL[1] + half));
   real_t pos0(pos[0] - fl1 * (m_shear * this->m_L[1]));
-  pos[0] = this->m_L[0] * (pos0 * this->m_invL[0] - floor(pos0 * this->m_invL[0] + real_t(0.5)));
+  pos[0] = this->m_L[0] * (pos0 * this->m_invL[0] - floor(pos0 * this->m_invL[0] + half));
   pos[1] = this->m_L[1] * (pos[1] * this->m_invL[1] - fl1);
-  pos[2] =
-      this->m_L[2] * (pos[2] * this->m_invL[2] - floor(pos[2] * this->m_invL[2] + real_t(0.5)));
+  pos[2] = this->m_L[2] * (pos[2] * this->m_invL[2] - floor(pos[2] * this->m_invL[2] + half));
 }
 
 template <typename UInt, typename real_t>

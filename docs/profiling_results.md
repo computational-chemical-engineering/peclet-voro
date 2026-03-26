@@ -142,7 +142,7 @@ arithmetic operations — correct.
 | `diffVolume`                | 20%      | Can be made lazy / optional for tess-only use  |
 | `makeShortestDistance`      | ~5% left | Floor calls remain; branchless int cast risky  |
 | `IndxList::reset`           | 3%       | Iterates all 127 slots; could track dirty range |
-| GPU/MPI generalisation      | —        | Future work; `CellArena` CSR layout ready      |
+| GPU/MPI generalisation      | —        | Future work; CSR arena + CellView planned       |
 
-The `CellArena<T>` and `CellView<T>` data structures defined in `cell_arena.hpp`
-provide the CSR memory layout that will be needed for a GPU/MPI port (Phase 4/5).
+A `CellArena<T>` / `CellView<T>` CSR layout (planned for Phase 4/5) would pack all
+cell data into a single contiguous allocation, making GPU offload straightforward.

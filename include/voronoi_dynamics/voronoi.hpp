@@ -316,7 +316,7 @@ class CellMaker {
   IndxList<uint1> m_freeV, m_freeF;
   VisitedIndx<uint2> m_visited;
   std::vector<uint2> m_checkGridCell;  ///< BFS queue (use m_checkGCHead as front index)
-  uint32_t m_checkGCHead;              ///< index of current BFS queue front
+  size_t m_checkGCHead;                ///< index of current BFS queue front
   real_t m_distMax, m_distGCMax;
   uint1 m_vRsqMax;
   bool m_isAllCut;
@@ -758,7 +758,7 @@ CellMaker<real_t>::CellMaker()
     , m_dist(NULL)
     , m_isKnownDist(NULL)
     , m_distGC(NULL)
-    , m_checkGCHead(0) {
+    , m_checkGCHead(0u) {
   uint1 maxV = vor::maxNumVertices - 1;
   uint1 maxF = vor::maxNumFacets - 1;
   m_vertexPos = new Array<real_t, 3>[maxV];
@@ -1504,7 +1504,7 @@ bool CellMaker<real_t>::build(uint2 id, const std::vector<Array<real_t, 3> > &po
   typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin;
   typename std::vector<PosAndId<uint2, real_t> >::const_iterator end;
   // one trial loop without checking of nbr cells
-  uint32_t headEnd = static_cast<uint32_t>(m_checkGridCell.size());
+  size_t headEnd = m_checkGridCell.size();
   for (; m_checkGCHead < headEnd; ++m_checkGCHead) {
     uint2 indx = m_checkGridCell[m_checkGCHead];
     p_nbrList->getCellContent(indx, begin, end);
