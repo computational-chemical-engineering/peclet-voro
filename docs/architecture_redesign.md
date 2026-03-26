@@ -8,7 +8,10 @@ culprit is **not** the cutting algorithm itself — the half-plane cutting metho
 is sound and efficient — but the way per-cell data is **stored, accessed, and
 copied**.  This document diagnoses the bottlenecks, proposes a new data layout
 that is both CPU-cache-friendly and GPU-mappable, and sketches a phased
-implementation plan.
+implementation plan.  A central design decision is to use **CSR (Compressed
+Sparse Row)** storage on the CPU for memory efficiency, and a **two-tier
+fixed-size layout (32 compact / 128 overflow)** on the GPU for coalesced
+memory access without excessive waste.
 
 ---
 
@@ -103,11 +106,15 @@ to simultaneously optimise for CPU caches **and** future GPU execution:
    global-memory transactions.  On a CPU the hardware prefetcher sees simple
    strides.
 
-2. **Fixed-capacity per cell with a dense count.**  Each cell gets a
-   compile-time maximum number of vertex/facet slots (the existing
-   `maxNumVertices = 128`, `maxNumFacets = 128` are fine).  Instead of a linked
-   list, a simple `uint8_t numVertices` count says how many are active;
-   compaction is done only when required.  This removes the `IndxList` entirely.
+2. **CSR (Compressed Sparse Row) storage on CPU.**  Each cell stores only as
+   many vertex/facet slots as it actually uses (plus a small headroom factor).
+   An offset array `offsets[c]` gives the start of cell `c`'s data, so
+   `offsets[c+1] - offsets[c]` is the capacity for that cell.  This reduces
+   memory by 5-10× compared to a fixed-128 layout (typical cells have 10-20
+   vertices, not 128).  On the CPU, sequential access within a cell is
+   cache-friendly regardless of the offset-based start address.
+
+   For the GPU a different strategy is used — see §4.5.
 
 3. **Avoid per-cell heap allocations.**  A single arena per `CellComplex` (or
    per thread for the build phase) is allocated once.  Cells are views/slices
@@ -125,23 +132,29 @@ to simultaneously optimise for CPU caches **and** future GPU execution:
 
 ## 3  Proposed Data Structures
 
-### 3.1  `CellArena` — The Global Cell Store (SoA)
+### 3.1  `CellArena` — The Global Cell Store (CSR on CPU)
+
+The CPU arena uses Compressed Sparse Row storage.  All vertex data for all
+cells is packed contiguously, with an offset array to locate each cell's slice.
 
 ```
-CellArena<real_t>
+CellArena<real_t>  (CPU / CSR layout)
 │
-├── numCells          : uint32_t
-├── maxVerticesPerCell: uint8_t   (compile-time, e.g. 128)
-├── maxFacetsPerCell  : uint8_t   (compile-time, e.g. 128)
+├── numCells            : uint32_t
 │
-│   ── Per-vertex arrays (contiguous, length = numCells × maxV) ──
-├── vertexPos  : real_t[numCells × maxV × 3]   // x,y,z interleaved per vertex
-├── vertexTopo : uint16_t[numCells × maxV × 3] // 3 half-edge labels per vertex
-├── rSq        : real_t[numCells × maxV]        // |v|² cache
+│   ── Offset arrays (length = numCells + 1) ──
+├── vertexOffsets : uint32_t[numCells + 1]  // vertexOffsets[c] = start of cell c's vertices
+├── facetOffsets  : uint32_t[numCells + 1]  // facetOffsets[c]  = start of cell c's facets
+│   (total vertices = vertexOffsets[numCells], total facets = facetOffsets[numCells])
 │
-│   ── Per-facet arrays ──
-├── facetLabel : uint16_t[numCells × maxF]      // starting half-edge label
-├── facetNbr   : uint32_t[numCells × maxF]      // neighbour cell id
+│   ── Per-vertex arrays (contiguous, length = totalVertices) ──
+├── vertexPos  : real_t[totalVertices × 3]    // x,y,z interleaved per vertex
+├── vertexTopo : uint16_t[totalVertices × 3]  // 3 half-edge labels per vertex
+├── rSq        : real_t[totalVertices]         // |v|² cache
+│
+│   ── Per-facet arrays (contiguous, length = totalFacets) ──
+├── facetLabel : uint16_t[totalFacets]        // starting half-edge label
+├── facetNbr   : uint32_t[totalFacets]        // neighbour cell id
 │
 │   ── Per-cell scalars ──
 ├── numVertices: uint8_t[numCells]
@@ -150,17 +163,24 @@ CellArena<real_t>
 └── (optionally: volume, centroid, …)
 ```
 
-**Indexing:**  vertex data for cell `c`, vertex `v` lives at
-offset `c * maxV + v`.  This is a standard 2-D row-major layout that maps
-trivially to GPU global memory.
+**Indexing:**  vertex data for cell `c`, local vertex `v`, lives at global
+offset `vertexOffsets[c] + v`.  Facet data for cell `c`, local facet `f`,
+lives at `facetOffsets[c] + f`.
 
-**Alignment:**  each cell's vertex block starts at a
-`maxV`-aligned boundary, which means the start of every cell's data is
-naturally aligned for SIMD/warp-width access.
+**Memory efficiency:**  for typical cells with ~15 vertices and ~12 facets,
+the CSR layout uses roughly **15/128 ≈ 12%** of the memory that a fixed-128
+layout would consume.  The offset arrays themselves are negligible (two
+`uint32_t` per cell ≈ 8 bytes vs. hundreds of bytes of saved vertex data).
 
-### 3.2  `CellView` — Lightweight Handle
+**Build-phase strategy:**  during the parallel build, each `CellMaker` thread
+works into a thread-local scratch buffer (fixed-size 128, small enough for the
+stack or a per-thread pre-allocation).  After all cells are built, a single
+pass computes the prefix-sum offsets and packs the results into the CSR arena.
+This two-step approach avoids the need to predict per-cell sizes in advance.
 
-A `CellView` is a non-owning accessor into the arena:
+### 3.2  `CellView` — Lightweight Handle (CSR)
+
+A `CellView` is a non-owning accessor into the CSR arena:
 
 ```cpp
 template <typename real_t>
@@ -169,10 +189,13 @@ struct CellView {
   CellArena<real_t> *arena; // pointer to the arena
 
   // Accessors (inline, zero-overhead)
-  real_t *vertexPos(uint8_t v)  { return &arena->vertexPos[(cellIdx*maxV + v)*3]; }
-  uint16_t *vertexTopo(uint8_t v) { return &arena->vertexTopo[(cellIdx*maxV + v)*3]; }
-  uint16_t &facetLabel(uint8_t f) { return arena->facetLabel[cellIdx*maxF + f]; }
-  uint32_t &facetNbr(uint8_t f)   { return arena->facetNbr[cellIdx*maxF + f]; }
+  uint32_t vOff() const { return arena->vertexOffsets[cellIdx]; }
+  uint32_t fOff() const { return arena->facetOffsets[cellIdx]; }
+
+  real_t   *vertexPos(uint8_t v)  { return &arena->vertexPos[(vOff() + v) * 3]; }
+  uint16_t *vertexTopo(uint8_t v) { return &arena->vertexTopo[(vOff() + v) * 3]; }
+  uint16_t &facetLabel(uint8_t f) { return arena->facetLabel[fOff() + f]; }
+  uint32_t &facetNbr(uint8_t f)   { return arena->facetNbr[fOff() + f]; }
   uint8_t  &numVertices()         { return arena->numVertices[cellIdx]; }
   uint8_t  &numFacets()           { return arena->numFacets[cellIdx]; }
 };
@@ -181,23 +204,33 @@ struct CellView {
 This replaces the current `Cell` class.  It costs **16 bytes** (index + pointer)
 and is trivially copyable — no heap, no destructor, no copy overhead.
 
-### 3.3  `CellMaker` Refactored — Direct-Write to Arena
+### 3.3  `CellMaker` Refactored — Thread-Local Build + CSR Pack
 
-Instead of maintaining its own private arrays, `CellMaker` receives a
-`CellView` and writes directly into the arena:
+During the parallel build each thread works into a **thread-local scratch
+buffer** of fixed size 128 (small enough for the stack).  After all cells are
+built, a single sequential pass computes the CSR offsets and packs results:
 
 ```
-CellMaker::build(cellIdx, pos, nbrList, arena)
-  CellView view{cellIdx, &arena};
-  initFromCuboid(view);          // write initial 8-vertex box into arena slot
+// Phase A — parallel build (one thread per cell)
+CellMaker::build(cellIdx, pos, nbrList, scratchBuffer)
+  initFromCuboid(scratchBuffer);
   for each neighbour:
-    cutCell(view, plane);         // modify the arena slot in-place
-  compact(view);                  // remove free slots, update numVertices/numFacets
-```
+    cutCell(scratchBuffer, plane);
+  compact(scratchBuffer);
+  // scratchBuffer now holds the finished cell with numV vertices, numF facets
+  cellSizes[cellIdx] = {numV, numF};
 
-**Thread safety during the parallel build** is trivial: each cell index is
-processed by exactly one thread, and cells do not share arena memory (each has
-its own `maxV`-sized block).
+// Phase B — sequential prefix sum
+vertexOffsets = exclusive_prefix_sum(cellSizes.numV)
+facetOffsets  = exclusive_prefix_sum(cellSizes.numF)
+allocate arena with total sizes
+
+// Phase C — parallel pack
+for each cell c (parallel):
+  memcpy(arena.vertexPos + vertexOffsets[c], scratch[c].vertexPos, numV[c] * ...)
+  memcpy(arena.facetLabel + facetOffsets[c], scratch[c].facetLabel, numF[c] * ...)
+  ...
+```
 
 ### 3.4  Replacing `IndxList` with a Dense Slot Array
 
@@ -291,7 +324,94 @@ Phase 3 — Geometry (GPU)
   └── Kernel 6: volumes, areas, derivatives   [1 thread / cell]
 ```
 
-### 4.4  MPI Domain Decomposition
+### 4.4  CSR on GPU — Quantitative Assessment
+
+Pure CSR (variable-length rows, offset-array indirection) is a natural fit for
+CPUs but introduces two costs on GPUs:
+
+| Concern | Severity | Explanation |
+|---------|----------|-------------|
+| **One extra indirection per access** | Low (~2-5%) | Reading `offsets[c]` is a single global-memory load that hits L2 cache after the first access per cell.  Negligible. |
+| **Loss of coalesced access in geometry kernels** | Moderate (~15-30%) | When a geometry kernel maps one thread to one cell and all threads read the same local vertex index `v`, with fixed-size layout the addresses `c * stride + v` form a regular stride that the memory controller serves in a few wide transactions.  With CSR the addresses `offsets[c] + v` are scattered — each thread's data is at an unpredictable location — causing many small transactions instead of a few wide ones.  On modern GPUs (Ampere / Hopper) the enlarged L2 cache (40-60 MB) partially mitigates this, but a 15-30% throughput loss on memory-bound kernels is realistic. |
+| **Build kernel impact** | Negligible (~0-5%) | The build kernel assigns one *warp* to one cell.  The warp accesses only its own cell's data sequentially — there is no cross-cell coalescing to lose.  CSR vs. fixed-size is irrelevant here. |
+| **Incremental-update kernel impact** | Low-Moderate (~5-15%) | Only changed cells are processed, so the working set is small and likely fits in L2.  Scattered offsets matter less when the total data volume is low. |
+
+**Bottom line:** CSR is *moderately* detrimental on GPU — not catastrophic, but
+enough to matter for memory-bound geometry kernels that run every time step.
+The build kernel (the most complex part) is essentially unaffected.
+
+### 4.5  Two-Tier GPU Layout — The Recommended Middle Ground
+
+Because the CSR penalty is moderate (not severe), a **pure fixed-128** layout
+would waste 6-10× memory for typical 10-20 vertex cells.  Conversely, pure CSR
+leaves 15-30% geometry-kernel performance on the table.  The best trade-off is
+a **two-tier fixed layout**:
+
+```
+GPU CellArena (two-tier)
+│
+│   ── Tier 1: compact slots (capacity = 32 per cell) ──
+│   Covers ~95% of cells (those with ≤ 32 vertices/facets)
+├── vertexPos_T1  : real_t[numCells × 32 × 3]
+├── vertexTopo_T1 : uint16_t[numCells × 32 × 3]
+├── rSq_T1        : real_t[numCells × 32]
+├── facetLabel_T1 : uint16_t[numCells × 32]
+├── facetNbr_T1   : uint32_t[numCells × 32]
+│
+│   ── Tier 2: overflow slots (capacity = 128 per cell) ──
+│   Only allocated for the ~5% of cells that exceed 32 vertices/facets
+├── numLargeCells  : uint32_t
+├── largeCellMap   : uint32_t[numLargeCells]        // maps overflow slot → cell id
+├── vertexPos_T2   : real_t[numLargeCells × 128 × 3]
+├── vertexTopo_T2  : uint16_t[numLargeCells × 128 × 3]
+├── rSq_T2         : real_t[numLargeCells × 128]
+├── facetLabel_T2  : uint16_t[numLargeCells × 128]
+├── facetNbr_T2    : uint32_t[numLargeCells × 128]
+│
+│   ── Per-cell metadata ──
+├── isLarge        : bool[numCells]                 // false → Tier 1, true → Tier 2
+├── largeCellIdx   : uint32_t[numCells]             // index into Tier 2 (valid if isLarge)
+├── numVertices    : uint8_t[numCells]
+├── numFacets      : uint8_t[numCells]
+└── cellId         : uint32_t[numCells]
+```
+
+**How it works:**
+
+- **Common path (~95% of cells):** `isLarge[c] == false`.  Vertex data lives at
+  `vertexPos_T1[c * 32 + v]`.  All threads in a warp access addresses with a
+  stride of 32 — small enough for efficient coalesced transactions (one 128-byte
+  transaction serves 4 consecutive cells for the same vertex).
+
+- **Overflow path (~5% of cells):** `isLarge[c] == true`.  Vertex data lives in
+  the Tier 2 arena at `vertexPos_T2[largeCellIdx[c] * 128 + v]`.  These cells
+  are processed in a separate kernel launch (or a separate warp-group) to avoid
+  divergence within a warp.
+
+**Why 32?**  Empirical observation: for well-equilibrated particle distributions
+the number of Voronoi vertices per cell is typically 10-20, and almost never
+exceeds 30.  A capacity of 32 provides ~60-100% headroom and covers the vast
+majority of cells.  It is also a natural GPU number (warp width), which means
+each cell's 32-slot block aligns with memory transaction boundaries.
+
+**Advantages over pure CSR:**
+
+| Metric | Pure CSR | Two-tier (32 / 128) |
+|--------|----------|---------------------|
+| Memory (1M cells) | ~0.6 GB (optimal) | ~0.9 GB (Tier 1) + ~0.1 GB (Tier 2) ≈ 1.0 GB |
+| Geometry kernel throughput | ~70-85% of peak | ~95-100% of peak (Tier 1 path) |
+| Indexing complexity | offset lookup per access | simple `c * 32 + v` for common path |
+| Build kernel throughput | ~same | ~same |
+
+**Advantages over pure fixed-128:**
+
+| Metric | Fixed-128 | Two-tier (32 / 128) |
+|--------|-----------|---------------------|
+| Memory (1M cells) | ~5.6 GB | ~1.0 GB |
+| Geometry kernel throughput | ~same (both coalesced) | ~same for Tier 1 |
+| Fits on GPU? | 1M cells barely fit on 24 GB GPU | 5-6M cells fit on 24 GB GPU |
+
+### 4.6  MPI Domain Decomposition
 
 For very large point sets the standard approach is:
 
@@ -301,40 +421,63 @@ For very large point sets the standard approach is:
 3. **Local build** — each rank builds the tessellation for its own particles
    (including ghosts).
 4. **Communication of cell data** — after the build, each rank may need facet
-   areas and volumes for ghost particles.  The SoA arena layout makes this
-   trivial: contiguous slices of the arena can be sent with a single
-   `MPI_Sendrecv`.
+   areas and volumes for ghost particles.  With CSR on CPU, ghost-cell data is
+   already packed tightly and can be sent with a single `MPI_Sendrecv` per
+   neighbour rank (no padding waste).  On GPU (two-tier layout), the Tier 1
+   blocks for ghost cells form a contiguous region if ghost cells are appended
+   at the end of the cell array.
 
-The SoA layout is again crucial here: if vertex data for cells 0..*N* is
-contiguous in memory, and ghost cells are appended at positions *N*..*N+G*,
-then the ghost data is a contiguous buffer that can be communicated without
-packing.
+Both the CSR layout (CPU) and the two-tier layout (GPU) support this pattern.
+With CSR the ghost data is already tightly packed — no wasted padding.  With
+the two-tier GPU layout, ghost cells are appended at positions *N*..*N+G* in
+the Tier 1 arena; since most ghost cells are also small, the Tier 1 region
+for ghosts is contiguous and can be transferred with a single memcpy or
+`MPI_Sendrecv`.
 
 ---
 
-## 5  Memory Budget Estimate
+## 5  Memory Budget Estimates
 
-For *N* = 1,000,000 particles with `maxV = 128`, `maxF = 128`:
+### 5.1  CPU — CSR Layout
+
+For *N* = 1,000,000 particles, assuming an average of 15 vertices and 12 facets
+per cell (typical for well-equilibrated systems):
 
 | Array | Element size | Total |
 |-------|-------------|-------|
-| `vertexPos` | 3 × 8 B × 128 × 10⁶ | 3.07 GB |
-| `vertexTopo` | 3 × 2 B × 128 × 10⁶ | 0.77 GB |
-| `rSq` | 8 B × 128 × 10⁶ | 1.02 GB |
-| `facetLabel` | 2 B × 128 × 10⁶ | 0.26 GB |
-| `facetNbr` | 4 B × 128 × 10⁶ | 0.51 GB |
-| **Total** | | **~5.6 GB** |
+| `vertexPos` | 3 × 8 B × 15 × 10⁶ | 0.36 GB |
+| `vertexTopo` | 3 × 2 B × 15 × 10⁶ | 0.09 GB |
+| `rSq` | 8 B × 15 × 10⁶ | 0.12 GB |
+| `facetLabel` | 2 B × 12 × 10⁶ | 0.02 GB |
+| `facetNbr` | 4 B × 12 × 10⁶ | 0.05 GB |
+| Offset arrays | 2 × 4 B × 10⁶ | 0.008 GB |
+| **Total** | | **~0.65 GB** |
 
-This fits in a single modern GPU (e.g. A100 with 80 GB, or even an RTX 4090
-with 24 GB).  For larger systems, MPI decomposition brings each rank below
-this budget.
+This is **~8.6× smaller** than the fixed-128 layout (5.6 GB).  Even 10 million
+particles fit comfortably in 6.5 GB of CPU RAM.
 
-**Optimisation:** the actual number of vertices per cell is typically 10-20,
-not 128.  A **variable-length** scheme (allocating only as many slots as
-needed, plus some headroom) can reduce memory by 5-10×, at the cost of an
-extra indirection (offset array).  This is the standard CSR (Compressed Sparse
-Row) approach.  Decision: start with the fixed-capacity layout (simpler, more
-GPU-friendly), and switch to CSR if memory becomes the bottleneck.
+### 5.2  GPU — Two-Tier Layout (32 / 128)
+
+For *N* = 1,000,000 particles, with ~5% overflow cells (50,000 large cells):
+
+| Component | Calculation | Total |
+|-----------|------------|-------|
+| **Tier 1** (all cells × 32 slots) | (3×8 + 3×2 + 8 + 2 + 4) B × 32 × 10⁶ | **1.41 GB** |
+| **Tier 2** (50K cells × 128 slots) | (3×8 + 3×2 + 8 + 2 + 4) B × 128 × 5×10⁴ | **0.28 GB** |
+| Per-cell metadata | ~16 B × 10⁶ | **0.02 GB** |
+| **Total** | | **~1.7 GB** |
+
+This is **~3.3× smaller** than a pure fixed-128 layout and comfortably fits on any
+modern GPU.  On a 24 GB consumer GPU (RTX 4090), this leaves ample room for
+the neighbour list, geometry arrays, and simulation state.
+
+### 5.3  Comparison
+
+| Layout | 1M cells | 10M cells | GPU-friendly? |
+|--------|----------|-----------|---------------|
+| Fixed-128 | 5.6 GB | 56 GB | ✓ (coalesced) |
+| CSR (CPU) | 0.65 GB | 6.5 GB | ✗ (scattered) |
+| Two-tier 32/128 (GPU) | 1.7 GB | 17 GB | ✓ (mostly coalesced) |
 
 ---
 
@@ -345,7 +488,11 @@ main advantages of this library over Voro++.  The proposed changes **preserve
 and improve** this path:
 
 1. **`CellView`-based updates.**  The `CellUpdater` receives a `CellView` and
-   modifies the arena in-place.  No copies needed.
+   modifies the arena in-place.  With CSR, if a cell grows beyond its allocated
+   capacity during an update (e.g. a new neighbour is inserted), the cell's
+   data is relocated to a free region at the end of the arena (amortised O(1)
+   with a growth factor).  In practice, incremental updates rarely change the
+   vertex count by more than 1-2, so re-allocation is infrequent.
 
 2. **Change detection.**  `m_hasChanged[c]` remains a simple boolean array.
    On GPU this becomes a device-side flag buffer; only flagged cells are
@@ -363,19 +510,21 @@ and improve** this path:
 
 ## 7  Implementation Plan
 
-### Phase 1 — Arena + CellView (CPU-only, no algorithm change)
+### Phase 1 — CSR Arena + CellView (CPU-only, no algorithm change)
 
-**Goal:** replace `Cell` with `CellArena` + `CellView`; eliminate per-cell
-heap allocations and copies.
+**Goal:** replace `Cell` with a CSR `CellArena` + `CellView`; eliminate
+per-cell heap allocations and copies.
 
 | Step | Description | Files touched |
 |------|-------------|---------------|
-| 1a | Define `CellArena` and `CellView` in a new header `cell_arena.hpp` | new file |
-| 1b | Refactor `CellMaker` to write directly into a `CellView` | `voronoi.hpp` |
-| 1c | Refactor `CellComplex` to own a `CellArena` instead of `std::vector<Cell>` | `voronoi.hpp` |
-| 1d | Update `CellGeometry` and `CellUpdater` to use `CellView` | `voronoi.hpp` |
-| 1e | Update all tests to use new API | `tests/*.cpp` |
-| 1f | Benchmark: compare static-build time against current version and Voro++ | `tests/test_voro_comparison.cpp` |
+| 1a | Define CSR `CellArena` and `CellView` in a new header `cell_arena.hpp` | new file |
+| 1b | Implement two-step build: thread-local scratch → prefix sum → CSR pack | `voronoi.hpp`, `cell_arena.hpp` |
+| 1c | Refactor `CellMaker` to work on a scratch buffer, then pack into CSR | `voronoi.hpp` |
+| 1d | Refactor `CellComplex` to own a CSR `CellArena` instead of `std::vector<Cell>` | `voronoi.hpp` |
+| 1e | Update `CellGeometry` and `CellUpdater` to use `CellView` | `voronoi.hpp` |
+| 1f | Handle CSR re-allocation for incremental updates (grow-at-end strategy) | `cell_arena.hpp` |
+| 1g | Update all tests to use new API | `tests/*.cpp` |
+| 1h | Benchmark: compare static-build time against current version and Voro++ | `tests/test_voro_comparison.cpp` |
 
 **Expected speedup: 1.3-1.5×** (from eliminating allocations and copies).
 
@@ -408,11 +557,13 @@ overhead and linked-list pointer chasing.
 
 | Step | Description |
 |------|-------------|
-| 4a | GPU neighbour-list build (prefix sum + scatter) |
-| 4b | GPU cell-build kernel (one warp per cell) |
-| 4c | GPU geometry kernel (volumes, areas, forces) |
-| 4d | GPU incremental update (flagged cells only) |
-| 4e | CPU-GPU memory management (unified or explicit transfers) |
+| 4a | Implement two-tier GPU `CellArena` (Tier 1: 32 slots, Tier 2: 128 slots) with device memory management |
+| 4b | GPU neighbour-list build (prefix sum + scatter) |
+| 4c | GPU cell-build kernel (one warp per cell), writing to thread-local scratch, then packing into two-tier arena |
+| 4d | Tier classification kernel: after build, flag cells with >32 vertices as `isLarge` and pack into Tier 2 |
+| 4e | GPU geometry kernels — separate kernels for Tier 1 (coalesced, stride-32) and Tier 2 (stride-128) |
+| 4f | GPU incremental update (flagged cells only); promote/demote between tiers as needed |
+| 4g | CPU↔GPU transfer: CSR (CPU) → two-tier (GPU) converter for hybrid workflows |
 
 ### Phase 5 — MPI Integration
 
@@ -429,16 +580,17 @@ overhead and linked-list pointer chasing.
 
 | # | Recommendation | Rationale |
 |---|----------------|-----------|
-| 1 | **Single contiguous arena** instead of per-cell heap arrays | Eliminates 4*N* allocations, enables GPU coalesced access |
-| 2 | **CellView** (non-owning handle) instead of `Cell` (owning class) | Zero-copy, trivially copyable, 16 bytes |
-| 3 | **Direct write** from `CellMaker` into arena | Eliminates assignment-operator copy |
-| 4 | **Dense slot allocator** instead of `IndxList` linked list | Sequential iteration, O(1) alloc/free, no `vector<bool>` |
-| 5 | **Branchless periodic wrapping** | Remove `floor()` overhead |
-| 6 | **SoA layout** for all per-vertex / per-facet data | Cache-line utilisation on CPU, coalesced reads on GPU |
-| 7 | **Fixed-capacity per cell** (start simple, CSR later if needed) | GPU-friendly, deterministic memory, simple indexing |
+| 1 | **CSR arena on CPU** instead of per-cell heap arrays | Eliminates 4*N* allocations; 8-9× less memory than fixed-128; tight packing for MPI |
+| 2 | **Two-tier GPU arena (32 / 128)** | Coalesced access for 95% of cells (stride-32); only 5% overflow to Tier 2; ~3× less memory than fixed-128 |
+| 3 | **CellView** (non-owning handle) instead of `Cell` (owning class) | Zero-copy, trivially copyable, 16 bytes; works with both CSR and two-tier backends |
+| 4 | **Thread-local scratch + pack** for the build phase | Avoids predicting cell sizes; trivially parallel; single prefix-sum to compute CSR offsets |
+| 5 | **Dense slot allocator** instead of `IndxList` linked list | Sequential iteration, O(1) alloc/free, no `vector<bool>` |
+| 6 | **Branchless periodic wrapping** | Remove `floor()` overhead |
+| 7 | **Separate geometry kernels** for Tier 1 and Tier 2 on GPU | Avoids warp divergence; each kernel has uniform stride |
 | 8 | **Keep the cutting algorithm** | It is correct and efficient; only the container changes |
 
 With Phases 1-3 the library should reach performance **parity with or better
 than Voro++** on static builds, while retaining the incremental-update
 capability that Voro++ lacks.  Phase 4 then unlocks GPU acceleration for very
-large systems, and Phase 5 adds distributed-memory scalability.
+large systems (with the two-tier layout providing near-peak memory bandwidth),
+and Phase 5 adds distributed-memory scalability.
