@@ -15,6 +15,7 @@ using std::vector;
 using vor::Array;
 using vor::Box;
 using vor::Cell;
+using vor::CellView;
 using vor::CellComplex;
 using vor::CellGeometry;
 using vor::uint1;
@@ -49,7 +50,7 @@ static int testRandomPoints(int numParticles, double Lx, double Ly, double Lz, u
   // Build Voronoi tessellation
   complex.build(pos);
 
-  vector<Cell<real_t> > &cells = complex.getCells();
+  vector<CellView<real_t> > &cells = complex.getCells();
   vector<CellGeometry<real_t> > &geoms = complex.getGeoms();
 
   if ((int)cells.size() != numParticles) {

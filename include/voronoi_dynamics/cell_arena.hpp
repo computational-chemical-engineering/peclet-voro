@@ -148,7 +148,7 @@ class CellView {
 
   inline bool hasNoNbr() const {
     for (uint0 i = 0; i < numFacets(); ++i)
-      if (facetNbr(i) == noNbr) return true;
+      if (getNbr(i) == noNbr) return true;
     return false;
   }
 
