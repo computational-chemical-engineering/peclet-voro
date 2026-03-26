@@ -45,7 +45,7 @@ template <typename real_t = float>
 class Box {
  public:
   Box() {}
-  Box(Array<real_t, 3> L) : m_L(L) {}
+  Box(Array<real_t, 3> L) { setL(L); }
   Box(real_t L) { setL(L); }
   inline void setL(Array<real_t, 3> L);
   inline void setL(real_t L);
@@ -56,6 +56,7 @@ class Box {
 
  protected:
   Array<real_t, 3> m_L;
+  Array<real_t, 3> m_invL;  ///< precomputed 1/L[k] for each dimension
 };
 
 template <typename real_t = float>
@@ -329,19 +330,22 @@ void Grid<UInt>::getDirectNbrs(UInt indxCell, std::vector<UInt>& nbrs) const {
 template <typename real_t>
 void Box<real_t>::setL(Array<real_t, 3> L) {
   m_L = L;
+  for (uint0 k = 0; k < 3; ++k) m_invL[k] = real_t(1) / L[k];
 }
 
 template <typename real_t>
 void Box<real_t>::setL(real_t L) {
-  for (uint0 i(0); i < 3; ++i)
+  for (uint0 i(0); i < 3; ++i) {
     m_L[i] = L;
+    m_invL[i] = real_t(1) / L;
+  }
 }
 
 template <typename real_t>
 void Box<real_t>::makeShortestDistance(Array<real_t, 3>& pos) const {
-  for (uint1 k(0); k < 3; ++k) {
-    real_t r(pos[k] / m_L[k]);
-    r -= floor(r + 0.5);
+  for (uint0 k(0); k < 3; ++k) {
+    real_t r = pos[k] * m_invL[k];
+    r -= floor(r + real_t(0.5));
     pos[k] = r * m_L[k];
   }
 }
