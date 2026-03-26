@@ -977,7 +977,10 @@ namespace vor {
     Indx indcs(p_nbrList->getGrid().expand(indx));
     const Array<real_t, 3> & L(p_nbrList->getBox().getL());
     for(uint0 k(0); k<3; ++k){
-      // Wrap the grid cell center to the nearest periodic image, then derive corner
+      // Wrap the grid cell center (not corner) to the nearest periodic image
+      // using floor(x/L + 0.5) which shifts by ±L to minimize |center|.
+      // This ensures the grid cell box [corner, corner+dL) does not straddle
+      // the periodic boundary, so computeRsqMinGC and computeDistGC work correctly.
       real_t center = (static_cast<real_t>(indcs[k]) + 0.5)*m_dLGC[k] - pos[k];
       center -= L[k]*floor(center/L[k] + 0.5);
       m_relOrigGC[k] = center - 0.5*m_dLGC[k];

@@ -76,8 +76,9 @@ static int testRandomPoints(int numParticles, double Lx, double Ly, double Lz, u
            numParticles, totalVol, boxVol, volErr);
     printf("  Min cell volume: %.6e, Max cell volume: %.6e\n", minVol, maxVol);
 
-    // For 200+ particles the tessellation should be exact to machine precision.
-    // Smaller counts may have tiny errors due to near-degenerate configurations.
+    // For >= 200 particles the tessellation should be exact to machine precision.
+    // Smaller counts may have small errors due to near-degenerate configurations
+    // in the plane-cutting algorithm (inherent floating-point limitation).
     real_t tol = (numParticles >= 200 ? 1e-10 : 1e-2);
     if (volErr > tol) {
         fprintf(stderr, "FAIL: volume error %.2e exceeds tolerance %.0e\n", volErr, tol);
