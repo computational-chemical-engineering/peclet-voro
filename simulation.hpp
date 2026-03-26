@@ -25,7 +25,7 @@ namespace vor {
     virtual bool restart(real_t time, const vector<Array<real_t, 3> > & pos, const vector<Array<real_t, 3> > & vel);
     virtual void step(int numTimeSteps, real_t dt) {}
     virtual real_t getKineticEnergy() const;
-    virtual real_t getInternalEnergy() const {}
+    virtual real_t getInternalEnergy() const { return 0; }
     void setTime(real_t time) {m_time=time;}
     void setL(Array<real_t, 3> L) {m_box.setL(L);}
     void setVelocities(const vector<Array<real_t, 3> > & vel) {m_vel = vel;}

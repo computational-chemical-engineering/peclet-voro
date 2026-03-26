@@ -27,13 +27,17 @@ int main()
   sim.setMassDensity(1);
   real_t dt(0.01);
   {
-    int numPart= 1000;
+    int numPart= 10000;
     vector<Array<real_t, 3> > pos(numPart);
     vector<Array<real_t, 3> > vel(numPart);
     FILE *pFile;
     char filename[255];
     sprintf(filename, "pos_eq_%d.dat",numPart);
     pFile=fopen(filename,"r");
+    if (!pFile) {
+      fprintf(stderr, "Error: cannot open %s\n", filename);
+      return 1;
+    }
     int j;
     for(int i=0; i<pos.size(); ++i){
       int j, ierr;

@@ -1,0 +1,21 @@
+# Build artifacts
+*.o
+*.d
+
+# Executables (test programs)
+testBuildRebuild
+testBuild_Trial
+testSimulation
+testDroplet
+testInterface
+testViscous
+testStaticVoronoi
+
+# Output data files from simulations
+pos_[0-9]*.dat
+intf_[0-9]*.dat
+GNUPlotfile.txt
+
+# Doxygen output
+html/
+latex/

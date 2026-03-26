@@ -261,7 +261,7 @@ namespace vor {
     void getCloseNbrs(NbrInsert & nbrs);
     // void drawGnuplot(FILE *fp) const;
     // void testTopo() const;
-    const vector<uint2> & getNbrs() const {return m_nbr;}
+    const uint2 * getNbrs() const {return m_nbr;}
     friend class Cell<real_t>;
     friend class CellUpdater<real_t>;
     void renumber();
@@ -975,9 +975,16 @@ namespace vor {
   void CellMaker<real_t>::computeGCOrig(uint2 indx, const Array<real_t,3> & pos)
   {
     Indx indcs(p_nbrList->getGrid().expand(indx));
-    for(uint0 k(0); k<3; ++k)
-      m_relOrigGC[k] = static_cast<real_t>(indcs[k])*m_dLGC[k]-pos[k];
-    p_nbrList->getBox().makeShortestDistance(m_relOrigGC);
+    const Array<real_t, 3> & L(p_nbrList->getBox().getL());
+    for(uint0 k(0); k<3; ++k){
+      // Wrap the grid cell center (not corner) to the nearest periodic image
+      // using floor(x/L + 0.5) which shifts by ±L to minimize |center|.
+      // This ensures the grid cell box [corner, corner+dL) does not straddle
+      // the periodic boundary, so computeRsqMinGC and computeDistGC work correctly.
+      real_t center = (static_cast<real_t>(indcs[k]) + 0.5)*m_dLGC[k] - pos[k];
+      center -= L[k]*floor(center/L[k] + 0.5);
+      m_relOrigGC[k] = center - 0.5*m_dLGC[k];
+    }
   }
 
 

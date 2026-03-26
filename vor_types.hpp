@@ -21,7 +21,7 @@ namespace vor {
   typedef uint32_t uint2;
 
   static const uint1 shiftFacet(9);
-  static const uint1 maskFacet( (~0) << shiftFacet);
+  static const uint1 maskFacet( static_cast<uint1>(~0u << shiftFacet) );
   static const uint1 maskNoFacet((uint1) ~maskFacet);
   static const uint1 maskEdge(3);
   static const uint1 maskVertex((uint1) ~(maskFacet | maskEdge));
@@ -93,8 +93,8 @@ namespace vor {
   class CompressedRowStorage
   {
   public:
-    CompressedRowStorage(size_t numRows, size_t numNZ): m_numRows(numRows), m_row_ptr(numRows+1,0) {m_values.reserve(numNZ); m_row_ptr.reserve(numNZ);}
-    vector<real_t> & getValues() {return m_value;}
+    CompressedRowStorage(size_t numRows, size_t numNZ): m_rowPtr(numRows+1,0) {m_values.reserve(numNZ); m_rowPtr.reserve(numNZ);}
+    vector<real_t> & getValues() {return m_values;}
     vector<size_t> & getColInd() {return m_colInd;}
     vector<size_t> & getRowPtr() {return m_rowPtr;}
   private:
