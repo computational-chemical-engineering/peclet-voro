@@ -1,0 +1,70 @@
+name: Doxygen Documentation
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Only one deployment can run at a time; cancel in-progress runs if a new one
+# is triggered so that the published site always reflects the latest commit.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Build HTML documentation ──────────────────────────────────────────────
+  build:
+    name: Build documentation
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y \
+            cmake \
+            ninja-build \
+            libboost-dev \
+            doxygen \
+            graphviz
+
+      - name: Configure CMake
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVORONOI_BUILD_TESTS=OFF \
+            -DVORONOI_BUILD_DOCS=ON \
+            -G Ninja
+
+      - name: Build Doxygen HTML
+        run: cmake --build build --target docs
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/docs/html
+
+  # ── Deploy to GitHub Pages ────────────────────────────────────────────────
+  deploy:
+    name: Deploy to GitHub Pages
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
