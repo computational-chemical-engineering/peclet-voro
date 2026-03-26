@@ -1,22 +1,39 @@
-# Build artifacts
+# ── CMake build directories ───────────────────────────────────────────────────
+build/
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+install_manifest.txt
+_CPack_Packages/
+
+# ── Generated CMake / package files (keep the .cmake.in template) ─────────────
+*.cmake
+!cmake/voronoi_dynamicsConfig.cmake.in
+
+# ── Compiled objects and binaries ─────────────────────────────────────────────
 *.o
 *.d
+*.a
+*.so
+*.dylib
 
-# Executables (test programs)
-testBuildRebuild
-testBuild_Trial
-testSimulation
-testDroplet
-testInterface
-testViscous
-testStaticVoronoi
-testVoroComparison
-
-# Output data files from simulations
+# ── Simulation output data files ─────────────────────────────────────────────
 pos_[0-9]*.dat
 intf_[0-9]*.dat
 GNUPlotfile.txt
 
-# Doxygen output
-html/
-latex/
+# ── Doxygen generated output ─────────────────────────────────────────────────
+docs/html/
+docs/latex/
+
+# ── IDE / editor artifacts ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

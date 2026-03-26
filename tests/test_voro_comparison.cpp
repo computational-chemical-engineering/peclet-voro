@@ -1,5 +1,5 @@
 /**
- * \file testVoroComparison.cpp
+ * @file test_voro_comparison.cpp
  * \brief Tests that compare voronoi_dynamics against voro++ for a periodic box.
  *
  * Two test scenarios are covered:
@@ -20,7 +20,7 @@
 #include <vector>
 #include <algorithm>
 
-#include "voronoi.hpp"
+#include <voronoi_dynamics/voronoi.hpp>
 #include <boost/random.hpp>
 
 // voro++ headers

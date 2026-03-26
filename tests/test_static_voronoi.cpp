@@ -1,5 +1,5 @@
 /**
- * \file testStaticVoronoi.cpp
+ * @file test_static_voronoi.cpp
  * \brief test program: build a Voronoi tessellation for a static point set in
  *        a periodic box and verify its correctness
  */
@@ -9,7 +9,7 @@
 #include <cmath>
 #include <vector>
 
-#include "voronoi.hpp"
+#include <voronoi_dynamics/voronoi.hpp>
 #include <boost/random.hpp>
 
 using std::vector;

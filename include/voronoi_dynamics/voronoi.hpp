@@ -1,56 +1,40 @@
 /**
- * \file voronoi.hpp
- * \brief header file for classes of voronoi cells, complexes of cells, their creation and manipulation
+ * @file voronoi.hpp
+ * @brief Voronoi cell construction, geometry, and dynamic cell-complex
+ *        management for moving-particle simulations.
  *
+ * Provides the core classes:
+ *  - Cell          – topology and neighbor information for a single Voronoi cell
+ *  - Cuboid        – helper that initialises a cell as a rectangular cuboid
+ *  - CellMaker     – incremental half-plane cutting algorithm
+ *  - CellGeometry  – geometric properties (volume, areas, velocity gradients)
+ *  - CellUpdater   – topology-repair after particle movement
+ *  - CellComplex   – collection of cells and high-level build/update interface
+ *  - NbrsToFacets  – neighbour-to-facet mapping for sparse-matrix assembly
  */
 
-#ifndef VOR_VORONOI_H
-#define VOR_VORONOI_H
+#pragma once
 
-#include <vector>
-#include <stack>
-#include <deque>
-#include <boost/container/flat_set.hpp>
-#include <utility>
-#include <cstdio>
-#include <queue>
-#include <limits>
-#include "vor_types.hpp"
-#include "nbrlist.hpp"
-//#include <google/profiler.h>
 #include <algorithm>
-//#include <omp.h>
+#include <boost/container/flat_set.hpp>
+#include <cstdio>
+#include <deque>
+#include <limits>
+#include <queue>
+#include <stack>
+#include <utility>
+#include <vector>
 
-using std::vector;
-using std::stack;
-using std::deque;
-using std::pair;
-using std::priority_queue;
-using std::sort;
-using std::merge;
-using std::numeric_limits;
-using vor::Array;
-using vor::Vertex;
-using vor::NbrInsert;
-using vor::uint1;
-using vor::uint0;
-using vor::uint2;
-using vor::NbrDist;
-using vor::CompareNbrDist;
-using vor::CompareNbrInsert;
-using vor::NbrList;
-using vor::Box;
-using vor::PosAndId;
-
-using boost::container::flat_set;
+#include "nbrlist.hpp"
+#include "vor_types.hpp"
 
 namespace vor {
 
   /**
-   * \brief make a 1 unsigned integer label that contains information of a neigbor vertex
-   * \param facet index of facet
-   * \param vertex index of neigbor vertex
-   * \param edge index of the edge (0 to 2) of the neighbor vertex that points back to current vertex
+   * @brief make a 1 unsigned integer label that contains information of a neighbor vertex
+   * @param facet index of facet
+   * @param vertex index of neighbor vertex
+   * @param edge index of the edge (0 to 2) of the neighbor vertex that points back to current vertex
    */
   inline uint1 makeLabel(uint1 facet, uint1 vertex, uint1 edge)
   {
@@ -58,8 +42,8 @@ namespace vor {
   }
 
   /**
-   * \brief get the facet index from a label
-   * \param label 
+   * @brief get the facet index from a label
+   * @param label 
    * \sa makeLabel
    */  
   inline uint1 getFacet(uint1 label)
@@ -68,8 +52,8 @@ namespace vor {
   }
 
   /**
-   * \brief get the neighbor vertex index from a label
-   * \param label 
+   * @brief get the neighbor vertex index from a label
+   * @param label 
    * \sa makeLabel
    */  
   inline uint1 getVertex(uint1 label)
@@ -78,8 +62,8 @@ namespace vor {
   }
 
   /**
-   * \brief get the neighbor edge index from a label
-   * \param label 
+   * @brief get the neighbor edge index from a label
+   * @param label 
    * \sa makeLabel
    */  
   inline uint1 getEdge(uint1 label)
@@ -95,71 +79,71 @@ namespace vor {
   class CellGeometry;
 
   /**
-   * \class Cell
-   * \brief class for storage of a single (Voronoi) cell
-   * \tparam real_t real type used for floating point numbers (e.g. real or double)
+   * @class Cell
+   * @brief class for storage of a single (Voronoi) cell
+   * @tparam real_t real type used for floating point numbers (e.g. real or double)
    */
   template< typename real_t >
   class Cell
   {
   public:
-    //! \brief constructor
+    //! @brief constructor
     Cell(): m_id(0), m_numVertices(0), m_numFacets(0), m_vertexPos(NULL), m_vertices(NULL), m_facets(NULL), m_nbr(NULL){}
-    //! \brief copy constructor
+    //! @brief copy constructor
     Cell(const Cell<real_t> & cell);
     //! destructor.
     ~Cell();
-    //! \brief copy operator
-    //! \param rhs of type Cell
-    //! \return reference to the copied cell
+    //! @brief copy operator
+    //! @param rhs of type Cell
+    //! @return reference to the copied cell
     Cell & operator=(const Cell<real_t> & rhs);
-    //! \brief copy operator
-    //! \param rhs of type CellMaker (\sa CellMaker)
-    //! \return reference to the copied cell
+    //! @brief copy operator
+    //! @param rhs of type CellMaker (\sa CellMaker)
+    //! @return reference to the copied cell
     Cell & operator=(CellMaker<real_t> & rhs);
-    //! \brief set the id of a cell
-    //! \param id the id to be set
+    //! @brief set the id of a cell
+    //! @param id the id to be set
     void setId(uint2 id) {m_id=id;}
-    //! \brief reset the internal storage for the cell information
-    //! \param numVertices number of vertices of the cell
-    //! \param numFacets number of facets of the cell
+    //! @brief reset the internal storage for the cell information
+    //! @param numVertices number of vertices of the cell
+    //! @param numFacets number of facets of the cell
     void reset(uint0 numVertices=0, uint0 numFacets=0);
-    //! \brief print the topological information of a cell
+    //! @brief print the topological information of a cell
     void printTopology() const;
-    //! \brief print the facet information (such as cell id's of its neighbors)
-    //! \param nbr id of neighbor cell. The facet corresponding to this neighbor is searched in the current cell
+    //! @brief print the facet information (such as cell id's of its neighbors)
+    //! @param nbr id of neighbor cell. The facet corresponding to this neighbor is searched in the current cell
     void printFacet(uint2 nbr) const;
-    //! \brief print all the information of the facets of the current cell
-    //! \param cells vector of cells that should include the neighbors of the current cell
-    void printNbrFacets(const vector<Cell<real_t> > & cells) const;
-    //! \brief output the cell geometry in a Gnuplot format
-    //! \param p coordinate of the center of the cell (Note that internal vertex coordinates are relative to the center.)
+    //! @brief print all the information of the facets of the current cell
+    //! @param cells vector of cells that should include the neighbors of the current cell
+    void printNbrFacets(const std::vector<Cell<real_t> > & cells) const;
+    //! @brief output the cell geometry in a Gnuplot format
+    //! @param p coordinate of the center of the cell (Note that internal vertex coordinates are relative to the center.)
     void drawGnuplot(Array<real_t, 3> p,FILE *fp) const;
-    //! \brief output a facet in a Gnuplot format
-    //! \param iFacet index of the facet to be drawn
-    //! \param p coordinate of the center of the cell (Note that internal vertex coordinates are relative to the center.)    
+    //! @brief output a facet in a Gnuplot format
+    //! @param iFacet index of the facet to be drawn
+    //! @param p coordinate of the center of the cell (Note that internal vertex coordinates are relative to the center.)    
     inline void drawFacetGnuplot(uint1 iFacet, Array<real_t, 3> p,FILE *fp) const;
-    //! \brief facet information of a cell with all the verticies on it
+    //! @brief facet information of a cell with all the verticies on it
     void printFacetInfo(Array<real_t, 3> p,uint facet_id) const;
-    //! \brief get the id if this cell
-    //! \return ID of cell
+    //! @brief get the id if this cell
+    //! @return ID of cell
     inline uint2 getID() const {return m_id;}
-    //! \brief number of vertices the cell contains
-    //! \return number of vertices
+    //! @brief number of vertices the cell contains
+    //! @return number of vertices
     inline uint0 numVertices() const {return m_numVertices;}
-    //! \brief number of facets the cell contains
-    //! \return number of facets
+    //! @brief number of facets the cell contains
+    //! @return number of facets
     inline uint0 numFacets() const {return m_numFacets;}
-    //! \brief get the id of the neighbor cell corresponding to a facet index
-    //! \param i index of a facet
-    //! \return id of neighbor cell
+    //! @brief get the id of the neighbor cell corresponding to a facet index
+    //! @param i index of a facet
+    //! @return id of neighbor cell
     inline uint2 getNbr(uint1 i) const {return m_nbr[i];}
-    //! \brief get the array of id's of the neighbor cells
-    //! \return array of id's of neighbor cells
+    //! @brief get the array of id's of the neighbor cells
+    //! @return array of id's of neighbor cells
     inline const uint2 * getNbrs() const {return m_nbr;}
-    //! \brief check of the cell has a facet that does not correspond to a neighbor cell
+    //! @brief check of the cell has a facet that does not correspond to a neighbor cell
     //! Not every facet need necesarrily have an neighbor cell associated to it.
-    //! \return true, if there are 1 or more facets without neighbors in a cell. false otherwise
+    //! @return true, if there are 1 or more facets without neighbors in a cell. false otherwise
     inline bool hasNoNbr();
     friend class CellMaker<real_t>;
     friend class CellUpdater<real_t>;
@@ -188,42 +172,42 @@ namespace vor {
   };
 
   /**
-   * \class Cuboid
-   * \brief class for creating a cuboid cell
+   * @class Cuboid
+   * @brief class for creating a cuboid cell
    * This is typically used as a starting cell to carve out a Voronoi cell using plane cuts.
-   * \tparam real_t real type used for floating point numbers (e.g. real or double)
+   * @tparam real_t real type used for floating point numbers (e.g. real or double)
    */
   template< typename real_t >
   class Cuboid: public Cell<real_t>
   {
   public:
-    //! \brief constructor
-    //! \param L contains the lengths of the 3 sides of the cuboid
+    //! @brief constructor
+    //! @param L contains the lengths of the 3 sides of the cuboid
     Cuboid(const Array<real_t, 3> & L);
   };
 
 
   /**
-   * \class CellMaker
-   * \brief class for making a cell using planar cuts
-   * \tparam real_t real type used for floating point numbers (e.g. real or double)
+   * @class CellMaker
+   * @brief class for making a cell using planar cuts
+   * @tparam real_t real type used for floating point numbers (e.g. real or double)
    */
   template< typename real_t >
   class CellMaker
   {
   public:
-    //! \brief constructot
+    //! @brief constructot
     CellMaker();
-    //! \brief destructor
+    //! @brief destructor
     ~CellMaker();
-    //! \brief initialize a cellmaker by equating it to a cell
-    //! \param rhs cell used to initialize the cellmaker
+    //! @brief initialize a cellmaker by equating it to a cell
+    //! @param rhs cell used to initialize the cellmaker
     CellMaker & operator=(const Cell<real_t> & rhs);
-    //! \brief initialize a cellmaker by equating it to a cellUpdatet
-    //! \param rhs cellupdater used to initialize the cellmaker
+    //! @brief initialize a cellmaker by equating it to a cellUpdatet
+    //! @param rhs cellupdater used to initialize the cellmaker
     CellMaker & operator=(const CellUpdater<real_t> & rhs);
     /**
-     * \brief build a Voronoi cell
+     * @brief build a Voronoi cell
      *
      * The Voronoi cell of the particle with index id and coordinated pos[id] is build.
      * Typically the vector pos contains all positions of the particles in the system. 
@@ -231,32 +215,32 @@ namespace vor {
      * Also the periodic simulation box is used to compute the smallest distance between a particle and the center of the Voronoi cell
      * Note that for a small number of particles more than 1 periodic image of a particle can be a neighbor of a cell.
      * Since this is not considered in the current version, this means that the final Voronoi cell is not correct when the number of particles considered is relatively small.
-    * \param id the unique id of the cell to be build. It also refers to the particle index.
-    * \param pos positions of all particles to be considered
-    * \param nbrList neighbor list used to efficiently find the closest particles
-    * \param initCell initial cell used to carve out the Voronoi cell
-    * \return true if the final cell is different form initCell
+    * @param id the unique id of the cell to be build. It also refers to the particle index.
+    * @param pos positions of all particles to be considered
+    * @param nbrList neighbor list used to efficiently find the closest particles
+    * @param initCell initial cell used to carve out the Voronoi cell
+    * @return true if the final cell is different form initCell
     */
-    bool build(uint2 id, const vector< Array<real_t, 3> > & pos,const NbrList<uint2, real_t> & nbrList, const Cell<real_t> & initCell);
+    bool build(uint2 id, const std::vector< Array<real_t, 3> > & pos,const NbrList<uint2, real_t> & nbrList, const Cell<real_t> & initCell);
     /**
-     * \brief rebuild a Voronoi cell 
+     * @brief rebuild a Voronoi cell 
      *
      * The Voronoi cell is carved out using only the neighbors as stored in initCell.
-     * \param pos positions of all particles
-     * \param box simulation box used to determine minimal image in the case of periodic boundary conditions
-     * \param initCell initial cell used to carve out the Voronoi cell
-     * \return true if all neighbors of initCell are associated with a facet of the newly created cell
+     * @param pos positions of all particles
+     * @param box simulation box used to determine minimal image in the case of periodic boundary conditions
+     * @param initCell initial cell used to carve out the Voronoi cell
+     * @return true if all neighbors of initCell are associated with a facet of the newly created cell
      */
-    bool rebuild(const vector< Array<real_t, 3> > & pos, const Box<real_t> & box, const Cell<real_t> & initCell);
+    bool rebuild(const std::vector< Array<real_t, 3> > & pos, const Box<real_t> & box, const Cell<real_t> & initCell);
     /** 
-     * \brief further refine the Voronoi cell by performing additional plane cuts corresponding to neighbors
+     * @brief further refine the Voronoi cell by performing additional plane cuts corresponding to neighbors
      * The id's and positions of the neighbors are accessed by means of an iterator of type PosAndId
-     * \param begin starting value for the iterator
-     * \param end end value of the iterator
-     * \param pos0 position of the particle corresponding to the Voronoi cell under consideration
-     * \return true if any of the neighbors caused a plane cut to add a facet to the cell
+     * @param begin starting value for the iterator
+     * @param end end value of the iterator
+     * @param pos0 position of the particle corresponding to the Voronoi cell under consideration
+     * @return true if any of the neighbors caused a plane cut to add a facet to the cell
      **/    
-    inline bool processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0, const  Box<real_t> & box);
+    inline bool processNbrs(typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin, typename std::vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0, const  Box<real_t> & box);
     //    inline real_t getRsqMax() const {return m_rSq[m_vRsqMax];}
     void getCloseNbrs(NbrInsert & nbrs);
     // void drawGnuplot(FILE *fp) const;
@@ -266,34 +250,34 @@ namespace vor {
     friend class CellUpdater<real_t>;
     void renumber();
   protected:
-    //! \brief initialize the cell to be cut
-    //! \param cell used for the initialization
+    //! @brief initialize the cell to be cut
+    //! @param cell used for the initialization
     void init(const Cell<real_t> & cell);
     inline bool cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
     inline bool cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
-    //! \brief compute squared distance between vertex i and the center of the cell
+    //! @brief compute squared distance between vertex i and the center of the cell
     //! Result is stored in private member m_rSq[i]
-    //! \param i index of the vertex
+    //! @param i index of the vertex
     inline void computeRsq(uint1 i);
-    //! \brief compute the squared distances of all cells
+    //! @brief compute the squared distances of all cells
     void computeAllRsq();
-    //! \brief find the vertex with the largest distance from the center
+    //! @brief find the vertex with the largest distance from the center
     //! The index of the vertex with the largest distance form the center will be stored in m_vRsqMax. 
     void findRsqMax();
-    //! \brief compute distance between the vertex i and a plane
-    //! \param i index of the vertex
-    //! \param p the poisition of a point relative to the cell center. The plane is the perpendicular plane halfway between the center and p.
-    //! \param rSqHalf = 0.5|p|^2
+    //! @brief compute distance between the vertex i and a plane
+    //! @param i index of the vertex
+    //! @param p the poisition of a point relative to the cell center. The plane is the perpendicular plane halfway between the center and p.
+    //! @param rSqHalf = 0.5|p|^2
     inline real_t computeDist(uint1 i, const Array<real_t, 3> p, const real_t rSqHalf);
-    //! \brief compute distance between the vertex i and a plane
-    //! \param i index of the vertex
-    //! \param p the poisition of a point relative to the cell center. The plane is the perpendicular plane halfway between the center and p.
+    //! @brief compute distance between the vertex i and a plane
+    //! @param i index of the vertex
+    //! @param p the poisition of a point relative to the cell center. The plane is the perpendicular plane halfway between the center and p.
     inline real_t computeDist(uint1 i, const Array<real_t, 3> p);
-    //! \brief compute distance between a plane and all vertices
-    //! \param p the poisition of a point relative to the cell center. The plane is the perpendicular plane halfway between the center and p.
-    //! \param rSqHalf = 0.5|p|^2    
+    //! @brief compute distance between a plane and all vertices
+    //! @param p the poisition of a point relative to the cell center. The plane is the perpendicular plane halfway between the center and p.
+    //! @param rSqHalf = 0.5|p|^2    
     void computeAllDist(const Array<real_t, 3> p, const real_t rSqHalf);
-    //! \brief reset internal variables that indicate distances of vertices to a plane are computed
+    //! @brief reset internal variables that indicate distances of vertices to a plane are computed
     inline void resetDist();
     
     inline void computeGCOrig(uint2 indx, const Array<real_t, 3> & pos);
@@ -319,7 +303,7 @@ namespace vor {
     uint2 * m_nbr;
     IndxList<uint1> m_freeV, m_freeF;
     VisitedIndx<uint2> m_visited;
-    deque<uint2> m_checkGridCell;
+    std::deque<uint2> m_checkGridCell;
     real_t m_distMax, m_distGCMax;
     uint1 m_vRsqMax;
     bool m_isAllCut;
@@ -330,12 +314,12 @@ namespace vor {
     real_t * m_distGC;
     uint1 * m_renumVWrk;
     uint1 * m_renumFWrk;
-    vector<uint1> m_newVerticesWrk;
-    vector<uint1> m_facetPrevWrk;
-    //    vector<uint2> m_indcsNbrsWrk;
-    vector<PosAndId<uint2, real_t> > m_nbrsWrk;
-    vector<NbrDist<real_t> > m_nbrDistWrk;
-    stack<uint1> m_vStackWrk;
+    std::vector<uint1> m_newVerticesWrk;
+    std::vector<uint1> m_facetPrevWrk;
+    //    std::vector<uint2> m_indcsNbrsWrk;
+    std::vector<PosAndId<uint2, real_t> > m_nbrsWrk;
+    std::vector<NbrDist<real_t> > m_nbrDistWrk;
+    std::stack<uint1> m_vStackWrk;
   };
 
   template< typename real_t >
@@ -346,41 +330,41 @@ namespace vor {
     CellGeometry(Cell<real_t> & cell);
     CellGeometry & operator=(Cell<real_t> & rhs);
     CellGeometry & operator=(const CellGeometry<real_t> & rhs);
-    void computeConnectingVectors(const vector<Array<real_t, 3> > & pos, const Box<real_t> & box);
+    void computeConnectingVectors(const std::vector<Array<real_t, 3> > & pos, const Box<real_t> & box);
     void computeEdgeInv();
     void updateVertexPos();
     void computeAreas();
     void computeVolume();
     void diffVolume();
     void computeAll();
-    Array<Array<real_t, 3>, 3> velocityGradient(const vector<Array<real_t, 3> > & velocity) const;
+    Array<Array<real_t, 3>, 3> velocityGradient(const std::vector<Array<real_t, 3> > & velocity) const;
     void getDelaunayNbrs(uint1 iVertex, Array<uint2, 3> & nbrs) const;
     void computeDelaunayForces(uint1 iVertex, const Array<Array<real_t, 3>, 3> & stress, Array<Array<real_t, 3>, 3> & forces);
-    Array<Array<real_t, 3>, 3> velocityGradientDelaunay(uint1 iVertex, const Array<uint2, 3> & nbrs, const vector<Array<real_t, 3> > & velocities) const;
-    Array<real_t, 3> force(const vector<Array<Array<real_t, 3>, 3> > & stresses) const;
-    void gradFacetAreaSq(uint1 facetIndx, vector<uint2> & indx, vector<Array<real_t, 3> > & grad) const;
-    inline const vector< Array<real_t, 3> > & getdV() const {return m_dV;}
-    inline const vector< Array<real_t, 3> > & getAreas() const {return m_areas;}
+    Array<Array<real_t, 3>, 3> velocityGradientDelaunay(uint1 iVertex, const Array<uint2, 3> & nbrs, const std::vector<Array<real_t, 3> > & velocities) const;
+    Array<real_t, 3> force(const std::vector<Array<Array<real_t, 3>, 3> > & stresses) const;
+    void gradFacetAreaSq(uint1 facetIndx, std::vector<uint2> & indx, std::vector<Array<real_t, 3> > & grad) const;
+    inline const std::vector< Array<real_t, 3> > & getdV() const {return m_dV;}
+    inline const std::vector< Array<real_t, 3> > & getAreas() const {return m_areas;}
     real_t getVolume() const {return m_vol;}
-    const vector<real_t> & getVolumeDelaunay() const {return m_volDelaunay;}
-    const vector< Array< Array< Array<real_t, 3>, 3 >, 3> > & getOmega() const {return m_omega;}
+    const std::vector<real_t> & getVolumeDelaunay() const {return m_volDelaunay;}
+    const std::vector< Array< Array< Array<real_t, 3>, 3 >, 3> > & getOmega() const {return m_omega;}
     bool isConvex() const;
     inline Cell<real_t> & getCell() {return *p_cell;}
-    inline const vector< Array<real_t, 3> > & getConnVect() const {return m_connV;}
-    inline const vector< real_t > & getConnVectSq() const {return m_rSq;}
+    inline const std::vector< Array<real_t, 3> > & getConnVect() const {return m_connV;}
+    inline const std::vector< real_t > & getConnVectSq() const {return m_rSq;}
   protected:
     Cell<real_t> * p_cell;
-    vector< Array<real_t, 3> > m_connV;
-    vector<real_t> m_rSq;
-    vector< Array< Array<real_t, 3>, 3 > > m_edgeInv;
-    vector< real_t> m_volDelaunay;
-    vector< Array<real_t, 3> > m_areas;
+    std::vector< Array<real_t, 3> > m_connV;
+    std::vector<real_t> m_rSq;
+    std::vector< Array< Array<real_t, 3>, 3 > > m_edgeInv;
+    std::vector< real_t> m_volDelaunay;
+    std::vector< Array<real_t, 3> > m_areas;
     real_t m_vol;
     // omega[i][j][l][k]
     // neighbor corresponding to facet i differentiated into j-direction
     // l: displacement direction, k: normal direction
-    vector< Array< Array< Array<real_t, 3>, 3 >, 3> > m_omega;
-    vector< Array<real_t, 3> > m_dV;
+    std::vector< Array< Array< Array<real_t, 3>, 3 >, 3> > m_omega;
+    std::vector< Array<real_t, 3> > m_dV;
   };
 
   template< typename real_t >
@@ -394,9 +378,9 @@ namespace vor {
     inline void reset();
     uint1 findFacet(uint2 nbr) const;
     void updateNbrInserts();
-    inline const vector<NbrInsert> & getNbrInserts() {return m_nbrInserts;}
+    inline const std::vector<NbrInsert> & getNbrInserts() {return m_nbrInserts;}
     inline void clearNbrInserts() {m_nbrInserts.clear();}
-    bool processNbrInserts(NbrInsertItr begin, NbrInsertItr end, CellMaker<real_t> & maker, const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box);
+    bool processNbrInserts(NbrInsertItr begin, NbrInsertItr end, CellMaker<real_t> & maker, const std::vector<Array<real_t, 3> > & pos, const  Box<real_t> & box);
     friend class CellMaker<real_t>;
     friend class CellGeometry<real_t>;
     //inline bool isConvex2() const;
@@ -406,12 +390,12 @@ namespace vor {
     inline bool isInNbrs(uint2 nbr) const;
     //inline bool isConvex() const;
     CellGeometry<real_t> * p_geom;
-    flat_set<uint2> m_nbrs;
-    vector<uint2> m_nbrsWrk;
-    vector<NbrInsert> m_nbrInserts;
+    boost::container::flat_set<uint2> m_nbrs;
+    std::vector<uint2> m_nbrsWrk;
+    std::vector<NbrInsert> m_nbrInserts;
     bool m_isSetup;
-    vector< PosAndId<uint2, real_t> > m_newNbrsWrk;
-    vector< Array< bool, 3> > m_visitedWrk;
+    std::vector< PosAndId<uint2, real_t> > m_newNbrsWrk;
+    std::vector< Array< bool, 3> > m_visitedWrk;
   };
 
   template<typename real_t>
@@ -419,25 +403,25 @@ namespace vor {
   {
   public:
     CellComplex(Box<real_t> * box): m_nbrList(box), m_isBuild(false) {}
-    void build(const vector<Array<real_t, 3> > & p);
-    void update(const vector<Array<real_t, 3> > & p);
-    const vector<Cell<real_t> > & getCells() const {return m_cells;}
-    vector<Cell<real_t> > & getCells() {return m_cells;}
-    vector<uint0> & getTypes() {return m_types;}
-    const vector<uint0> & getTypes() const {return m_types;}
-    vector<CellGeometry<real_t> > & getGeoms() {return m_geom;}
-    const vector<CellGeometry<real_t> > & getGeoms() const {return m_geom;}
+    void build(const std::vector<Array<real_t, 3> > & p);
+    void update(const std::vector<Array<real_t, 3> > & p);
+    const std::vector<Cell<real_t> > & getCells() const {return m_cells;}
+    std::vector<Cell<real_t> > & getCells() {return m_cells;}
+    std::vector<uint0> & getTypes() {return m_types;}
+    const std::vector<uint0> & getTypes() const {return m_types;}
+    std::vector<CellGeometry<real_t> > & getGeoms() {return m_geom;}
+    const std::vector<CellGeometry<real_t> > & getGeoms() const {return m_geom;}
     const NbrList<uint2, real_t>  & getNbrList() const {return m_nbrList;}
-    void drawInterfaceGnuplot(uint0 iType, uint0 jType, const vector<Array<real_t, 3> > & p, FILE *fp) const;
+    void drawInterfaceGnuplot(uint0 iType, uint0 jType, const std::vector<Array<real_t, 3> > & p, FILE *fp) const;
   private:
-    void repair(const vector<Array<real_t, 3> > & p);
-    void initNbrList(const vector<Array<real_t, 3> > & p);
+    void repair(const std::vector<Array<real_t, 3> > & p);
+    void initNbrList(const std::vector<Array<real_t, 3> > & p);
     NbrList<uint2, real_t> m_nbrList;
-    vector<uint0> m_types;
-    vector<Cell<real_t> > m_cells;
-    vector<CellGeometry<real_t> > m_geom;
-    vector<CellUpdater<real_t> > m_updaters;
-    vector<bool> m_hasChanged;
+    std::vector<uint0> m_types;
+    std::vector<Cell<real_t> > m_cells;
+    std::vector<CellGeometry<real_t> > m_geom;
+    std::vector<CellUpdater<real_t> > m_updaters;
+    std::vector<bool> m_hasChanged;
     bool m_isBuild;
   };
 
@@ -446,16 +430,16 @@ namespace vor {
   public:
     NbrsToFacets() {}
     template<typename real_t>
-    void init(const vector< Cell<real_t> > & cells);
+    void init(const std::vector< Cell<real_t> > & cells);
     void print() const;
-    //    void makeMatrixdVdV(const vector<real_t> & dV);
+    //    void makeMatrixdVdV(const std::vector<real_t> & dV);
   protected:
     template<typename real_t>
-    NbrsToFacets transposedV(const vector<real_t> & values, vector<real_t> & valuesTr) const;
+    NbrsToFacets transposedV(const std::vector<real_t> & values, std::vector<real_t> & valuesTr) const;
     uint2 m_numCells;
-    vector<uint2> m_ptr;
-    vector<uint2> m_nbr;
-    vector<uint1> m_facet;
+    std::vector<uint2> m_ptr;
+    std::vector<uint2> m_nbr;
+    std::vector<uint1> m_facet;
   };
   
   template<typename real_t>
@@ -597,7 +581,7 @@ namespace vor {
   }
 
   template<typename real_t>
-  void Cell<real_t>::printNbrFacets(const vector<Cell<real_t> > & cells) const
+  void Cell<real_t>::printNbrFacets(const std::vector<Cell<real_t> > & cells) const
   {
     printf("number of facets %u\n", m_numFacets);
     for (uint1 i(0); i< m_numFacets; ++i){
@@ -832,7 +816,7 @@ namespace vor {
     }
     computeAllRsq();
     resetDist();
-    const numeric_limits<real_t> lim;
+    const std::numeric_limits<real_t> lim;
     m_distGCMax = -lim.max();
     m_vDistGCMax = maxNumVertices;
   }
@@ -870,7 +854,7 @@ namespace vor {
   template<typename real_t>
   void CellMaker<real_t>::resetDist()
   {
-    const numeric_limits<real_t> lim;
+    const std::numeric_limits<real_t> lim;
     m_distMax = -lim.max();
     m_vDistMax = maxNumVertices;
     for(uint1 i=m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i))
@@ -910,7 +894,7 @@ namespace vor {
   template<typename real_t>
   void CellMaker<real_t>::computeAllDist(const Array<real_t, 3> p, const real_t rSqHalf)
   {
-    const numeric_limits<real_t> lim;
+    const std::numeric_limits<real_t> lim;
     m_distMax = -lim.max();
     m_vDistMax = maxNumVertices;
     for (uint1 i(m_freeV.beginIndx()); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i)){
@@ -1091,7 +1075,7 @@ namespace vor {
   template<typename real_t>
   void CellMaker<real_t>::computeAllDistGC()
   {
-    const numeric_limits<real_t> lim;
+    const std::numeric_limits<real_t> lim;
     m_distGCMax = -lim.max();
     m_vDistGCMax = maxNumVertices;
     //compute 0.5 [v^2 - (p-v)^2]
@@ -1301,7 +1285,7 @@ namespace vor {
     if (isLargestDeleted)
       findRsqMax();
     // if (isVCloseGCDeleted){
-    //   const numeric_limits<real_t> lim;
+    //   const std::numeric_limits<real_t> lim;
     //   m_distGCMax = -lim.max();
     //   m_vDistGCMax = maxNumVertices;
     //   for(uint1 i=m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i)){
@@ -1453,7 +1437,7 @@ namespace vor {
     if (isLargestDeleted)
       findRsqMax();
     // if (isVCloseGCDeleted){
-    //   const numeric_limits<real_t> lim;
+    //   const std::numeric_limits<real_t> lim;
     //   m_distGCMax = -lim.max();
     //   m_vDistGCMax = maxNumVertices;
     //   for(uint1 i=m_freeV.beginIndx(); i != m_freeV.endIndx() ; i = m_freeV.nextIndx(i)){
@@ -1467,7 +1451,7 @@ namespace vor {
   }
   
   template<typename real_t>
-  bool CellMaker<real_t>::build(uint2 id, const vector<Array<real_t, 3> > & pos, const  NbrList<uint2, real_t> & nbrList, const Cell<real_t> & initCell)
+  bool CellMaker<real_t>::build(uint2 id, const std::vector<Array<real_t, 3> > & pos, const  NbrList<uint2, real_t> & nbrList, const Cell<real_t> & initCell)
   {
     p_nbrList = &nbrList;
     {
@@ -1484,7 +1468,7 @@ namespace vor {
     else
       m_visited.reset();
     m_checkGridCell.clear();
-    vector<uint2 > nbrGC;
+    std::vector<uint2 > nbrGC;
     p_nbrList->getGridNbrs(pos[id], nbrGC);
     for(uint2 j(0); j < nbrGC.size(); ++j){
       if (!m_visited.isVisited(nbrGC[j])){
@@ -1492,8 +1476,8 @@ namespace vor {
     	m_visited.set(nbrGC[j]);
       }
     }
-    typename vector<PosAndId<uint2, real_t> >::const_iterator begin;
-    typename vector<PosAndId<uint2, real_t> >::const_iterator end;
+    typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin;
+    typename std::vector<PosAndId<uint2, real_t> >::const_iterator end;
     //one trial loop without checking of nbr cells
     size_t n = m_checkGridCell.size();
     for(uint2 i(0); i < n; ++i){
@@ -1555,7 +1539,7 @@ namespace vor {
   }
 
   template<typename real_t>
-  bool CellMaker<real_t>::rebuild(const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box, const Cell<real_t> & initCell)
+  bool CellMaker<real_t>::rebuild(const std::vector<Array<real_t, 3> > & pos, const  Box<real_t> & box, const Cell<real_t> & initCell)
   {
     m_nbrsWrk.clear();
     for(uint1 i=m_freeF.beginIndx(); i != m_freeF.endIndx() ; i = m_freeF.nextIndx(i))
@@ -1570,21 +1554,21 @@ namespace vor {
     //   printf("cell %u, neigb: %u\n", m_id, m_indcsNbrsWrk[i]);
     // printf("\n");
     this->init(initCell);
-    //typename vector<PosAndId<uint2, real_t> >::const_iterator begin = m_indcsNbrsWrk.begin();
-    //typename vector<PosAndId<uint2, real_t> >::const_iterator end = m_indcsNbrsWrk.end();
+    //typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin = m_indcsNbrsWrk.begin();
+    //typename std::vector<PosAndId<uint2, real_t> >::const_iterator end = m_indcsNbrsWrk.end();
     processNbrs(m_nbrsWrk.begin(), m_nbrsWrk.end(), pos[m_id], box);
     return m_isAllCut;
   }
 
   template<typename real_t>
-  bool CellMaker<real_t>::processNbrs(typename vector<PosAndId<uint2, real_t> >::const_iterator begin, typename vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0, const  Box<real_t> & box)
+  bool CellMaker<real_t>::processNbrs(typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin, typename std::vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0, const  Box<real_t> & box)
   {
     //    printf("number of nbrs: %lu\n", end-begin);
     bool isCut(false);
     m_nbrDistWrk.clear();
     m_nbrDistWrk.reserve(end-begin);
     NbrDist<real_t>  nbrDist;
-    for(typename vector<PosAndId<uint2, real_t> >::const_iterator itr(begin); itr != end; ++itr){
+    for(typename std::vector<PosAndId<uint2, real_t> >::const_iterator itr(begin); itr != end; ++itr){
       if (itr->id == m_id) continue;
       nbrDist.id = itr->id;
       //      printf("nbr: %u ", itr->id);
@@ -1676,7 +1660,7 @@ template<typename real_t>
   template<typename real_t>
   uint1 CellUpdater<real_t>::findFacet(uint2 nbr) const{
     const uint1 numFacets(p_geom->getCell().m_numFacets);
-    const vector<uint2> & nbrs(p_geom->getCell().m_nbr);
+    const std::vector<uint2> & nbrs(p_geom->getCell().m_nbr);
     uint1 indx(~0);
     for(uint0 i(0); i< numFacets; ++i)
       (nbrs[i]==nbr ? indx=i : indx);
@@ -1711,7 +1695,7 @@ template<typename real_t>
   }
   
   template<typename real_t>
-  bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end, CellMaker<real_t> & maker, const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box)
+  bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end, CellMaker<real_t> & maker, const std::vector<Array<real_t, 3> > & pos, const  Box<real_t> & box)
   {
     //    printf("begin %u %u %u\n", (*begin)[0], (*begin)[1], (*begin)[2]);
     bool hasChanged(false);
@@ -1744,7 +1728,7 @@ template<typename real_t>
 	(isInserted ? hasChanged = true: hasChanged);
 	if(!isInserted) {
 	  //	  printf("not inserted: %u %u %u\n",(*itr)[0],(*itr)[1],(*itr)[2]);
-	  // const vector<uint2> & nbrs(maker.getNbrs());
+	  // const std::vector<uint2> & nbrs(maker.getNbrs());
 	  // for(size_t i(0); i<nbrs.size(); ++i)
 	  //   if (nbrs[i] != noNbr){
 	  //     nbrIns[0] = (*itr)[1];
@@ -1752,7 +1736,7 @@ template<typename real_t>
 	  //     nbrIns[2] = nbrs[i];
 	  // 	m_nbrInserts.push_back(nbrIns);
 	  //   }
-	//   //If (*itr)[1] is not a neigbor of (*itr)[0] then (*itr)[0] is not a neighbor of (*itr)[1]
+	//   //If (*itr)[1] is not a neighbor of (*itr)[0] then (*itr)[0] is not a neighbor of (*itr)[1]
 	//   //Propose other neighbors to cell (*itr)[1] that might be closerby
 	  maker.getCloseNbrs(nbrClose);
 	  nbrIns[0] = (*itr)[1];
@@ -1824,7 +1808,7 @@ template<typename real_t>
   }
 
   template<typename real_t>
-  void CellGeometry<real_t>::computeConnectingVectors(const vector<Array<real_t, 3> > & pos, const  Box<real_t> & box)
+  void CellGeometry<real_t>::computeConnectingVectors(const std::vector<Array<real_t, 3> > & pos, const  Box<real_t> & box)
   {
     m_connV.resize(p_cell->m_numFacets);
     m_rSq.resize(p_cell->m_numFacets);
@@ -2001,7 +1985,7 @@ template<typename real_t>
 	for (uint0 i(0); i<3; ++i)
 	  for (uint0 l(0); l<3; ++l){
 	    dVertex[j][i][l] = m_edgeInv[vc][eOpp[i]][l]*(m_connV[f[i]][j]-p_cell->m_vertexPos[vc][j]);
-	    //	    dVertex[j][i][l] = (fabs(dVertex[j][i][l])>5e0? copysign(0, dVertex[j][i][l]) :dVertex[j][i][l]);
+	    //	    dVertex[j][i][l] = (std::fabs(dVertex[j][i][l])>5e0? copysign(0, dVertex[j][i][l]) :dVertex[j][i][l]);
 	  }
       for(uint0 m(0); m<3; ++m){
 	dA[0] = p_cell->m_vertexPos[vc][1]*dv[m][2]-p_cell->m_vertexPos[vc][2]*dv[m][1];
@@ -2135,7 +2119,7 @@ template<typename real_t>
   }
   
   // template<typename real_t>
-  // Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const vector<Array<real_t, 3> > & velocities) const
+  // Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const std::vector<Array<real_t, 3> > & velocities) const
   // {
   //   Array<Array<real_t, 3>, 3> gradV; //gradV[i][j] = dv[i]/dx[j]
   //   Array<real_t, 3> vCenter = velocities[p_cell->m_id];
@@ -2165,7 +2149,7 @@ template<typename real_t>
   // }
 
   template<typename real_t>
-  Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const vector<Array<real_t, 3> > & velocities) const
+  Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const std::vector<Array<real_t, 3> > & velocities) const
   {
     Array<Array<real_t, 3>, 3> gradV; //gradV[i][j] = dv[i]/dx[j]
     for(int l(0); l<3; ++l)
@@ -2198,7 +2182,7 @@ template<typename real_t>
   }
   
   template<typename real_t>
-  Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradientDelaunay(uint1 iVertex, const Array<uint2, 3> & nbrs, const vector<Array<real_t, 3> > & velocities) const
+  Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradientDelaunay(uint1 iVertex, const Array<uint2, 3> & nbrs, const std::vector<Array<real_t, 3> > & velocities) const
   {
     Array<Array<real_t, 3>, 3> gradV; //gradV[i][j] = dv[i]/dx[j]
     for(int l(0); l<3; ++l)
@@ -2230,7 +2214,7 @@ template<typename real_t>
   }
   
   template<typename real_t>
-  Array<real_t, 3> CellGeometry<real_t>::force(const vector<Array<Array<real_t, 3>, 3> > & stresses) const
+  Array<real_t, 3> CellGeometry<real_t>::force(const std::vector<Array<Array<real_t, 3>, 3> > & stresses) const
   {
     Array<real_t, 3> f; //gradV[i][j] = dv[i]/dx[j]
     Array<Array<real_t, 3>, 3> stressCenter = stresses[p_cell->id];
@@ -2254,9 +2238,9 @@ template<typename real_t>
   }
   
   template<typename real_t>
-  void CellGeometry<real_t>::gradFacetAreaSq(uint1 indxFacet, vector<uint2> & indxFacets, vector<Array<real_t, 3> > & grad) const
+  void CellGeometry<real_t>::gradFacetAreaSq(uint1 indxFacet, std::vector<uint2> & indxFacets, std::vector<Array<real_t, 3> > & grad) const
   {
-    vector<uint1> labels;
+    std::vector<uint1> labels;
     labels.reserve(10);
     uint1 labelStart(p_cell->m_facets[indxFacet]);
     labels.push_back(labelStart);
@@ -2314,17 +2298,17 @@ template<typename real_t>
   }
 
   template<typename real_t>
-  void CellComplex<real_t>::initNbrList(const vector<Array<real_t, 3> > & p)
+  void CellComplex<real_t>::initNbrList(const std::vector<Array<real_t, 3> > & p)
   {
     const Array<real_t, 3> & L(m_nbrList.getBox().getL());
     real_t density = real_t(p.size())/(L[0]*L[1]*L[2]);
-    real_t rcut = 1.75*(pow(density,-1.0/3.0));
+    real_t rcut = 1.75*(std::pow(density,-1.0/3.0));
     m_nbrList.setup(p, rcut);
     //    printf("number grid cells: %u\n", m_nbrList.getGrid().getN()[0]);
   }
 
   template<typename real_t>
-  void CellComplex<real_t>::build(const vector<Array<real_t, 3> > & p)
+  void CellComplex<real_t>::build(const std::vector<Array<real_t, 3> > & p)
   {
     initNbrList(p);
     //    printf("nbr list build\n");
@@ -2373,7 +2357,7 @@ template<typename real_t>
   }
   
   template<typename real_t>
-  void CellComplex<real_t>::update(const vector<Array<real_t, 3> > & p)
+  void CellComplex<real_t>::update(const std::vector<Array<real_t, 3> > & p)
   {
     (p.size() == m_cells.size()? m_isBuild : m_isBuild = false);
     if (!m_isBuild) {
@@ -2403,11 +2387,11 @@ template<typename real_t>
     if (numChanged==0) return;
     const Array<real_t, 3> & L(box.getL());
     Cuboid<real_t> cub(L);
-    vector<uint2> emptyCells;
+    std::vector<uint2> emptyCells;
 #pragma omp parallel
     {
       CellMaker<real_t> maker;
-      vector<uint2> emptyCellsPriv;
+      std::vector<uint2> emptyCellsPriv;
 #pragma omp for
       for(size_t i=0; i < m_updaters.size(); ++i){
 	if (!m_hasChanged[i]) continue;
@@ -2446,7 +2430,7 @@ template<typename real_t>
   }
 
   template<typename real_t>
-  void CellComplex<real_t>::repair(const vector<Array<real_t, 3> > & p)
+  void CellComplex<real_t>::repair(const std::vector<Array<real_t, 3> > & p)
   {
     //    ProfilerStart("test.prof");
 #pragma omp parallel for
@@ -2457,13 +2441,13 @@ template<typename real_t>
     bool needsUpdate(true);
     while (needsUpdate){
       needsUpdate = false;
-      vector<NbrInsert> nbrInserts, nbrInsTmp;
+      std::vector<NbrInsert> nbrInserts, nbrInsTmp;
 #pragma omp parallel
       {
-	vector<NbrInsert> nbrInsPriv;
+	std::vector<NbrInsert> nbrInsPriv;
 #pragma omp for
 	for(size_t i=0; i < m_updaters.size(); ++i){
-	  const vector<NbrInsert> & inserts(m_updaters[i].getNbrInserts());
+	  const std::vector<NbrInsert> & inserts(m_updaters[i].getNbrInserts());
 	  if (!inserts.empty()){
 	    nbrInsPriv.insert(nbrInsPriv.end(), inserts.begin(), inserts.end());
 	    m_updaters[i].clearNbrInserts();
@@ -2471,22 +2455,22 @@ template<typename real_t>
 	    needsUpdate = true;
 	  }
 	}
-	sort(nbrInsPriv.begin(), nbrInsPriv.end(), CompareNbrInsert());
+	std::sort(nbrInsPriv.begin(), nbrInsPriv.end(), CompareNbrInsert());
 #pragma omp critical
 	{
 	  nbrInsTmp.resize(nbrInserts.size()+nbrInsPriv.size());
-	  merge(nbrInserts.begin(), nbrInserts.end(), nbrInsPriv.begin(), nbrInsPriv.end(), nbrInsTmp.begin(), CompareNbrInsert());
+	  std::merge(nbrInserts.begin(), nbrInserts.end(), nbrInsPriv.begin(), nbrInsPriv.end(), nbrInsTmp.begin(), CompareNbrInsert());
 	  nbrInserts.swap(nbrInsTmp);
 	}
 // #pragma omp critical
 // 	nbrInserts.insert(nbrInserts.end(), nbrInsPriv.begin(), nbrInsPriv.end());
       }
-      //      std::__parallel::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
+      //      std::__parallel::std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
       // std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
       NbrInsertItr begin, end;
       begin = nbrInserts.begin();
       end = begin;
-      //      vector< CellMaker<real_t> > makers(omp_get_num_threads());
+      //      std::vector< CellMaker<real_t> > makers(omp_get_num_threads());
       //printf("start repair\n");
 #pragma omp parallel 
       {
@@ -2521,7 +2505,7 @@ template<typename real_t>
   }
 
   template<typename real_t>
-  void CellComplex<real_t>::drawInterfaceGnuplot(uint0 iType, uint0 jType, const vector<Array<real_t, 3> > & pos, FILE *fp) const
+  void CellComplex<real_t>::drawInterfaceGnuplot(uint0 iType, uint0 jType, const std::vector<Array<real_t, 3> > & pos, FILE *fp) const
   {
 #pragma omp parallel for
     for(size_t i=0; i<m_types.size(); ++i){
@@ -2538,7 +2522,7 @@ template<typename real_t>
 
     
   template<typename real_t>
-  void NbrsToFacets::init(const vector< Cell<real_t> > & cells)
+  void NbrsToFacets::init(const std::vector< Cell<real_t> > & cells)
   {
     m_numCells = cells.size();
     m_ptr.resize(m_numCells+1);
@@ -2550,7 +2534,7 @@ template<typename real_t>
     m_facet.resize(m_ptr[m_numCells]);
 #pragma omp parallel
     {
-      vector< pair<uint2, uint1> > nbrLoc;      
+      std::vector< std::pair<uint2, uint1> > nbrLoc;      
 #pragma omp for
       for(uint2 i=0; i< m_numCells; ++i){
 	uint2 numFacets(m_ptr[i+1]-m_ptr[i]);
@@ -2559,7 +2543,7 @@ template<typename real_t>
 	  nbrLoc[j].first = cells[i].getNbr(j);
 	  nbrLoc[j].second = j;
 	}
-	sort(nbrLoc.begin(), nbrLoc.end(), ComparePairFirst());
+	std::sort(nbrLoc.begin(), nbrLoc.end(), ComparePairFirst());
 	for(uint1 j=0; j< numFacets; ++j){
 	  m_nbr[m_ptr[i]+j] = nbrLoc[j].first;
 	  m_facet[m_ptr[i]+j] = nbrLoc[j].second;
@@ -2585,7 +2569,7 @@ template<typename real_t>
   }
 
   template<typename real_t>
-  NbrsToFacets NbrsToFacets::transposedV(const vector<real_t> & values, vector<real_t> & valuesTr) const
+  NbrsToFacets NbrsToFacets::transposedV(const std::vector<real_t> & values, std::vector<real_t> & valuesTr) const
   {
     NbrsToFacets tr;
     tr.m_numCells = m_numCells;
@@ -2601,8 +2585,8 @@ template<typename real_t>
     for(uint2 i=0; i< m_numCells; ++i){
       tr.m_ptr[i+1] += tr.m_ptr[i];
     }
-    vector<uint2> ptrTmp(tr.m_ptr.size());
-    vector<pair<uint2, pair<uint1, Array<real_t, 3> > > > nbrTmp(m_nbr.size());
+    std::vector<uint2> ptrTmp(tr.m_ptr.size());
+    std::vector<std::pair<uint2, std::pair<uint1, Array<real_t, 3> > > > nbrTmp(m_nbr.size());
 #pragma omp parallel for
     for(uint2 i=0; i< tr.m_ptr.size(); ++i)
       ptrTmp[i] = tr.m_ptr[i];
@@ -2620,7 +2604,7 @@ template<typename real_t>
       }
 #pragma omp parallel for
     for(uint2 i=0; i< tr.m_numCells; ++i)
-      sort(nbrTmp.begin()+tr.m_ptr[i], nbrTmp.begin()+tr.m_ptr[i+1], ComparePairFirst());
+      std::sort(nbrTmp.begin()+tr.m_ptr[i], nbrTmp.begin()+tr.m_ptr[i+1], ComparePairFirst());
     tr.m_nbr.resize(nbrTmp.size());
     tr.m_facet.resize(nbrTmp.size());
     valuesTr.resize(nbrTmp.size());
@@ -2634,23 +2618,23 @@ template<typename real_t>
   }
 
 //   template<typename real_t>
-//   void NbrsToFacets::makeMatrixdVdV(const vector<CellGeometry<real_t> > & geoms, const vector<real_t> & masses)
+//   void NbrsToFacets::makeMatrixdVdV(const std::vector<CellGeometry<real_t> > & geoms, const std::vector<real_t> & masses)
 //   {
-//     vector< Array<real_t, 3> > values(m_nbr.size());
+//     std::vector< Array<real_t, 3> > values(m_nbr.size());
 // #pragma omp parallel for
 //     for(uint2 i=0; i< m_ptr.size()-1; ++i){
-//       const vector< Array<real_t, 3> > & dV(geoms[i].getdV());
+//       const std::vector< Array<real_t, 3> > & dV(geoms[i].getdV());
 //       for(uint2 j=m_ptr[i]; j < m_ptr[i+1]; ++j)
 // 	for(uint0 k(0); k<3; ++k)
 // 	  values[j][k] = dV[m_facet[j]][k];
 //     }
-//     vector< Array<real_t, 3> > valuesTr();
+//     std::vector< Array<real_t, 3> > valuesTr();
 //     NbrsToFacets tr(this->transposedV(values, valuesTr));
       
-//     vector<CoordMatrix<real_t> > cMat;
+//     std::vector<CoordMatrix<real_t> > cMat;
 //     cMat.reserve(m_numCells*300);
 //     for(uint2 i(0); i< m_numCells; ++i){
-//       const vector<Array, 3> & dV1(geom[i].getdV());
+//       const std::vector<Array, 3> & dV1(geom[i].getdV());
 //       for(uint2 j(m_ptr[i]); j< m_ptr[i+1]; ++j){
 // 	uint2 partIndx(m_nbr[j]);
 // 	for(uint2 m(tr.m_ptr[partIndx]); m < tr.m_ptr[partIndx+1]; ++m){
@@ -2664,5 +2648,3 @@ template<typename real_t>
 //   }
   
 }
-
-#endif
