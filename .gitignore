@@ -10,6 +10,7 @@ testDroplet
 testInterface
 testViscous
 testStaticVoronoi
+testVoroComparison
 
 # Output data files from simulations
 pos_[0-9]*.dat
