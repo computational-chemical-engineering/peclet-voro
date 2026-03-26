@@ -128,7 +128,7 @@ class IndxList {
  public:
   //! @brief constructor
   //! @param endIndx the valid indices given out run from 0 to endIndx-1
-  IndxList(UInt endIndx) : m_endIndx(endIndx), m_next(endIndx), m_free(endIndx) { reset(0); }
+  IndxList(UInt endIndx) : m_endIndx(endIndx), m_next(endIndx), m_free(endIndx, 1) { reset(0); }
   //! @brief get the end index to end an iteration
   //! @return value of endIndx
   inline UInt endIndx() const { return m_endIndx; }
@@ -142,7 +142,7 @@ class IndxList {
   //! @brief test if an index is free
   //! @param i index to be tested
   //! @return true if the index is free, false if it is in use
-  inline bool isFree(UInt i) const { return m_free[i]; }
+  inline bool isFree(UInt i) const { return m_free[i] != 0; }
   //! @brief release an index (change it from in-use to free)
   //! @param i index to be release
   //! @return true if the index is release, false if the index was already free
@@ -155,7 +155,7 @@ class IndxList {
   void reset(UInt N = 0);
 
  private:
-  std::vector<bool> m_free;
+  std::vector<uint8_t> m_free;  ///< byte array (not bit-packed) for fast byte access
   std::vector<UInt> m_next;
   const UInt m_endIndx;
   UInt m_firstFree, m_firstUsed;
@@ -214,7 +214,7 @@ bool IndxList<UInt>::release(UInt i) {
     m_next[i] = m_firstFree;
     m_firstFree = i;
   }
-  m_free[i] = true;
+  m_free[i] = 1;
   for (prev = i; m_free[prev] && prev != 0; --prev) {
   }
   if (!m_free[prev])
@@ -237,7 +237,7 @@ UInt IndxList<UInt>::getFree() {
     m_next[i] = m_next[i - 1];
     m_next[i - 1] = i;
   }
-  m_free[i] = false;
+  m_free[i] = 0;
   return i;
 }
 
@@ -251,9 +251,9 @@ void IndxList<UInt>::reset(UInt N) {
     }
     UInt j(0);
     for (; j < N; ++j)
-      m_free[j] = false;
+      m_free[j] = 0;
     for (; j < m_endIndx; ++j)
-      m_free[j] = true;
+      m_free[j] = 1;
   }
   if (N == 0) {
     m_firstFree = 0;
