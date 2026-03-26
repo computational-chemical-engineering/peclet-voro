@@ -34,6 +34,10 @@ int main()
     char filename[255];
     sprintf(filename, "pos_init.dat");
     pFile=fopen(filename,"r");
+    if (!pFile) {
+      fprintf(stderr, "Error: cannot open %s\n", filename);
+      return 1;
+    }
     while(true){
       int j, ierr, type;
       ierr = fscanf(pFile, "%d",&j);

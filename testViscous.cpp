@@ -36,6 +36,10 @@ int main()
     char filename[255];
     sprintf(filename, "pos_eq_%d.dat",numPart);
     pFile=fopen(filename,"r");
+    if (!pFile) {
+      fprintf(stderr, "Error: cannot open %s\n", filename);
+      return 1;
+    }
     int j;
     for(int i=0; i<pos.size(); ++i){
       int j, ierr;
