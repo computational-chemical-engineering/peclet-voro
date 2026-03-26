@@ -32,6 +32,7 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y \
             cmake \
+            git \
             ninja-build \
             libboost-dev \
             libomp-dev \
@@ -52,11 +53,11 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Run fast tests (CTest)
-        # Only run the quick static-voronoi test in CI to keep the job fast.
-        # Long-running physics simulations are run separately (see below).
+        # Run the quick self-contained tests plus the Voro++ comparison to
+        # verify the two libraries agree on cell volumes.
         run: |
           ctest --test-dir build \
-            -R "test_static_voronoi" \
+            -R "test_static_voronoi|test_voro_comparison" \
             --output-on-failure \
             --timeout 120
 

@@ -42,20 +42,21 @@ voronoi_dynamics/
 | CMake | ≥ 3.16 | |
 | Boost | ≥ 1.65 | Header-only components (`random`, `container`) |
 | OpenMP | any | Optional – enables parallel cell construction |
+| Voro++ | master | **Fetched automatically** by CMake FetchContent; no manual install needed |
 
 ---
 
 ## Building with CMake
 
 ```bash
-# Configure
+# Configure (Voro++ is fetched automatically at this step)
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 
-# Build the test programs
+# Build the test programs (including the Voro++ comparison test)
 cmake --build build --parallel
 
 # Run the fast test suite
-ctest --test-dir build -R test_static_voronoi --output-on-failure
+ctest --test-dir build -R "test_static_voronoi|test_voro_comparison" --output-on-failure
 ```
 
 ### CMake options
@@ -64,7 +65,6 @@ ctest --test-dir build -R test_static_voronoi --output-on-failure
 |--------|---------|-------------|
 | `VORONOI_BUILD_TESTS` | `ON` | Build the test executables |
 | `VORONOI_BUILD_DOCS` | `OFF` | Build Doxygen HTML documentation |
-| `VORONOI_BUILD_VORO_COMPARISON` | `OFF` | Build Voro++ comparison test (needs Voro++) |
 
 ---
 

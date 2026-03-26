@@ -1,17 +1,17 @@
 /**
  * @file test_voro_comparison.cpp
- * \brief Tests that compare voronoi_dynamics against voro++ for a periodic box.
+ * @brief Tests that compare voronoi_dynamics against Voro++ for a periodic box.
  *
  * Two test scenarios are covered:
  *   1. Static tessellation: build a Voronoi diagram for a fixed random point
  *      set and verify that per-particle volumes agree between the two libraries.
  *   2. Moving points: build an initial tessellation, displace the particles,
  *      rebuild with voronoi_dynamics (via CellComplex::build) and compare the
- *      resulting volumes against a fresh voro++ tessellation of the same
+ *      resulting volumes against a fresh Voro++ tessellation of the same
  *      final positions.
  *
- * The voro++ library must be pre-built in the voro/src/ subfolder so that
- * voro/src/libvoro++.a is available at link time.
+ * Voro++ is fetched and compiled automatically at CMake configure time via
+ * FetchContent; no manual installation is required.
  */
 
 #include <cstdio>
@@ -24,7 +24,7 @@
 #include <boost/random.hpp>
 
 // voro++ headers
-#include "voro/src/voro++.hh"
+#include <voro++.hh>
 
 using std::vector;
 using vor::Array;

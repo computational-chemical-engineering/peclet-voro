@@ -41,17 +41,32 @@ add_voronoi_test(test_interface            test_interface.cpp)
 # Viscous Navier-Stokes flow (needs pos_eq_10000.dat)
 add_voronoi_test(test_viscous              test_viscous.cpp)
 
-# ── Optional Voro++ comparison test ──────────────────────────────────────────
-option(VORONOI_BUILD_VORO_COMPARISON "Build Voro++ comparison test (requires Voro++ library)" OFF)
-if(VORONOI_BUILD_VORO_COMPARISON)
-  find_library(VORO_LIB voro++ HINTS voro/src)
-  find_path(VORO_INC voro++.hh HINTS voro/src)
-  if(VORO_LIB AND VORO_INC)
-    add_voronoi_test(test_voro_comparison test_voro_comparison.cpp)
-    target_include_directories(test_voro_comparison PRIVATE ${VORO_INC})
-    target_link_libraries(test_voro_comparison PRIVATE ${VORO_LIB})
-    message(STATUS "Voro++ comparison test enabled")
-  else()
-    message(WARNING "Voro++ library not found; skipping test_voro_comparison")
-  endif()
-endif()
+# ── Voro++ comparison test (fetched automatically) ───────────────────────────
+# Voro++ is downloaded and compiled at configure time via CMake FetchContent.
+# No manual installation is required; the test is always part of the suite.
+include(FetchContent)
+
+FetchContent_Declare(
+  voropp
+  GIT_REPOSITORY https://github.com/chr1shr/voro.git
+  GIT_TAG        master
+  GIT_SHALLOW    TRUE
+)
+
+# Disable Voro++ components that are not needed for the comparison test so
+# that only the library itself is compiled.
+set(VORO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(VORO_BUILD_CMD_LINE OFF CACHE BOOL "" FORCE)
+set(VORO_ENABLE_DOXYGEN OFF CACHE BOOL "" FORCE)
+
+FetchContent_MakeAvailable(voropp)
+
+# Suppress third-party compiler warnings originating from Voro++ headers.
+get_target_property(_voropp_inc voro++ INTERFACE_INCLUDE_DIRECTORIES)
+set_target_properties(voro++ PROPERTIES
+  INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_voropp_inc}"
+)
+
+# Register the comparison test – uses the same helper as all other tests.
+add_voronoi_test(test_voro_comparison test_voro_comparison.cpp)
+target_link_libraries(test_voro_comparison PRIVATE voro++)
