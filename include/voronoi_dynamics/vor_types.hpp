@@ -144,7 +144,8 @@ class DenseSlots {
     m_numAlive = n;
     m_freeTop = 0;
     std::memset(m_alive, 0, Capacity);
-    for (UInt i = 0; i < n; ++i) m_alive[i] = 1;
+    for (UInt i = 0; i < n; ++i)
+      m_alive[i] = 1;
   }
   /// Allocate a free slot (returns Capacity if none available).
   UInt getFree() {
@@ -162,9 +163,11 @@ class DenseSlots {
   }
   /// Release slot i. Returns true if it was alive.
   bool release(UInt i) {
-    if (i >= Capacity || !m_alive[i]) return false;
+    if (i >= Capacity || !m_alive[i])
+      return false;
     m_alive[i] = 0;
-    if (m_freeTop < Capacity) m_freeStack[m_freeTop++] = i;
+    if (m_freeTop < Capacity)
+      m_freeStack[m_freeTop++] = i;
     --m_numAlive;
     return true;
   }
@@ -179,7 +182,8 @@ class DenseSlots {
   /// Find first alive slot index (returns Capacity if empty).
   inline UInt firstAlive() const {
     for (UInt i = 0; i < m_numAllocated; ++i)
-      if (m_alive[i]) return i;
+      if (m_alive[i])
+        return i;
     return Capacity;
   }
 

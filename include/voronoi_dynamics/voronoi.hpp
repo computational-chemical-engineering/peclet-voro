@@ -319,8 +319,8 @@ class CellMaker {
   bool m_isAllCut;
   uint1 m_vDistMax, m_vDistGCMax;
   real_t m_dist[kMaxV];
-  uint2 m_distGen;                     ///< generation counter for lazy distance reset
-  uint2 m_knownDistGen[kMaxV];         ///< per-vertex generation stamp
+  uint2 m_distGen;              ///< generation counter for lazy distance reset
+  uint2 m_knownDistGen[kMaxV];  ///< per-vertex generation stamp
   Array<real_t, 3> m_relOrigGC, m_dLGC;
   real_t m_distGC[kMaxV];
   uint1 m_renumVWrk[kMaxV];
@@ -461,9 +461,7 @@ class NbrsToFacets {
 
 template <typename real_t>
 Cell<real_t>::Cell(const Cell<real_t> &rhs)
-    : m_id(rhs.m_id)
-    , m_numVertices(rhs.m_numVertices)
-    , m_numFacets(rhs.m_numFacets) {
+    : m_id(rhs.m_id), m_numVertices(rhs.m_numVertices), m_numFacets(rhs.m_numFacets) {
   std::memcpy(m_vertexPos, rhs.m_vertexPos, m_numVertices * sizeof(m_vertexPos[0]));
   std::memcpy(m_vertices, rhs.m_vertices, m_numVertices * sizeof(m_vertices[0]));
   std::memcpy(m_facets, rhs.m_facets, m_numFacets * sizeof(m_facets[0]));
@@ -710,10 +708,7 @@ Cuboid<real_t>::Cuboid(const Array<real_t, 3> &L) {
 }
 
 template <typename real_t>
-CellMaker<real_t>::CellMaker()
-    : p_nbrList(NULL)
-    , m_distGen(0)
-    , m_checkGCHead(0u) {
+CellMaker<real_t>::CellMaker() : p_nbrList(NULL), m_distGen(0), m_checkGCHead(0u) {
   std::memset(m_knownDistGen, 0, sizeof(m_knownDistGen));
   m_newVerticesWrk.reserve(20);
   m_facetPrevWrk.reserve(20);
@@ -773,7 +768,8 @@ template <typename real_t>
 void CellMaker<real_t>::computeAllRsq() {
   m_vRsqMax = m_slotsV.firstAlive();
   for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
-    if (m_slotsV.isFree(i)) continue;
+    if (m_slotsV.isFree(i))
+      continue;
     computeRsq(i);
   }
 }
@@ -792,7 +788,8 @@ template <typename real_t>
 void CellMaker<real_t>::findRsqMax() {
   real_t rSqMax = 0;
   for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
-    if (m_slotsV.isFree(i)) continue;
+    if (m_slotsV.isFree(i))
+      continue;
     if (m_rSq[i] > rSqMax) {
       rSqMax = m_rSq[i];
       m_vRsqMax = i;
@@ -843,7 +840,8 @@ void CellMaker<real_t>::computeAllDist(const Array<real_t, 3> p, const real_t rS
   m_distMax = -lim.max();
   m_vDistMax = maxNumVertices;
   for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
-    if (m_slotsV.isFree(i)) continue;
+    if (m_slotsV.isFree(i))
+      continue;
     m_dist[i] =
         m_vertexPos[i][0] * p[0] + m_vertexPos[i][1] * p[1] + m_vertexPos[i][2] * p[2] - rSqHalf;
     if (m_dist[i] > m_distMax) {
@@ -859,7 +857,8 @@ void CellMaker<real_t>::renumber() {
   m_numVertices = 0;
   {
     for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
-      if (m_slotsV.isFree(i)) continue;
+      if (m_slotsV.isFree(i))
+        continue;
       m_renumVWrk[i] = m_numVertices;
       if (i != m_numVertices) {
         for (uint0 k(0); k < 3; ++k) {
@@ -874,7 +873,8 @@ void CellMaker<real_t>::renumber() {
   m_numFacets = 0;
   {
     for (uint1 i = 0; i < m_slotsF.numAllocated(); ++i) {
-      if (m_slotsF.isFree(i)) continue;
+      if (m_slotsF.isFree(i))
+        continue;
       m_renumFWrk[i] = m_numFacets;
       if (i != m_numFacets) {
         m_facets[m_numFacets] = m_facets[i];
@@ -1021,7 +1021,8 @@ void CellMaker<real_t>::computeAllDistGC() {
   m_distGCMax = -lim.max();
   m_vDistGCMax = maxNumVertices;
   for (uint1 indx = 0; indx < m_slotsV.numAllocated(); ++indx) {
-    if (m_slotsV.isFree(indx)) continue;
+    if (m_slotsV.isFree(indx))
+      continue;
     computeDistGC(indx);
   }
 }
@@ -1079,7 +1080,8 @@ bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2
       computeAllDist(p, rSqHalf);
       real_t distMax = 0;
       for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
-        if (m_slotsV.isFree(i)) continue;
+        if (m_slotsV.isFree(i))
+          continue;
         if (m_dist[i] <= 0) {
           for (uint1 k(0); k < 3; ++k) {
             uint1 nbrVertex(getVertex(m_vertices[i][k]));
@@ -1261,7 +1263,8 @@ bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 
   real_t distMax = 0;
   uint1 edgeStart(0);
   for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
-    if (m_slotsV.isFree(i)) continue;
+    if (m_slotsV.isFree(i))
+      continue;
     if (m_dist[i] <= 0)
       continue;
     for (uint1 k(0); k < 3; ++k) {
@@ -1506,7 +1509,8 @@ bool CellMaker<real_t>::rebuild(const std::vector<Array<real_t, 3> > &pos, const
                                 const Cell<real_t> &initCell) {
   m_nbrsWrk.clear();
   for (uint1 i = 0; i < m_slotsF.numAllocated(); ++i) {
-    if (m_slotsF.isFree(i)) continue;
+    if (m_slotsF.isFree(i))
+      continue;
     if (m_nbr[i] != noNbr) {
       PosAndId<uint2, real_t> newNbr;
       newNbr.id = m_nbr[i];
