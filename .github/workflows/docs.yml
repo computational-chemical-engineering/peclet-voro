@@ -51,6 +51,7 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: build/docs/html
+          jekyll: false
 
   # ── Deploy to GitHub Pages ────────────────────────────────────────────────
   deploy:
