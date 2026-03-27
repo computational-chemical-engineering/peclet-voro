@@ -300,14 +300,17 @@ class CellMaker {
   CellMaker &operator=(const CellMaker<real_t> &rhs);
   inline uint1 getNextLabelCCW(uint1 label) const;
   inline uint1 getReverseLabel(uint1 label) const;
+  static constexpr uint1 kMaxV = maxNumVertices - 1;
+  static constexpr uint1 kMaxF = maxNumFacets - 1;
   uint2 m_id;
   const NbrList<uint2, real_t> *p_nbrList;
-  Array<real_t, 3> *m_vertexPos;
-  real_t *m_rSq;
-  Vertex *m_vertices;
-  uint1 *m_facets;
-  uint2 *m_nbr;
-  IndxList<uint1> m_freeV, m_freeF;
+  Array<real_t, 3> m_vertexPos[kMaxV];
+  real_t m_rSq[kMaxV];
+  Vertex m_vertices[kMaxV];
+  uint1 m_facets[kMaxF];
+  uint2 m_nbr[kMaxF];
+  DenseSlots<uint1, kMaxV> m_slotsV;
+  DenseSlots<uint1, kMaxF> m_slotsF;
   VisitedIndx<uint2> m_visited;
   std::vector<uint2> m_checkGridCell;  ///< BFS queue (use m_checkGCHead as front index)
   size_t m_checkGCHead;                ///< index of current BFS queue front
@@ -315,15 +318,15 @@ class CellMaker {
   uint1 m_vRsqMax;
   bool m_isAllCut;
   uint1 m_vDistMax, m_vDistGCMax;
-  real_t *m_dist;
-  bool *m_isKnownDist;
+  real_t m_dist[kMaxV];
+  uint2 m_distGen;                     ///< generation counter for lazy distance reset
+  uint2 m_knownDistGen[kMaxV];         ///< per-vertex generation stamp
   Array<real_t, 3> m_relOrigGC, m_dLGC;
-  real_t *m_distGC;
-  uint1 *m_renumVWrk;
-  uint1 *m_renumFWrk;
+  real_t m_distGC[kMaxV];
+  uint1 m_renumVWrk[kMaxV];
+  uint1 m_renumFWrk[kMaxF];
   std::vector<uint1> m_newVerticesWrk;
   std::vector<uint1> m_facetPrevWrk;
-  //    std::vector<uint2> m_indcsNbrsWrk;
   std::vector<PosAndId<uint2, real_t> > m_nbrsWrk;
   std::vector<NbrDist<real_t> > m_nbrDistWrk;
   std::vector<uint1> m_vStackWrk;  ///< DFS stack (push_back/back/pop_back)
@@ -705,51 +708,19 @@ Cuboid<real_t>::Cuboid(const Array<real_t, 3> &L) {
 
 template <typename real_t>
 CellMaker<real_t>::CellMaker()
-    : m_freeV(vor::maxNumVertices - 1)
-    , m_freeF(vor::maxNumFacets - 1)
-    , m_vertexPos(NULL)
-    , m_rSq(NULL)
-    , m_vertices(NULL)
-    , m_facets(NULL)
-    , m_nbr(NULL)
-    , m_renumVWrk(NULL)
-    , m_renumFWrk(NULL)
-    , m_dist(NULL)
-    , m_isKnownDist(NULL)
-    , m_distGC(NULL)
+    : p_nbrList(NULL)
+    , m_distGen(0)
     , m_checkGCHead(0u) {
-  uint1 maxV = vor::maxNumVertices - 1;
-  uint1 maxF = vor::maxNumFacets - 1;
-  m_vertexPos = new Array<real_t, 3>[maxV];
-  m_rSq = new real_t[maxV];
-  m_vertices = new Vertex[maxV];
-  m_facets = new uint1[maxF];
-  m_nbr = new uint2[maxF];
-  m_renumVWrk = new uint1[maxV];
-  m_renumFWrk = new uint1[maxF];
-  m_dist = new real_t[maxV];
-  m_isKnownDist = new bool[maxV];
-  m_distGC = new real_t[maxV];
+  std::memset(m_knownDistGen, 0, sizeof(m_knownDistGen));
   m_newVerticesWrk.reserve(20);
   m_facetPrevWrk.reserve(20);
   m_nbrsWrk.reserve(40);
-  m_checkGridCell.reserve(64);  // typical max ~50 grid cells per build
-  m_vStackWrk.reserve(32);      // typical DFS depth < 32
+  m_checkGridCell.reserve(64);
+  m_vStackWrk.reserve(32);
 }
 
 template <typename real_t>
-CellMaker<real_t>::~CellMaker() {
-  delete[] m_vertexPos;
-  delete[] m_rSq;
-  delete[] m_vertices;
-  delete[] m_facets;
-  delete[] m_nbr;
-  delete[] m_renumVWrk;
-  delete[] m_renumFWrk;
-  delete[] m_dist;
-  delete[] m_isKnownDist;
-  delete[] m_distGC;
-}
+CellMaker<real_t>::~CellMaker() {}
 
 template <typename real_t>
 CellMaker<real_t> &CellMaker<real_t>::operator=(const Cell<real_t> &rhs) {
@@ -782,12 +753,12 @@ uint1 CellMaker<real_t>::getReverseLabel(uint1 label) const {
 
 template <typename real_t>
 void CellMaker<real_t>::init(const Cell<real_t> &cell) {
-  m_freeV.reset(cell.m_numVertices);
+  m_slotsV.reset(cell.m_numVertices);
   for (uint1 i(0); i < cell.m_numVertices; ++i) {
     m_vertexPos[i] = cell.m_vertexPos[i];
     m_vertices[i] = cell.m_vertices[i];
   }
-  m_freeF.reset(cell.m_numFacets);
+  m_slotsF.reset(cell.m_numFacets);
   for (uint1 i(0); i < cell.m_numFacets; ++i) {
     m_facets[i] = cell.m_facets[i];
     m_nbr[i] = cell.m_nbr[i];
@@ -801,9 +772,11 @@ void CellMaker<real_t>::init(const Cell<real_t> &cell) {
 
 template <typename real_t>
 void CellMaker<real_t>::computeAllRsq() {
-  m_vRsqMax = m_freeV.beginIndx();
-  for (uint1 i = m_freeV.beginIndx(); i != m_freeV.endIndx(); i = m_freeV.nextIndx(i))
+  m_vRsqMax = m_slotsV.firstAlive();
+  for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
+    if (m_slotsV.isFree(i)) continue;
     computeRsq(i);
+  }
 }
 
 template <typename real_t>
@@ -819,11 +792,13 @@ void CellMaker<real_t>::computeRsq(uint1 i) {
 template <typename real_t>
 void CellMaker<real_t>::findRsqMax() {
   real_t rSqMax = 0;
-  for (uint1 i = m_freeV.beginIndx(); i != m_freeV.endIndx(); i = m_freeV.nextIndx(i))
+  for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
+    if (m_slotsV.isFree(i)) continue;
     if (m_rSq[i] > rSqMax) {
       rSqMax = m_rSq[i];
       m_vRsqMax = i;
     }
+  }
 }
 
 template <typename real_t>
@@ -831,27 +806,26 @@ void CellMaker<real_t>::resetDist() {
   const std::numeric_limits<real_t> lim;
   m_distMax = -lim.max();
   m_vDistMax = maxNumVertices;
-  for (uint1 i = m_freeV.beginIndx(); i != m_freeV.endIndx(); i = m_freeV.nextIndx(i))
-    m_isKnownDist[i] = false;
+  ++m_distGen;
 }
 
 template <typename real_t>
 real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p, const real_t rSqHalf) {
-  if (!m_isKnownDist[i]) {
+  if (m_knownDistGen[i] != m_distGen) {
     m_dist[i] =
         m_vertexPos[i][0] * p[0] + m_vertexPos[i][1] * p[1] + m_vertexPos[i][2] * p[2] - rSqHalf;
     if (m_dist[i] > m_distMax) {
       m_vDistMax = i;
       m_distMax = m_dist[i];
     }
-    m_isKnownDist[i] = true;
+    m_knownDistGen[i] = m_distGen;
   }
   return m_dist[i];
 }
 
 template <typename real_t>
 real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p) {
-  if (!m_isKnownDist[i]) {
+  if (m_knownDistGen[i] != m_distGen) {
     m_dist[i] = 0;
     for (uint0 k(0); k < 3; ++k)
       m_dist[i] += (m_vertexPos[i][k] - 0.5 * p[k]) * p[k];
@@ -859,7 +833,7 @@ real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p) {
       m_vDistMax = i;
       m_distMax = m_dist[i];
     }
-    m_isKnownDist[i] = true;
+    m_knownDistGen[i] = m_distGen;
   }
   return m_dist[i];
 }
@@ -869,14 +843,15 @@ void CellMaker<real_t>::computeAllDist(const Array<real_t, 3> p, const real_t rS
   const std::numeric_limits<real_t> lim;
   m_distMax = -lim.max();
   m_vDistMax = maxNumVertices;
-  for (uint1 i(m_freeV.beginIndx()); i != m_freeV.endIndx(); i = m_freeV.nextIndx(i)) {
+  for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
+    if (m_slotsV.isFree(i)) continue;
     m_dist[i] =
         m_vertexPos[i][0] * p[0] + m_vertexPos[i][1] * p[1] + m_vertexPos[i][2] * p[2] - rSqHalf;
     if (m_dist[i] > m_distMax) {
       m_vDistMax = i;
       m_distMax = m_dist[i];
     }
-    m_isKnownDist[i] = true;
+    m_knownDistGen[i] = m_distGen;
   }
 }
 
@@ -884,32 +859,32 @@ template <typename real_t>
 void CellMaker<real_t>::renumber() {
   m_numVertices = 0;
   {
-    uint1 i = m_freeV.beginIndx();
-    for (; i != m_freeV.endIndx() && i == m_numVertices; i = m_freeV.nextIndx(i), ++m_numVertices) {
+    for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
+      if (m_slotsV.isFree(i)) continue;
       m_renumVWrk[i] = m_numVertices;
-    }
-    for (; i != m_freeV.endIndx(); i = m_freeV.nextIndx(i), ++m_numVertices) {
-      m_renumVWrk[i] = m_numVertices;
-      for (uint0 k(0); k < 3; ++k) {
-        m_vertices[m_numVertices][k] = m_vertices[i][k];
-        m_vertexPos[m_numVertices][k] = m_vertexPos[i][k];
+      if (i != m_numVertices) {
+        for (uint0 k(0); k < 3; ++k) {
+          m_vertices[m_numVertices][k] = m_vertices[i][k];
+          m_vertexPos[m_numVertices][k] = m_vertexPos[i][k];
+        }
       }
+      ++m_numVertices;
     }
   }
-  m_freeV.reset(m_numVertices);
+  m_slotsV.reset(m_numVertices);
   m_numFacets = 0;
   {
-    uint1 i = m_freeF.beginIndx();
-    for (; i != m_freeF.endIndx() && i == m_numFacets; i = m_freeF.nextIndx(i), ++m_numFacets) {
+    for (uint1 i = 0; i < m_slotsF.numAllocated(); ++i) {
+      if (m_slotsF.isFree(i)) continue;
       m_renumFWrk[i] = m_numFacets;
-    }
-    for (; i != m_freeF.endIndx(); i = m_freeF.nextIndx(i), ++m_numFacets) {
-      m_renumFWrk[i] = m_numFacets;
-      m_facets[m_numFacets] = m_facets[i];
-      m_nbr[m_numFacets] = m_nbr[i];
+      if (i != m_numFacets) {
+        m_facets[m_numFacets] = m_facets[i];
+        m_nbr[m_numFacets] = m_nbr[i];
+      }
+      ++m_numFacets;
     }
   }
-  m_freeF.reset(m_numFacets);
+  m_slotsF.reset(m_numFacets);
   m_vRsqMax = m_renumVWrk[m_vRsqMax];
   for (uint1 i(0); i < m_numVertices; ++i) {
     for (uint0 k(0); k < 3; ++k) {
@@ -987,9 +962,9 @@ Array<real_t, 3> CellMaker<real_t>::getClosestPointGC(uint1 indx) const {
 
 template <typename real_t>
 real_t CellMaker<real_t>::computeMaxDistGC() {
-  if (m_freeV.beginIndx() == m_freeV.endIndx())
+  if (m_slotsV.empty())
     return 0;
-  uint1 v1 = m_freeV.beginIndx();
+  uint1 v1 = m_slotsV.firstAlive();
   real_t distMax = computeDistGC(v1);
   uint0 k(0);
   while (k < 3) {
@@ -1008,9 +983,9 @@ real_t CellMaker<real_t>::computeMaxDistGC() {
 
 template <typename real_t>
 real_t CellMaker<real_t>::computeMaxDistGCVerb() {
-  if (m_freeV.beginIndx() == m_freeV.endIndx())
+  if (m_slotsV.empty())
     return 0;
-  uint1 v1 = m_freeV.beginIndx();
+  uint1 v1 = m_slotsV.firstAlive();
   Array<real_t, 3> posGC(getClosestPointGC(v1));
   real_t rSqHalf = 0.5 * (posGC[0] * posGC[0] + posGC[1] * posGC[1] + posGC[2] * posGC[2]);
   real_t distMax = m_vertexPos[v1][0] * posGC[0] + m_vertexPos[v1][1] * posGC[1] +
@@ -1046,9 +1021,10 @@ void CellMaker<real_t>::computeAllDistGC() {
   const std::numeric_limits<real_t> lim;
   m_distGCMax = -lim.max();
   m_vDistGCMax = maxNumVertices;
-  // compute 0.5 [v^2 - (p-v)^2]
-  for (uint1 indx = m_freeV.beginIndx(); indx != m_freeV.endIndx(); indx = m_freeV.nextIndx(indx))
+  for (uint1 indx = 0; indx < m_slotsV.numAllocated(); ++indx) {
+    if (m_slotsV.isFree(indx)) continue;
     computeDistGC(indx);
+  }
 }
 
 template <typename real_t>
@@ -1070,13 +1046,13 @@ template <typename real_t>
 bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
   //    printf("entering cutCell\n");
   resetDist();
-  if (m_freeV.beginIndx() == m_freeV.endIndx())
+  if (m_slotsV.empty())
     return false;
   uint1 v1;
-  if (m_vDistMax != maxNumVertices && !m_freeV.isFree(m_vDistMax))
+  if (m_vDistMax != maxNumVertices && !m_slotsV.isFree(m_vDistMax))
     v1 = m_vDistMax;
   else
-    v1 = m_freeV.beginIndx();
+    v1 = m_slotsV.firstAlive();
 
   // find an edge where the sign of m_dist changes
   bool found(false);
@@ -1103,7 +1079,8 @@ bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2
       // lets do an exhaustive search to find a possible negative distance
       computeAllDist(p, rSqHalf);
       real_t distMax = 0;
-      for (uint1 i = m_freeV.beginIndx(); i != m_freeV.endIndx(); i = m_freeV.nextIndx(i)) {
+      for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
+        if (m_slotsV.isFree(i)) continue;
         if (m_dist[i] <= 0) {
           for (uint1 k(0); k < 3; ++k) {
             uint1 nbrVertex(getVertex(m_vertices[i][k]));
@@ -1123,8 +1100,8 @@ bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2
     }
     if (!found) {
       // all vertices on negative side of cut-plane -> delete all
-      m_freeV.reset(0);
-      m_freeF.reset(0);
+      m_slotsV.reset(0);
+      m_slotsF.reset(0);
       return true;
     }
   } else {
@@ -1167,7 +1144,7 @@ bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2
     // printf("previous facet: %u\n",fPrev);
     m_facetPrevWrk.push_back(fPrev);
     m_vertices[vRev][eRev] = lDummy;
-    uint1 vNew = m_freeV.getFree();
+    uint1 vNew = m_slotsV.getFree();
     // printf("new vertex %u\n", vNew);
     m_newVerticesWrk.push_back(vNew);
     // compute new positions
@@ -1207,7 +1184,7 @@ bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2
 
   // form a new facet and interconnect the new vertices
   {
-    uint1 facetNew = m_freeF.getFree();
+    uint1 facetNew = m_slotsF.getFree();
     // printf("new facet: %u\n",facetNew);
     uint1 imin = m_newVerticesWrk.size() - 1;
     uint1 numNewV = (uint1)m_newVerticesWrk.size();
@@ -1233,7 +1210,7 @@ bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2
   //    bool isVCloseGCDeleted(false);
   {
     uint1 v(getVertex(edgeStart));
-    m_freeV.release(v);
+    m_slotsV.release(v);
     // printf("deteled vertex %u\n", v);
     isLargestDeleted = (v == m_vRsqMax ? true : isLargestDeleted);
     //      isVCloseGCDeleted = (v == m_vDistGCMax ? true: isVCloseGCDeleted);
@@ -1246,11 +1223,11 @@ bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2
         if (vNxt == vDummy)
           continue;
         uint facet(getFacet(m_vertices[v][k]));
-        if (facet != fDummy && !m_freeF.isFree(facet))
-          m_freeF.release(facet);
-        if (m_freeV.isFree(vNxt))
+        if (facet != fDummy && !m_slotsF.isFree(facet))
+          m_slotsF.release(facet);
+        if (m_slotsV.isFree(vNxt))
           continue;
-        m_freeV.release(vNxt);
+        m_slotsV.release(vNxt);
         isLargestDeleted = (vNxt == m_vRsqMax ? true : isLargestDeleted);
         //	  isVCloseGCDeleted = (vNxt == m_vDistGCMax ? true: isVCloseGCDeleted);
         m_vStackWrk.push_back(vNxt);
@@ -1284,7 +1261,8 @@ bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 
   // edgeStart will be the edge where the change is largest
   real_t distMax = 0;
   uint1 edgeStart(0);
-  for (uint1 i = m_freeV.beginIndx(); i != m_freeV.endIndx(); i = m_freeV.nextIndx(i)) {
+  for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
+    if (m_slotsV.isFree(i)) continue;
     if (m_dist[i] <= 0)
       continue;
     for (uint1 k(0); k < 3; ++k) {
@@ -1300,8 +1278,8 @@ bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 
     }
   }
   if (distMax == 0) {  // the full cell will be deleted
-    m_freeV.reset(0);
-    m_freeF.reset(0);
+    m_slotsV.reset(0);
+    m_slotsF.reset(0);
     return true;
   }
   // Starting from edgeStart trace out a path that bounds a connected region
@@ -1326,7 +1304,7 @@ bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 
     // printf("previous facet: %u\n",fPrev);
     m_facetPrevWrk.push_back(fPrev);
     m_vertices[vRev][eRev] = lDummy;
-    uint1 vNew = m_freeV.getFree();
+    uint1 vNew = m_slotsV.getFree();
     // printf("new vertex %u\n", vNew);
     m_newVerticesWrk.push_back(vNew);
     // compute new positions
@@ -1366,7 +1344,7 @@ bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 
 
   // form a new facet and interconnect the new vertices
   {
-    uint1 facetNew = m_freeF.getFree();
+    uint1 facetNew = m_slotsF.getFree();
     // printf("new facet: %u\n",facetNew);
     uint1 imin = m_newVerticesWrk.size() - 1;
     uint1 numNewV = (uint1)m_newVerticesWrk.size();
@@ -1392,7 +1370,7 @@ bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 
   //    bool isVCloseGCDeleted(false);
   {
     uint1 v(getVertex(edgeStart));
-    m_freeV.release(v);
+    m_slotsV.release(v);
     // printf("deteled vertex %u\n", v);
     isLargestDeleted = (v == m_vRsqMax ? true : isLargestDeleted);
     //      isVCloseGCDeleted = (v == m_vDistGCMax ? true: isVCloseGCDeleted);
@@ -1405,11 +1383,11 @@ bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 
         if (vNxt == vDummy)
           continue;
         uint facet(getFacet(m_vertices[v][k]));
-        if (facet != fDummy && !m_freeF.isFree(facet))
-          m_freeF.release(facet);
-        if (m_freeV.isFree(vNxt))
+        if (facet != fDummy && !m_slotsF.isFree(facet))
+          m_slotsF.release(facet);
+        if (m_slotsV.isFree(vNxt))
           continue;
-        m_freeV.release(vNxt);
+        m_slotsV.release(vNxt);
         isLargestDeleted = (vNxt == m_vRsqMax ? true : isLargestDeleted);
         //	  isVCloseGCDeleted = (vNxt == m_vDistGCMax ? true: isVCloseGCDeleted);
         m_vStackWrk.push_back(vNxt);
@@ -1528,13 +1506,15 @@ template <typename real_t>
 bool CellMaker<real_t>::rebuild(const std::vector<Array<real_t, 3> > &pos, const Box<real_t> &box,
                                 const Cell<real_t> &initCell) {
   m_nbrsWrk.clear();
-  for (uint1 i = m_freeF.beginIndx(); i != m_freeF.endIndx(); i = m_freeF.nextIndx(i))
+  for (uint1 i = 0; i < m_slotsF.numAllocated(); ++i) {
+    if (m_slotsF.isFree(i)) continue;
     if (m_nbr[i] != noNbr) {
       PosAndId<uint2, real_t> newNbr;
       newNbr.id = m_nbr[i];
       newNbr.pos = pos[newNbr.id];
       m_nbrsWrk.push_back(newNbr);
     }
+  }
   m_isAllCut = true;
   // for(uint2 i(0); i< m_indcsNbrsWrk.size(); ++i)
   //   printf("cell %u, neigb: %u\n", m_id, m_indcsNbrsWrk[i]);
