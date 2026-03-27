@@ -11,6 +11,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -116,6 +117,82 @@ class CompareNbrDist {
 class CompareNbrInsert {
  public:
   inline bool operator()(const NbrInsert& a, const NbrInsert& b) const { return a[0] < b[0]; }
+};
+
+/**
+ * @class DenseSlots
+ * @brief Cache-friendly slot allocator replacing linked-list-based IndxList.
+ *
+ * Manages a fixed-capacity pool of slot indices.  Alive slots are tracked via
+ * a byte array (no bit-packing).  A small stack caches recently freed indices
+ * for O(1) re-allocation.  Iteration is a simple sequential scan over the
+ * [0, numAllocated) range, checking the alive flag — ideal for the hardware
+ * prefetcher.
+ *
+ * @tparam UInt unsigned integer type for slot indices
+ * @tparam Capacity maximum number of slots
+ */
+template <typename UInt, UInt Capacity>
+class DenseSlots {
+ public:
+  DenseSlots() : m_numAllocated(0), m_numAlive(0), m_freeTop(0) {
+    std::memset(m_alive, 0, Capacity);
+  }
+  /// Reset: slots 0..n-1 are alive, rest are dead.
+  void reset(UInt n) {
+    m_numAllocated = n;
+    m_numAlive = n;
+    m_freeTop = 0;
+    std::memset(m_alive, 0, Capacity);
+    for (UInt i = 0; i < n; ++i)
+      m_alive[i] = 1;
+  }
+  /// Allocate a free slot (returns Capacity if none available).
+  UInt getFree() {
+    UInt idx;
+    if (m_freeTop > 0) {
+      idx = m_freeStack[--m_freeTop];
+    } else if (m_numAllocated < Capacity) {
+      idx = m_numAllocated++;
+    } else {
+      return Capacity;
+    }
+    m_alive[idx] = 1;
+    ++m_numAlive;
+    return idx;
+  }
+  /// Release slot i. Returns true if it was alive.
+  bool release(UInt i) {
+    if (i >= Capacity || !m_alive[i])
+      return false;
+    m_alive[i] = 0;
+    if (m_freeTop < Capacity)
+      m_freeStack[m_freeTop++] = i;
+    --m_numAlive;
+    return true;
+  }
+  /// Check if slot i is free (dead).
+  inline bool isFree(UInt i) const { return !m_alive[i]; }
+  /// Number of slots ever allocated (high-water mark for iteration).
+  inline UInt numAllocated() const { return m_numAllocated; }
+  /// Number of currently alive slots.
+  inline UInt numAlive() const { return m_numAlive; }
+  /// True if no alive slots.
+  inline bool empty() const { return m_numAlive == 0; }
+  /// Find first alive slot index (returns Capacity if empty).
+  inline UInt firstAlive() const {
+    for (UInt i = 0; i < m_numAllocated; ++i)
+      if (m_alive[i])
+        return i;
+    return Capacity;
+  }
+
+ private:
+  uint8_t m_alive[Capacity];
+  UInt m_freeStack[Capacity];
+  UInt m_freeTop;
+  UInt m_numAllocated;
+  UInt m_numAlive;
 };
 
 /**
