@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <boost/container/flat_set.hpp>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <queue>
 #include <utility>
@@ -81,18 +82,11 @@ template <typename real_t>
 class Cell {
  public:
   //! @brief constructor
-  Cell()
-      : m_id(0)
-      , m_numVertices(0)
-      , m_numFacets(0)
-      , m_vertexPos(NULL)
-      , m_vertices(NULL)
-      , m_facets(NULL)
-      , m_nbr(NULL) {}
+  Cell() : m_id(0), m_numVertices(0), m_numFacets(0) {}
   //! @brief copy constructor
   Cell(const Cell<real_t> &cell);
   //! destructor.
-  ~Cell();
+  ~Cell() = default;
   //! @brief copy operator
   //! @param rhs of type Cell
   //! @return reference to the copied cell
@@ -156,10 +150,10 @@ class Cell {
   uint2 m_id;
   uint0 m_numFacets;
   uint0 m_numVertices;
-  Array<real_t, 3> *m_vertexPos;
-  Vertex *m_vertices;
-  uint1 *m_facets;
-  uint2 *m_nbr;
+  Array<real_t, 3> m_vertexPos[maxNumVertices];
+  Vertex m_vertices[maxNumVertices];
+  uint1 m_facets[maxNumFacets];
+  uint2 m_nbr[maxNumFacets];
   inline uint1 getNextLabelCCW(uint1 label) const {
     uint1 facetMasked(label & maskFacet);
     uint1 revLabel(m_vertices[getVertex(label)][getEdge(label)]);
@@ -462,46 +456,18 @@ class NbrsToFacets {
 template <typename real_t>
 Cell<real_t>::Cell(const Cell<real_t> &rhs)
     : m_id(rhs.m_id)
-    , m_numVertices(0)
-    , m_numFacets(0)
-    , m_vertexPos(NULL)
-    , m_vertices(NULL)
-    , m_facets(NULL)
-    , m_nbr(NULL) {
-  this->reset(rhs.m_numVertices, rhs.m_numFacets);
-  for (uint0 i(0); i < m_numVertices; ++i)
-    this->m_vertexPos[i] = rhs.m_vertexPos[i];
-  for (uint0 i(0); i < m_numVertices; ++i)
-    this->m_vertices[i] = rhs.m_vertices[i];
-  for (uint0 i(0); i < m_numFacets; ++i)
-    this->m_facets[i] = rhs.m_facets[i];
-  for (uint0 i(0); i < m_numFacets; ++i)
-    this->m_nbr[i] = rhs.m_nbr[i];
+    , m_numVertices(rhs.m_numVertices)
+    , m_numFacets(rhs.m_numFacets) {
+  std::memcpy(m_vertexPos, rhs.m_vertexPos, m_numVertices * sizeof(m_vertexPos[0]));
+  std::memcpy(m_vertices, rhs.m_vertices, m_numVertices * sizeof(m_vertices[0]));
+  std::memcpy(m_facets, rhs.m_facets, m_numFacets * sizeof(m_facets[0]));
+  std::memcpy(m_nbr, rhs.m_nbr, m_numFacets * sizeof(m_nbr[0]));
 }
 
 template <typename real_t>
 void Cell<real_t>::reset(uint0 numVertices, uint0 numFacets) {
-  delete[] m_vertexPos;
-  delete[] m_vertices;
-  delete[] m_facets;
-  delete[] m_nbr;
   m_numVertices = numVertices;
   m_numFacets = numFacets;
-  m_vertexPos = new Array<real_t, 3>[numVertices];
-  m_vertices = new Vertex[numVertices];
-  m_facets = new uint1[numFacets];
-  m_nbr = new uint2[numFacets];
-}
-
-template <typename real_t>
-Cell<real_t>::~Cell() {
-  if (m_vertexPos != NULL) {
-    delete[] m_vertexPos;
-    delete[] m_vertices;
-    delete[] m_facets;
-    delete[] m_nbr;
-  }
-  m_vertexPos = NULL;
 }
 
 template <typename real_t>
@@ -509,15 +475,12 @@ Cell<real_t> &Cell<real_t>::operator=(const Cell<real_t> &rhs) {
   if (&rhs == this)
     return *this;
   m_id = rhs.m_id;
-  this->reset(rhs.m_numVertices, rhs.m_numFacets);
-  for (uint0 i(0); i < m_numVertices; ++i)
-    this->m_vertexPos[i] = rhs.m_vertexPos[i];
-  for (uint0 i(0); i < m_numVertices; ++i)
-    this->m_vertices[i] = rhs.m_vertices[i];
-  for (uint0 i(0); i < m_numFacets; ++i)
-    this->m_facets[i] = rhs.m_facets[i];
-  for (uint0 i(0); i < m_numFacets; ++i)
-    this->m_nbr[i] = rhs.m_nbr[i];
+  m_numVertices = rhs.m_numVertices;
+  m_numFacets = rhs.m_numFacets;
+  std::memcpy(m_vertexPos, rhs.m_vertexPos, m_numVertices * sizeof(m_vertexPos[0]));
+  std::memcpy(m_vertices, rhs.m_vertices, m_numVertices * sizeof(m_vertices[0]));
+  std::memcpy(m_facets, rhs.m_facets, m_numFacets * sizeof(m_facets[0]));
+  std::memcpy(m_nbr, rhs.m_nbr, m_numFacets * sizeof(m_nbr[0]));
   return *this;
 }
 
@@ -525,16 +488,12 @@ template <typename real_t>
 Cell<real_t> &Cell<real_t>::operator=(CellMaker<real_t> &rhs) {
   m_id = rhs.m_id;
   rhs.renumber();
-  this->reset(rhs.m_numVertices, rhs.m_numFacets);
-  //    printf("numVertices: %u, numFacets: %u\n", m_numVertices, m_numFacets);
-  for (uint0 i(0); i < m_numVertices; ++i)
-    this->m_vertexPos[i] = rhs.m_vertexPos[i];
-  for (uint0 i(0); i < m_numVertices; ++i)
-    this->m_vertices[i] = rhs.m_vertices[i];
-  for (uint0 i(0); i < m_numFacets; ++i)
-    this->m_facets[i] = rhs.m_facets[i];
-  for (uint0 i(0); i < m_numFacets; ++i)
-    this->m_nbr[i] = rhs.m_nbr[i];
+  m_numVertices = rhs.m_numVertices;
+  m_numFacets = rhs.m_numFacets;
+  std::memcpy(m_vertexPos, rhs.m_vertexPos, m_numVertices * sizeof(m_vertexPos[0]));
+  std::memcpy(m_vertices, rhs.m_vertices, m_numVertices * sizeof(m_vertices[0]));
+  std::memcpy(m_facets, rhs.m_facets, m_numFacets * sizeof(m_facets[0]));
+  std::memcpy(m_nbr, rhs.m_nbr, m_numFacets * sizeof(m_nbr[0]));
   return *this;
 }
 
@@ -1686,7 +1645,7 @@ bool CellUpdater<real_t>::isInNbrs(uint2 nbr) const {
 template <typename real_t>
 uint1 CellUpdater<real_t>::findFacet(uint2 nbr) const {
   const uint1 numFacets(p_geom->getCell().m_numFacets);
-  const std::vector<uint2> &nbrs(p_geom->getCell().m_nbr);
+  const uint2 *nbrs = p_geom->getCell().m_nbr;
   uint1 indx(~0);
   for (uint0 i(0); i < numFacets; ++i)
     (nbrs[i] == nbr ? indx = i : indx);
