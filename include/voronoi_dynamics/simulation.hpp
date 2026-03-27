@@ -200,7 +200,8 @@ void Simulation<real_t>::computeGradients(const std::vector<Array<real_t, m> >& 
 #pragma omp parallel for
   for (size_t i = 0; i < geoms.size(); ++i) {
     const std::vector<Array<real_t, 3> >& dV(geoms[i].getdV());
-    const Cell<real_t>& cell(this->m_complex.getCells()[i]);
+    Cell<real_t> cell;
+    this->m_complex.materializeCell(i, cell);
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
       uint2 nbr = cell.getNbr(j);
       for (int p = 0; p < m; ++p)
@@ -238,7 +239,8 @@ void Simulation<real_t>::computeGradients2(const std::vector<Array<real_t, m> >&
 #pragma omp parallel for
   for (size_t i = 0; i < geoms.size(); ++i) {
     const std::vector<Array<real_t, 3> >& dV(geoms[i].getdV());
-    const Cell<real_t>& cell(this->m_complex.getCells()[i]);
+    Cell<real_t> cell;
+    this->m_complex.materializeCell(i, cell);
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
       uint2 nbr = cell.getNbr(j);
       for (int p = 0; p < m; ++p) {
@@ -269,7 +271,8 @@ void Simulation<real_t>::computeGradients(const std::vector<real_t>& phi,
 #pragma omp parallel for
   for (size_t i = 0; i < geoms.size(); ++i) {
     const std::vector<Array<real_t, 3> >& dV(geoms[i].getdV());
-    const Cell<real_t>& cell(this->m_complex.getCells()[i]);
+    Cell<real_t> cell;
+    this->m_complex.materializeCell(i, cell);
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
       uint2 nbr = cell.getNbr(j);
       for (uint0 k = 0; k < 3; ++k) {
@@ -359,7 +362,8 @@ void ExplicitEuler<real_t>::computeForces() {
 #pragma omp parallel for
   for (size_t i = 0; i < geoms.size(); ++i) {
     const std::vector<Array<real_t, 3> >& dV(geoms[i].getdV());
-    const Cell<real_t>& cell(this->m_complex.getCells()[i]);
+    Cell<real_t> cell;
+    this->m_complex.materializeCell(i, cell);
     //      geoms[i].diffVolume();
     real_t press = (m_pressEq * m_volAvg) / geoms[i].getVolume();
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
@@ -383,7 +387,8 @@ void ExplicitEuler<real_t>::computeForces() {
 //      for(uint k(0); k<3; ++k)
 //  	this->m_forces[i][k] = 0.0;
 //     std::vector<CellGeometry<real_t> > & geoms(this->m_complex.getGeoms());
-//     const std::vector<Cell<real_t> > & cells(this->m_complex.getCells());
+//     std::vector<Cell<real_t> > cells;
+//     this->m_complex.materializeCells(cells);
 // #pragma omp parallel for
 //     for(size_t i=0; i< geoms.size(); ++i){
 //       geoms[i].diffVolume();
@@ -443,7 +448,8 @@ void ExplicitEuler<real_t>::computeForces() {
 // #pragma omp parallel for
 //     for(size_t i=0; i< geoms.size(); ++i){
 //       geoms[i].diffVolume();
-//       const Cell<real_t> & cell(this->m_complex.getCells()[i]);
+//       Cell<real_t> cell;
+//       this->m_complex.materializeCell(i, cell);
 //       Array<Array<real_t, 3>, 3> gradVel(geoms[i].velocityGradient(this->m_vel));
 //       real_t press = (this->m_pressEq*this->m_volAvg)/geoms[i].getVolume();
 //       real_t divVel=0;
@@ -484,7 +490,8 @@ void NavierStokes<real_t>::computeForces() {
   std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
 #pragma omp parallel for
   for (size_t i = 0; i < geoms.size(); ++i) {
-    const Cell<real_t>& cell(this->m_complex.getCells()[i]);
+    Cell<real_t> cell;
+    this->m_complex.materializeCell(i, cell);
     real_t press = (this->m_pressEq * this->m_volAvg) / geoms[i].getVolume();
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
       uint2 nbr = cell.getNbr(j);
@@ -525,7 +532,8 @@ void NavierStokes<real_t>::computeViscousForces() {
   std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
 #pragma omp parallel for
   for (size_t i = 0; i < geoms.size(); ++i) {
-    const Cell<real_t>& cell(this->m_complex.getCells()[i]);
+    Cell<real_t> cell;
+    this->m_complex.materializeCell(i, cell);
     Array<real_t, 3> f;
     for (uint k(0); k < 3; ++k)
       f[k] = 0;
@@ -547,7 +555,8 @@ void NavierStokes<real_t>::computeViscousForces() {
 //     const real_t two_third = 2.0/3.0;
 // #pragma omp parallel for
 //     for(size_t i=0; i< geoms.size(); ++i){
-//       const Cell<real_t> & cell(this->m_complex.getCells()[i]);
+//       Cell<real_t> cell;
+//       this->m_complex.materializeCell(i, cell);
 //       Array<uint2, 3> nbrs;
 //       Array<Array<real_t, 3>, 3> gradVel, stress, forces;
 //       for(uint0 j=0; j< cell.numVertices(); ++j){
@@ -682,7 +691,8 @@ void IntfDyn<real_t>::computeIntfForces() {
 #pragma omp parallel for
   for (size_t i = 0; i < types.size(); ++i) {
     if (types[i] > 0) {
-      const Cell<real_t>& cell(this->m_complex.getCells()[i]);
+      Cell<real_t> cell;
+      this->m_complex.materializeCell(i, cell);
       const CellGeometry<real_t>& geom(this->m_complex.getGeoms()[i]);
       for (uint1 j = 0; j < cell.numFacets(); ++j) {
         uint2 nbr = cell.getNbr(j);
@@ -717,7 +727,8 @@ real_t IntfDyn<real_t>::getIntfEnergy() const {
 #pragma omp parallel for reduction(+ : E)
   for (size_t i = 0; i < types.size(); ++i) {
     if (types[i] > 0) {
-      const Cell<real_t>& cell(this->m_complex.getCells()[i]);
+      Cell<real_t> cell;
+      this->m_complex.materializeCell(i, cell);
       const CellGeometry<real_t>& geom(this->m_complex.getGeoms()[i]);
       for (uint1 j = 0; j < cell.numFacets(); ++j) {
         uint2 nbr = cell.getNbr(j);
@@ -739,7 +750,8 @@ void Incompressible<real_t>::buildConstraintMatrix() {
   real_t duration;
   start = clock();
   // find next nearest neighbors
-  std::vector<Cell<real_t> >& cells(this->m_complex.getCells());
+  std::vector<Cell<real_t> > cells;
+  this->m_complex.materializeCells(cells);
   for (size_t i = 0; i < cells.size(); ++i) {
     std::vector<uint2> nbrs;
     nbrs.reserve(300);
@@ -770,7 +782,7 @@ void Incompressible<real_t>::buildConstraintMatrix() {
   for (size_t i = 0; i < geoms.size(); ++i) {
     MatrixEntry<real_t> triplet;
     const std::vector<Array<real_t, 3> >& dV(geoms[i].getdV());
-    const Cell<real_t>& cell(this->m_complex.getCells()[i]);
+    const Cell<real_t>& cell(cells[i]);
     real_t dVii[3];
     for (uint0 k = 0; k < 3; ++k)
       dVii[k] = 0;

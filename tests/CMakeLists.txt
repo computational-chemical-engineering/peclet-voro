@@ -29,6 +29,10 @@ add_voronoi_test(test_build_rebuild        test_build_rebuild.cpp)
 # Alternative build trials and stress testing
 add_voronoi_test(test_build_trial          test_build_trial.cpp)
 
+# Moving random points with periodic wrapping; report repair/convexity stats
+# and validate the final incremental tessellation against a clean rebuild.
+add_voronoi_test(test_moving_points_repair_stats test_moving_points_repair_stats.cpp)
+
 # Compressible Euler equations (needs pos_eq_10000.dat)
 add_voronoi_test(test_simulation           test_simulation.cpp)
 

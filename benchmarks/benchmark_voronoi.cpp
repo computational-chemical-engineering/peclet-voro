@@ -21,10 +21,10 @@
  * Progress and metadata are written to stderr.
  *
  * Usage:
- *     ./benchmark_voronoi [output.csv]
- * If an argument is given, stdout is redirected to that file. Otherwise,
- * pipe stdout to a file directly:
- *     ./benchmark_voronoi > results.csv
+ *     ./benchmark_voronoi [--include-sphere] [output.csv]
+ *
+ * By default, the expensive sphere_surface dataset is skipped.
+ * Pass --include-sphere to include it.
  */
 
 #include <algorithm>
@@ -375,12 +375,35 @@ static void run_case(FILE*                      out,
 // ---------------------------------------------------------------------------
 
 int main(int argc, char* argv[]) {
+  bool include_sphere = false;
+  const char* out_name = nullptr;
+  for (int i = 1; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--include-sphere") == 0) {
+      include_sphere = true;
+    } else if (std::strcmp(argv[i], "--help") == 0 || std::strcmp(argv[i], "-h") == 0) {
+      std::fprintf(stderr,
+                   "Usage: %s [--include-sphere] [output.csv]\n"
+                   "  --include-sphere   include sphere_surface benchmark cases\n"
+                   "  output.csv         optional output CSV path (default: stdout)\n",
+                   argv[0]);
+      return 0;
+    } else if (argv[i][0] == '-') {
+      std::fprintf(stderr, "Unknown option: %s\n", argv[i]);
+      return 1;
+    } else if (out_name == nullptr) {
+      out_name = argv[i];
+    } else {
+      std::fprintf(stderr, "Unexpected positional argument: %s\n", argv[i]);
+      return 1;
+    }
+  }
+
   // Optional: redirect CSV output to a named file
   FILE* out = stdout;
-  if (argc > 1 && std::strcmp(argv[1], "-") != 0) {
-    out = std::fopen(argv[1], "w");
+  if (out_name != nullptr && std::strcmp(out_name, "-") != 0) {
+    out = std::fopen(out_name, "w");
     if (!out) {
-      std::perror(argv[1]);
+      std::perror(out_name);
       return 1;
     }
   }
@@ -398,6 +421,7 @@ int main(int argc, char* argv[]) {
   fprintf(out, "# OpenMP threads: %d\n", nthreads);
   fprintf(out, "# Box: unit cube [0,1)^3\n");
   fprintf(out, "# Sphere radius: 0.4 (voronoi_dynamics NOT benchmarked: hollow interior creates >128-facet cells for any N)\n");
+  fprintf(out, "# include_sphere: %s\n", include_sphere ? "true" : "false");
   fprintf(out, "# Columns: library,point_set,N,nthreads,reps,time_ms_mean,time_ms_std\n");
   fprintf(out, "library,point_set,N,nthreads,reps,time_ms_mean,time_ms_std\n");
   fflush(out);
@@ -420,21 +444,25 @@ int main(int argc, char* argv[]) {
     run_case(out, "cubic_lattice", pos, L, nthreads);
   }
 
-  // ── sphere_surface ───────────────────────────────────────────────────────
-  // voronoi_dynamics is NOT benchmarked for sphere_surface.
-  // The hollow sphere interior creates cells with more than 128 facets for
-  // ALL tested N values (including N=100), overflowing the library's fixed-size
-  // static arrays.  Voro++ (no cell-complexity limit) is timed for all sizes.
-  fprintf(stderr, "\n=== sphere_surface (voronoi_dynamics skipped entirely) ===\n");
-  constexpr int VD_SPHERE_MAX = 0;  // 0 = never run vd for sphere_surface
-  // NOTE: Voro++ exhibits O(N^2) cost for the hollow sphere distribution
-  // (empty interior causes each cell to check many more candidate cut planes).
-  // N > 10000 would take > 1 hour; the study is therefore capped at N = 10000.
-  for (int N : {100, 500, 1000, 5000, 10000}) {
-    const bool run_vd = (N <= VD_SPHERE_MAX);
-    if (!run_vd)
-      fprintf(stderr, "    (voronoi_dynamics skipped: N > %d)\n", VD_SPHERE_MAX);
-    run_case(out, "sphere_surface", sphere_surface(N, L, SEED), L, nthreads, run_vd);
+  // ── sphere_surface (optional) ────────────────────────────────────────────
+  if (include_sphere) {
+    // voronoi_dynamics is NOT benchmarked for sphere_surface.
+    // The hollow sphere interior creates cells with more than 128 facets for
+    // ALL tested N values (including N=100), overflowing the library's fixed-size
+    // static arrays.  Voro++ (no cell-complexity limit) is timed for all sizes.
+    fprintf(stderr, "\n=== sphere_surface (voronoi_dynamics skipped entirely) ===\n");
+    constexpr int VD_SPHERE_MAX = 0;  // 0 = never run vd for sphere_surface
+    // NOTE: Voro++ exhibits O(N^2) cost for the hollow sphere distribution
+    // (empty interior causes each cell to check many more candidate cut planes).
+    // N > 10000 would take > 1 hour; the study is therefore capped at N = 10000.
+    for (int N : {100, 500, 1000, 5000, 10000}) {
+      const bool run_vd = (N <= VD_SPHERE_MAX);
+      if (!run_vd)
+        fprintf(stderr, "    (voronoi_dynamics skipped: N > %d)\n", VD_SPHERE_MAX);
+      run_case(out, "sphere_surface", sphere_surface(N, L, SEED), L, nthreads, run_vd);
+    }
+  } else {
+    fprintf(stderr, "\n=== sphere_surface skipped (use --include-sphere to enable) ===\n");
   }
 
   fprintf(stderr, "\nBenchmark complete.\n");

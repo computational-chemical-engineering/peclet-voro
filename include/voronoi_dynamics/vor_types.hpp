@@ -135,11 +135,13 @@ class CompareNbrInsert {
 template <typename UInt, UInt Capacity>
 class DenseSlots {
  public:
-  DenseSlots() : m_numAllocated(0), m_numAlive(0), m_freeTop(0) {
+  DenseSlots() : m_numAllocated(0), m_numAlive(0), m_freeTop(0), m_activeCapacity(Capacity) {
     std::memset(m_alive, 0, Capacity);
   }
   /// Reset: slots 0..n-1 are alive, rest are dead.
   void reset(UInt n) {
+    if (n > m_activeCapacity)
+      setActiveCapacity(n);
     m_numAllocated = n;
     m_numAlive = n;
     m_freeTop = 0;
@@ -152,7 +154,7 @@ class DenseSlots {
     UInt idx;
     if (m_freeTop > 0) {
       idx = m_freeStack[--m_freeTop];
-    } else if (m_numAllocated < Capacity) {
+    } else if (m_numAllocated < m_activeCapacity) {
       idx = m_numAllocated++;
     } else {
       return Capacity;
@@ -177,6 +179,34 @@ class DenseSlots {
   inline UInt numAllocated() const { return m_numAllocated; }
   /// Number of currently alive slots.
   inline UInt numAlive() const { return m_numAlive; }
+  /// Current active capacity (<= Capacity).
+  inline UInt activeCapacity() const { return m_activeCapacity; }
+  /// Set active capacity (clamped to [numAllocated, Capacity]).
+  void setActiveCapacity(UInt cap) {
+    if (cap < m_numAllocated)
+      cap = m_numAllocated;
+    if (cap > Capacity)
+      cap = Capacity;
+    m_activeCapacity = cap;
+  }
+  /// Grow active capacity by doubling (or to target if provided).
+  /// Returns true if capacity increased.
+  bool growActiveCapacity(UInt target = 0) {
+    if (m_activeCapacity >= Capacity)
+      return false;
+    UInt new_cap = target;
+    if (new_cap == 0) {
+      new_cap = static_cast<UInt>(m_activeCapacity * 2);
+      if (new_cap <= m_activeCapacity)
+        new_cap = static_cast<UInt>(m_activeCapacity + 1);
+    }
+    if (new_cap > Capacity)
+      new_cap = Capacity;
+    if (new_cap <= m_activeCapacity)
+      return false;
+    m_activeCapacity = new_cap;
+    return true;
+  }
   /// True if no alive slots.
   inline bool empty() const { return m_numAlive == 0; }
   /// Find first alive slot index (returns Capacity if empty).
@@ -193,6 +223,7 @@ class DenseSlots {
   UInt m_freeTop;
   UInt m_numAllocated;
   UInt m_numAlive;
+  UInt m_activeCapacity;
 };
 
 /**

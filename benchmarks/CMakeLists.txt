@@ -173,3 +173,32 @@ target_compile_options(benchmark_cell_creation
 
 message(STATUS "benchmark_cell_creation: run from ${CMAKE_BINARY_DIR}/benchmarks")
 message(STATUS "  ./benchmark_cell_creation > results/benchmark_cell_creation.csv")
+
+# ── benchmark_cell_arena_blocks executable ───────────────────────────────────
+# Focused N=1e4 random benchmark for CellArena reserve-capacity sweeps.
+add_executable(benchmark_cell_arena_blocks benchmark_cell_arena_blocks.cpp)
+
+target_link_libraries(benchmark_cell_arena_blocks
+  PRIVATE
+    voronoi_dynamics::voronoi_dynamics
+)
+
+target_compile_definitions(benchmark_cell_arena_blocks
+  PRIVATE
+    NDEBUG
+)
+
+target_compile_options(benchmark_cell_arena_blocks
+  PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:
+      -O3
+      -march=native
+      -mtune=native
+      -ffast-math
+      -funroll-loops
+      -fno-omit-frame-pointer
+    >
+)
+
+message(STATUS "benchmark_cell_arena_blocks: run from ${CMAKE_BINARY_DIR}/benchmarks")
+message(STATUS "  ./benchmark_cell_arena_blocks --n 10000 --reps 12")

@@ -230,6 +230,8 @@ int main(int argc, char *argv[]) {
   const int nthreads = 1;
 #endif
 
+  vor::resetCellMakerTelemetry();
+
   fprintf(out, "# Cell-creation benchmark (no sphere)\n");
   fprintf(out, "# Compiled: %s %s\n", __DATE__, __TIME__);
   fprintf(out, "# OpenMP max threads at runtime: %d\n", nthreads);
@@ -248,6 +250,42 @@ int main(int argc, char *argv[]) {
     run_case(out, "cubic_lattice", cubic_lattice(N, L, SEED), L, nthreads, vd_only);
 
   fprintf(stderr, "\nBenchmark complete.\n");
+
+    const auto &telemetry = vor::cellMakerTelemetry();
+    const auto peak_vertices = telemetry.peak_vertices_seen.load(std::memory_order_relaxed);
+    const auto peak_facets = telemetry.peak_facets_seen.load(std::memory_order_relaxed);
+      const auto peak_vertex_capacity = telemetry.peak_vertex_capacity.load(std::memory_order_relaxed);
+      const auto peak_facet_capacity = telemetry.peak_facet_capacity.load(std::memory_order_relaxed);
+    const auto vertex_overflows = telemetry.vertex_overflow_events.load(std::memory_order_relaxed);
+    const auto facet_overflows = telemetry.facet_overflow_events.load(std::memory_order_relaxed);
+      const auto vertex_growths = telemetry.vertex_growth_events.load(std::memory_order_relaxed);
+      const auto facet_growths = telemetry.facet_growth_events.load(std::memory_order_relaxed);
+    fprintf(stderr,
+        "CellMaker telemetry: peak_vertices=%llu peak_facets=%llu "
+        "peak_vertex_capacity=%llu peak_facet_capacity=%llu "
+        "vertex_growths=%llu facet_growths=%llu "
+        "vertex_overflows=%llu facet_overflows=%llu\n",
+      static_cast<unsigned long long>(peak_vertices),
+      static_cast<unsigned long long>(peak_facets),
+        static_cast<unsigned long long>(peak_vertex_capacity),
+        static_cast<unsigned long long>(peak_facet_capacity),
+        static_cast<unsigned long long>(vertex_growths),
+        static_cast<unsigned long long>(facet_growths),
+      static_cast<unsigned long long>(vertex_overflows),
+      static_cast<unsigned long long>(facet_overflows));
+    fprintf(out,
+        "# CellMaker telemetry: peak_vertices=%llu,peak_facets=%llu,"
+        "peak_vertex_capacity=%llu,peak_facet_capacity=%llu,"
+        "vertex_growths=%llu,facet_growths=%llu,"
+        "vertex_overflows=%llu,facet_overflows=%llu\n",
+      static_cast<unsigned long long>(peak_vertices),
+      static_cast<unsigned long long>(peak_facets),
+        static_cast<unsigned long long>(peak_vertex_capacity),
+        static_cast<unsigned long long>(peak_facet_capacity),
+        static_cast<unsigned long long>(vertex_growths),
+        static_cast<unsigned long long>(facet_growths),
+      static_cast<unsigned long long>(vertex_overflows),
+      static_cast<unsigned long long>(facet_overflows));
 
   if (out != stdout)
     std::fclose(out);
