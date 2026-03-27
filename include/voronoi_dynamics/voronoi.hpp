@@ -417,6 +417,9 @@ class CellComplex {
  public:
   CellComplex(Box<real_t> *box) : m_nbrList(box), m_isBuild(false) {}
   void build(const std::vector<Array<real_t, 3> > &p);
+  /// Build geometry data (connecting vectors, edge inverses, volume derivatives)
+  /// for all cells. Called automatically by build(); call separately if needed.
+  void buildGeometry(const std::vector<Array<real_t, 3> > &p);
   void update(const std::vector<Array<real_t, 3> > &p);
   const std::vector<Cell<real_t> > &getCells() const { return m_cells; }
   std::vector<Cell<real_t> > &getCells() { return m_cells; }
@@ -754,15 +757,11 @@ uint1 CellMaker<real_t>::getReverseLabel(uint1 label) const {
 template <typename real_t>
 void CellMaker<real_t>::init(const Cell<real_t> &cell) {
   m_slotsV.reset(cell.m_numVertices);
-  for (uint1 i(0); i < cell.m_numVertices; ++i) {
-    m_vertexPos[i] = cell.m_vertexPos[i];
-    m_vertices[i] = cell.m_vertices[i];
-  }
+  std::memcpy(m_vertexPos, cell.m_vertexPos, cell.m_numVertices * sizeof(m_vertexPos[0]));
+  std::memcpy(m_vertices, cell.m_vertices, cell.m_numVertices * sizeof(m_vertices[0]));
   m_slotsF.reset(cell.m_numFacets);
-  for (uint1 i(0); i < cell.m_numFacets; ++i) {
-    m_facets[i] = cell.m_facets[i];
-    m_nbr[i] = cell.m_nbr[i];
-  }
+  std::memcpy(m_facets, cell.m_facets, cell.m_numFacets * sizeof(m_facets[0]));
+  std::memcpy(m_nbr, cell.m_nbr, cell.m_numFacets * sizeof(m_nbr[0]));
   computeAllRsq();
   resetDist();
   const std::numeric_limits<real_t> lim;
@@ -1556,7 +1555,7 @@ bool CellMaker<real_t>::processNbrs(
   for (size_t i(0); (i < m_nbrDistWrk.size()) && (m_nbrDistWrk[i].rSqHalf < 2.0 * m_rSq[m_vRsqMax]);
        ++i) {
     const NbrDist<real_t> &p(m_nbrDistWrk[i]);
-    (cutCell(p, p.rSqHalf, p.id) ? isCut = true : m_isAllCut = false);
+    (cutCell2(p, p.rSqHalf, p.id) ? isCut = true : m_isAllCut = false);
   }
   return isCut;
 }
@@ -2296,7 +2295,6 @@ void CellComplex<real_t>::initNbrList(const std::vector<Array<real_t, 3> > &p) {
 template <typename real_t>
 void CellComplex<real_t>::build(const std::vector<Array<real_t, 3> > &p) {
   initNbrList(p);
-  //    printf("nbr list build\n");
   const Array<real_t, 3> &L(m_nbrList.getBox().getL());
   Cuboid<real_t> cub(L);
   m_cells.resize(p.size());
@@ -2307,26 +2305,15 @@ void CellComplex<real_t>::build(const std::vector<Array<real_t, 3> > &p) {
     for (uint2 i = 0; i < p.size(); ++i) {
       maker.build(i, p, m_nbrList, cub);
       m_cells[i] = maker;
-      // if (m_cells[i].hasNoNbr()){
-      //   printf("cell %d has non-defined neighbors\n", i);
-      //   FILE *printFile;
-      //   printFile = fopen ("GNUPlotfile.txt","w");
-      //   m_cells[i].drawGnuplot(p[i],printFile);
-      //   fclose(printFile);
-      //   cub.printTopology();
-      //   printf("\n");
-      //   m_cells[i].printTopology();
-      // }
     }
   }
-  //     m_updaters.resize(p.size());
-  // #pragma omp parallel for
-  //     for(size_t i=0; i < m_updaters.size(); ++i){
-  //       m_updaters[i] = m_cells[i];
-  //       m_updaters[i].reset();
-  //     }
-  //     repair(p, changedCells);
   m_nbrList.clear();
+  buildGeometry(p);
+  m_isBuild = true;
+}
+
+template <typename real_t>
+void CellComplex<real_t>::buildGeometry(const std::vector<Array<real_t, 3> > &p) {
   m_geom.resize(p.size());
   m_updaters.resize(p.size());
 #pragma omp parallel for
@@ -2338,7 +2325,6 @@ void CellComplex<real_t>::build(const std::vector<Array<real_t, 3> > &p) {
     m_updaters[i] = m_geom[i];
   }
   m_hasChanged.resize(p.size());
-  m_isBuild = true;
 }
 
 template <typename real_t>
