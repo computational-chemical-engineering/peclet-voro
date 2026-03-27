@@ -164,7 +164,7 @@ class DenseSlots {
   bool release(UInt i) {
     if (i >= Capacity || !m_alive[i]) return false;
     m_alive[i] = 0;
-    m_freeStack[m_freeTop++] = i;
+    if (m_freeTop < Capacity) m_freeStack[m_freeTop++] = i;
     --m_numAlive;
     return true;
   }

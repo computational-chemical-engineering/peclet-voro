@@ -21,6 +21,15 @@
 namespace vor {
 typedef Array<uint1, 3> Indx;
 
+/// Branchless floor: truncation rounds towards zero; for negative non-integer
+/// values we subtract 1 to correctly round down (e.g. int(-0.3)=0, need -1).
+template <typename real_t>
+inline real_t fastFloor(real_t x) {
+  int n = static_cast<int>(x);
+  n -= (x < n);
+  return static_cast<real_t>(n);
+}
+
 template <typename UInt>
 class Grid {
  public:
@@ -356,9 +365,7 @@ void Box<real_t>::makeShortestDistance(Array<real_t, 3>& pos) const {
   for (uint1 k(0); k < 3; ++k) {
     real_t r = pos[k] * m_invL[k];
     real_t s = r + half;
-    int n = static_cast<int>(s);
-    n -= (s < n);  // branchless floor correction for negatives
-    pos[k] = (r - static_cast<real_t>(n)) * m_L[k];
+    pos[k] = (r - fastFloor(s)) * m_L[k];
   }
 }
 
@@ -376,17 +383,11 @@ void Box<real_t>::putInBox(std::vector<Array<real_t, 3> >& pos) const {
 template <typename real_t>
 void BoxLE<real_t>::makeShortestDistance(Array<real_t, 3>& pos) const {
   static constexpr real_t half = real_t(0.5);
-  // Branchless floor for periodic wrapping
-  auto bfloor = [](real_t x) -> real_t {
-    int n = static_cast<int>(x);
-    n -= (x < n);
-    return static_cast<real_t>(n);
-  };
-  real_t fl1 = bfloor(pos[1] * this->m_invL[1] + half);
+  real_t fl1 = fastFloor(pos[1] * this->m_invL[1] + half);
   real_t pos0(pos[0] - fl1 * (m_shear * this->m_L[1]));
-  pos[0] = this->m_L[0] * (pos0 * this->m_invL[0] - bfloor(pos0 * this->m_invL[0] + half));
+  pos[0] = this->m_L[0] * (pos0 * this->m_invL[0] - fastFloor(pos0 * this->m_invL[0] + half));
   pos[1] = this->m_L[1] * (pos[1] * this->m_invL[1] - fl1);
-  pos[2] = this->m_L[2] * (pos[2] * this->m_invL[2] - bfloor(pos[2] * this->m_invL[2] + half));
+  pos[2] = this->m_L[2] * (pos[2] * this->m_invL[2] - fastFloor(pos[2] * this->m_invL[2] + half));
 }
 
 template <typename UInt, typename real_t>
