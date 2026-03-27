@@ -60,6 +60,12 @@ if(VORONOI_BUILD_TESTS)
   add_subdirectory(tests)
 endif()
 
+# ── Benchmarks ────────────────────────────────────────────────────────────────
+option(VORONOI_BUILD_BENCHMARKS "Build the performance benchmarks" OFF)
+if(VORONOI_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
+endif()
+
 # ── Documentation ─────────────────────────────────────────────────────────────
 option(VORONOI_BUILD_DOCS "Build Doxygen documentation" OFF)
 if(VORONOI_BUILD_DOCS)
