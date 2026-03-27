@@ -412,6 +412,7 @@ class CellGeometry {
   void computeVolume();
   void diffVolume();
   void computeAll();
+  real_t maxConvexViolation() const;
   Array<Array<real_t, 3>, 3> velocityGradient(const std::vector<Array<real_t, 3> > &velocity) const;
   void getDelaunayNbrs(uint1 iVertex, Array<uint2, 3> &nbrs) const;
   void computeDelaunayForces(uint1 iVertex, const Array<Array<real_t, 3>, 3> &stress,
@@ -1966,6 +1967,7 @@ bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end
   if (!m_isSetup)
     setupNbrSet();
   m_newNbrsWrk.clear();
+  boost::container::flat_set<uint2> attemptedNbrs;
   PosAndId<uint2, real_t> newNbr;
   Cell<real_t> &cell(p_geom->getCell());
   uint2 id(cell.getID());
@@ -1977,6 +1979,9 @@ bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end
     if ((*itr)[0] != id)
       continue;
     if ((*itr)[1] == (*itr)[2]) {
+      if (attemptedNbrs.find((*itr)[1]) != attemptedNbrs.end())
+        continue;
+      attemptedNbrs.insert((*itr)[1]);
       // printf("testing %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
       if (!hasSetMaker) {
         maker = cell;
@@ -1988,9 +1993,11 @@ bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end
         relPos[k] = pos[(*itr)[1]][k] - pos[id][k];
       box.makeShortestDistance(relPos);
       rSqHalf = 0.5 * (relPos[0] * relPos[0] + relPos[1] * relPos[1] + relPos[2] * relPos[2]);
-      m_nbrs.insert((*itr)[1]);
-      bool isInserted = maker.cutCell(relPos, rSqHalf, (*itr)[1]);
-      (isInserted ? hasChanged = true : hasChanged);
+      bool isInserted = maker.applyCut(relPos, rSqHalf, (*itr)[1]);
+      if (isInserted) {
+        hasChanged = true;
+        m_nbrs.insert((*itr)[1]);
+      }
       if (!isInserted) {
         //	  printf("not inserted: %u %u %u\n",(*itr)[0],(*itr)[1],(*itr)[2]);
         // const std::vector<uint2> & nbrs(maker.getNbrs());
@@ -2020,10 +2027,12 @@ bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end
       }
     } else {
       //	printf("inserting %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
+      if (attemptedNbrs.find((*itr)[2]) != attemptedNbrs.end())
+        continue;
+      attemptedNbrs.insert((*itr)[2]);
       newNbr.id = (*itr)[2];
       newNbr.pos = pos[newNbr.id];
       m_newNbrsWrk.push_back(newNbr);
-      m_nbrs.insert((*itr)[2]);
     }
   }
   if (!m_newNbrsWrk.empty()) {
@@ -2159,6 +2168,24 @@ bool CellGeometry<real_t>::isConvex() const {
     }
   }
   return valid;
+}
+
+template <typename real_t>
+real_t CellGeometry<real_t>::maxConvexViolation() const {
+  real_t maxDist = 0;
+  for (uint1 i(0); i < p_cell->m_numVertices; ++i) {
+    for (uint0 k(0); k < 3; ++k) {
+      uint1 v(getVertex(p_cell->m_vertices[i][k]));
+      uint0 kmin(k == 0 ? 2 : k - 1);
+      uint1 f(getFacet(p_cell->m_vertices[i][kmin]));
+      real_t dist(p_cell->m_vertexPos[v][0] * m_connV[f][0] +
+                  p_cell->m_vertexPos[v][1] * m_connV[f][1] +
+                  p_cell->m_vertexPos[v][2] * m_connV[f][2] - m_rSq[f]);
+      if (dist > maxDist)
+        maxDist = dist;
+    }
+  }
+  return maxDist;
 }
 
 template <typename real_t>
@@ -2697,6 +2724,14 @@ void CellComplex<real_t>::update(const std::vector<Array<real_t, 3> > &p) {
       }
     }
   }
+#pragma omp parallel for
+  for (size_t i = 0; i < m_updaters.size(); ++i) {
+    if (!m_hasChanged[i])
+      continue;
+    m_geomCells[i] = m_cells[i];
+    m_geom[i] = m_geomCells[i];
+    m_updaters[i] = m_geom[i];
+  }
   repair(p);
   m_cellArena.rebuildFromCells(m_cells);
   m_geomCells.resize(m_cells.size());
@@ -2749,45 +2784,24 @@ void CellComplex<real_t>::repair(const std::vector<Array<real_t, 3> > &p) {
     }
     //      std::__parallel::std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
     // std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
-    NbrInsertItr begin, end;
-    begin = nbrInserts.begin();
-    end = begin;
-    //      std::vector< CellMaker<real_t> > makers(omp_get_num_threads());
-    // printf("start repair\n");
-#pragma omp parallel
-    {
-      // printf("%d entering parallel region\n", omp_get_thread_num());
-      CellMaker<real_t> maker;
-      NbrInsertItr beginPriv;
-      NbrInsertItr endPriv;
-      while (end != nbrInserts.end()) {
-        // #pragma omp task
-        {
-          // printf("thread %d entering task\n", omp_get_thread_num());
-#pragma omp critical
-          {
-            for (uint2 cellId((*begin)[0]); (end != nbrInserts.end()) && ((*end)[0] == cellId);
-                 ++end) {
-            }
-            beginPriv = begin;
-            endPriv = end;
-            begin = end;
-          }
-          // printf("%d continuing task after critical region\n", omp_get_thread_num());
-#if defined(_OPENMP) && (_OPENMP > 0)
-          // printf("thead %d updates cell %d\n", omp_get_thread_num(), (*beginPriv)[0]);
-#endif
-          bool hasChanged = m_updaters[(*beginPriv)[0]].processNbrInserts(beginPriv, endPriv, maker,
-                                                                          p, m_nbrList.getBox());
-          m_hasChanged[(*beginPriv)[0]] = true;
-          if (hasChanged) {
-            m_cells[(*beginPriv)[0]] = maker;
-            m_updaters[(*beginPriv)[0]].updateNbrInserts();
-          }
-          // printf("%d leaving task\n", omp_get_thread_num());
-        }
+    CellMaker<real_t> maker;
+    size_t nextGroupBegin = 0;
+    while (nextGroupBegin < nbrInserts.size()) {
+      size_t groupEnd = nextGroupBegin;
+      const uint2 cellId = nbrInserts[nextGroupBegin][0];
+      while (groupEnd < nbrInserts.size() && nbrInserts[groupEnd][0] == cellId) {
+        ++groupEnd;
       }
-      // printf("thead %d leaves parallel region\n",omp_get_thread_num());
+      NbrInsertItr beginPriv = nbrInserts.begin() + static_cast<std::ptrdiff_t>(nextGroupBegin);
+      NbrInsertItr endPriv = nbrInserts.begin() + static_cast<std::ptrdiff_t>(groupEnd);
+      bool hasChanged =
+          m_updaters[cellId].processNbrInserts(beginPriv, endPriv, maker, p, m_nbrList.getBox());
+      m_hasChanged[cellId] = true;
+      if (hasChanged) {
+        m_cells[cellId] = maker;
+        m_updaters[cellId].updateNbrInserts();
+      }
+      nextGroupBegin = groupEnd;
     }
   }
 }

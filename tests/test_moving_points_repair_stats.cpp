@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <vector>
@@ -49,6 +50,7 @@ struct StepStats {
   int non_convex_after = 0;
   int topology_changed_cells = 0;
   int no_nbr_cells_after = 0;
+  Real max_convex_violation_after = 0.0;
 };
 
 /**
@@ -112,6 +114,48 @@ int CountNonConvexCells(vor::CellComplex<Real> &complex, const std::vector<Pos3>
     }
   }
   return non_convex;
+}
+
+Real MaxConvexViolation(vor::CellComplex<Real> &complex, const std::vector<Pos3> &pos,
+                        const vor::Box<Real> &box, int max_report = 0) {
+  std::vector<vor::CellGeometry<Real> > &geoms = complex.getGeoms();
+  Real max_violation = 0.0;
+  int reported = 0;
+  for (std::size_t i = 0; i < geoms.size(); ++i) {
+    geoms[i].computeConnectingVectors(pos, box);
+    geoms[i].computeEdgeInv();
+    geoms[i].updateVertexPos();
+    const Real violation = geoms[i].maxConvexViolation();
+    if (violation > max_violation) {
+      max_violation = violation;
+    }
+    if (max_report > 0 && violation > 0.0 && reported < max_report) {
+      std::printf("# NON-CONVEX cell %zu max_violation=%.16e\n", i, violation);
+      ++reported;
+    }
+  }
+  return max_violation;
+}
+
+std::vector<std::pair<int, Real> > CollectConvexViolations(vor::CellComplex<Real> &complex,
+                                                           const std::vector<Pos3> &pos,
+                                                           const vor::Box<Real> &box) {
+  std::vector<vor::CellGeometry<Real> > &geoms = complex.getGeoms();
+  std::vector<std::pair<int, Real> > violations;
+  for (std::size_t i = 0; i < geoms.size(); ++i) {
+    geoms[i].computeConnectingVectors(pos, box);
+    geoms[i].computeEdgeInv();
+    geoms[i].updateVertexPos();
+    const Real violation = geoms[i].maxConvexViolation();
+    if (violation > 0.0) {
+      violations.push_back(std::make_pair(static_cast<int>(i), violation));
+    }
+  }
+  std::sort(violations.begin(), violations.end(),
+            [](const std::pair<int, Real> &a, const std::pair<int, Real> &b) {
+              return a.second > b.second;
+            });
+  return violations;
 }
 
 /**
@@ -287,7 +331,7 @@ int main(int argc, char **argv) {
               velocity_sigma);
   std::printf("# seeds: pos=%llu vel=%llu\n", static_cast<unsigned long long>(pos_seed),
               static_cast<unsigned long long>(vel_seed));
-  std::printf("step,non_convex_before,non_convex_after,topology_changed_cells,no_nbr_cells_after\n");
+  std::printf("step,non_convex_before,non_convex_after,topology_changed_cells,no_nbr_cells_after,max_convex_violation_after\n");
 
   for (int step = 1; step <= num_steps; ++step) {
     AdvectAndWrap(pos, vel, dt, box);
@@ -301,6 +345,8 @@ int main(int argc, char **argv) {
 
     const int non_convex_after = CountNonConvexCells(complex_incremental, pos, box);
     const int no_nbr_cells_after = CountNoNeighborCells(complex_incremental);
+    const Real max_convex_violation_after =
+        MaxConvexViolation(complex_incremental, pos, box, non_convex_after > 0 ? 5 : 0);
 
     const std::vector<CellSignature> sig_after =
       BuildSignaturesByCellId(complex_incremental, num_particles);
@@ -319,13 +365,39 @@ int main(int argc, char **argv) {
     s.non_convex_after = non_convex_after;
     s.topology_changed_cells = changed_cells;
     s.no_nbr_cells_after = no_nbr_cells_after;
+    s.max_convex_violation_after = max_convex_violation_after;
     step_stats.push_back(s);
 
     cumulative_non_convex_before += non_convex_before;
     cumulative_topology_changed += changed_cells;
 
-    std::printf("%d,%d,%d,%d,%d\n", s.step, s.non_convex_before, s.non_convex_after,
-                s.topology_changed_cells, s.no_nbr_cells_after);
+    std::printf("%d,%d,%d,%d,%d,%.16e\n", s.step, s.non_convex_before, s.non_convex_after,
+                s.topology_changed_cells, s.no_nbr_cells_after, s.max_convex_violation_after);
+
+    if (non_convex_after > 0) {
+      std::vector<std::pair<int, Real> > violations =
+          CollectConvexViolations(complex_incremental, pos, box);
+      vor::CellComplex<Real> complex_clean_step(&box);
+      complex_clean_step.build(pos);
+      const std::vector<CellSignature> sig_clean_step =
+          BuildSignaturesByCellId(complex_clean_step, num_particles);
+      const Real clean_max_violation = MaxConvexViolation(complex_clean_step, pos, box, 0);
+      std::printf("# STEP %d clean_max_convex_violation=%.16e\n", step, clean_max_violation);
+      for (std::size_t j = 0; j < violations.size() && j < 5; ++j) {
+        const int cell_id = violations[j].first;
+        const CellSignature &inc_sig = sig_after[static_cast<std::size_t>(cell_id)];
+        const CellSignature &clean_sig = sig_clean_step[static_cast<std::size_t>(cell_id)];
+        const bool topo_match =
+            inc_sig.num_vertices == clean_sig.num_vertices &&
+            inc_sig.num_facets == clean_sig.num_facets &&
+            inc_sig.nbrs_sorted == clean_sig.nbrs_sorted;
+        std::printf("# STEP %d cell %d violation=%.16e topo_match_clean=%s "
+                    "inc(V=%u F=%u) clean(V=%u F=%u)\n",
+                    step, cell_id, violations[j].second, topo_match ? "yes" : "no",
+                    inc_sig.num_vertices, inc_sig.num_facets,
+                    clean_sig.num_vertices, clean_sig.num_facets);
+      }
+    }
   }
 
   vor::CellComplex<Real> complex_clean(&box);
