@@ -1084,7 +1084,7 @@ bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2
         if (m_dist[i] <= 0) {
           for (uint1 k(0); k < 3; ++k) {
             uint1 nbrVertex(getVertex(m_vertices[i][k]));
-            bool isKnown = m_isKnownDist[nbrVertex];
+            bool isKnown = (m_knownDistGen[nbrVertex] == m_distGen);
             real_t nbrDist = computeDist(nbrVertex, p, rSqHalf);
             if (nbrDist > 0) {
               found = true;
