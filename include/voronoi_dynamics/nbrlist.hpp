@@ -16,6 +16,10 @@
 #include <string>
 #include <vector>
 
+#ifdef VORONOI_USE_OPENMP
+#include <omp.h>
+#endif
+
 #include "vor_types.hpp"
 
 namespace vor {
@@ -113,6 +117,7 @@ class NbrList {
   inline const Grid<UInt>& getGrid() const { return m_grid; }
   inline const Box<real_t>& getBox() const { return *p_box; }
   void setup(const std::vector<std::array<real_t, 3> >& pos, real_t rcut);
+  void setupCurrentTeam(const std::vector<std::array<real_t, 3> >& pos, real_t rcut);
   inline UInt computeCellIndex(const std::array<real_t, 3>& pos) const;
   inline void getGridNbrs(const std::array<real_t, 3>& pos, std::vector<UInt>& nbrs) const;
   void getNbrs(UInt posIndx, const std::vector<std::array<real_t, 3> >& pos,
@@ -127,10 +132,12 @@ class NbrList {
   }
 
  private:
-  Grid<UInt> m_grid;
+ Grid<UInt> m_grid;
   Box<real_t>* p_box;
   std::vector<UInt> m_headCell;
   std::vector<PosAndId<UInt, real_t> > m_cell2Pos;
+  std::vector<UInt> m_teamScratchIndx;
+  std::vector<UInt> m_teamScratchCounts;
 };
 
 template <typename UInt>
@@ -466,30 +473,95 @@ void NbrList<UInt, real_t>::setup(const std::vector<std::array<real_t, 3> >& pos
   m_grid.init(n);
   m_headCell.clear();
   std::vector<UInt> indx(pos.size());
+  const size_t numPos = pos.size();
+  const size_t numCells = static_cast<size_t>(m_grid.numCells());
+#ifdef VORONOI_USE_OPENMP
+  const int numThreads = omp_get_max_threads();
+#else
+  const int numThreads = 1;
+#endif
+
+  if (numThreads <= 1) {
+    for (UInt i = 0; i < pos.size(); ++i)
+      indx[i] = computeCellIndex(pos[i]);
+
+    std::vector<UInt> counts(numCells, 0);
+    for (UInt i = 0; i < pos.size(); ++i)
+      ++counts[indx[i]];
+
+    m_headCell.resize(counts.size() + 1);
+    m_headCell[0] = 0;
+    std::partial_sum(counts.begin(), counts.end(), m_headCell.begin() + 1);
+
+    counts = m_headCell;
+    m_cell2Pos.resize(indx.size());
+    for (UInt i = 0; i < indx.size(); ++i) {
+      const UInt head = counts[indx[i]]++;
+      m_cell2Pos[head].id = i;
+      m_cell2Pos[head].pos = pos[i];
+      for (uint0 k(0); k < 3; ++k)
+        m_cell2Pos[head].pos[k] -= L[k] * floor(m_cell2Pos[head].pos[k] * invL[k]);
+    }
+    return;
+  }
+
+#ifdef VORONOI_USE_OPENMP
 #pragma omp parallel for
   for (UInt i = 0; i < pos.size(); ++i)
     indx[i] = computeCellIndex(pos[i]);
-  std::vector<UInt> temp(m_grid.numCells(), 0);
-#pragma omp parallel for
-  for (UInt i = 0; i < pos.size(); ++i) {
-#pragma omp atomic
-    ++temp[indx[i]];
+
+  std::vector<UInt> localCounts(static_cast<size_t>(numThreads) * numCells, 0);
+#pragma omp parallel num_threads(numThreads)
+  {
+    const int tid = omp_get_thread_num();
+    UInt* const counts = localCounts.data() + static_cast<size_t>(tid) * numCells;
+    const size_t begin = (numPos * static_cast<size_t>(tid)) / static_cast<size_t>(numThreads);
+    const size_t end = (numPos * static_cast<size_t>(tid + 1)) / static_cast<size_t>(numThreads);
+    for (size_t i = begin; i < end; ++i)
+      ++counts[indx[i]];
   }
-  m_headCell.resize(temp.size() + 1);
+
+  std::vector<UInt> counts(numCells, 0);
+  for (size_t cell = 0; cell < numCells; ++cell) {
+    UInt total = 0;
+    for (int tid = 0; tid < numThreads; ++tid)
+      total += localCounts[static_cast<size_t>(tid) * numCells + cell];
+    counts[cell] = total;
+  }
+
+  m_headCell.resize(counts.size() + 1);
   m_headCell[0] = 0;
-  std::partial_sum(temp.begin(), temp.end(), m_headCell.begin() + 1);
-  temp = m_headCell;
-  m_cell2Pos.resize(indx.size());
-#pragma omp parallel for
-  for (UInt i = 0; i < indx.size(); ++i) {
-    UInt head;
-#pragma omp atomic capture
-    head = temp[indx[i]]++;
-    m_cell2Pos[head].id = i;
-    m_cell2Pos[head].pos = pos[i];
-    for (uint0 k(0); k < 3; ++k)
-      m_cell2Pos[head].pos[k] -= L[k] * floor(m_cell2Pos[head].pos[k] * invL[k]);
+  std::partial_sum(counts.begin(), counts.end(), m_headCell.begin() + 1);
+
+  for (size_t cell = 0; cell < numCells; ++cell) {
+    UInt head = m_headCell[cell];
+    for (int tid = 0; tid < numThreads; ++tid) {
+      UInt& offset = localCounts[static_cast<size_t>(tid) * numCells + cell];
+      const UInt count = offset;
+      offset = head;
+      head += count;
+    }
   }
+
+  m_cell2Pos.resize(indx.size());
+#pragma omp parallel num_threads(numThreads)
+  {
+    const int tid = omp_get_thread_num();
+    UInt* const offsets = localCounts.data() + static_cast<size_t>(tid) * numCells;
+    const size_t begin = (numPos * static_cast<size_t>(tid)) / static_cast<size_t>(numThreads);
+    const size_t end = (numPos * static_cast<size_t>(tid + 1)) / static_cast<size_t>(numThreads);
+    for (size_t i = begin; i < end; ++i) {
+      const UInt head = offsets[indx[i]]++;
+      m_cell2Pos[head].id = static_cast<UInt>(i);
+      m_cell2Pos[head].pos = pos[i];
+      for (uint0 k(0); k < 3; ++k)
+        m_cell2Pos[head].pos[k] -= L[k] * floor(m_cell2Pos[head].pos[k] * invL[k]);
+    }
+  }
+#else
+  for (UInt i = 0; i < pos.size(); ++i)
+    indx[i] = computeCellIndex(pos[i]);
+#endif
   // #pragma omp parallel for
   //     for(UInt i=0; i < m_headCell.size()-1; ++i){
   //       std::sort(m_cell2Pos.begin() + m_headCell[i], m_cell2Pos.begin() + m_headCell[i+1]);
@@ -509,6 +581,96 @@ void NbrList<UInt, real_t>::setup(const std::vector<std::array<real_t, 3> >& pos
   // 	  m_cell2Pos[j].pos[k] - =orig[k];
   // 	}
   //     }
+}
+
+template <typename UInt, typename real_t>
+void NbrList<UInt, real_t>::setupCurrentTeam(const std::vector<std::array<real_t, 3> >& pos,
+                                             real_t rcut) {
+#ifndef VORONOI_USE_OPENMP
+  setup(pos, rcut);
+#else
+  if (!omp_in_parallel()) {
+    setup(pos, rcut);
+    return;
+  }
+
+  const int numThreads = omp_get_num_threads();
+  const int tid = omp_get_thread_num();
+  const size_t numPos = pos.size();
+  const std::array<real_t, 3>& L(p_box->getL());
+  const std::array<real_t, 3>& invL(p_box->getInvL());
+  size_t numCells = 0;
+
+#pragma omp single
+  {
+    Indx n;
+    for (uint0 i(0); i < 3; ++i)
+      n[i] = static_cast<uint2>(floor(L[i] / rcut));
+    m_grid.init(n);
+    m_headCell.clear();
+    m_cell2Pos.clear();
+    numCells = static_cast<size_t>(m_grid.numCells());
+    m_teamScratchIndx.resize(numPos);
+    m_teamScratchCounts.assign(static_cast<size_t>(numThreads) * numCells, 0);
+    m_headCell.resize(numCells + 1);
+    m_cell2Pos.resize(numPos);
+  }
+
+#pragma omp barrier
+
+  numCells = static_cast<size_t>(m_grid.numCells());
+  std::vector<UInt>& indx = m_teamScratchIndx;
+  std::vector<UInt>& localCounts = m_teamScratchCounts;
+
+#pragma omp for nowait
+  for (UInt i = 0; i < pos.size(); ++i)
+    indx[i] = computeCellIndex(pos[i]);
+
+  UInt* const counts = localCounts.data() + static_cast<size_t>(tid) * numCells;
+  const size_t begin = (numPos * static_cast<size_t>(tid)) / static_cast<size_t>(numThreads);
+  const size_t end = (numPos * static_cast<size_t>(tid + 1)) / static_cast<size_t>(numThreads);
+  for (size_t i = begin; i < end; ++i)
+    ++counts[indx[i]];
+
+#pragma omp barrier
+
+#pragma omp single
+  {
+    std::vector<UInt> countsPerCell(numCells, 0);
+    for (size_t cell = 0; cell < numCells; ++cell) {
+      UInt total = 0;
+      for (int t = 0; t < numThreads; ++t)
+        total += localCounts[static_cast<size_t>(t) * numCells + cell];
+      countsPerCell[cell] = total;
+    }
+
+    m_headCell[0] = 0;
+    std::partial_sum(countsPerCell.begin(), countsPerCell.end(), m_headCell.begin() + 1);
+
+    for (size_t cell = 0; cell < numCells; ++cell) {
+      UInt head = m_headCell[cell];
+      for (int t = 0; t < numThreads; ++t) {
+        UInt& offset = localCounts[static_cast<size_t>(t) * numCells + cell];
+        const UInt count = offset;
+        offset = head;
+        head += count;
+      }
+    }
+  }
+
+#pragma omp barrier
+
+  UInt* const offsets = localCounts.data() + static_cast<size_t>(tid) * numCells;
+  for (size_t i = begin; i < end; ++i) {
+    const UInt head = offsets[indx[i]]++;
+    m_cell2Pos[head].id = static_cast<UInt>(i);
+    m_cell2Pos[head].pos = pos[i];
+    for (uint0 k(0); k < 3; ++k)
+      m_cell2Pos[head].pos[k] -= L[k] * floor(m_cell2Pos[head].pos[k] * invL[k]);
+  }
+
+#pragma omp barrier
+#endif
 }
 
 template <typename UInt, typename real_t>

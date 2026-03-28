@@ -10,9 +10,13 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -182,6 +186,128 @@ class DenseSlotsView {
   UInt m_numAllocated;
   UInt m_numAlive;
   UInt m_freeTop;
+};
+
+template <typename T>
+class ChunkedPool {
+ public:
+  static constexpr uint2 InvalidIdx = static_cast<uint2>(~0u);
+
+  explicit ChunkedPool(size_t chunkSize = 1024)
+      : m_globalOffset(0), m_chunkSize(std::max<size_t>(chunkSize, 1)) {}
+
+  void clear() {
+    std::lock_guard<std::mutex> lock(m_chunkMutex);
+    m_chunks.clear();
+    m_globalOffset.store(0, std::memory_order_relaxed);
+  }
+
+  T *allocate(size_t count, uint2 &outOverflowIdx) {
+    if (count == 0) {
+      outOverflowIdx = InvalidIdx;
+      return NULL;
+    }
+
+    const size_t start = claimOffset(count);
+    ensureChunk((start / m_chunkSize) + 1);
+    outOverflowIdx = static_cast<uint2>(start);
+    return m_chunks[start / m_chunkSize].get() + (start % m_chunkSize);
+  }
+
+  T &get(size_t idx) { return m_chunks[idx / m_chunkSize][idx % m_chunkSize]; }
+  const T &get(size_t idx) const { return m_chunks[idx / m_chunkSize][idx % m_chunkSize]; }
+  size_t chunkSize() const { return m_chunkSize; }
+
+ private:
+  size_t claimOffset(size_t count) {
+    size_t current = m_globalOffset.load(std::memory_order_relaxed);
+    while (true) {
+      const size_t inChunk = current % m_chunkSize;
+      const size_t start = (inChunk + count <= m_chunkSize) ? current : (current + (m_chunkSize - inChunk));
+      const size_t next = start + count;
+      if (m_globalOffset.compare_exchange_weak(current, next, std::memory_order_relaxed,
+                                               std::memory_order_relaxed)) {
+        return start;
+      }
+    }
+  }
+
+  void ensureChunk(size_t requiredChunks) {
+    std::lock_guard<std::mutex> lock(m_chunkMutex);
+    while (m_chunks.size() < requiredChunks)
+      m_chunks.emplace_back(new T[m_chunkSize]());
+  }
+
+  std::vector<std::unique_ptr<T[]> > m_chunks;
+  std::atomic<size_t> m_globalOffset;
+  size_t m_chunkSize;
+  std::mutex m_chunkMutex;
+};
+
+template <typename T, uint1 PrimaryCap>
+class PrimaryOverflowArray {
+ public:
+  static constexpr uint2 InvalidOverflow = ChunkedPool<T>::InvalidIdx;
+
+  explicit PrimaryOverflowArray(size_t overflowChunkSize = 1024) : m_overflow(overflowChunkSize) {}
+
+  void clear() {
+    m_primary.clear();
+    m_counts.clear();
+    m_overflowIdx.clear();
+    m_overflow.clear();
+  }
+
+  void resize(uint2 numCells) {
+    m_primary.assign(static_cast<size_t>(numCells) * static_cast<size_t>(PrimaryCap), T());
+    m_counts.assign(numCells, 0);
+    m_overflowIdx.assign(numCells, InvalidOverflow);
+    m_overflow.clear();
+  }
+
+  void insert(uint2 cellId, const T *data, uint1 count) {
+    m_counts[cellId] = count;
+    T *primary = primaryData(cellId);
+    const uint1 primaryCount = std::min<uint1>(count, PrimaryCap);
+    for (uint1 i = 0; i < primaryCount; ++i)
+      primary[i] = data[i];
+    for (uint1 i = primaryCount; i < PrimaryCap; ++i)
+      primary[i] = T();
+
+    if (count > PrimaryCap) {
+      uint2 overflowIdx = InvalidOverflow;
+      T *overflow = m_overflow.allocate(static_cast<size_t>(count - PrimaryCap), overflowIdx);
+      for (uint1 i = PrimaryCap; i < count; ++i)
+        overflow[i - PrimaryCap] = data[i];
+      m_overflowIdx[cellId] = overflowIdx;
+    } else {
+      m_overflowIdx[cellId] = InvalidOverflow;
+    }
+  }
+
+  uint1 count(uint2 cellId) const { return m_counts[cellId]; }
+  bool hasOverflow(uint2 cellId) const { return m_overflowIdx[cellId] != InvalidOverflow; }
+  const T &get(uint2 cellId, uint1 idx) const {
+    if (idx < PrimaryCap)
+      return m_primary[(static_cast<size_t>(cellId) * static_cast<size_t>(PrimaryCap)) + idx];
+    return m_overflow.get(static_cast<size_t>(m_overflowIdx[cellId]) + (idx - PrimaryCap));
+  }
+  T *primaryData(uint2 cellId) {
+    return m_primary.data() + (static_cast<size_t>(cellId) * static_cast<size_t>(PrimaryCap));
+  }
+  const T *primaryData(uint2 cellId) const {
+    return m_primary.data() + (static_cast<size_t>(cellId) * static_cast<size_t>(PrimaryCap));
+  }
+
+  const std::vector<T> &primary() const { return m_primary; }
+  const std::vector<uint1> &counts() const { return m_counts; }
+  const std::vector<uint2> &overflowIdx() const { return m_overflowIdx; }
+
+ private:
+  std::vector<T> m_primary;
+  ChunkedPool<T> m_overflow;
+  std::vector<uint1> m_counts;
+  std::vector<uint2> m_overflowIdx;
 };
 
 /**

@@ -90,7 +90,7 @@ def make_vd_scaling_plot(df_threads: pd.DataFrame, df_noomp: pd.DataFrame, out_f
         ax.set_xlabel("Threads")
         ax.set_title(ps)
         ax.grid(True, ls="--", lw=0.4, alpha=0.7)
-        ax.set_xticks([4, 8, 16, 32, 48])
+        ax.set_xticks(sorted(sps["nthreads"].unique()))
         ax.legend(fontsize=8)
 
     axes[0].set_ylabel("Speedup vs no-OpenMP single-thread")
@@ -112,6 +112,8 @@ def make_markdown(
 ) -> None:
     rnd = fair[fair["point_set"] == "random_uniform"].copy()
     lat = fair[fair["point_set"] == "cubic_lattice"].copy()
+    thread_counts = sorted(scaling["nthreads"].unique().tolist())
+    thread_counts_txt = ", ".join(str(int(t)) for t in thread_counts)
 
     rnd_slower = rnd[rnd["ratio_vd_over_vpp"] > 1]["N"].tolist()
     lat_slower = lat[lat["ratio_vd_over_vpp"] > 1]["N"].tolist()
@@ -145,7 +147,7 @@ def make_markdown(
     lines.append("- Cell creation only: vd_tess vs voro++ compute_cell")
     lines.append("- Sphere case excluded")
     lines.append("- Single-thread no-OpenMP fair comparison")
-    lines.append("- vd thread scaling at 4, 8, 16, 32, 48 threads")
+    lines.append(f"- vd thread scaling at {thread_counts_txt} threads")
     lines.append("")
     lines.append("## Is Voro++ multithreaded?")
     lines.append("")

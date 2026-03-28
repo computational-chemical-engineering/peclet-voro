@@ -44,8 +44,22 @@ target_compile_options(voro++ PRIVATE
 target_compile_definitions(voro++ PRIVATE NDEBUG)
 
 add_executable(benchmark_cell_creation benchmark_cell_creation.cpp)
+add_executable(benchmark_cell_creation_targeted benchmark_cell_creation_targeted.cpp)
+add_executable(benchmark_nbrlist_setup_diagnostic benchmark_nbrlist_setup_diagnostic.cpp)
 
 target_link_libraries(benchmark_cell_creation
+  PRIVATE
+    voronoi_dynamics::voronoi_dynamics
+    voro++
+)
+
+target_link_libraries(benchmark_cell_creation_targeted
+  PRIVATE
+    voronoi_dynamics::voronoi_dynamics
+    voro++
+)
+
+target_link_libraries(benchmark_nbrlist_setup_diagnostic
   PRIVATE
     voronoi_dynamics::voronoi_dynamics
     voro++
@@ -57,7 +71,45 @@ target_compile_definitions(benchmark_cell_creation
     NDEBUG
 )
 
+target_compile_definitions(benchmark_cell_creation_targeted
+  PRIVATE
+    VORONOI_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+    NDEBUG
+)
+
+target_compile_definitions(benchmark_nbrlist_setup_diagnostic
+  PRIVATE
+    VORONOI_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+    NDEBUG
+)
+
 target_compile_options(benchmark_cell_creation
+  PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:
+      -O3
+      -march=native
+      -mtune=native
+      -ffast-math
+      -funroll-loops
+      -fno-omit-frame-pointer
+      -Wno-unused-result
+    >
+)
+
+target_compile_options(benchmark_cell_creation_targeted
+  PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:
+      -O3
+      -march=native
+      -mtune=native
+      -ffast-math
+      -funroll-loops
+      -fno-omit-frame-pointer
+      -Wno-unused-result
+    >
+)
+
+target_compile_options(benchmark_nbrlist_setup_diagnostic
   PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:
       -O3

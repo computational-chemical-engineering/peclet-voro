@@ -124,7 +124,8 @@ static void vd_tess_only(const std::vector<Pos3d> &pos, vor::Box<double> &box) {
 
 #pragma omp parallel
   {
-    vor::CellMaker<double> maker;
+    vor::ConstructionArena<double> arena;
+    vor::CellMaker<double> maker(arena);
 #pragma omp for schedule(dynamic, 64)
     for (vor::uint2 i = 0; i < static_cast<vor::uint2>(pos.size()); ++i) {
       maker.build(i, pos, nbr_list, cub);

@@ -33,6 +33,9 @@ add_voronoi_test(test_build_trial          test_build_trial.cpp)
 # and validate the final incremental tessellation against a clean rebuild.
 add_voronoi_test(test_moving_points_repair_stats test_moving_points_repair_stats.cpp)
 
+# Force tiny CellMaker scratch arenas to grow and verify growth is handled.
+add_voronoi_test(test_cell_maker_growth test_cell_maker_growth.cpp)
+
 # Compressible Euler equations (needs pos_eq_10000.dat)
 add_voronoi_test(test_simulation           test_simulation.cpp)
 

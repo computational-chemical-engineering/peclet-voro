@@ -188,25 +188,24 @@ template <typename real_t>
 template <std::size_t m>
 void Simulation<real_t>::computeGradients(const std::vector<std::array<real_t, m> >& phi,
                                           std::vector<std::array<std::array<real_t, m>, 3> >& grads) const {
-  const std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
-  if (geoms.size() > phi.size())
+  const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
+  if (geometry.numCells() > phi.size())
     return;
-  grads.resize(geoms.size());
+  grads.resize(geometry.numCells());
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i)
+  for (size_t i = 0; i < geometry.numCells(); ++i)
     for (int p = 0; p < m; ++p)
       for (uint0 k = 0; k < 3; ++k)
         grads[i][p][k] = 0;
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i) {
-    const std::vector<std::array<real_t, 3> >& dV(geoms[i].getdV());
-    Cell<real_t> cell;
-    this->m_complex.materializeCell(i, cell);
+  for (size_t i = 0; i < geometry.numCells(); ++i) {
+    const CellView<real_t> cell(this->m_complex.getCellView(i));
+    const GeometryView<real_t> geom(this->m_complex.getGeometryView(i));
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
       uint2 nbr = cell.getNbr(j);
       for (int p = 0; p < m; ++p)
         for (uint0 k = 0; k < 3; ++k) {
-          real_t dgrad = -phi[i][p] * dV[j][k];
+          real_t dgrad = -phi[i][p] * geom.getdV(j)[k];
 #pragma omp atomic
           grads[nbr][p][k] += dgrad;
 #pragma omp atomic
@@ -215,8 +214,8 @@ void Simulation<real_t>::computeGradients(const std::vector<std::array<real_t, m
     }
   }
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i) {
-    real_t vol = geoms[i].getVolume();
+  for (size_t i = 0; i < geometry.numCells(); ++i) {
+    real_t vol = geometry.getView(i).getVolume();
     for (int p = 0; p < m; ++p)
       for (uint0 k = 0; k < 3; ++k)
         grads[i][p][k] /= vol;
@@ -227,30 +226,29 @@ template <typename real_t>
 template <std::size_t m>
 void Simulation<real_t>::computeGradients2(const std::vector<std::array<real_t, m> >& phi,
                                            std::vector<std::array<std::array<real_t, m>, 3> >& grads) const {
-  const std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
-  if (geoms.size() > phi.size())
+  const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
+  if (geometry.numCells() > phi.size())
     return;
-  grads.resize(geoms.size());
+  grads.resize(geometry.numCells());
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i)
+  for (size_t i = 0; i < geometry.numCells(); ++i)
     for (int p = 0; p < m; ++p)
       for (uint0 k = 0; k < 3; ++k)
         grads[i][p][k] = 0;
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i) {
-    const std::vector<std::array<real_t, 3> >& dV(geoms[i].getdV());
-    Cell<real_t> cell;
-    this->m_complex.materializeCell(i, cell);
+  for (size_t i = 0; i < geometry.numCells(); ++i) {
+    const CellView<real_t> cell(this->m_complex.getCellView(i));
+    const GeometryView<real_t> geom(this->m_complex.getGeometryView(i));
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
       uint2 nbr = cell.getNbr(j);
       for (int p = 0; p < m; ++p) {
         real_t dphi = phi[nbr][p] - phi[i][p];
         for (uint0 k = 0; k < 3; ++k)
-          grads[i][p][k] += dphi * dV[j][k];
+          grads[i][p][k] += dphi * geom.getdV(j)[k];
         ;
       }
     }
-    real_t vol = geoms[i].getVolume();
+    real_t vol = geom.getVolume();
     for (int p = 0; p < m; ++p)
       for (uint0 k = 0; k < 3; ++k)
         grads[i][p][k] /= vol;
@@ -260,23 +258,22 @@ void Simulation<real_t>::computeGradients2(const std::vector<std::array<real_t, 
 template <typename real_t>
 void Simulation<real_t>::computeGradients(const std::vector<real_t>& phi,
                                           std::vector<std::array<real_t, 3> >& grads) const {
-  const std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
-  if (geoms.size() > phi.size())
+  const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
+  if (geometry.numCells() > phi.size())
     return;
-  grads.resize(geoms.size());
+  grads.resize(geometry.numCells());
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i)
+  for (size_t i = 0; i < geometry.numCells(); ++i)
     for (uint0 k = 0; k < 3; ++k)
       grads[i][k] = 0;
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i) {
-    const std::vector<std::array<real_t, 3> >& dV(geoms[i].getdV());
-    Cell<real_t> cell;
-    this->m_complex.materializeCell(i, cell);
+  for (size_t i = 0; i < geometry.numCells(); ++i) {
+    const CellView<real_t> cell(this->m_complex.getCellView(i));
+    const GeometryView<real_t> geom(this->m_complex.getGeometryView(i));
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
       uint2 nbr = cell.getNbr(j);
       for (uint0 k = 0; k < 3; ++k) {
-        real_t dgrad = -phi * dV[j][k];
+        real_t dgrad = -phi[i] * geom.getdV(j)[k];
 #pragma omp atomic
         grads[nbr][k] += dgrad;
 #pragma omp atomic
@@ -285,8 +282,8 @@ void Simulation<real_t>::computeGradients(const std::vector<real_t>& phi,
     }
   }
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i) {
-    real_t vol = geoms[i].getVolume();
+  for (size_t i = 0; i < geometry.numCells(); ++i) {
+    real_t vol = geometry.getView(i).getVolume();
     for (uint0 k = 0; k < 3; ++k)
       grads[i][k] /= vol;
   }
@@ -344,11 +341,11 @@ void ExplicitEuler<real_t>::step(int numTimeSteps, real_t dt) {
 
 template <typename real_t>
 real_t ExplicitEuler<real_t>::getInternalEnergy() const {
-  const std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
+  const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
   real_t E = 0;
 #pragma omp parallel for reduction(- : E)
   for (size_t i = 0; i < this->m_pos.size(); ++i)
-    E -= m_pressEq * m_volAvg * log(geoms[i].getVolume() / m_volAvg);
+    E -= m_pressEq * m_volAvg * log(geometry.getView(i).getVolume() / m_volAvg);
   return E;
 }
 
@@ -358,18 +355,16 @@ void ExplicitEuler<real_t>::computeForces() {
   for (int i = 0; i < this->m_pos.size(); ++i)
     for (uint k(0); k < 3; ++k)
       m_forces[i][k] = 0.0;
-  std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
+  const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i) {
-    const std::vector<std::array<real_t, 3> >& dV(geoms[i].getdV());
-    Cell<real_t> cell;
-    this->m_complex.materializeCell(i, cell);
-    //      geoms[i].diffVolume();
-    real_t press = (m_pressEq * m_volAvg) / geoms[i].getVolume();
+  for (size_t i = 0; i < geometry.numCells(); ++i) {
+    const CellView<real_t> cell(this->m_complex.getCellView(i));
+    const GeometryView<real_t> geom(this->m_complex.getGeometryView(i));
+    real_t press = (m_pressEq * m_volAvg) / geom.getVolume();
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
       uint2 nbr = cell.getNbr(j);
       for (uint0 k = 0; k < 3; ++k) {
-        real_t df = press * dV[j][k];
+        real_t df = press * geom.getdV(j)[k];
 #pragma omp atomic
         m_forces[nbr][k] += df;
 #pragma omp atomic
@@ -382,121 +377,22 @@ void ExplicitEuler<real_t>::computeForces() {
 //   template<typename real_t>
 //   void NavierStokes<real_t>::computeForces()
 //   {
-// #pragma omp parallel for
-//     for (int i =0; i< this->m_pos.size(); ++i)
-//      for(uint k(0); k<3; ++k)
-//  	this->m_forces[i][k] = 0.0;
-//     std::vector<CellGeometry<real_t> > & geoms(this->m_complex.getGeoms());
-//     std::vector<Cell<real_t> > cells;
-//     this->m_complex.materializeCells(cells);
-// #pragma omp parallel for
-//     for(size_t i=0; i< geoms.size(); ++i){
-//       geoms[i].diffVolume();
-//       real_t press = (this->m_pressEq*this->m_volAvg)/geoms[i].getVolume();
-//       const std::vector< std::array<real_t, 3> > & dV(geoms[i].getdV());
-//       for(uint0 j=0; j< cells[i].numFacets(); ++j){
-// 	uint2 nbr = cells[i].getNbr(j);
-// 	for(uint0 k=0; k<3; ++k){
-// 	  real_t df = -press*dV[j][k];
-// #pragma omp atomic
-// 	  this->m_forces[nbr][k] -= df;
-// #pragma omp atomic
-// 	  this->m_forces[i][k] += df;
-// 	}
-// 	if (nbr > i){
-// 	  real_t visc, bulkVisc;
-// 	  visc =
-// 0.5*(this->m_masses[i]+this->m_masses[nbr])/(this->m_masses[i]/m_visc[i]+this->m_masses[nbr]/m_visc[nbr]);
-// 	  bulkVisc =
-// 0.5*(this->m_masses[i]+this->m_masses[nbr])/(this->m_masses[i]/m_bulkVisc[i]+this->m_masses[nbr]/m_bulkVisc[nbr]);
-// 	  const std::array<real_t, 3> & r(geoms[i].getConnVect()[j]);
-// 	  real_t rSq = geoms[i].getConnVectSq()[j];
-// 	  const std::array<real_t, 3> & area(geoms[i].getAreas()[j]);
-// 	  real_t inp2=0;//, inp1=0;
-// 	  std::array<real_t, 3> dv;
-// 	  for(uint0 k=0; k<3; ++k){
-// 	    dv[k] = this->m_vel[nbr][k] - this->m_vel[i][k];
-// 	    //	    inp1 += r[k]*dv[k];
-// 	    inp2 += r[k]*area[k];
-// 	  }
-// 	  //	  real_t c1 = visc*inp2/(3.0*rSq);
-// 	  //real_t c2 = (bulkVisc+visc/3.0)*inp1/(3.0*rSq);
-// 	  real_t c1 = visc*inp2/rSq;
-// 	  for(uint0 k=0; k<3; ++k){
-// 	    real_t df;
-// 	    //	    df = c1*dv[k] + c2*area[k];
-// 	    df = c1*dv[k];
-// #pragma omp atomic
-// 	    this->m_forces[nbr][k] -= df;
-// #pragma omp atomic
-// 	    this->m_forces[i][k] += df;
-// 	  }
-// 	}
-//       }
-//     }
-//   }
-
-//   template<typename real_t>
-//   void NavierStokes<real_t>::computeForces()
-//   {
-// #pragma omp parallel for
-//     for (int i =0; i< this->m_pos.size(); ++i)
-//       for(uint k(0); k<3; ++k)
-//  	this->m_forces[i][k] = 0.0;
-//     const real_t two_third = 2.0/3.0;
-//     std::vector<CellGeometry<real_t> > & geoms(this->m_complex.getGeoms());
-// #pragma omp parallel for
-//     for(size_t i=0; i< geoms.size(); ++i){
-//       geoms[i].diffVolume();
-//       Cell<real_t> cell;
-//       this->m_complex.materializeCell(i, cell);
-//       std::array<std::array<real_t, 3>, 3> gradVel(geoms[i].velocityGradient(this->m_vel));
-//       real_t press = (this->m_pressEq*this->m_volAvg)/geoms[i].getVolume();
-//       real_t divVel=0;
-//       std::array<std::array<real_t, 3>, 3> stress;
-//       // compute viscous stress in cell
-//       for(uint0 k=0; k<3; ++k){
-// 	for(uint0 m=0; m<3; ++m){
-// 	  stress[k][m] = m_visc[i]*(gradVel[k][m]+gradVel[m][k]);
-// 	}
-// 	divVel += gradVel[k][k];
-//       }
-//       for(uint0 k=0; k<3; ++k)
-// 	stress[k][k] += (m_bulkVisc[i]-two_third*m_visc[i])*divVel;
-//       const std::vector<std::array<real_t, 3> > & areas(geoms[i].getAreas());
-//       for(uint0 j=0; j< cell.numFacets(); ++j){
-// 	uint2 nbr = cell.getNbr(j);
-// 	for(uint0 k=0; k<3; ++k){
-// 	  real_t df = 0;
-// 	  for(int m(0); m<3; ++m)
-// 	    df -= areas[j][m]*stress[m][k];
-// 	  df += geoms[i].getdV()[j][k]*press;
-// 	  df *= 0.5;
-// #pragma omp atomic
-// 	  this->m_forces[nbr][k] += df;
-// #pragma omp atomic
-// 	  this->m_forces[i][k] -= df;
-// 	}
-//       }
-//     }
-//   }
-
 template <typename real_t>
 void NavierStokes<real_t>::computeForces() {
 #pragma omp parallel for
   for (int i = 0; i < this->m_pos.size(); ++i)
     for (uint k(0); k < 3; ++k)
       this->m_forces[i][k] = 0.0;
-  std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
+  const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i) {
-    Cell<real_t> cell;
-    this->m_complex.materializeCell(i, cell);
-    real_t press = (this->m_pressEq * this->m_volAvg) / geoms[i].getVolume();
+  for (size_t i = 0; i < geometry.numCells(); ++i) {
+    const CellView<real_t> cell(this->m_complex.getCellView(i));
+    const GeometryView<real_t> geom(this->m_complex.getGeometryView(i));
+    real_t press = (this->m_pressEq * this->m_volAvg) / geom.getVolume();
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
       uint2 nbr = cell.getNbr(j);
       for (uint0 k = 0; k < 3; ++k) {
-        real_t df = geoms[i].getdV()[j][k] * press;
+        real_t df = geom.getdV(j)[k] * press;
 #pragma omp atomic
         this->m_forces[nbr][k] += df;
 #pragma omp atomic
@@ -529,11 +425,11 @@ void NavierStokes<real_t>::computeViscousForces() {
       stress[k][k] += (m_bulkVisc[i] - two_third * m_visc[i]) * divVel;
     stresses[i] = stress;
   }
-  std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
+  const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i) {
-    Cell<real_t> cell;
-    this->m_complex.materializeCell(i, cell);
+  for (size_t i = 0; i < geometry.numCells(); ++i) {
+    const CellView<real_t> cell(this->m_complex.getCellView(i));
+    const GeometryView<real_t> geom(this->m_complex.getGeometryView(i));
     std::array<real_t, 3> f;
     for (uint k(0); k < 3; ++k)
       f[k] = 0;
@@ -541,67 +437,24 @@ void NavierStokes<real_t>::computeViscousForces() {
       uint2 nbr = cell.getNbr(j);
       for (uint0 k = 0; k < 3; ++k)
         for (uint0 m = 0; m < 3; ++m)
-          f[k] += (stresses[nbr][k][m] - stresses[i][k][m]) * geoms[i].getdV()[j][m];
+          f[k] += (stresses[nbr][k][m] - stresses[i][k][m]) * geom.getdV(j)[m];
     }
     for (uint k(0); k < 3; ++k)
       this->m_forces[i][k] += f[k];
   }
 }
 
-//   template<typename real_t>
-//   void NavierStokes<real_t>::computeViscousForces()
-//   {
-//     std::vector<CellGeometry<real_t> > & geoms(this->m_complex.getGeoms());
-//     const real_t two_third = 2.0/3.0;
-// #pragma omp parallel for
-//     for(size_t i=0; i< geoms.size(); ++i){
-//       Cell<real_t> cell;
-//       this->m_complex.materializeCell(i, cell);
-//       std::array<uint2, 3> nbrs;
-//       std::array<std::array<real_t, 3>, 3> gradVel, stress, forces;
-//       for(uint0 j=0; j< cell.numVertices(); ++j){
-// 	geoms[i].getDelaunayNbrs(j,nbrs);
-// 	if (i < nbrs[0] && i < nbrs[1] && i < nbrs[2]){
-// 	  real_t visc = 1/m_visc[i];
-// 	  for(uint0 k=0; k<3; ++k)
-// 	    visc += 1/m_visc[nbrs[k]];
-// 	  visc = 4.0/visc;
-// 	  gradVel = geoms[i].velocityGradientDelaunay(j, nbrs, this->m_vel);
-// 	  real_t divVel=0;
-// 	  // compute viscous stress in cell
-// 	  for(uint0 k=0; k<3; ++k){
-// 	    for(uint0 m=0; m<3; ++m){
-// 	      stress[k][m] = visc*(gradVel[k][m]+gradVel[m][k]);
-// 	    }
-// 	    divVel += gradVel[k][k];
-// 	  }
-// 	  for(uint0 k=0; k<3; ++k)
-// 	    stress[k][k] -= two_third*visc*divVel;
-// 	  geoms[i].computeDelaunayForces(j, stress, forces);
-// 	  for(uint0 k=0; k<3; ++k)
-// 	    for(uint0 m=0; m<3; ++m){
-// 	      uint2 nbr = nbrs[m];
-// #pragma omp atomic
-// 	      this->m_forces[nbr][k] += forces[m][k];
-// #pragma omp atomic
-// 	      this->m_forces[i][k] -= forces[m][k];
-// 	    }
-// 	}
-//       }
-//     }
-//   }
-
 template <typename real_t>
 void NavierStokes<real_t>::addExternalForces() {
   static const real_t pi = 3.1415926535897932384626433832795;
   if (m_extForceDens == 0)
     return;
-  std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
+  const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
   const std::array<real_t, 3>& L(this->m_box.getL());
 #pragma omp parallel for
-  for (size_t i = 0; i < geoms.size(); ++i) {
+  for (size_t i = 0; i < geometry.numCells(); ++i) {
     real_t sn = sin(2.0 * pi * this->m_pos[i][1] / L[1]);
-    this->m_forces[i][0] += m_extForceDens * geoms[i].getVolume() * sn;
+    this->m_forces[i][0] += m_extForceDens * geometry.getView(i).getVolume() * sn;
   }
 }
 
@@ -691,8 +544,7 @@ void IntfDyn<real_t>::computeIntfForces() {
 #pragma omp parallel for
   for (size_t i = 0; i < types.size(); ++i) {
     if (types[i] > 0) {
-      Cell<real_t> cell;
-      this->m_complex.materializeCell(i, cell);
+      const CellView<real_t> cell(this->m_complex.getCellView(i));
       const CellGeometry<real_t>& geom(this->m_complex.getGeoms()[i]);
       for (uint1 j = 0; j < cell.numFacets(); ++j) {
         uint2 nbr = cell.getNbr(j);
@@ -722,13 +574,10 @@ template <typename real_t>
 real_t IntfDyn<real_t>::getIntfEnergy() const {
   real_t E = 0;
   const std::vector<uint0>& types(this->m_complex.getTypes());
-  std::vector<uint2> indxFacets;
-  std::vector<std::array<real_t, 3> > grad;
 #pragma omp parallel for reduction(+ : E)
   for (size_t i = 0; i < types.size(); ++i) {
     if (types[i] > 0) {
-      Cell<real_t> cell;
-      this->m_complex.materializeCell(i, cell);
+      const CellView<real_t> cell(this->m_complex.getCellView(i));
       const CellGeometry<real_t>& geom(this->m_complex.getGeoms()[i]);
       for (uint1 j = 0; j < cell.numFacets(); ++j) {
         uint2 nbr = cell.getNbr(j);
@@ -750,16 +599,16 @@ void Incompressible<real_t>::buildConstraintMatrix() {
   real_t duration;
   start = clock();
   // find next nearest neighbors
-  std::vector<Cell<real_t> > cells;
-  this->m_complex.materializeCells(cells);
-  for (size_t i = 0; i < cells.size(); ++i) {
+  for (size_t i = 0; i < this->m_complex.numCells(); ++i) {
+    const CellView<real_t> cell(this->m_complex.getCellView(i));
     std::vector<uint2> nbrs;
     nbrs.reserve(300);
-    for (size_t j = 0; j < cells[i].numFacets(); ++j) {
-      uint2 nbr = cells[i].getNbr(j);
+    for (size_t j = 0; j < cell.numFacets(); ++j) {
+      uint2 nbr = cell.getNbr(static_cast<uint1>(j));
       nbrs.push_back(nbr);
-      for (size_t k = 0; k < cells[nbr].numFacets(); ++k)
-        nbrs.push_back(cells[nbr].getNbr(k));
+      const CellView<real_t> nbrCell(this->m_complex.getCellView(nbr));
+      for (size_t k = 0; k < nbrCell.numFacets(); ++k)
+        nbrs.push_back(nbrCell.getNbr(static_cast<uint1>(k)));
     }
     std::sort(nbrs.begin(), nbrs.end());
     size_t iNew = 0;
@@ -774,24 +623,24 @@ void Incompressible<real_t>::buildConstraintMatrix() {
   duration = real_t(clock() - start);
   printf("sparsity pattern in %f seconds\n", duration / (real_t(CLOCKS_PER_SEC)));
 
-  const std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
+  const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
   std::vector<MatrixEntry<real_t> > matdV;
 
   start = clock();
-  matdV.reserve(60 * geoms.size());
-  for (size_t i = 0; i < geoms.size(); ++i) {
+  matdV.reserve(60 * geometry.numCells());
+  for (size_t i = 0; i < geometry.numCells(); ++i) {
     MatrixEntry<real_t> triplet;
-    const std::vector<std::array<real_t, 3> >& dV(geoms[i].getdV());
-    const Cell<real_t>& cell(cells[i]);
+    const GeometryView<real_t> geom(this->m_complex.getGeometryView(i));
+    const CellView<real_t> cell(this->m_complex.getCellView(i));
     real_t dVii[3];
     for (uint0 k = 0; k < 3; ++k)
       dVii[k] = 0;
     for (uint0 j = 0; j < cell.numFacets(); ++j) {
       for (uint0 k = 0; k < 3; ++k) {
-        dVii[k] -= dV[j][k];
+        dVii[k] -= geom.getdV(j)[k];
         triplet.col() = i;
         triplet.row() = (3 * cell.getNbr(j)) + k;
-        triplet.value() = dV[j][k];
+        triplet.value() = geom.getdV(j)[k];
         matdV.push_back(triplet);
       }
     }
@@ -812,7 +661,7 @@ void Incompressible<real_t>::buildConstraintMatrix() {
 
   start = clock();
   std::vector<MatrixEntry<real_t> > matConstr;
-  matConstr.reserve(450 * geoms.size());
+  matConstr.reserve(450 * geometry.numCells());
   size_t iEnd = 0;
   while (iEnd < matdV.size()) {
     size_t row = matdV[iEnd].row();
@@ -855,7 +704,7 @@ void Incompressible<real_t>::buildConstraintMatrix() {
   duration = real_t(clock() - start);
   printf("summation in %f seconds\n", duration / (real_t(CLOCKS_PER_SEC)));
 
-  printf("matConstr size per cell (after summation): %lu\n", matConstr.size() / geoms.size());
+  printf("matConstr size per cell (after summation): %lu\n", matConstr.size() / geometry.numCells());
 }
 
 // template<typename real_t>

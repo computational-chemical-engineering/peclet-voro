@@ -18,13 +18,23 @@
 #include <algorithm>
 #include <atomic>
 #include <boost/container/flat_set.hpp>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <exception>
+#include <functional>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <queue>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#ifdef VORONOI_USE_OPENMP
+#include <omp.h>
+#endif
 
 #include "nbrlist.hpp"
 #include "vor_types.hpp"
@@ -124,7 +134,15 @@ class CellUpdater;
 template <typename real_t>
 class CellGeometry;
 template <typename real_t>
-class CellArena;
+class ConstructionArena;
+template <typename real_t>
+struct CellView;
+template <typename real_t>
+struct GeometryView;
+template <typename real_t>
+class TopologyArena;
+template <typename real_t>
+class GeometryArena;
 
 struct CellComplexUpdateStats {
   uint2 num_cells = 0;
@@ -163,6 +181,7 @@ class Cell {
   //! @param rhs of type Cell
   //! @return reference to the copied cell
   Cell &operator=(const Cell<real_t> &rhs);
+  Cell &operator=(const CellView<real_t> &rhs);
   //! @brief copy operator
   //! @param rhs of type CellMaker (\sa CellMaker)
   //! @return reference to the copied cell
@@ -217,7 +236,7 @@ class Cell {
   friend class CellMaker<real_t>;
   friend class CellUpdater<real_t>;
   friend class CellGeometry<real_t>;
-  friend class CellArena<real_t>;
+  friend class TopologyArena<real_t>;
 
  protected:
   uint2 m_id;
@@ -254,6 +273,101 @@ class Cuboid : public Cell<real_t> {
   Cuboid(const std::array<real_t, 3> &L);
 };
 
+template <typename real_t>
+class ConstructionArena {
+ public:
+  static constexpr uint1 kDefaultVertexCapacity = 128;
+  static constexpr uint1 kDefaultFacetCapacity = 64;
+
+  ConstructionArena(uint1 vertexCapacity = kDefaultVertexCapacity,
+                    uint1 facetCapacity = kDefaultFacetCapacity) {
+    ensureCapacity(vertexCapacity, facetCapacity);
+    m_newVerticesWrk.reserve(20);
+    m_facetPrevWrk.reserve(20);
+    m_nbrsWrk.reserve(40);
+    m_checkGridCell.reserve(64);
+    m_vStackWrk.reserve(32);
+  }
+
+  void ensureCapacity(uint1 minVertices, uint1 minFacets) {
+    size_t vertexCapacity = m_vertexPos.size();
+    if (vertexCapacity < minVertices) {
+      vertexCapacity = std::max<size_t>(std::max<size_t>(vertexCapacity * 2, minVertices), 1);
+      m_vertexPos.resize(vertexCapacity);
+      m_rSq.resize(vertexCapacity);
+      m_vertices.resize(vertexCapacity);
+      m_dist.resize(vertexCapacity);
+      m_knownDistGen.resize(vertexCapacity, 0u);
+      m_distGC.resize(vertexCapacity);
+      m_renumVWrk.resize(vertexCapacity);
+      m_aliveV.resize(vertexCapacity, 0u);
+      m_freeStackV.resize(vertexCapacity);
+    }
+
+    size_t facetCapacity = m_facets.size();
+    if (facetCapacity < minFacets) {
+      facetCapacity = std::max<size_t>(std::max<size_t>(facetCapacity * 2, minFacets), 1);
+      m_facets.resize(facetCapacity);
+      m_nbr.resize(facetCapacity);
+      m_renumFWrk.resize(facetCapacity);
+      m_aliveF.resize(facetCapacity, 0u);
+      m_freeStackF.resize(facetCapacity);
+    }
+  }
+
+  uint1 vertexCapacity() const { return static_cast<uint1>(m_vertexPos.size()); }
+  uint1 facetCapacity() const { return static_cast<uint1>(m_facets.size()); }
+
+  std::array<real_t, 3> *vertexPosData() { return m_vertexPos.data(); }
+  real_t *rSqData() { return m_rSq.data(); }
+  Vertex *verticesData() { return m_vertices.data(); }
+  uint1 *facetsData() { return m_facets.data(); }
+  uint2 *nbrData() { return m_nbr.data(); }
+  real_t *distData() { return m_dist.data(); }
+  uint2 *knownDistGenData() { return m_knownDistGen.data(); }
+  real_t *distGCData() { return m_distGC.data(); }
+  uint1 *renumVWrkData() { return m_renumVWrk.data(); }
+  uint1 *renumFWrkData() { return m_renumFWrk.data(); }
+
+  uint8_t *aliveVData() { return m_aliveV.data(); }
+  uint8_t *aliveFData() { return m_aliveF.data(); }
+  uint1 *freeStackVData() { return m_freeStackV.data(); }
+  uint1 *freeStackFData() { return m_freeStackF.data(); }
+
+  std::vector<uint8_t> &aliveV() { return m_aliveV; }
+  std::vector<uint8_t> &aliveF() { return m_aliveF; }
+  std::vector<uint1> &freeStackV() { return m_freeStackV; }
+  std::vector<uint1> &freeStackF() { return m_freeStackF; }
+  std::vector<uint2> &checkGridCell() { return m_checkGridCell; }
+  std::vector<uint1> &newVerticesWrk() { return m_newVerticesWrk; }
+  std::vector<uint1> &facetPrevWrk() { return m_facetPrevWrk; }
+  std::vector<PosAndId<uint2, real_t> > &nbrsWrk() { return m_nbrsWrk; }
+  std::vector<NbrDist<real_t> > &nbrDistWrk() { return m_nbrDistWrk; }
+  std::vector<uint1> &vStackWrk() { return m_vStackWrk; }
+
+ private:
+  std::vector<std::array<real_t, 3> > m_vertexPos;
+  std::vector<real_t> m_rSq;
+  std::vector<Vertex> m_vertices;
+  std::vector<uint1> m_facets;
+  std::vector<uint2> m_nbr;
+  std::vector<real_t> m_dist;
+  std::vector<uint2> m_knownDistGen;
+  std::vector<real_t> m_distGC;
+  std::vector<uint1> m_renumVWrk;
+  std::vector<uint1> m_renumFWrk;
+  std::vector<uint8_t> m_aliveV;
+  std::vector<uint8_t> m_aliveF;
+  std::vector<uint1> m_freeStackV;
+  std::vector<uint1> m_freeStackF;
+  std::vector<uint2> m_checkGridCell;
+  std::vector<uint1> m_newVerticesWrk;
+  std::vector<uint1> m_facetPrevWrk;
+  std::vector<PosAndId<uint2, real_t> > m_nbrsWrk;
+  std::vector<NbrDist<real_t> > m_nbrDistWrk;
+  std::vector<uint1> m_vStackWrk;
+};
+
 /**
  * @class CellMaker
  * @brief class for making a cell using planar cuts
@@ -263,12 +377,13 @@ template <typename real_t>
 class CellMaker {
  public:
   //! @brief constructot
-  CellMaker();
+  explicit CellMaker(ConstructionArena<real_t> &arena);
   //! @brief destructor
   ~CellMaker();
   //! @brief initialize a cellmaker by equating it to a cell
   //! @param rhs cell used to initialize the cellmaker
   CellMaker &operator=(const Cell<real_t> &rhs);
+  CellMaker &operator=(const CellView<real_t> &rhs);
   //! @brief initialize a cellmaker by equating it to a cellUpdatet
   //! @param rhs cellupdater used to initialize the cellmaker
   CellMaker &operator=(const CellUpdater<real_t> &rhs);
@@ -320,15 +435,17 @@ class CellMaker {
   void getCloseNbrs(NbrInsert &nbrs);
   // void drawGnuplot(FILE *fp) const;
   // void testTopo() const;
-  const uint2 *getNbrs() const { return m_nbr.data(); }
+  const uint2 *getNbrs() const { return m_nbr; }
   friend class Cell<real_t>;
   friend class CellUpdater<real_t>;
+  friend class TopologyArena<real_t>;
   void renumber();
 
  protected:
   //! @brief initialize the cell to be cut
   //! @param cell used for the initialization
   void init(const Cell<real_t> &cell);
+  void init(const CellView<real_t> &cell);
   inline bool cutCell(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
   inline bool cutCell2(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
   //! @brief compute squared distance between vertex i and the center of the cell
@@ -374,6 +491,7 @@ class CellMaker {
   inline uint1 getNextLabelCCW(uint1 label) const;
   inline uint1 getReverseLabel(uint1 label) const;
   inline bool applyCut(const std::array<real_t, 3> &p, real_t rSqHalf, uint2 nbr);
+  inline void bindArenaStorage();
   inline void ensureVertexBuffers(uint1 minSize);
   inline void ensureFacetBuffers(uint1 minSize);
   inline uint1 allocVertexChecked(const char *caller);
@@ -383,41 +501,141 @@ class CellMaker {
 #define VOR_CELLMAKER_USE_CUTCELL2 1
 #endif
   static constexpr bool kUseCutCell2 = (VOR_CELLMAKER_USE_CUTCELL2 != 0);
+  static constexpr uint1 kMaxV = maxNumVertices - 1;
+  static constexpr uint1 kMaxF = maxNumFacets - 1;
   static constexpr uint1 kInitialV = 128;
   static constexpr uint1 kInitialF = 64;
   uint2 m_id;
   const NbrList<uint2, real_t> *p_nbrList;
-  std::vector<std::array<real_t, 3> > m_vertexPos;
-  std::vector<real_t> m_rSq;
-  std::vector<Vertex> m_vertices;
-  std::vector<uint1> m_facets;
-  std::vector<uint2> m_nbr;
+  ConstructionArena<real_t> *m_arena;
+  std::array<real_t, 3> *m_vertexPos;
+  real_t *m_rSq;
+  Vertex *m_vertices;
+  uint1 *m_facets;
+  uint2 *m_nbr;
   DenseSlotsView<uint1> m_slotsV;
   DenseSlotsView<uint1> m_slotsF;
-  std::vector<uint8_t> m_aliveV_buf;
-  std::vector<uint8_t> m_aliveF_buf;
-  std::vector<uint1> m_freeStackV_buf;
-  std::vector<uint1> m_freeStackF_buf;
   VisitedIndx<uint2> m_visited;
-  std::vector<uint2> m_checkGridCell;  ///< BFS queue (use m_checkGCHead as front index)
-  size_t m_checkGCHead;                ///< index of current BFS queue front
+  std::vector<uint2> &m_checkGridCell;  ///< BFS queue (use m_checkGCHead as front index)
+  size_t m_checkGCHead;                 ///< index of current BFS queue front
   real_t m_distMax, m_distGCMax;
   uint1 m_vRsqMax;
   bool m_isAllCut;
   uint1 m_vDistMax, m_vDistGCMax;
-  std::vector<real_t> m_dist;
+  real_t *m_dist;
   uint2 m_distGen;              ///< generation counter for lazy distance reset
-  std::vector<uint2> m_knownDistGen;  ///< per-vertex generation stamp
+  uint2 *m_knownDistGen;        ///< per-vertex generation stamp
   std::array<real_t, 3> m_relOrigGC, m_dLGC;
-  std::vector<real_t> m_distGC;
-  std::vector<uint1> m_renumVWrk;
-  std::vector<uint1> m_renumFWrk;
-  std::vector<uint1> m_newVerticesWrk;
-  std::vector<uint1> m_facetPrevWrk;
-  std::vector<PosAndId<uint2, real_t> > m_nbrsWrk;
-  std::vector<NbrDist<real_t> > m_nbrDistWrk;
-  std::vector<uint1> m_vStackWrk;  ///< DFS stack (push_back/back/pop_back)
+  real_t *m_distGC;
+  uint1 *m_renumVWrk;
+  uint1 *m_renumFWrk;
+  std::vector<uint1> &m_newVerticesWrk;
+  std::vector<uint1> &m_facetPrevWrk;
+  std::vector<PosAndId<uint2, real_t> > &m_nbrsWrk;
+  std::vector<NbrDist<real_t> > &m_nbrDistWrk;
+  std::vector<uint1> &m_vStackWrk;  ///< DFS stack (push_back/back/pop_back)
 };
+
+template <typename real_t>
+struct CellView {
+  uint2 id;
+  uint2 cellIndex;
+  const TopologyArena<real_t> *arena;
+
+  inline uint2 getID() const { return id; }
+  inline uint1 numVertices() const { return arena->cellNumVertices(cellIndex); }
+  inline uint1 numFacets() const { return arena->cellNumFacets(cellIndex); }
+  inline const std::array<real_t, 3> &getVertexPos(uint1 i) const {
+    return arena->cellVertexPos(cellIndex, i);
+  }
+  inline const Vertex &getVertex(uint1 i) const { return arena->cellVertexLabel(cellIndex, i); }
+  inline uint1 getFacet(uint1 i) const { return arena->cellFacetLabel(cellIndex, i); }
+  inline uint2 getNbr(uint1 i) const { return arena->cellNbr(cellIndex, i); }
+  inline bool hasNoNbr() const {
+    for (uint1 i = 0; i < numFacets(); ++i)
+      if (getNbr(i) == noNbr)
+        return true;
+    return false;
+  }
+};
+
+namespace detail {
+
+struct CellTopologyRef {
+  uint2 id;
+  uint1 vertexCount;
+  uint1 facetCount;
+  const Vertex *vertices;
+  const uint1 *facets;
+};
+
+inline uint1 getReverseLabel(const CellTopologyRef &cell, uint1 label) {
+  return cell.vertices[getVertex(label)][getEdge(label)];
+}
+
+inline void failInvalidTopology(const CellTopologyRef &cell,
+                                const char *stage,
+                                const char *what,
+                                uint1 owner,
+                                uint1 edge,
+                                uint1 label) {
+  std::fprintf(stderr,
+               "Fatal: invalid cell topology in %s for cell %u: %s "
+               "(owner=%u edge=%u facet=%u vertex=%u edgeLabel=%u, numVertices=%u, numFacets=%u)\n",
+               stage,
+               static_cast<unsigned>(cell.id),
+               what,
+               static_cast<unsigned>(owner),
+               static_cast<unsigned>(edge),
+               static_cast<unsigned>(getFacet(label)),
+               static_cast<unsigned>(getVertex(label)),
+               static_cast<unsigned>(getEdge(label)),
+               static_cast<unsigned>(cell.vertexCount),
+               static_cast<unsigned>(cell.facetCount));
+  std::abort();
+}
+
+inline void validateCellTopology(const CellTopologyRef &cell, const char *stage) {
+  if (cell.vertexCount > maxNumVertices || cell.facetCount > maxNumFacets) {
+    std::fprintf(stderr,
+                 "Fatal: invalid cell topology in %s for cell %u: counts exceed fixed storage "
+                 "(numVertices=%u, numFacets=%u)\n",
+                 stage,
+                 static_cast<unsigned>(cell.id),
+                 static_cast<unsigned>(cell.vertexCount),
+                 static_cast<unsigned>(cell.facetCount));
+    std::abort();
+  }
+  for (uint1 i = 0; i < cell.facetCount; ++i) {
+    const uint1 label = cell.facets[i];
+    if (getFacet(label) >= cell.facetCount)
+      failInvalidTopology(cell, stage, "facet start label references facet out of range", i, 0, label);
+    if (getVertex(label) >= cell.vertexCount)
+      failInvalidTopology(cell, stage, "facet start label references vertex out of range", i, 0, label);
+    if (getEdge(label) >= 3)
+      failInvalidTopology(cell, stage, "facet start label references edge out of range", i, 0, label);
+  }
+  for (uint1 i = 0; i < cell.vertexCount; ++i) {
+    for (uint1 k = 0; k < 3; ++k) {
+      const uint1 label = cell.vertices[i][k];
+      if (getFacet(label) >= cell.facetCount)
+        failInvalidTopology(cell, stage, "vertex label references facet out of range", i, k, label);
+      if (getVertex(label) >= cell.vertexCount)
+        failInvalidTopology(cell, stage, "vertex label references vertex out of range", i, k, label);
+      if (getEdge(label) >= 3)
+        failInvalidTopology(cell, stage, "vertex label references edge out of range", i, k, label);
+      const uint1 reverse = getReverseLabel(cell, label);
+      if (getFacet(reverse) >= cell.facetCount)
+        failInvalidTopology(cell, stage, "reverse label references facet out of range", i, k, reverse);
+      if (getVertex(reverse) != i)
+        failInvalidTopology(cell, stage, "reverse label does not point back to owner vertex", i, k, reverse);
+      if (getEdge(reverse) != k)
+        failInvalidTopology(cell, stage, "reverse label does not point back to owner edge", i, k, reverse);
+    }
+  }
+}
+
+}  // namespace detail
 
 template <typename real_t>
 class CellGeometry {
@@ -510,115 +728,210 @@ class CellUpdater {
  * memory-layout experiments and future API transition.
  */
 template <typename real_t>
-class CellArena {
+class TopologyArena {
  public:
-  struct CellSpan {
-    uint2 id;
-    uint2 vertexOffset;
-    uint1 vertexCount;
-    uint2 facetOffset;
-    uint1 facetCount;
-  };
-
-  #ifndef VOR_CELLARENA_RESERVE_VERTICES_PER_CELL
-  #define VOR_CELLARENA_RESERVE_VERTICES_PER_CELL 28
-  #endif
-  #ifndef VOR_CELLARENA_RESERVE_FACETS_PER_CELL
-  #define VOR_CELLARENA_RESERVE_FACETS_PER_CELL 20
-  #endif
-    static constexpr uint1 kReserveVerticesPerCell =
-      static_cast<uint1>(VOR_CELLARENA_RESERVE_VERTICES_PER_CELL);
-    static constexpr uint1 kReserveFacetsPerCell =
-      static_cast<uint1>(VOR_CELLARENA_RESERVE_FACETS_PER_CELL);
+  static constexpr uint1 PrimaryV = static_cast<uint1>(28);
+  static constexpr uint1 PrimaryF = static_cast<uint1>(18);
 
   void clear() {
-    m_spans.clear();
+    m_ids.clear();
     m_vertexPos.clear();
     m_vertices.clear();
     m_facets.clear();
-    m_nbr.clear();
+    m_nbrs.clear();
   }
 
   void rebuildFromCells(const std::vector<Cell<real_t> > &cells) {
     clear();
-    m_spans.reserve(cells.size());
-    m_vertexPos.reserve(cells.size() * static_cast<size_t>(kReserveVerticesPerCell));
-    m_vertices.reserve(cells.size() * static_cast<size_t>(kReserveVerticesPerCell));
-    m_facets.reserve(cells.size() * static_cast<size_t>(kReserveFacetsPerCell));
-    m_nbr.reserve(cells.size() * static_cast<size_t>(kReserveFacetsPerCell));
+    const uint2 numCells = static_cast<uint2>(cells.size());
+    m_ids.resize(numCells);
+    m_vertexPos.resize(numCells);
+    m_vertices.resize(numCells);
+    m_facets.resize(numCells);
+    m_nbrs.resize(numCells);
 
     for (size_t i = 0; i < cells.size(); ++i) {
       const Cell<real_t> &cell = cells[i];
       const uint1 nv = static_cast<uint1>(cell.m_numVertices);
       const uint1 nf = static_cast<uint1>(cell.m_numFacets);
-
-      CellSpan span;
-      span.id = cell.m_id;
-      span.vertexOffset = static_cast<uint2>(m_vertexPos.size());
-      span.vertexCount = nv;
-      span.facetOffset = static_cast<uint2>(m_facets.size());
-      span.facetCount = nf;
-      m_spans.push_back(span);
-
-      m_vertexPos.insert(m_vertexPos.end(), cell.m_vertexPos, cell.m_vertexPos + nv);
-      m_vertices.insert(m_vertices.end(), cell.m_vertices, cell.m_vertices + nv);
-      m_facets.insert(m_facets.end(), cell.m_facets, cell.m_facets + nf);
-      m_nbr.insert(m_nbr.end(), cell.m_nbr, cell.m_nbr + nf);
+      detail::CellTopologyRef ref;
+      ref.id = cell.m_id;
+      ref.vertexCount = nv;
+      ref.facetCount = nf;
+      ref.vertices = cell.m_vertices;
+      ref.facets = cell.m_facets;
+      detail::validateCellTopology(ref, "TopologyArena::rebuildFromCells");
+      m_ids[i] = cell.m_id;
+      m_vertexPos.insert(static_cast<uint2>(i), cell.m_vertexPos, nv);
+      m_vertices.insert(static_cast<uint2>(i), cell.m_vertices, nv);
+      m_facets.insert(static_cast<uint2>(i), cell.m_facets, nf);
+      m_nbrs.insert(static_cast<uint2>(i), cell.m_nbr, nf);
     }
   }
 
-  size_t numCells() const { return m_spans.size(); }
-  const CellSpan &span(size_t i) const { return m_spans[i]; }
-  uint2 cellId(size_t i) const { return m_spans[i].id; }
-  uint1 cellNumVertices(size_t i) const { return m_spans[i].vertexCount; }
-  uint1 cellNumFacets(size_t i) const { return m_spans[i].facetCount; }
-  const std::array<real_t, 3> *cellVertexPosData(size_t i) const {
-    return m_vertexPos.data() + m_spans[i].vertexOffset;
+  void insertFromMaker(uint2 cellId, CellMaker<real_t> &maker) {
+    maker.renumber();
+    m_ids[cellId] = maker.m_id;
+    m_vertexPos.insert(cellId, maker.m_vertexPos, maker.m_numVertices);
+    m_vertices.insert(cellId, maker.m_vertices, maker.m_numVertices);
+    m_facets.insert(cellId, maker.m_facets, maker.m_numFacets);
+    m_nbrs.insert(cellId, maker.m_nbr, maker.m_numFacets);
   }
-  const Vertex *cellVertexLabelData(size_t i) const {
-    return m_vertices.data() + m_spans[i].vertexOffset;
+
+  void resize(uint2 numCells) {
+    clear();
+    m_ids.resize(numCells, 0u);
+    m_vertexPos.resize(numCells);
+    m_vertices.resize(numCells);
+    m_facets.resize(numCells);
+    m_nbrs.resize(numCells);
   }
-  const uint1 *cellFacetLabelData(size_t i) const { return m_facets.data() + m_spans[i].facetOffset; }
-  const uint2 *cellNbrData(size_t i) const { return m_nbr.data() + m_spans[i].facetOffset; }
+
+  size_t numCells() const { return m_ids.size(); }
+  uint2 cellId(size_t i) const { return m_ids[i]; }
+  uint1 cellNumVertices(size_t i) const { return m_vertexPos.count(static_cast<uint2>(i)); }
+  uint1 cellNumFacets(size_t i) const { return m_facets.count(static_cast<uint2>(i)); }
+  const std::array<real_t, 3> &cellVertexPos(size_t i, uint1 j) const {
+    return m_vertexPos.get(static_cast<uint2>(i), j);
+  }
+  const Vertex &cellVertexLabel(size_t i, uint1 j) const {
+    return m_vertices.get(static_cast<uint2>(i), j);
+  }
+  uint1 cellFacetLabel(size_t i, uint1 j) const { return m_facets.get(static_cast<uint2>(i), j); }
+  uint2 cellNbr(size_t i, uint1 j) const { return m_nbrs.get(static_cast<uint2>(i), j); }
+  const uint2 *cellNbrData(size_t i) const {
+    const uint2 cellId = static_cast<uint2>(i);
+    if (cellNumFacets(i) <= PrimaryF)
+      return m_nbrs.primaryData(cellId);
+    thread_local std::vector<uint2> scratch;
+    scratch.resize(cellNumFacets(i));
+    for (uint1 j = 0; j < cellNumFacets(i); ++j)
+      scratch[j] = cellNbr(i, j);
+    return scratch.data();
+  }
+
+  CellView<real_t> getView(size_t i) const {
+    CellView<real_t> view;
+    view.id = m_ids[i];
+    view.cellIndex = static_cast<uint2>(i);
+    view.arena = this;
+    return view;
+  }
 
   void materializeCell(size_t i, Cell<real_t> &cell) const {
-    const CellSpan &s = m_spans[i];
-    cell.m_id = s.id;
-    cell.m_numVertices = s.vertexCount;
-    cell.m_numFacets = s.facetCount;
-    std::memcpy(cell.m_vertexPos, m_vertexPos.data() + s.vertexOffset,
-                s.vertexCount * sizeof(cell.m_vertexPos[0]));
-    std::memcpy(cell.m_vertices, m_vertices.data() + s.vertexOffset,
-                s.vertexCount * sizeof(cell.m_vertices[0]));
-    std::memcpy(cell.m_facets, m_facets.data() + s.facetOffset,
-                s.facetCount * sizeof(cell.m_facets[0]));
-    std::memcpy(cell.m_nbr, m_nbr.data() + s.facetOffset, s.facetCount * sizeof(cell.m_nbr[0]));
+    cell.reset(cellNumVertices(i), cellNumFacets(i));
+    cell.m_id = m_ids[i];
+    for (uint1 j = 0; j < cell.m_numVertices; ++j) {
+      cell.m_vertexPos[j] = cellVertexPos(i, j);
+      cell.m_vertices[j] = cellVertexLabel(i, j);
+    }
+    for (uint1 j = 0; j < cell.m_numFacets; ++j) {
+      cell.m_facets[j] = cellFacetLabel(i, j);
+      cell.m_nbr[j] = cellNbr(i, j);
+    }
   }
 
-  const std::vector<CellSpan> &spans() const { return m_spans; }
-  const std::vector<std::array<real_t, 3> > &vertexPos() const { return m_vertexPos; }
-  const std::vector<Vertex> &vertices() const { return m_vertices; }
-  const std::vector<uint1> &facets() const { return m_facets; }
-  const std::vector<uint2> &nbrs() const { return m_nbr; }
+  const std::vector<uint2> &ids() const { return m_ids; }
 
  private:
-  std::vector<CellSpan> m_spans;
-  std::vector<std::array<real_t, 3> > m_vertexPos;
-  std::vector<Vertex> m_vertices;
-  std::vector<uint1> m_facets;
-  std::vector<uint2> m_nbr;
+  std::vector<uint2> m_ids;
+  PrimaryOverflowArray<std::array<real_t, 3>, PrimaryV> m_vertexPos;
+  PrimaryOverflowArray<Vertex, PrimaryV> m_vertices;
+  PrimaryOverflowArray<uint1, PrimaryF> m_facets;
+  PrimaryOverflowArray<uint2, PrimaryF> m_nbrs;
+};
+
+template <typename real_t>
+using CellArena = TopologyArena<real_t>;
+
+template <typename real_t>
+struct GeometryView {
+  uint2 id;
+  uint2 cellIndex;
+  const GeometryArena<real_t> *arena;
+
+  inline real_t getVolume() const { return arena->cellVolume(cellIndex); }
+  inline uint1 numFacets() const { return arena->cellFacetCount(cellIndex); }
+  inline const std::array<real_t, 3> &getdV(uint1 i) const { return arena->cellDV(cellIndex, i); }
+  inline const std::array<real_t, 3> &getArea(uint1 i) const { return arena->cellArea(cellIndex, i); }
+  inline const std::array<real_t, 3> &getConnVect(uint1 i) const {
+    return arena->cellConnVect(cellIndex, i);
+  }
+  inline real_t getConnVectSq(uint1 i) const { return arena->cellConnVectSq(cellIndex, i); }
+};
+
+template <typename real_t>
+class GeometryArena {
+ public:
+  void clear() {
+    m_ids.clear();
+    m_volumes.clear();
+    m_dV.clear();
+    m_areas.clear();
+    m_connV.clear();
+    m_connVSq.clear();
+  }
+
+  void rebuildFromLegacy(const TopologyArena<real_t> &topology,
+                         const std::vector<CellGeometry<real_t> > &geoms);
+
+  void resize(uint2 numCells) {
+    clear();
+    m_ids.resize(numCells, 0u);
+    m_volumes.resize(numCells, real_t());
+    m_dV.resize(numCells);
+    m_areas.resize(numCells);
+    m_connV.resize(numCells);
+    m_connVSq.resize(numCells);
+  }
+
+  size_t numCells() const { return m_ids.size(); }
+  real_t cellVolume(size_t i) const { return m_volumes[i]; }
+  uint1 cellFacetCount(size_t i) const { return m_dV.count(static_cast<uint2>(i)); }
+  const std::array<real_t, 3> &cellDV(size_t i, uint1 j) const {
+    return m_dV.get(static_cast<uint2>(i), j);
+  }
+  const std::array<real_t, 3> &cellArea(size_t i, uint1 j) const {
+    return m_areas.get(static_cast<uint2>(i), j);
+  }
+  const std::array<real_t, 3> &cellConnVect(size_t i, uint1 j) const {
+    return m_connV.get(static_cast<uint2>(i), j);
+  }
+  real_t cellConnVectSq(size_t i, uint1 j) const { return m_connVSq.get(static_cast<uint2>(i), j); }
+
+  GeometryView<real_t> getView(size_t i) const {
+    GeometryView<real_t> view;
+    view.id = m_ids[i];
+    view.cellIndex = static_cast<uint2>(i);
+    view.arena = this;
+    return view;
+  }
+
+  const std::vector<uint2> &ids() const { return m_ids; }
+  const std::vector<real_t> &volumes() const { return m_volumes; }
+
+ private:
+  std::vector<uint2> m_ids;
+  std::vector<real_t> m_volumes;
+  PrimaryOverflowArray<std::array<real_t, 3>, TopologyArena<real_t>::PrimaryF> m_dV;
+  PrimaryOverflowArray<std::array<real_t, 3>, TopologyArena<real_t>::PrimaryF> m_areas;
+  PrimaryOverflowArray<std::array<real_t, 3>, TopologyArena<real_t>::PrimaryF> m_connV;
+  PrimaryOverflowArray<real_t, TopologyArena<real_t>::PrimaryF> m_connVSq;
 };
 
 template <typename real_t>
 class CellComplex {
  public:
-  CellComplex(Box<real_t> *box) : m_nbrList(box), m_isBuild(false) {}
+  CellComplex(Box<real_t> *box);
+  ~CellComplex() = default;
   void build(const std::vector<std::array<real_t, 3> > &p);
   /// Build geometry data (connecting vectors, edge inverses, volume derivatives)
   /// for all cells. Called automatically by build(); call separately if needed.
   void buildGeometry(const std::vector<std::array<real_t, 3> > &p);
   void update(const std::vector<std::array<real_t, 3> > &p);
   size_t numCells() const { return m_cellArena.numCells(); }
+  CellView<real_t> getCellView(size_t i) const { return m_cellArena.getView(i); }
+  GeometryView<real_t> getGeometryView(size_t i) const { return m_geometry.getView(i); }
   void materializeCell(size_t i, Cell<real_t> &cell) const { m_cellArena.materializeCell(i, cell); }
   void materializeCells(std::vector<Cell<real_t> > &cells) const {
     cells.resize(m_cellArena.numCells());
@@ -629,6 +942,8 @@ class CellComplex {
   const std::vector<uint0> &getTypes() const { return m_types; }
   std::vector<CellGeometry<real_t> > &getGeoms() { return m_geom; }
   const std::vector<CellGeometry<real_t> > &getGeoms() const { return m_geom; }
+  GeometryArena<real_t> &getGeometryArena() { return m_geometry; }
+  const GeometryArena<real_t> &getGeometryArena() const { return m_geometry; }
   CellArena<real_t> &getCellArena() { return m_cellArena; }
   const CellArena<real_t> &getCellArena() const { return m_cellArena; }
   const NbrList<uint2, real_t> &getNbrList() const { return m_nbrList; }
@@ -637,15 +952,131 @@ class CellComplex {
                             FILE *fp) const;
 
  private:
+  class PersistentWorkerTeam {
+   public:
+    PersistentWorkerTeam() : m_stop(false), m_generation(0), m_completed(0), m_threadCount(0) {}
+
+    ~PersistentWorkerTeam() { stop(); }
+
+    void start(size_t count) {
+      stop();
+      m_stop = false;
+      m_generation = 0;
+      m_completed = 0;
+      m_threadCount = count;
+      for (size_t tid = 0; tid < m_threadCount; ++tid)
+        m_threads.emplace_back(&PersistentWorkerTeam::workerLoop, this, tid);
+    }
+
+    void stop() {
+      {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_stop = true;
+      }
+      m_cvStart.notify_all();
+      for (size_t i = 0; i < m_threads.size(); ++i)
+        if (m_threads[i].joinable())
+          m_threads[i].join();
+      m_threads.clear();
+      m_threadCount = 0;
+    }
+
+    size_t threadCount() const { return m_threadCount; }
+
+    template <typename Func>
+    void run(Func fn) {
+      if (m_threadCount == 0) {
+        fn(0, 1);
+        return;
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_task = fn;
+        m_exception = nullptr;
+        m_completed = 0;
+        ++m_generation;
+      }
+      m_cvStart.notify_all();
+
+      std::unique_lock<std::mutex> lock(m_mutex);
+      m_cvDone.wait(lock, [this]() { return m_completed == m_threadCount; });
+      std::exception_ptr ex = m_exception;
+      lock.unlock();
+      if (ex)
+        std::rethrow_exception(ex);
+    }
+
+   private:
+    void workerLoop(size_t tid) {
+      size_t generationSeen = 0;
+      while (true) {
+        std::function<void(size_t, size_t)> task;
+        {
+          std::unique_lock<std::mutex> lock(m_mutex);
+          m_cvStart.wait(lock, [this, &generationSeen]() {
+            return m_stop || m_generation != generationSeen;
+          });
+          if (m_stop)
+            return;
+          generationSeen = m_generation;
+          task = m_task;
+        }
+
+        try {
+          task(tid, m_threadCount);
+        } catch (...) {
+          std::lock_guard<std::mutex> lock(m_mutex);
+          if (!m_exception)
+            m_exception = std::current_exception();
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(m_mutex);
+          ++m_completed;
+          if (m_completed == m_threadCount)
+            m_cvDone.notify_one();
+        }
+      }
+    }
+
+    std::mutex m_mutex;
+    std::condition_variable m_cvStart;
+    std::condition_variable m_cvDone;
+    std::vector<std::thread> m_threads;
+    std::function<void(size_t, size_t)> m_task;
+    std::exception_ptr m_exception;
+    bool m_stop;
+    size_t m_generation;
+    size_t m_completed;
+    size_t m_threadCount;
+  };
+
+  struct WorkerContext {
+    WorkerContext() : arena(), maker(arena) {}
+
+    // Per-thread scratch reused across build/update calls. The CellMaker owns no
+    // storage; it is permanently bound to this worker's arena.
+    ConstructionArena<real_t> arena;
+    CellMaker<real_t> maker;
+  };
+
+  static size_t defaultPersistentWorkerCount();
+  template <typename Func>
+  void parallelForPersistent(size_t count, Func fn);
+  void ensureWorkerContexts(size_t count);
   void repair(const std::vector<std::array<real_t, 3> > &p);
   void initNbrList(const std::vector<std::array<real_t, 3> > &p);
   NbrList<uint2, real_t> m_nbrList;
   std::vector<uint0> m_types;
   std::vector<Cell<real_t> > m_cells;
-  CellArena<real_t> m_cellArena;
+  TopologyArena<real_t> m_cellArena;
+  GeometryArena<real_t> m_geometry;
   std::vector<Cell<real_t> > m_geomCells;
   std::vector<CellGeometry<real_t> > m_geom;
   std::vector<CellUpdater<real_t> > m_updaters;
+  PersistentWorkerTeam m_team;
+  std::vector<std::unique_ptr<WorkerContext> > m_workers;
   std::vector<bool> m_hasChanged;
   CellComplexUpdateStats m_lastUpdateStats;
   bool m_isBuild;
@@ -699,15 +1130,58 @@ Cell<real_t> &Cell<real_t>::operator=(const Cell<real_t> &rhs) {
 }
 
 template <typename real_t>
+Cell<real_t> &Cell<real_t>::operator=(const CellView<real_t> &rhs) {
+  const uint1 vertexCount = rhs.numVertices();
+  const uint1 facetCount = rhs.numFacets();
+  if (vertexCount > maxNumVertices || facetCount > maxNumFacets) {
+    std::fprintf(stderr, "Fatal: CellView exceeds fixed Cell storage (%u vertices, %u facets).\n",
+                 static_cast<unsigned>(vertexCount), static_cast<unsigned>(facetCount));
+    std::abort();
+  }
+  m_id = rhs.id;
+  m_numVertices = vertexCount;
+  m_numFacets = facetCount;
+  for (uint1 i = 0; i < m_numVertices; ++i) {
+    m_vertexPos[i] = rhs.getVertexPos(i);
+    m_vertices[i] = rhs.getVertex(i);
+  }
+  for (uint1 i = 0; i < m_numFacets; ++i) {
+    m_facets[i] = rhs.getFacet(i);
+    m_nbr[i] = rhs.getNbr(i);
+  }
+  detail::CellTopologyRef ref;
+  ref.id = m_id;
+  ref.vertexCount = static_cast<uint1>(m_numVertices);
+  ref.facetCount = static_cast<uint1>(m_numFacets);
+  ref.vertices = m_vertices;
+  ref.facets = m_facets;
+  detail::validateCellTopology(ref, "Cell::operator=(CellView)");
+  return *this;
+}
+
+template <typename real_t>
 Cell<real_t> &Cell<real_t>::operator=(CellMaker<real_t> &rhs) {
   m_id = rhs.m_id;
   rhs.renumber();
+  if (rhs.m_numVertices > maxNumVertices || rhs.m_numFacets > maxNumFacets) {
+    std::fprintf(stderr,
+                 "Fatal: CellMaker output exceeds fixed Cell storage (%u vertices, %u facets).\n",
+                 static_cast<unsigned>(rhs.m_numVertices), static_cast<unsigned>(rhs.m_numFacets));
+    std::abort();
+  }
+  detail::CellTopologyRef ref;
+  ref.id = rhs.m_id;
+  ref.vertexCount = rhs.m_numVertices;
+  ref.facetCount = rhs.m_numFacets;
+  ref.vertices = rhs.m_vertices;
+  ref.facets = rhs.m_facets;
+  detail::validateCellTopology(ref, "Cell::operator=(CellMaker)");
   m_numVertices = rhs.m_numVertices;
   m_numFacets = rhs.m_numFacets;
-  std::memcpy(m_vertexPos, rhs.m_vertexPos.data(), m_numVertices * sizeof(m_vertexPos[0]));
-  std::memcpy(m_vertices, rhs.m_vertices.data(), m_numVertices * sizeof(m_vertices[0]));
-  std::memcpy(m_facets, rhs.m_facets.data(), m_numFacets * sizeof(m_facets[0]));
-  std::memcpy(m_nbr, rhs.m_nbr.data(), m_numFacets * sizeof(m_nbr[0]));
+  std::memcpy(m_vertexPos, rhs.m_vertexPos, m_numVertices * sizeof(m_vertexPos[0]));
+  std::memcpy(m_vertices, rhs.m_vertices, m_numVertices * sizeof(m_vertices[0]));
+  std::memcpy(m_facets, rhs.m_facets, m_numFacets * sizeof(m_facets[0]));
+  std::memcpy(m_nbr, rhs.m_nbr, m_numFacets * sizeof(m_nbr[0]));
   return *this;
 }
 
@@ -918,56 +1392,65 @@ Cuboid<real_t>::Cuboid(const std::array<real_t, 3> &L) {
 }
 
 template <typename real_t>
-CellMaker<real_t>::CellMaker()
-  : p_nbrList(NULL), m_checkGCHead(0u), m_isAllCut(false), m_distGen(0) {
-  m_aliveV_buf.resize(kInitialV, 0u);
-  m_aliveF_buf.resize(kInitialF, 0u);
-  m_freeStackV_buf.resize(kInitialV);
-  m_freeStackF_buf.resize(kInitialF);
-  m_slotsV.setStorage(m_aliveV_buf.data(), m_freeStackV_buf.data(),
-                      static_cast<uint1>(m_aliveV_buf.size()));
-  m_slotsF.setStorage(m_aliveF_buf.data(), m_freeStackF_buf.data(),
-                      static_cast<uint1>(m_aliveF_buf.size()));
-  ensureVertexBuffers(static_cast<uint1>(m_aliveV_buf.size()));
-  ensureFacetBuffers(static_cast<uint1>(m_aliveF_buf.size()));
+CellMaker<real_t>::CellMaker(ConstructionArena<real_t> &arena)
+  : m_numVertices(0),
+    m_numFacets(0),
+    m_id(0),
+    p_nbrList(NULL),
+    m_arena(&arena),
+    m_vertexPos(NULL),
+    m_rSq(NULL),
+    m_vertices(NULL),
+    m_facets(NULL),
+    m_nbr(NULL),
+    m_checkGridCell(arena.checkGridCell()),
+    m_checkGCHead(0u),
+    m_isAllCut(false),
+    m_dist(NULL),
+    m_distGen(0),
+    m_knownDistGen(NULL),
+    m_distGC(NULL),
+    m_renumVWrk(NULL),
+    m_renumFWrk(NULL),
+    m_newVerticesWrk(arena.newVerticesWrk()),
+    m_facetPrevWrk(arena.facetPrevWrk()),
+    m_nbrsWrk(arena.nbrsWrk()),
+    m_nbrDistWrk(arena.nbrDistWrk()),
+    m_vStackWrk(arena.vStackWrk()) {
+  bindArenaStorage();
   updatePeakCounter(cellMakerTelemetry().peak_vertex_capacity,
-                    static_cast<uint64_t>(m_aliveV_buf.size()));
+                    static_cast<uint64_t>(m_arena->vertexCapacity()));
   updatePeakCounter(cellMakerTelemetry().peak_facet_capacity,
-                    static_cast<uint64_t>(m_aliveF_buf.size()));
-  std::fill(m_knownDistGen.begin(), m_knownDistGen.end(), 0u);
-  m_newVerticesWrk.reserve(20);
-  m_facetPrevWrk.reserve(20);
-  m_nbrsWrk.reserve(40);
-  m_checkGridCell.reserve(64);
-  m_vStackWrk.reserve(32);
+                    static_cast<uint64_t>(m_arena->facetCapacity()));
+  std::fill(m_knownDistGen, m_knownDistGen + m_arena->vertexCapacity(), 0u);
+}
+
+template <typename real_t>
+void CellMaker<real_t>::bindArenaStorage() {
+  m_vertexPos = m_arena->vertexPosData();
+  m_rSq = m_arena->rSqData();
+  m_vertices = m_arena->verticesData();
+  m_facets = m_arena->facetsData();
+  m_nbr = m_arena->nbrData();
+  m_dist = m_arena->distData();
+  m_knownDistGen = m_arena->knownDistGenData();
+  m_distGC = m_arena->distGCData();
+  m_renumVWrk = m_arena->renumVWrkData();
+  m_renumFWrk = m_arena->renumFWrkData();
+  m_slotsV.setStorage(m_arena->aliveVData(), m_arena->freeStackVData(), m_arena->vertexCapacity());
+  m_slotsF.setStorage(m_arena->aliveFData(), m_arena->freeStackFData(), m_arena->facetCapacity());
 }
 
 template <typename real_t>
 void CellMaker<real_t>::ensureVertexBuffers(uint1 minSize) {
-  if (m_vertexPos.size() < minSize)
-    m_vertexPos.resize(minSize);
-  if (m_vertices.size() < minSize)
-    m_vertices.resize(minSize);
-  if (m_rSq.size() < minSize)
-    m_rSq.resize(minSize);
-  if (m_dist.size() < minSize)
-    m_dist.resize(minSize);
-  if (m_distGC.size() < minSize)
-    m_distGC.resize(minSize);
-  if (m_knownDistGen.size() < minSize)
-    m_knownDistGen.resize(minSize, 0u);
-  if (m_renumVWrk.size() < minSize)
-    m_renumVWrk.resize(minSize);
+  m_arena->ensureCapacity(minSize, m_arena->facetCapacity());
+  bindArenaStorage();
 }
 
 template <typename real_t>
 void CellMaker<real_t>::ensureFacetBuffers(uint1 minSize) {
-  if (m_facets.size() < minSize)
-    m_facets.resize(minSize);
-  if (m_nbr.size() < minSize)
-    m_nbr.resize(minSize);
-  if (m_renumFWrk.size() < minSize)
-    m_renumFWrk.resize(minSize);
+  m_arena->ensureCapacity(m_arena->vertexCapacity(), minSize);
+  bindArenaStorage();
 }
 
 template <typename real_t>
@@ -976,6 +1459,13 @@ CellMaker<real_t>::~CellMaker() {}
 template <typename real_t>
 CellMaker<real_t> &CellMaker<real_t>::operator=(const Cell<real_t> &rhs) {
   m_id = rhs.m_id;
+  init(rhs);
+  return *this;
+}
+
+template <typename real_t>
+CellMaker<real_t> &CellMaker<real_t>::operator=(const CellView<real_t> &rhs) {
+  m_id = rhs.id;
   init(rhs);
   return *this;
 }
@@ -1013,21 +1503,21 @@ template <typename real_t>
 uint1 CellMaker<real_t>::allocVertexChecked(const char *caller) {
   uint1 v_new = m_slotsV.getFree();
   if (v_new == DenseSlotsView<uint1>::InvalidIdx) {
-    size_t newCapacity = std::max<size_t>(1, m_aliveV_buf.size() * 2);
-    if (newCapacity > static_cast<size_t>(DenseSlotsView<uint1>::InvalidIdx))
-      failCapacity(caller, "vertex", DenseSlotsView<uint1>::InvalidIdx);
-    m_aliveV_buf.resize(newCapacity, 0u);
-    m_freeStackV_buf.resize(newCapacity);
-    m_slotsV.setStorage(m_aliveV_buf.data(), m_freeStackV_buf.data(),
-                        static_cast<uint1>(m_aliveV_buf.size()));
-    ensureVertexBuffers(static_cast<uint1>(m_aliveV_buf.size()));
+    if (m_arena->vertexCapacity() >= kMaxV)
+      failCapacity(caller, "vertex", kMaxV);
+    size_t newCapacity = std::max<size_t>(1, m_arena->vertexCapacity() * 2);
+    newCapacity = std::min<size_t>(newCapacity, static_cast<size_t>(kMaxV));
+    if (newCapacity <= m_arena->vertexCapacity())
+      failCapacity(caller, "vertex", kMaxV);
+    m_arena->ensureCapacity(static_cast<uint1>(newCapacity), m_arena->facetCapacity());
+    bindArenaStorage();
     cellMakerTelemetry().vertex_growth_events.fetch_add(1, std::memory_order_relaxed);
     updatePeakCounter(cellMakerTelemetry().peak_vertex_capacity,
-                      static_cast<uint64_t>(m_aliveV_buf.size()));
+                      static_cast<uint64_t>(m_arena->vertexCapacity()));
     v_new = m_slotsV.getFree();
   }
   if (v_new == DenseSlotsView<uint1>::InvalidIdx)
-    failCapacity(caller, "vertex", static_cast<uint1>(m_aliveV_buf.size()));
+    failCapacity(caller, "vertex", m_arena->vertexCapacity());
   return v_new;
 }
 
@@ -1035,21 +1525,21 @@ template <typename real_t>
 uint1 CellMaker<real_t>::allocFacetChecked(const char *caller) {
   uint1 f_new = m_slotsF.getFree();
   if (f_new == DenseSlotsView<uint1>::InvalidIdx) {
-    size_t newCapacity = std::max<size_t>(1, m_aliveF_buf.size() * 2);
-    if (newCapacity > static_cast<size_t>(DenseSlotsView<uint1>::InvalidIdx))
-      failCapacity(caller, "facet", DenseSlotsView<uint1>::InvalidIdx);
-    m_aliveF_buf.resize(newCapacity, 0u);
-    m_freeStackF_buf.resize(newCapacity);
-    m_slotsF.setStorage(m_aliveF_buf.data(), m_freeStackF_buf.data(),
-                        static_cast<uint1>(m_aliveF_buf.size()));
-    ensureFacetBuffers(static_cast<uint1>(m_aliveF_buf.size()));
+    if (m_arena->facetCapacity() >= kMaxF)
+      failCapacity(caller, "facet", kMaxF);
+    size_t newCapacity = std::max<size_t>(1, m_arena->facetCapacity() * 2);
+    newCapacity = std::min<size_t>(newCapacity, static_cast<size_t>(kMaxF));
+    if (newCapacity <= m_arena->facetCapacity())
+      failCapacity(caller, "facet", kMaxF);
+    m_arena->ensureCapacity(m_arena->vertexCapacity(), static_cast<uint1>(newCapacity));
+    bindArenaStorage();
     cellMakerTelemetry().facet_growth_events.fetch_add(1, std::memory_order_relaxed);
     updatePeakCounter(cellMakerTelemetry().peak_facet_capacity,
-                      static_cast<uint64_t>(m_aliveF_buf.size()));
+                      static_cast<uint64_t>(m_arena->facetCapacity()));
     f_new = m_slotsF.getFree();
   }
   if (f_new == DenseSlotsView<uint1>::InvalidIdx)
-    failCapacity(caller, "facet", static_cast<uint1>(m_aliveF_buf.size()));
+    failCapacity(caller, "facet", m_arena->facetCapacity());
   return f_new;
 }
 
@@ -1071,30 +1561,57 @@ template <typename real_t>
 
 template <typename real_t>
 void CellMaker<real_t>::init(const Cell<real_t> &cell) {
-  if (m_aliveV_buf.size() < cell.m_numVertices) {
-    m_aliveV_buf.resize(cell.m_numVertices, 0u);
-    m_freeStackV_buf.resize(cell.m_numVertices);
-    m_slotsV.setStorage(m_aliveV_buf.data(), m_freeStackV_buf.data(),
-                        static_cast<uint1>(m_aliveV_buf.size()));
+  if (m_arena->vertexCapacity() < cell.m_numVertices) {
+    m_arena->ensureCapacity(cell.m_numVertices, m_arena->facetCapacity());
+    bindArenaStorage();
   }
   m_slotsV.reset(cell.m_numVertices);
-  std::fill(m_aliveV_buf.begin(), m_aliveV_buf.end(), 0u);
-  std::fill(m_aliveV_buf.begin(), m_aliveV_buf.begin() + cell.m_numVertices, uint8_t(1));
-  ensureVertexBuffers(static_cast<uint1>(m_aliveV_buf.size()));
-  std::memcpy(m_vertexPos.data(), cell.m_vertexPos, cell.m_numVertices * sizeof(m_vertexPos[0]));
-  std::memcpy(m_vertices.data(), cell.m_vertices, cell.m_numVertices * sizeof(m_vertices[0]));
-  if (m_aliveF_buf.size() < cell.m_numFacets) {
-    m_aliveF_buf.resize(cell.m_numFacets, 0u);
-    m_freeStackF_buf.resize(cell.m_numFacets);
-    m_slotsF.setStorage(m_aliveF_buf.data(), m_freeStackF_buf.data(),
-                        static_cast<uint1>(m_aliveF_buf.size()));
+  std::fill(m_arena->aliveV().begin(), m_arena->aliveV().end(), 0u);
+  std::fill(m_arena->aliveV().begin(), m_arena->aliveV().begin() + cell.m_numVertices, uint8_t(1));
+  std::memcpy(m_vertexPos, cell.m_vertexPos, cell.m_numVertices * sizeof(m_vertexPos[0]));
+  std::memcpy(m_vertices, cell.m_vertices, cell.m_numVertices * sizeof(m_vertices[0]));
+  if (m_arena->facetCapacity() < cell.m_numFacets) {
+    m_arena->ensureCapacity(m_arena->vertexCapacity(), cell.m_numFacets);
+    bindArenaStorage();
   }
   m_slotsF.reset(cell.m_numFacets);
-  std::fill(m_aliveF_buf.begin(), m_aliveF_buf.end(), 0u);
-  std::fill(m_aliveF_buf.begin(), m_aliveF_buf.begin() + cell.m_numFacets, uint8_t(1));
-  ensureFacetBuffers(static_cast<uint1>(m_aliveF_buf.size()));
-  std::memcpy(m_facets.data(), cell.m_facets, cell.m_numFacets * sizeof(m_facets[0]));
-  std::memcpy(m_nbr.data(), cell.m_nbr, cell.m_numFacets * sizeof(m_nbr[0]));
+  std::fill(m_arena->aliveF().begin(), m_arena->aliveF().end(), 0u);
+  std::fill(m_arena->aliveF().begin(), m_arena->aliveF().begin() + cell.m_numFacets, uint8_t(1));
+  std::memcpy(m_facets, cell.m_facets, cell.m_numFacets * sizeof(m_facets[0]));
+  std::memcpy(m_nbr, cell.m_nbr, cell.m_numFacets * sizeof(m_nbr[0]));
+  computeAllRsq();
+  resetDist();
+  const std::numeric_limits<real_t> lim;
+  m_distGCMax = -lim.max();
+  m_vDistGCMax = maxNumVertices;
+}
+
+template <typename real_t>
+void CellMaker<real_t>::init(const CellView<real_t> &cell) {
+  const uint1 vertexCount = cell.numVertices();
+  const uint1 facetCount = cell.numFacets();
+  if (m_arena->vertexCapacity() < vertexCount) {
+    m_arena->ensureCapacity(vertexCount, m_arena->facetCapacity());
+    bindArenaStorage();
+  }
+  m_slotsV.reset(vertexCount);
+  std::fill(m_arena->aliveV().begin(), m_arena->aliveV().end(), 0u);
+  std::fill(m_arena->aliveV().begin(), m_arena->aliveV().begin() + vertexCount, uint8_t(1));
+  for (uint1 i = 0; i < vertexCount; ++i) {
+    m_vertexPos[i] = cell.getVertexPos(i);
+    m_vertices[i] = cell.getVertex(i);
+  }
+  if (m_arena->facetCapacity() < facetCount) {
+    m_arena->ensureCapacity(m_arena->vertexCapacity(), facetCount);
+    bindArenaStorage();
+  }
+  m_slotsF.reset(facetCount);
+  std::fill(m_arena->aliveF().begin(), m_arena->aliveF().end(), 0u);
+  std::fill(m_arena->aliveF().begin(), m_arena->aliveF().begin() + facetCount, uint8_t(1));
+  for (uint1 i = 0; i < facetCount; ++i) {
+    m_facets[i] = cell.getFacet(i);
+    m_nbr[i] = cell.getNbr(i);
+  }
   computeAllRsq();
   resetDist();
   const std::numeric_limits<real_t> lim;
@@ -1208,6 +1725,8 @@ void CellMaker<real_t>::renumber() {
     }
   }
   m_slotsV.reset(m_numVertices);
+  std::fill(m_arena->aliveV().begin(), m_arena->aliveV().end(), 0u);
+  std::fill(m_arena->aliveV().begin(), m_arena->aliveV().begin() + m_numVertices, uint8_t(1));
   m_numFacets = 0;
   {
     for (uint1 i = 0; i < m_slotsF.numAllocated(); ++i) {
@@ -1222,6 +1741,8 @@ void CellMaker<real_t>::renumber() {
     }
   }
   m_slotsF.reset(m_numFacets);
+  std::fill(m_arena->aliveF().begin(), m_arena->aliveF().end(), 0u);
+  std::fill(m_arena->aliveF().begin(), m_arena->aliveF().begin() + m_numFacets, uint8_t(1));
   updatePeakCounter(cellMakerTelemetry().peak_vertices_seen, static_cast<uint64_t>(m_numVertices));
   updatePeakCounter(cellMakerTelemetry().peak_facets_seen, static_cast<uint64_t>(m_numFacets));
   m_vRsqMax = m_renumVWrk[m_vRsqMax];
@@ -1928,13 +2449,13 @@ template <typename real_t>
 CellUpdater<real_t> &CellUpdater<real_t>::operator=(const CellUpdater<real_t> &rhs) {
   if (&rhs == this)
     return *this;
-  p_geom = this->p_geom;
-  m_nbrs = this->m_nbrs;
-  m_nbrsWrk = this->m_nbrsWrk;
-  m_nbrInserts = this->m_nbrInserts;
-  m_isSetup = this->m_isSetup;
-  m_newNbrsWrk = this->m_newNbrsWrk;
-  m_visitedWrk = this->m_visitedWrk;
+  p_geom = rhs.p_geom;
+  m_nbrs = rhs.m_nbrs;
+  m_nbrsWrk = rhs.m_nbrsWrk;
+  m_nbrInserts = rhs.m_nbrInserts;
+  m_isSetup = rhs.m_isSetup;
+  m_newNbrsWrk = rhs.m_newNbrsWrk;
+  m_visitedWrk = rhs.m_visitedWrk;
   return *this;
 }
 
@@ -2192,6 +2713,15 @@ void CellGeometry<real_t>::computeEdgeInv() {
       uint1 e1(getEdge(label1));
       uint1 v1(getVertex(label1));
       uint1 f1(getFacet(label1));
+      if (f0 >= p_cell->m_numFacets || f1 >= p_cell->m_numFacets) {
+        detail::CellTopologyRef ref;
+        ref.id = p_cell->m_id;
+        ref.vertexCount = static_cast<uint1>(p_cell->m_numVertices);
+        ref.facetCount = static_cast<uint1>(p_cell->m_numFacets);
+        ref.vertices = p_cell->m_vertices;
+        ref.facets = p_cell->m_facets;
+        detail::validateCellTopology(ref, "CellGeometry::computeEdgeInv");
+      }
       m_edgeInv[v0][e0][0] = m_connV[f0][1] * m_connV[f1][2] - m_connV[f0][2] * m_connV[f1][1];
       m_edgeInv[v0][e0][1] = m_connV[f0][2] * m_connV[f1][0] - m_connV[f0][0] * m_connV[f1][2];
       m_edgeInv[v0][e0][2] = m_connV[f0][0] * m_connV[f1][1] - m_connV[f0][1] * m_connV[f1][0];
@@ -2202,6 +2732,15 @@ void CellGeometry<real_t>::computeEdgeInv() {
   for (uint1 i(0); i < p_cell->m_numVertices; ++i) {
     uint1 indxF;
     indxF = getFacet(p_cell->m_vertices[i][2]);
+    if (indxF >= p_cell->m_numFacets) {
+      detail::CellTopologyRef ref;
+      ref.id = p_cell->m_id;
+      ref.vertexCount = static_cast<uint1>(p_cell->m_numVertices);
+      ref.facetCount = static_cast<uint1>(p_cell->m_numFacets);
+      ref.vertices = p_cell->m_vertices;
+      ref.facets = p_cell->m_facets;
+      detail::validateCellTopology(ref, "CellGeometry::computeEdgeInv");
+    }
     real_t vol(m_connV[indxF][0] * m_edgeInv[i][0][0] + m_connV[indxF][1] * m_edgeInv[i][0][1] +
                m_connV[indxF][2] * m_edgeInv[i][0][2]);
     m_volDelaunay[i] = vol / (-6.0);
@@ -2685,12 +3224,85 @@ void CellGeometry<real_t>::gradFacetAreaSq(uint1 indxFacet, std::vector<uint2> &
 }
 
 template <typename real_t>
+void GeometryArena<real_t>::rebuildFromLegacy(const TopologyArena<real_t> &topology,
+                                              const std::vector<CellGeometry<real_t> > &geoms) {
+  clear();
+  const size_t numCells = std::min(topology.numCells(), geoms.size());
+  resize(static_cast<uint2>(numCells));
+  for (size_t i = 0; i < numCells; ++i) {
+    const uint2 cellId = topology.cellId(i);
+    const uint1 facetCount = topology.cellNumFacets(i);
+    m_ids[i] = cellId;
+    m_volumes[i] = geoms[i].getVolume();
+    const std::vector<std::array<real_t, 3> > &dV = geoms[i].getdV();
+    const std::vector<std::array<real_t, 3> > &areas = geoms[i].getAreas();
+    const std::vector<std::array<real_t, 3> > &connV = geoms[i].getConnVect();
+    const std::vector<real_t> &connVSq = geoms[i].getConnVectSq();
+    m_dV.insert(static_cast<uint2>(i), dV.data(), facetCount);
+    m_areas.insert(static_cast<uint2>(i), areas.data(), facetCount);
+    m_connV.insert(static_cast<uint2>(i), connV.data(), facetCount);
+    m_connVSq.insert(static_cast<uint2>(i), connVSq.data(), facetCount);
+  }
+}
+
+template <typename real_t>
+CellComplex<real_t>::CellComplex(Box<real_t> *box) : m_nbrList(box), m_isBuild(false) {
+  const size_t workerCount = defaultPersistentWorkerCount();
+  m_team.start(workerCount);
+  ensureWorkerContexts(std::max<size_t>(workerCount, 1));
+}
+
+template <typename real_t>
+size_t CellComplex<real_t>::defaultPersistentWorkerCount() {
+#ifdef VORONOI_USE_OPENMP
+  const int ompThreads = omp_get_max_threads();
+  if (ompThreads > 1)
+    return static_cast<size_t>(ompThreads);
+#endif
+  const unsigned hw = std::thread::hardware_concurrency();
+  return (hw > 1u) ? static_cast<size_t>(hw) : 0u;
+}
+
+template <typename real_t>
+template <typename Func>
+void CellComplex<real_t>::parallelForPersistent(size_t count, Func fn) {
+  if (count == 0)
+    return;
+
+  if (m_team.threadCount() == 0) {
+    for (size_t i = 0; i < count; ++i)
+      fn(i, 0u);
+    return;
+  }
+
+  m_team.run([count, &fn](size_t tid, size_t teamSize) {
+    const size_t begin = (count * tid) / teamSize;
+    const size_t end = (count * (tid + 1)) / teamSize;
+    for (size_t i = begin; i < end; ++i)
+      fn(i, tid);
+  });
+}
+
+template <typename real_t>
 void CellComplex<real_t>::initNbrList(const std::vector<std::array<real_t, 3> > &p) {
   const std::array<real_t, 3> &L(m_nbrList.getBox().getL());
   real_t density = real_t(p.size()) / (L[0] * L[1] * L[2]);
   real_t rcut = 1.75 * (std::pow(density, -1.0 / 3.0));
+#ifdef VORONOI_USE_OPENMP
+  if (omp_in_parallel())
+    m_nbrList.setupCurrentTeam(p, rcut);
+  else
+    m_nbrList.setup(p, rcut);
+#else
   m_nbrList.setup(p, rcut);
+#endif
   //    printf("number grid cells: %u\n", m_nbrList.getGrid().getN()[0]);
+}
+
+template <typename real_t>
+void CellComplex<real_t>::ensureWorkerContexts(size_t count) {
+  while (m_workers.size() < count)
+    m_workers.emplace_back(new WorkerContext());
 }
 
 template <typename real_t>
@@ -2698,38 +3310,33 @@ void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> > &p) {
   initNbrList(p);
   const std::array<real_t, 3> &L(m_nbrList.getBox().getL());
   Cuboid<real_t> cub(L);
-  m_cells.resize(p.size());
-#pragma omp parallel
-  {
-    CellMaker<real_t> maker;
-#pragma omp for
-    for (uint2 i = 0; i < p.size(); ++i) {
-      maker.build(i, p, m_nbrList, cub);
-      m_cells[i] = maker;
-    }
-  }
+  m_cellArena.resize(static_cast<uint2>(p.size()));
+  parallelForPersistent(p.size(), [&](size_t i, size_t workerId) {
+    CellMaker<real_t> &maker = m_workers[workerId]->maker;
+    maker.build(static_cast<uint2>(i), p, m_nbrList, cub);
+    m_cellArena.insertFromMaker(static_cast<uint2>(i), maker);
+  });
   m_nbrList.clear();
-  m_cellArena.rebuildFromCells(m_cells);
   buildGeometry(p);
   m_isBuild = true;
 }
 
 template <typename real_t>
 void CellComplex<real_t>::buildGeometry(const std::vector<std::array<real_t, 3> > &p) {
-  if (m_cellArena.numCells() != m_cells.size())
+  if (m_cellArena.numCells() == 0 && !m_cells.empty())
     m_cellArena.rebuildFromCells(m_cells);
   m_geom.resize(p.size());
   m_geomCells.resize(p.size());
   m_updaters.resize(p.size());
-#pragma omp parallel for
-  for (size_t i = 0; i < m_updaters.size(); ++i) {
-    m_cellArena.materializeCell(i, m_geomCells[i]);
+  parallelForPersistent(m_updaters.size(), [&](size_t i, size_t) {
+    m_geomCells[i] = m_cellArena.getView(i);
     m_geom[i] = m_geomCells[i];
     m_geom[i].computeConnectingVectors(p, m_nbrList.getBox());
     m_geom[i].computeEdgeInv();
     m_geom[i].diffVolume();
     m_updaters[i] = m_geom[i];
-  }
+  });
+  m_geometry.rebuildFromLegacy(m_cellArena, m_geom);
   m_hasChanged.resize(p.size());
 }
 
@@ -2737,6 +3344,8 @@ template <typename real_t>
 void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> > &p) {
   m_lastUpdateStats = CellComplexUpdateStats();
   m_lastUpdateStats.num_cells = static_cast<uint2>(p.size());
+  if (m_cells.size() != m_cellArena.numCells())
+    materializeCells(m_cells);
   (p.size() == m_cells.size() ? m_isBuild : m_isBuild = false);
   if (!m_isBuild) {
     m_lastUpdateStats.rebuilt_from_scratch = true;
@@ -2762,36 +3371,44 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> > &p) {
   m_lastUpdateStats.num_non_convex_before = numChanged;
   m_lastUpdateStats.num_rebuild_candidates = numChanged;
   //    printf("number changed cells: %u\n",numChanged);
-  if (numChanged == 0)
+  if (numChanged == 0) {
+    parallelForPersistent(m_geom.size(), [&](size_t i, size_t) {
+      m_geom[i].diffVolume();
+    });
+    m_geometry.rebuildFromLegacy(m_cellArena, m_geom);
     return;
+  }
   const std::array<real_t, 3> &L(box.getL());
   Cuboid<real_t> cub(L);
+  std::vector<size_t> changedCells;
+  changedCells.reserve(numChanged);
+  for (size_t i = 0; i < m_hasChanged.size(); ++i)
+    if (m_hasChanged[i])
+      changedCells.push_back(i);
   std::vector<uint2> emptyCells;
-  {
-    CellMaker<real_t> maker;
-    for (size_t i = 0; i < m_updaters.size(); ++i) {
-      if (!m_hasChanged[i])
-        continue;
-      maker = m_cells[i];
-      maker.rebuild(p, box, cub);
-      m_cells[i] = maker;
-      ++m_lastUpdateStats.num_local_rebuild_cells;
-      if (m_cells[i].numVertices() == 0 || m_cells[i].hasNoNbr())
-        emptyCells.push_back(i);
-    }
-  }
+  std::vector<std::vector<uint2> > emptyByWorker(std::max<size_t>(m_team.threadCount(), 1u));
+  parallelForPersistent(changedCells.size(), [&](size_t j, size_t workerId) {
+    const size_t i = changedCells[j];
+    CellMaker<real_t> &maker = m_workers[workerId]->maker;
+    maker = m_cellArena.getView(i);
+    maker.rebuild(p, box, cub);
+    m_cells[i] = maker;
+    if (m_cells[i].numVertices() == 0 || m_cells[i].hasNoNbr())
+      emptyByWorker[workerId].push_back(static_cast<uint2>(i));
+  });
+  m_lastUpdateStats.num_local_rebuild_cells = static_cast<uint2>(changedCells.size());
+  for (size_t workerId = 0; workerId < emptyByWorker.size(); ++workerId)
+    emptyCells.insert(emptyCells.end(), emptyByWorker[workerId].begin(), emptyByWorker[workerId].end());
   //    printf("number empty cells: %lu\n",emptyCells.size());
   m_lastUpdateStats.num_empty_after_local_rebuild = static_cast<uint2>(emptyCells.size());
   if (!emptyCells.empty()) {
     initNbrList(p);
-    {
-      CellMaker<real_t> maker;
-      for (size_t i = 0; i < emptyCells.size(); ++i) {
-        maker.build(emptyCells[i], p, m_nbrList, cub);
-        m_cells[emptyCells[i]] = maker;
-        ++m_lastUpdateStats.num_full_rebuild_cells;
-      }
-    }
+    parallelForPersistent(emptyCells.size(), [&](size_t i, size_t workerId) {
+      CellMaker<real_t> &maker = m_workers[workerId]->maker;
+      maker.build(emptyCells[i], p, m_nbrList, cub);
+      m_cells[emptyCells[i]] = maker;
+    });
+    m_lastUpdateStats.num_full_rebuild_cells = static_cast<uint2>(emptyCells.size());
   }
   for (size_t i = 0; i < m_updaters.size(); ++i) {
     if (!m_hasChanged[i])
@@ -2803,13 +3420,14 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> > &p) {
   repair(p);
   m_cellArena.rebuildFromCells(m_cells);
   m_geomCells.resize(m_cells.size());
-  for (size_t i = 0; i < m_geom.size(); ++i) {
-    m_cellArena.materializeCell(i, m_geomCells[i]);
+  parallelForPersistent(m_geom.size(), [&](size_t i, size_t) {
+    m_geomCells[i] = m_cellArena.getView(i);
     m_geom[i] = m_geomCells[i];
     m_geom[i].computeConnectingVectors(p, box);
     m_geom[i].computeEdgeInv();
     m_geom[i].diffVolume();
-  }
+  });
+  m_geometry.rebuildFromLegacy(m_cellArena, m_geom);
 }
 
 template <typename real_t>
@@ -2854,7 +3472,8 @@ void CellComplex<real_t>::repair(const std::vector<std::array<real_t, 3> > &p) {
     m_lastUpdateStats.num_repair_proposals_total += static_cast<uint2>(nbrInserts.size());
     //      std::__parallel::std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
     // std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
-    CellMaker<real_t> maker;
+    ensureWorkerContexts(1);
+    CellMaker<real_t> &maker = m_workers[0]->maker;
     size_t nextGroupBegin = 0;
     while (nextGroupBegin < nbrInserts.size()) {
       size_t groupEnd = nextGroupBegin;
@@ -2903,7 +3522,7 @@ void CellComplex<real_t>::drawInterfaceGnuplot(uint0 iType, uint0 jType,
   for (size_t i = 0; i < m_types.size(); ++i) {
     if (m_types[i] == iType) {
       Cell<real_t> cell;
-      m_cellArena.materializeCell(i, cell);
+      cell = m_cellArena.getView(i);
       for (uint1 j = 0; j < cell.numFacets(); ++j) {
         if (m_types[cell.getNbr(j)] == jType) {
           cell.drawFacetGnuplot(j, pos[i], fp);
