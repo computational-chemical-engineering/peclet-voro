@@ -126,6 +126,25 @@ class CellGeometry;
 template <typename real_t>
 class CellArena;
 
+struct CellComplexUpdateStats {
+  uint2 num_cells = 0;
+  uint2 num_non_convex_before = 0;
+  uint2 num_rebuild_candidates = 0;
+  uint2 num_local_rebuild_cells = 0;
+  uint2 num_empty_after_local_rebuild = 0;
+  uint2 num_full_rebuild_cells = 0;
+  uint2 num_repair_iterations = 0;
+  uint2 num_repair_proposals_total = 0;
+  uint2 num_repair_target_groups_total = 0;
+  uint2 num_repair_cells_changed_total = 0;
+  uint2 num_repair_direct_attempts = 0;
+  uint2 num_repair_direct_successes = 0;
+  uint2 num_repair_indirect_candidates = 0;
+  uint2 num_repair_batch_calls = 0;
+  uint2 num_repair_batch_changes = 0;
+  bool rebuilt_from_scratch = false;
+};
+
 /**
  * @class Cell
  * @brief class for storage of a single (Voronoi) cell
@@ -461,7 +480,8 @@ class CellUpdater {
   inline const std::vector<NbrInsert> &getNbrInserts() { return m_nbrInserts; }
   inline void clearNbrInserts() { m_nbrInserts.clear(); }
   bool processNbrInserts(NbrInsertItr begin, NbrInsertItr end, CellMaker<real_t> &maker,
-                         const std::vector<Array<real_t, 3> > &pos, const Box<real_t> &box);
+                         const std::vector<Array<real_t, 3> > &pos, const Box<real_t> &box,
+                         CellComplexUpdateStats *stats = NULL);
   friend class CellMaker<real_t>;
   friend class CellGeometry<real_t>;
   // inline bool isConvex2() const;
@@ -610,6 +630,7 @@ class CellComplex {
   CellArena<real_t> &getCellArena() { return m_cellArena; }
   const CellArena<real_t> &getCellArena() const { return m_cellArena; }
   const NbrList<uint2, real_t> &getNbrList() const { return m_nbrList; }
+  const CellComplexUpdateStats &getLastUpdateStats() const { return m_lastUpdateStats; }
   void drawInterfaceGnuplot(uint0 iType, uint0 jType, const std::vector<Array<real_t, 3> > &p,
                             FILE *fp) const;
 
@@ -624,6 +645,7 @@ class CellComplex {
   std::vector<CellGeometry<real_t> > m_geom;
   std::vector<CellUpdater<real_t> > m_updaters;
   std::vector<bool> m_hasChanged;
+  CellComplexUpdateStats m_lastUpdateStats;
   bool m_isBuild;
 };
 
@@ -1958,7 +1980,8 @@ template <typename real_t>
 bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end,
                                             CellMaker<real_t> &maker,
                                             const std::vector<Array<real_t, 3> > &pos,
-                                            const Box<real_t> &box) {
+                                            const Box<real_t> &box,
+                                            CellComplexUpdateStats *stats) {
   //    printf("begin %u %u %u\n", (*begin)[0], (*begin)[1], (*begin)[2]);
   bool hasChanged(false);
   if (begin == end)
@@ -1982,6 +2005,8 @@ bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end
       if (attemptedNbrs.find((*itr)[1]) != attemptedNbrs.end())
         continue;
       attemptedNbrs.insert((*itr)[1]);
+      if (stats != NULL)
+        ++stats->num_repair_direct_attempts;
       // printf("testing %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
       if (!hasSetMaker) {
         maker = cell;
@@ -1997,6 +2022,8 @@ bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end
       if (isInserted) {
         hasChanged = true;
         m_nbrs.insert((*itr)[1]);
+        if (stats != NULL)
+          ++stats->num_repair_direct_successes;
       }
       if (!isInserted) {
         //	  printf("not inserted: %u %u %u\n",(*itr)[0],(*itr)[1],(*itr)[2]);
@@ -2030,6 +2057,8 @@ bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end
       if (attemptedNbrs.find((*itr)[2]) != attemptedNbrs.end())
         continue;
       attemptedNbrs.insert((*itr)[2]);
+      if (stats != NULL)
+        ++stats->num_repair_indirect_candidates;
       newNbr.id = (*itr)[2];
       newNbr.pos = pos[newNbr.id];
       m_newNbrsWrk.push_back(newNbr);
@@ -2038,8 +2067,13 @@ bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end
   if (!m_newNbrsWrk.empty()) {
     if (!hasSetMaker)
       maker = cell;
-    (maker.processNbrs(m_newNbrsWrk.begin(), m_newNbrsWrk.end(), pos[id], box) ? hasChanged = true
-                                                                               : hasChanged);
+    if (stats != NULL)
+      ++stats->num_repair_batch_calls;
+    if (maker.processNbrs(m_newNbrsWrk.begin(), m_newNbrsWrk.end(), pos[id], box)) {
+      hasChanged = true;
+      if (stats != NULL)
+        ++stats->num_repair_batch_changes;
+    }
   }
   if (hasChanged) {
     cell = maker;
@@ -2663,68 +2697,64 @@ void CellComplex<real_t>::buildGeometry(const std::vector<Array<real_t, 3> > &p)
 
 template <typename real_t>
 void CellComplex<real_t>::update(const std::vector<Array<real_t, 3> > &p) {
+  m_lastUpdateStats = CellComplexUpdateStats();
+  m_lastUpdateStats.num_cells = static_cast<uint2>(p.size());
   (p.size() == m_cells.size() ? m_isBuild : m_isBuild = false);
   if (!m_isBuild) {
+    m_lastUpdateStats.rebuilt_from_scratch = true;
     build(p);
     return;
   }
-#pragma omp parallel for
   for (size_t i = 0; i < m_updaters.size(); ++i) {
     m_updaters[i].reset();
     m_hasChanged[i] = false;
   }
   uint2 numChanged(0);
   const Box<real_t> &box(m_nbrList.getBox());
-#pragma omp parallel for
   for (size_t i = 0; i < m_geom.size(); ++i) {
     m_geom[i].computeConnectingVectors(p, box);
     m_geom[i].computeEdgeInv();
     m_geom[i].updateVertexPos();
     bool isConvex = m_geom[i].isConvex();
-    if (!m_geom[i].isConvex()) {
+    if (!isConvex) {
       m_hasChanged[i] = true;
-#pragma omp atomic
       ++numChanged;
     }
   }
+  m_lastUpdateStats.num_non_convex_before = numChanged;
+  m_lastUpdateStats.num_rebuild_candidates = numChanged;
   //    printf("number changed cells: %u\n",numChanged);
   if (numChanged == 0)
     return;
   const Array<real_t, 3> &L(box.getL());
   Cuboid<real_t> cub(L);
   std::vector<uint2> emptyCells;
-#pragma omp parallel
   {
     CellMaker<real_t> maker;
-    std::vector<uint2> emptyCellsPriv;
-#pragma omp for
     for (size_t i = 0; i < m_updaters.size(); ++i) {
       if (!m_hasChanged[i])
         continue;
       maker = m_cells[i];
       maker.rebuild(p, box, cub);
       m_cells[i] = maker;
+      ++m_lastUpdateStats.num_local_rebuild_cells;
       if (m_cells[i].numVertices() == 0 || m_cells[i].hasNoNbr())
-        emptyCellsPriv.push_back(i);
+        emptyCells.push_back(i);
     }
-    if (!emptyCellsPriv.empty())
-#pragma omp critical
-      emptyCells.insert(emptyCells.end(), emptyCellsPriv.begin(), emptyCellsPriv.end());
   }
   //    printf("number empty cells: %lu\n",emptyCells.size());
+  m_lastUpdateStats.num_empty_after_local_rebuild = static_cast<uint2>(emptyCells.size());
   if (!emptyCells.empty()) {
     initNbrList(p);
-#pragma omp parallel
     {
       CellMaker<real_t> maker;
-#pragma omp for
       for (size_t i = 0; i < emptyCells.size(); ++i) {
         maker.build(emptyCells[i], p, m_nbrList, cub);
         m_cells[emptyCells[i]] = maker;
+        ++m_lastUpdateStats.num_full_rebuild_cells;
       }
     }
   }
-#pragma omp parallel for
   for (size_t i = 0; i < m_updaters.size(); ++i) {
     if (!m_hasChanged[i])
       continue;
@@ -2735,7 +2765,6 @@ void CellComplex<real_t>::update(const std::vector<Array<real_t, 3> > &p) {
   repair(p);
   m_cellArena.rebuildFromCells(m_cells);
   m_geomCells.resize(m_cells.size());
-#pragma omp parallel for
   for (size_t i = 0; i < m_geom.size(); ++i) {
     m_cellArena.materializeCell(i, m_geomCells[i]);
     m_geom[i] = m_geomCells[i];
@@ -2748,7 +2777,7 @@ void CellComplex<real_t>::update(const std::vector<Array<real_t, 3> > &p) {
 template <typename real_t>
 void CellComplex<real_t>::repair(const std::vector<Array<real_t, 3> > &p) {
   //    ProfilerStart("test.prof");
-#pragma omp parallel for
+  const bool debugRepair = (std::getenv("VOR_DEBUG_REPAIR") != NULL);
   for (size_t i = 0; i < m_updaters.size(); ++i) {
     if (!m_hasChanged[i])
       continue;
@@ -2756,32 +2785,35 @@ void CellComplex<real_t>::repair(const std::vector<Array<real_t, 3> > &p) {
   }
   bool needsUpdate(true);
   while (needsUpdate) {
+    ++m_lastUpdateStats.num_repair_iterations;
+    const uint2 iterIndex = m_lastUpdateStats.num_repair_iterations;
+    const uint2 proposalsBefore = m_lastUpdateStats.num_repair_proposals_total;
+    const uint2 groupsBefore = m_lastUpdateStats.num_repair_target_groups_total;
+    const uint2 changedBefore = m_lastUpdateStats.num_repair_cells_changed_total;
+    const uint2 directAttemptsBefore = m_lastUpdateStats.num_repair_direct_attempts;
+    const uint2 directSuccessesBefore = m_lastUpdateStats.num_repair_direct_successes;
+    const uint2 indirectBefore = m_lastUpdateStats.num_repair_indirect_candidates;
+    const uint2 batchCallsBefore = m_lastUpdateStats.num_repair_batch_calls;
+    const uint2 batchChangesBefore = m_lastUpdateStats.num_repair_batch_changes;
     needsUpdate = false;
     std::vector<NbrInsert> nbrInserts, nbrInsTmp;
-#pragma omp parallel
     {
       std::vector<NbrInsert> nbrInsPriv;
-#pragma omp for
       for (size_t i = 0; i < m_updaters.size(); ++i) {
         const std::vector<NbrInsert> &inserts(m_updaters[i].getNbrInserts());
         if (!inserts.empty()) {
           nbrInsPriv.insert(nbrInsPriv.end(), inserts.begin(), inserts.end());
           m_updaters[i].clearNbrInserts();
-#pragma omp atomic write
           needsUpdate = true;
         }
       }
       std::sort(nbrInsPriv.begin(), nbrInsPriv.end(), CompareNbrInsert());
-#pragma omp critical
-      {
-        nbrInsTmp.resize(nbrInserts.size() + nbrInsPriv.size());
-        std::merge(nbrInserts.begin(), nbrInserts.end(), nbrInsPriv.begin(), nbrInsPriv.end(),
-                   nbrInsTmp.begin(), CompareNbrInsert());
-        nbrInserts.swap(nbrInsTmp);
-      }
-      // #pragma omp critical
-      // 	nbrInserts.insert(nbrInserts.end(), nbrInsPriv.begin(), nbrInsPriv.end());
+      nbrInsTmp.resize(nbrInserts.size() + nbrInsPriv.size());
+      std::merge(nbrInserts.begin(), nbrInserts.end(), nbrInsPriv.begin(), nbrInsPriv.end(),
+                 nbrInsTmp.begin(), CompareNbrInsert());
+      nbrInserts.swap(nbrInsTmp);
     }
+    m_lastUpdateStats.num_repair_proposals_total += static_cast<uint2>(nbrInserts.size());
     //      std::__parallel::std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
     // std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
     CellMaker<real_t> maker;
@@ -2792,16 +2824,35 @@ void CellComplex<real_t>::repair(const std::vector<Array<real_t, 3> > &p) {
       while (groupEnd < nbrInserts.size() && nbrInserts[groupEnd][0] == cellId) {
         ++groupEnd;
       }
+      ++m_lastUpdateStats.num_repair_target_groups_total;
       NbrInsertItr beginPriv = nbrInserts.begin() + static_cast<std::ptrdiff_t>(nextGroupBegin);
       NbrInsertItr endPriv = nbrInserts.begin() + static_cast<std::ptrdiff_t>(groupEnd);
-      bool hasChanged =
-          m_updaters[cellId].processNbrInserts(beginPriv, endPriv, maker, p, m_nbrList.getBox());
+      bool hasChanged = m_updaters[cellId].processNbrInserts(beginPriv, endPriv, maker, p,
+                                                             m_nbrList.getBox(),
+                                                             &m_lastUpdateStats);
       m_hasChanged[cellId] = true;
       if (hasChanged) {
         m_cells[cellId] = maker;
         m_updaters[cellId].updateNbrInserts();
+        ++m_lastUpdateStats.num_repair_cells_changed_total;
       }
       nextGroupBegin = groupEnd;
+    }
+    if (debugRepair) {
+      std::fprintf(stderr,
+                   "DEBUG repair iter=%u proposals=%u target_groups=%u changed_cells=%u "
+                   "direct_attempts=%u direct_successes=%u indirect_candidates=%u "
+                   "batch_calls=%u batch_changes=%u next_round=%d\n",
+                   static_cast<unsigned>(iterIndex),
+                   static_cast<unsigned>(m_lastUpdateStats.num_repair_proposals_total - proposalsBefore),
+                   static_cast<unsigned>(m_lastUpdateStats.num_repair_target_groups_total - groupsBefore),
+                   static_cast<unsigned>(m_lastUpdateStats.num_repair_cells_changed_total - changedBefore),
+                   static_cast<unsigned>(m_lastUpdateStats.num_repair_direct_attempts - directAttemptsBefore),
+                   static_cast<unsigned>(m_lastUpdateStats.num_repair_direct_successes - directSuccessesBefore),
+                   static_cast<unsigned>(m_lastUpdateStats.num_repair_indirect_candidates - indirectBefore),
+                   static_cast<unsigned>(m_lastUpdateStats.num_repair_batch_calls - batchCallsBefore),
+                   static_cast<unsigned>(m_lastUpdateStats.num_repair_batch_changes - batchChangesBefore),
+                   needsUpdate ? 1 : 0);
     }
   }
 }

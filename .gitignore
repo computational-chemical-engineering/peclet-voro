@@ -30,6 +30,9 @@ GNUPlotfile.txt
 docs/html/
 docs/latex/
 
+# ── Benchmark output ──────────────────────────────────────────────────────────
+benchmarks/results/
+
 # ── IDE / editor artifacts ───────────────────────────────────────────────────
 .vscode/
 .idea/
