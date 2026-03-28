@@ -46,8 +46,8 @@ int main() {
   L[2] = 1;
   BoxLE<real_t> box(L);
   CellComplex<real_t> complex(&box);
-  vector<Cell<real_t> > &cells(complex.getCells());
   vector<CellGeometry<real_t> > &geoms(complex.getGeoms());
+  vector<Cell<real_t> > cells;
 
   uint particle_type, no_particles, no_particles_x, no_particles_y, no_particles_z;
   printf("Type 1 for random and 2 for regular particle generation\n");
@@ -91,6 +91,7 @@ int main() {
     }
   }
   complex.build(p);
+  complex.materializeCells(cells);
 
   real_t vol(0);
 #pragma omp parallel for reduction(+ : vol)

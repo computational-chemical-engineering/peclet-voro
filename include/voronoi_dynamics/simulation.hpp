@@ -43,10 +43,10 @@ class Simulation {
   const std::vector<std::array<real_t, 3> >& getVelocities() const { return m_vel; }
   const CellComplex<real_t>& getCellComplex() const { return m_complex; }
   void putInBox() { m_box.putInBox(m_pos); }
-  template <unsigned int m>
+  template <std::size_t m>
   void computeGradients(const std::vector<std::array<real_t, m> >& phi,
                         std::vector<std::array<std::array<real_t, m>, 3> >& grads) const;
-  template <unsigned int m>
+  template <std::size_t m>
   void computeGradients2(const std::vector<std::array<real_t, m> >& phi,
                          std::vector<std::array<std::array<real_t, m>, 3> >& grads) const;
   void computeGradients(const std::vector<real_t>& phi,
@@ -185,7 +185,7 @@ bool Simulation<real_t>::restart(real_t time, const std::vector<std::array<real_
 }
 
 template <typename real_t>
-template <unsigned int m>
+template <std::size_t m>
 void Simulation<real_t>::computeGradients(const std::vector<std::array<real_t, m> >& phi,
                                           std::vector<std::array<std::array<real_t, m>, 3> >& grads) const {
   const std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());
@@ -224,7 +224,7 @@ void Simulation<real_t>::computeGradients(const std::vector<std::array<real_t, m
 }
 
 template <typename real_t>
-template <unsigned int m>
+template <std::size_t m>
 void Simulation<real_t>::computeGradients2(const std::vector<std::array<real_t, m> >& phi,
                                            std::vector<std::array<std::array<real_t, m>, 3> >& grads) const {
   const std::vector<CellGeometry<real_t> >& geoms(this->m_complex.getGeoms());

@@ -42,7 +42,6 @@ int main() {
   L[2] = 1;
   BoxLE<real_t> box(L);
   CellComplex<real_t> complex(&box);
-  vector<Cell<real_t> >& cells(complex.getCells());
   vector<CellGeometry<real_t> >& geoms(complex.getGeoms());
 
   vector<std::array<real_t, 3> > p(10000);
@@ -59,7 +58,7 @@ int main() {
   for (uint i = 0; i < N; ++i)
     complex.build(p);
   duration = real_t(clock() - start);
-  printf("%lu Voronoi cells created in %f seconds\n", complex.getCells().size(),
+  printf("%lu Voronoi cells created in %f seconds\n", static_cast<unsigned long>(complex.numCells()),
          duration / (real_t(N) * real_t(CLOCKS_PER_SEC)));
 
   {

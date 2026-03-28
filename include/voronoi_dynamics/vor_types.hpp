@@ -110,110 +110,78 @@ class CompareNbrInsert {
 };
 
 /**
- * @class DenseSlots
- * @brief Cache-friendly slot allocator replacing linked-list-based IndxList.
+ * @class DenseSlotsView
+ * @brief Logic-only slot allocator view backed by externally owned storage.
  *
- * Manages a fixed-capacity pool of slot indices.  Alive slots are tracked via
- * a byte array (no bit-packing).  A small stack caches recently freed indices
- * for O(1) re-allocation.  Iteration is a simple sequential scan over the
- * [0, numAllocated) range, checking the alive flag — ideal for the hardware
- * prefetcher.
+ * Alive flags and the free stack are supplied by the caller via `setStorage()`.
+ * This keeps slot-management logic portable while leaving allocation policy to
+ * the owner.
  *
  * @tparam UInt unsigned integer type for slot indices
- * @tparam Capacity maximum number of slots
  */
-template <typename UInt, UInt Capacity>
-class DenseSlots {
+template <typename UInt>
+class DenseSlotsView {
  public:
-  DenseSlots() : m_numAllocated(0), m_numAlive(0), m_freeTop(0), m_activeCapacity(Capacity) {
-    std::memset(m_alive, 0, Capacity);
+  static constexpr UInt InvalidIdx = static_cast<UInt>(~0);
+
+  DenseSlotsView()
+      : m_alive(NULL), m_freeStack(NULL), m_capacity(0), m_numAllocated(0), m_numAlive(0),
+        m_freeTop(0) {}
+
+  void setStorage(uint8_t *alivePtr, UInt *stackPtr, UInt capacity) {
+    m_alive = alivePtr;
+    m_freeStack = stackPtr;
+    m_capacity = capacity;
   }
-  /// Reset: slots 0..n-1 are alive, rest are dead.
+
   void reset(UInt n) {
-    if (n > m_activeCapacity)
-      setActiveCapacity(n);
     m_numAllocated = n;
     m_numAlive = n;
     m_freeTop = 0;
-    std::memset(m_alive, 0, Capacity);
-    for (UInt i = 0; i < n; ++i)
-      m_alive[i] = 1;
   }
-  /// Allocate a free slot (returns Capacity if none available).
+
   UInt getFree() {
     UInt idx;
     if (m_freeTop > 0) {
       idx = m_freeStack[--m_freeTop];
-    } else if (m_numAllocated < m_activeCapacity) {
+    } else if (m_numAllocated < m_capacity) {
       idx = m_numAllocated++;
     } else {
-      return Capacity;
+      return InvalidIdx;
     }
     m_alive[idx] = 1;
     ++m_numAlive;
     return idx;
   }
-  /// Release slot i. Returns true if it was alive.
+
   bool release(UInt i) {
-    if (i >= Capacity || !m_alive[i])
+    if (i >= m_capacity || !m_alive[i])
       return false;
     m_alive[i] = 0;
-    if (m_freeTop < Capacity)
-      m_freeStack[m_freeTop++] = i;
+    m_freeStack[m_freeTop++] = i;
     --m_numAlive;
     return true;
   }
-  /// Check if slot i is free (dead).
+
   inline bool isFree(UInt i) const { return !m_alive[i]; }
-  /// Number of slots ever allocated (high-water mark for iteration).
   inline UInt numAllocated() const { return m_numAllocated; }
-  /// Number of currently alive slots.
   inline UInt numAlive() const { return m_numAlive; }
-  /// Current active capacity (<= Capacity).
-  inline UInt activeCapacity() const { return m_activeCapacity; }
-  /// Set active capacity (clamped to [numAllocated, Capacity]).
-  void setActiveCapacity(UInt cap) {
-    if (cap < m_numAllocated)
-      cap = m_numAllocated;
-    if (cap > Capacity)
-      cap = Capacity;
-    m_activeCapacity = cap;
-  }
-  /// Grow active capacity by doubling (or to target if provided).
-  /// Returns true if capacity increased.
-  bool growActiveCapacity(UInt target = 0) {
-    if (m_activeCapacity >= Capacity)
-      return false;
-    UInt new_cap = target;
-    if (new_cap == 0) {
-      new_cap = static_cast<UInt>(m_activeCapacity * 2);
-      if (new_cap <= m_activeCapacity)
-        new_cap = static_cast<UInt>(m_activeCapacity + 1);
-    }
-    if (new_cap > Capacity)
-      new_cap = Capacity;
-    if (new_cap <= m_activeCapacity)
-      return false;
-    m_activeCapacity = new_cap;
-    return true;
-  }
-  /// True if no alive slots.
+  inline UInt activeCapacity() const { return m_capacity; }
   inline bool empty() const { return m_numAlive == 0; }
-  /// Find first alive slot index (returns Capacity if empty).
   inline UInt firstAlive() const {
     for (UInt i = 0; i < m_numAllocated; ++i)
       if (m_alive[i])
         return i;
-    return Capacity;
+    return InvalidIdx;
   }
 
  private:
-  uint8_t m_alive[Capacity];
-  UInt m_freeStack[Capacity];
-  UInt m_freeTop;
+  uint8_t *m_alive;
+  UInt *m_freeStack;
+  UInt m_capacity;
   UInt m_numAllocated;
   UInt m_numAlive;
-  UInt m_activeCapacity;
+  UInt m_freeTop;
 };
 
 /**

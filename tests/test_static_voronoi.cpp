@@ -48,8 +48,9 @@ static int testRandomPoints(int numParticles, double Lx, double Ly, double Lz, u
   // Build Voronoi tessellation
   complex.build(pos);
 
-  vector<Cell<real_t> > &cells = complex.getCells();
   vector<CellGeometry<real_t> > &geoms = complex.getGeoms();
+  vector<Cell<real_t> > cells;
+  complex.materializeCells(cells);
 
   if ((int)cells.size() != numParticles) {
     fprintf(stderr, "FAIL: expected %d cells, got %lu\n", numParticles,
@@ -147,7 +148,7 @@ int main() {
 
     // Build twice and compare volumes
     complex.build(pos);
-    vector<CellGeometry<real_t> > &geoms1 = complex.getGeoms();
+  vector<CellGeometry<real_t> > &geoms1 = complex.getGeoms();
     vector<real_t> vols1(N);
     for (int i = 0; i < N; ++i) {
       geoms1[i].computeVolume();

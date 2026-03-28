@@ -379,8 +379,6 @@ class CellMaker {
   inline uint1 allocVertexChecked(const char *caller);
   inline uint1 allocFacetChecked(const char *caller);
   [[noreturn]] inline void failCapacity(const char *caller, const char *kind, uint1 capacity) const;
-  static constexpr uint1 kMaxV = maxNumVertices - 1;
-  static constexpr uint1 kMaxF = maxNumFacets - 1;
 #ifndef VOR_CELLMAKER_USE_CUTCELL2
 #define VOR_CELLMAKER_USE_CUTCELL2 1
 #endif
@@ -394,8 +392,12 @@ class CellMaker {
   std::vector<Vertex> m_vertices;
   std::vector<uint1> m_facets;
   std::vector<uint2> m_nbr;
-  DenseSlots<uint1, kMaxV> m_slotsV;
-  DenseSlots<uint1, kMaxF> m_slotsF;
+  DenseSlotsView<uint1> m_slotsV;
+  DenseSlotsView<uint1> m_slotsF;
+  std::vector<uint8_t> m_aliveV_buf;
+  std::vector<uint8_t> m_aliveF_buf;
+  std::vector<uint1> m_freeStackV_buf;
+  std::vector<uint1> m_freeStackF_buf;
   VisitedIndx<uint2> m_visited;
   std::vector<uint2> m_checkGridCell;  ///< BFS queue (use m_checkGCHead as front index)
   size_t m_checkGCHead;                ///< index of current BFS queue front
@@ -918,14 +920,20 @@ Cuboid<real_t>::Cuboid(const std::array<real_t, 3> &L) {
 template <typename real_t>
 CellMaker<real_t>::CellMaker()
   : p_nbrList(NULL), m_checkGCHead(0u), m_isAllCut(false), m_distGen(0) {
-  m_slotsV.setActiveCapacity(kInitialV);
-  m_slotsF.setActiveCapacity(kInitialF);
-  ensureVertexBuffers(m_slotsV.activeCapacity());
-  ensureFacetBuffers(m_slotsF.activeCapacity());
+  m_aliveV_buf.resize(kInitialV, 0u);
+  m_aliveF_buf.resize(kInitialF, 0u);
+  m_freeStackV_buf.resize(kInitialV);
+  m_freeStackF_buf.resize(kInitialF);
+  m_slotsV.setStorage(m_aliveV_buf.data(), m_freeStackV_buf.data(),
+                      static_cast<uint1>(m_aliveV_buf.size()));
+  m_slotsF.setStorage(m_aliveF_buf.data(), m_freeStackF_buf.data(),
+                      static_cast<uint1>(m_aliveF_buf.size()));
+  ensureVertexBuffers(static_cast<uint1>(m_aliveV_buf.size()));
+  ensureFacetBuffers(static_cast<uint1>(m_aliveF_buf.size()));
   updatePeakCounter(cellMakerTelemetry().peak_vertex_capacity,
-                    static_cast<uint64_t>(m_slotsV.activeCapacity()));
+                    static_cast<uint64_t>(m_aliveV_buf.size()));
   updatePeakCounter(cellMakerTelemetry().peak_facet_capacity,
-                    static_cast<uint64_t>(m_slotsF.activeCapacity()));
+                    static_cast<uint64_t>(m_aliveF_buf.size()));
   std::fill(m_knownDistGen.begin(), m_knownDistGen.end(), 0u);
   m_newVerticesWrk.reserve(20);
   m_facetPrevWrk.reserve(20);
@@ -1004,30 +1012,44 @@ bool CellMaker<real_t>::applyCut(const std::array<real_t, 3> &p, real_t rSqHalf,
 template <typename real_t>
 uint1 CellMaker<real_t>::allocVertexChecked(const char *caller) {
   uint1 v_new = m_slotsV.getFree();
-  if (v_new == kMaxV && m_slotsV.growActiveCapacity()) {
-    ensureVertexBuffers(m_slotsV.activeCapacity());
+  if (v_new == DenseSlotsView<uint1>::InvalidIdx) {
+    size_t newCapacity = std::max<size_t>(1, m_aliveV_buf.size() * 2);
+    if (newCapacity > static_cast<size_t>(DenseSlotsView<uint1>::InvalidIdx))
+      failCapacity(caller, "vertex", DenseSlotsView<uint1>::InvalidIdx);
+    m_aliveV_buf.resize(newCapacity, 0u);
+    m_freeStackV_buf.resize(newCapacity);
+    m_slotsV.setStorage(m_aliveV_buf.data(), m_freeStackV_buf.data(),
+                        static_cast<uint1>(m_aliveV_buf.size()));
+    ensureVertexBuffers(static_cast<uint1>(m_aliveV_buf.size()));
     cellMakerTelemetry().vertex_growth_events.fetch_add(1, std::memory_order_relaxed);
     updatePeakCounter(cellMakerTelemetry().peak_vertex_capacity,
-                      static_cast<uint64_t>(m_slotsV.activeCapacity()));
+                      static_cast<uint64_t>(m_aliveV_buf.size()));
     v_new = m_slotsV.getFree();
   }
-  if (v_new == kMaxV)
-    failCapacity(caller, "vertex", kMaxV);
+  if (v_new == DenseSlotsView<uint1>::InvalidIdx)
+    failCapacity(caller, "vertex", static_cast<uint1>(m_aliveV_buf.size()));
   return v_new;
 }
 
 template <typename real_t>
 uint1 CellMaker<real_t>::allocFacetChecked(const char *caller) {
   uint1 f_new = m_slotsF.getFree();
-  if (f_new == kMaxF && m_slotsF.growActiveCapacity()) {
-    ensureFacetBuffers(m_slotsF.activeCapacity());
+  if (f_new == DenseSlotsView<uint1>::InvalidIdx) {
+    size_t newCapacity = std::max<size_t>(1, m_aliveF_buf.size() * 2);
+    if (newCapacity > static_cast<size_t>(DenseSlotsView<uint1>::InvalidIdx))
+      failCapacity(caller, "facet", DenseSlotsView<uint1>::InvalidIdx);
+    m_aliveF_buf.resize(newCapacity, 0u);
+    m_freeStackF_buf.resize(newCapacity);
+    m_slotsF.setStorage(m_aliveF_buf.data(), m_freeStackF_buf.data(),
+                        static_cast<uint1>(m_aliveF_buf.size()));
+    ensureFacetBuffers(static_cast<uint1>(m_aliveF_buf.size()));
     cellMakerTelemetry().facet_growth_events.fetch_add(1, std::memory_order_relaxed);
     updatePeakCounter(cellMakerTelemetry().peak_facet_capacity,
-                      static_cast<uint64_t>(m_slotsF.activeCapacity()));
+                      static_cast<uint64_t>(m_aliveF_buf.size()));
     f_new = m_slotsF.getFree();
   }
-  if (f_new == kMaxF)
-    failCapacity(caller, "facet", kMaxF);
+  if (f_new == DenseSlotsView<uint1>::InvalidIdx)
+    failCapacity(caller, "facet", static_cast<uint1>(m_aliveF_buf.size()));
   return f_new;
 }
 
@@ -1049,12 +1071,28 @@ template <typename real_t>
 
 template <typename real_t>
 void CellMaker<real_t>::init(const Cell<real_t> &cell) {
+  if (m_aliveV_buf.size() < cell.m_numVertices) {
+    m_aliveV_buf.resize(cell.m_numVertices, 0u);
+    m_freeStackV_buf.resize(cell.m_numVertices);
+    m_slotsV.setStorage(m_aliveV_buf.data(), m_freeStackV_buf.data(),
+                        static_cast<uint1>(m_aliveV_buf.size()));
+  }
   m_slotsV.reset(cell.m_numVertices);
-  ensureVertexBuffers(m_slotsV.activeCapacity());
+  std::fill(m_aliveV_buf.begin(), m_aliveV_buf.end(), 0u);
+  std::fill(m_aliveV_buf.begin(), m_aliveV_buf.begin() + cell.m_numVertices, uint8_t(1));
+  ensureVertexBuffers(static_cast<uint1>(m_aliveV_buf.size()));
   std::memcpy(m_vertexPos.data(), cell.m_vertexPos, cell.m_numVertices * sizeof(m_vertexPos[0]));
   std::memcpy(m_vertices.data(), cell.m_vertices, cell.m_numVertices * sizeof(m_vertices[0]));
+  if (m_aliveF_buf.size() < cell.m_numFacets) {
+    m_aliveF_buf.resize(cell.m_numFacets, 0u);
+    m_freeStackF_buf.resize(cell.m_numFacets);
+    m_slotsF.setStorage(m_aliveF_buf.data(), m_freeStackF_buf.data(),
+                        static_cast<uint1>(m_aliveF_buf.size()));
+  }
   m_slotsF.reset(cell.m_numFacets);
-  ensureFacetBuffers(m_slotsF.activeCapacity());
+  std::fill(m_aliveF_buf.begin(), m_aliveF_buf.end(), 0u);
+  std::fill(m_aliveF_buf.begin(), m_aliveF_buf.begin() + cell.m_numFacets, uint8_t(1));
+  ensureFacetBuffers(static_cast<uint1>(m_aliveF_buf.size()));
   std::memcpy(m_facets.data(), cell.m_facets, cell.m_numFacets * sizeof(m_facets[0]));
   std::memcpy(m_nbr.data(), cell.m_nbr, cell.m_numFacets * sizeof(m_nbr[0]));
   computeAllRsq();

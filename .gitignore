@@ -32,6 +32,7 @@ docs/latex/
 
 # ── Benchmark output ──────────────────────────────────────────────────────────
 benchmarks/results/
+benchmarks/archive_pending/
 
 # ── IDE / editor artifacts ───────────────────────────────────────────────────
 .vscode/
