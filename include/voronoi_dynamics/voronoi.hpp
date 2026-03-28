@@ -186,14 +186,14 @@ class Cell {
   //! @brief output the cell geometry in a Gnuplot format
   //! @param p coordinate of the center of the cell (Note that internal vertex coordinates are
   //! relative to the center.)
-  void drawGnuplot(Array<real_t, 3> p, FILE *fp) const;
+  void drawGnuplot(std::array<real_t, 3> p, FILE *fp) const;
   //! @brief output a facet in a Gnuplot format
   //! @param iFacet index of the facet to be drawn
   //! @param p coordinate of the center of the cell (Note that internal vertex coordinates are
   //! relative to the center.)
-  inline void drawFacetGnuplot(uint1 iFacet, Array<real_t, 3> p, FILE *fp) const;
+  inline void drawFacetGnuplot(uint1 iFacet, std::array<real_t, 3> p, FILE *fp) const;
   //! @brief facet information of a cell with all the verticies on it
-  void printFacetInfo(Array<real_t, 3> p, uint facet_id) const;
+  void printFacetInfo(std::array<real_t, 3> p, uint facet_id) const;
   //! @brief get the id if this cell
   //! @return ID of cell
   inline uint2 getID() const { return m_id; }
@@ -223,7 +223,7 @@ class Cell {
   uint2 m_id;
   uint0 m_numFacets;
   uint0 m_numVertices;
-  Array<real_t, 3> m_vertexPos[maxNumVertices];
+  std::array<real_t, 3> m_vertexPos[maxNumVertices];
   Vertex m_vertices[maxNumVertices];
   uint1 m_facets[maxNumFacets];
   uint2 m_nbr[maxNumFacets];
@@ -251,7 +251,7 @@ class Cuboid : public Cell<real_t> {
  public:
   //! @brief constructor
   //! @param L contains the lengths of the 3 sides of the cuboid
-  Cuboid(const Array<real_t, 3> &L);
+  Cuboid(const std::array<real_t, 3> &L);
 };
 
 /**
@@ -290,7 +290,7 @@ class CellMaker {
    * @param initCell initial cell used to carve out the Voronoi cell
    * @return true if the final cell is different form initCell
    */
-  bool build(uint2 id, const std::vector<Array<real_t, 3> > &pos,
+  bool build(uint2 id, const std::vector<std::array<real_t, 3> > &pos,
              const NbrList<uint2, real_t> &nbrList, const Cell<real_t> &initCell);
   /**
    * @brief rebuild a Voronoi cell
@@ -302,7 +302,7 @@ class CellMaker {
    * @param initCell initial cell used to carve out the Voronoi cell
    * @return true if all neighbors of initCell are associated with a facet of the newly created cell
    */
-  bool rebuild(const std::vector<Array<real_t, 3> > &pos, const Box<real_t> &box,
+  bool rebuild(const std::vector<std::array<real_t, 3> > &pos, const Box<real_t> &box,
                const Cell<real_t> &initCell);
   /**
    * @brief further refine the Voronoi cell by performing additional plane cuts corresponding to
@@ -315,7 +315,7 @@ class CellMaker {
    **/
   inline bool processNbrs(typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin,
                           typename std::vector<PosAndId<uint2, real_t> >::const_iterator end,
-                          const Array<real_t, 3> pos0, const Box<real_t> &box);
+                          const std::array<real_t, 3> pos0, const Box<real_t> &box);
   //    inline real_t getRsqMax() const {return m_rSq[m_vRsqMax];}
   void getCloseNbrs(NbrInsert &nbrs);
   // void drawGnuplot(FILE *fp) const;
@@ -329,8 +329,8 @@ class CellMaker {
   //! @brief initialize the cell to be cut
   //! @param cell used for the initialization
   void init(const Cell<real_t> &cell);
-  inline bool cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
-  inline bool cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
+  inline bool cutCell(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
+  inline bool cutCell2(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr);
   //! @brief compute squared distance between vertex i and the center of the cell
   //! Result is stored in private member m_rSq[i]
   //! @param i index of the vertex
@@ -345,23 +345,23 @@ class CellMaker {
   //! @param p the poisition of a point relative to the cell center. The plane is the perpendicular
   //! plane halfway between the center and p.
   //! @param rSqHalf = 0.5|p|^2
-  inline real_t computeDist(uint1 i, const Array<real_t, 3> p, const real_t rSqHalf);
+  inline real_t computeDist(uint1 i, const std::array<real_t, 3> p, const real_t rSqHalf);
   //! @brief compute distance between the vertex i and a plane
   //! @param i index of the vertex
   //! @param p the poisition of a point relative to the cell center. The plane is the perpendicular
   //! plane halfway between the center and p.
-  inline real_t computeDist(uint1 i, const Array<real_t, 3> p);
+  inline real_t computeDist(uint1 i, const std::array<real_t, 3> p);
   //! @brief compute distance between a plane and all vertices
   //! @param p the poisition of a point relative to the cell center. The plane is the perpendicular
   //! plane halfway between the center and p.
   //! @param rSqHalf = 0.5|p|^2
-  void computeAllDist(const Array<real_t, 3> p, const real_t rSqHalf);
+  void computeAllDist(const std::array<real_t, 3> p, const real_t rSqHalf);
   //! @brief reset internal variables that indicate distances of vertices to a plane are computed
   inline void resetDist();
 
-  inline void computeGCOrig(uint2 indx, const Array<real_t, 3> &pos);
+  inline void computeGCOrig(uint2 indx, const std::array<real_t, 3> &pos);
   real_t computeRsqMinGC() const;
-  Array<real_t, 3> getClosestPointGC(uint1 indx) const;
+  std::array<real_t, 3> getClosestPointGC(uint1 indx) const;
   inline real_t computeDistGC(uint1 i);
   inline real_t computeMaxDistGC();
   real_t computeMaxDistGCVerb();
@@ -373,7 +373,7 @@ class CellMaker {
   CellMaker &operator=(const CellMaker<real_t> &rhs);
   inline uint1 getNextLabelCCW(uint1 label) const;
   inline uint1 getReverseLabel(uint1 label) const;
-  inline bool applyCut(const Array<real_t, 3> &p, real_t rSqHalf, uint2 nbr);
+  inline bool applyCut(const std::array<real_t, 3> &p, real_t rSqHalf, uint2 nbr);
   inline void ensureVertexBuffers(uint1 minSize);
   inline void ensureFacetBuffers(uint1 minSize);
   inline uint1 allocVertexChecked(const char *caller);
@@ -389,7 +389,7 @@ class CellMaker {
   static constexpr uint1 kInitialF = 64;
   uint2 m_id;
   const NbrList<uint2, real_t> *p_nbrList;
-  std::vector<Array<real_t, 3> > m_vertexPos;
+  std::vector<std::array<real_t, 3> > m_vertexPos;
   std::vector<real_t> m_rSq;
   std::vector<Vertex> m_vertices;
   std::vector<uint1> m_facets;
@@ -406,7 +406,7 @@ class CellMaker {
   std::vector<real_t> m_dist;
   uint2 m_distGen;              ///< generation counter for lazy distance reset
   std::vector<uint2> m_knownDistGen;  ///< per-vertex generation stamp
-  Array<real_t, 3> m_relOrigGC, m_dLGC;
+  std::array<real_t, 3> m_relOrigGC, m_dLGC;
   std::vector<real_t> m_distGC;
   std::vector<uint1> m_renumVWrk;
   std::vector<uint1> m_renumFWrk;
@@ -424,7 +424,7 @@ class CellGeometry {
   CellGeometry(Cell<real_t> &cell);
   CellGeometry &operator=(Cell<real_t> &rhs);
   CellGeometry &operator=(const CellGeometry<real_t> &rhs);
-  void computeConnectingVectors(const std::vector<Array<real_t, 3> > &pos, const Box<real_t> &box);
+  void computeConnectingVectors(const std::vector<std::array<real_t, 3> > &pos, const Box<real_t> &box);
   void computeEdgeInv();
   void updateVertexPos();
   void computeAreas();
@@ -432,39 +432,39 @@ class CellGeometry {
   void diffVolume();
   void computeAll();
   real_t maxConvexViolation() const;
-  Array<Array<real_t, 3>, 3> velocityGradient(const std::vector<Array<real_t, 3> > &velocity) const;
-  void getDelaunayNbrs(uint1 iVertex, Array<uint2, 3> &nbrs) const;
-  void computeDelaunayForces(uint1 iVertex, const Array<Array<real_t, 3>, 3> &stress,
-                             Array<Array<real_t, 3>, 3> &forces);
-  Array<Array<real_t, 3>, 3> velocityGradientDelaunay(
-      uint1 iVertex, const Array<uint2, 3> &nbrs,
-      const std::vector<Array<real_t, 3> > &velocities) const;
-  Array<real_t, 3> force(const std::vector<Array<Array<real_t, 3>, 3> > &stresses) const;
+  std::array<std::array<real_t, 3>, 3> velocityGradient(const std::vector<std::array<real_t, 3> > &velocity) const;
+  void getDelaunayNbrs(uint1 iVertex, std::array<uint2, 3> &nbrs) const;
+  void computeDelaunayForces(uint1 iVertex, const std::array<std::array<real_t, 3>, 3> &stress,
+                             std::array<std::array<real_t, 3>, 3> &forces);
+  std::array<std::array<real_t, 3>, 3> velocityGradientDelaunay(
+      uint1 iVertex, const std::array<uint2, 3> &nbrs,
+      const std::vector<std::array<real_t, 3> > &velocities) const;
+  std::array<real_t, 3> force(const std::vector<std::array<std::array<real_t, 3>, 3> > &stresses) const;
   void gradFacetAreaSq(uint1 facetIndx, std::vector<uint2> &indx,
-                       std::vector<Array<real_t, 3> > &grad) const;
-  inline const std::vector<Array<real_t, 3> > &getdV() const { return m_dV; }
-  inline const std::vector<Array<real_t, 3> > &getAreas() const { return m_areas; }
+                       std::vector<std::array<real_t, 3> > &grad) const;
+  inline const std::vector<std::array<real_t, 3> > &getdV() const { return m_dV; }
+  inline const std::vector<std::array<real_t, 3> > &getAreas() const { return m_areas; }
   real_t getVolume() const { return m_vol; }
   const std::vector<real_t> &getVolumeDelaunay() const { return m_volDelaunay; }
-  const std::vector<Array<Array<Array<real_t, 3>, 3>, 3> > &getOmega() const { return m_omega; }
+  const std::vector<std::array<std::array<std::array<real_t, 3>, 3>, 3> > &getOmega() const { return m_omega; }
   bool isConvex() const;
   inline Cell<real_t> &getCell() { return *p_cell; }
-  inline const std::vector<Array<real_t, 3> > &getConnVect() const { return m_connV; }
+  inline const std::vector<std::array<real_t, 3> > &getConnVect() const { return m_connV; }
   inline const std::vector<real_t> &getConnVectSq() const { return m_rSq; }
 
  protected:
   Cell<real_t> *p_cell;
-  std::vector<Array<real_t, 3> > m_connV;
+  std::vector<std::array<real_t, 3> > m_connV;
   std::vector<real_t> m_rSq;
-  std::vector<Array<Array<real_t, 3>, 3> > m_edgeInv;
+  std::vector<std::array<std::array<real_t, 3>, 3> > m_edgeInv;
   std::vector<real_t> m_volDelaunay;
-  std::vector<Array<real_t, 3> > m_areas;
+  std::vector<std::array<real_t, 3> > m_areas;
   real_t m_vol;
   // omega[i][j][l][k]
   // neighbor corresponding to facet i differentiated into j-direction
   // l: displacement direction, k: normal direction
-  std::vector<Array<Array<Array<real_t, 3>, 3>, 3> > m_omega;
-  std::vector<Array<real_t, 3> > m_dV;
+  std::vector<std::array<std::array<std::array<real_t, 3>, 3>, 3> > m_omega;
+  std::vector<std::array<real_t, 3> > m_dV;
 };
 
 template <typename real_t>
@@ -480,7 +480,7 @@ class CellUpdater {
   inline const std::vector<NbrInsert> &getNbrInserts() { return m_nbrInserts; }
   inline void clearNbrInserts() { m_nbrInserts.clear(); }
   bool processNbrInserts(NbrInsertItr begin, NbrInsertItr end, CellMaker<real_t> &maker,
-                         const std::vector<Array<real_t, 3> > &pos, const Box<real_t> &box,
+                         const std::vector<std::array<real_t, 3> > &pos, const Box<real_t> &box,
                          CellComplexUpdateStats *stats = NULL);
   friend class CellMaker<real_t>;
   friend class CellGeometry<real_t>;
@@ -496,7 +496,7 @@ class CellUpdater {
   std::vector<NbrInsert> m_nbrInserts;
   bool m_isSetup;
   std::vector<PosAndId<uint2, real_t> > m_newNbrsWrk;
-  std::vector<Array<bool, 3> > m_visitedWrk;
+  std::vector<std::array<bool, 3> > m_visitedWrk;
 };
 
 /**
@@ -570,7 +570,7 @@ class CellArena {
   uint2 cellId(size_t i) const { return m_spans[i].id; }
   uint1 cellNumVertices(size_t i) const { return m_spans[i].vertexCount; }
   uint1 cellNumFacets(size_t i) const { return m_spans[i].facetCount; }
-  const Array<real_t, 3> *cellVertexPosData(size_t i) const {
+  const std::array<real_t, 3> *cellVertexPosData(size_t i) const {
     return m_vertexPos.data() + m_spans[i].vertexOffset;
   }
   const Vertex *cellVertexLabelData(size_t i) const {
@@ -594,14 +594,14 @@ class CellArena {
   }
 
   const std::vector<CellSpan> &spans() const { return m_spans; }
-  const std::vector<Array<real_t, 3> > &vertexPos() const { return m_vertexPos; }
+  const std::vector<std::array<real_t, 3> > &vertexPos() const { return m_vertexPos; }
   const std::vector<Vertex> &vertices() const { return m_vertices; }
   const std::vector<uint1> &facets() const { return m_facets; }
   const std::vector<uint2> &nbrs() const { return m_nbr; }
 
  private:
   std::vector<CellSpan> m_spans;
-  std::vector<Array<real_t, 3> > m_vertexPos;
+  std::vector<std::array<real_t, 3> > m_vertexPos;
   std::vector<Vertex> m_vertices;
   std::vector<uint1> m_facets;
   std::vector<uint2> m_nbr;
@@ -611,11 +611,11 @@ template <typename real_t>
 class CellComplex {
  public:
   CellComplex(Box<real_t> *box) : m_nbrList(box), m_isBuild(false) {}
-  void build(const std::vector<Array<real_t, 3> > &p);
+  void build(const std::vector<std::array<real_t, 3> > &p);
   /// Build geometry data (connecting vectors, edge inverses, volume derivatives)
   /// for all cells. Called automatically by build(); call separately if needed.
-  void buildGeometry(const std::vector<Array<real_t, 3> > &p);
-  void update(const std::vector<Array<real_t, 3> > &p);
+  void buildGeometry(const std::vector<std::array<real_t, 3> > &p);
+  void update(const std::vector<std::array<real_t, 3> > &p);
   size_t numCells() const { return m_cellArena.numCells(); }
   void materializeCell(size_t i, Cell<real_t> &cell) const { m_cellArena.materializeCell(i, cell); }
   void materializeCells(std::vector<Cell<real_t> > &cells) const {
@@ -631,12 +631,12 @@ class CellComplex {
   const CellArena<real_t> &getCellArena() const { return m_cellArena; }
   const NbrList<uint2, real_t> &getNbrList() const { return m_nbrList; }
   const CellComplexUpdateStats &getLastUpdateStats() const { return m_lastUpdateStats; }
-  void drawInterfaceGnuplot(uint0 iType, uint0 jType, const std::vector<Array<real_t, 3> > &p,
+  void drawInterfaceGnuplot(uint0 iType, uint0 jType, const std::vector<std::array<real_t, 3> > &p,
                             FILE *fp) const;
 
  private:
-  void repair(const std::vector<Array<real_t, 3> > &p);
-  void initNbrList(const std::vector<Array<real_t, 3> > &p);
+  void repair(const std::vector<std::array<real_t, 3> > &p);
+  void initNbrList(const std::vector<std::array<real_t, 3> > &p);
   NbrList<uint2, real_t> m_nbrList;
   std::vector<uint0> m_types;
   std::vector<Cell<real_t> > m_cells;
@@ -791,7 +791,7 @@ void Cell<real_t>::printNbrFacets(const std::vector<Cell<real_t> > &cells) const
 }
 
 template <typename real_t>
-void Cell<real_t>::drawGnuplot(Array<real_t, 3> p, FILE *fp) const {
+void Cell<real_t>::drawGnuplot(std::array<real_t, 3> p, FILE *fp) const {
   for (uint1 i(0); i < m_numFacets; ++i) {
     drawFacetGnuplot(i, p, fp);
     fputs("\n\n", fp);
@@ -799,7 +799,7 @@ void Cell<real_t>::drawGnuplot(Array<real_t, 3> p, FILE *fp) const {
 }
 
 template <typename real_t>
-void Cell<real_t>::drawFacetGnuplot(uint1 iFacet, Array<real_t, 3> p, FILE *fp) const {
+void Cell<real_t>::drawFacetGnuplot(uint1 iFacet, std::array<real_t, 3> p, FILE *fp) const {
   uint1 labelStart(m_facets[iFacet]);
   uint1 label = labelStart;
   uint1 vertex;
@@ -822,7 +822,7 @@ void Cell<real_t>::drawFacetGnuplot(uint1 iFacet, Array<real_t, 3> p, FILE *fp) 
 }
 
 template <typename real_t>
-void Cell<real_t>::printFacetInfo(Array<real_t, 3> p, uint facet_id) const {
+void Cell<real_t>::printFacetInfo(std::array<real_t, 3> p, uint facet_id) const {
   uint1 labelStart, label, vertex, numfacevertex(1);
   labelStart = m_facets[facet_id];
   label = labelStart;
@@ -852,7 +852,7 @@ bool Cell<real_t>::hasNoNbr() {
 }
 
 template <typename real_t>
-Cuboid<real_t>::Cuboid(const Array<real_t, 3> &L) {
+Cuboid<real_t>::Cuboid(const std::array<real_t, 3> &L) {
   this->reset(8, 6);
   for (uint0 i(0); i < 6; ++i)
     this->m_nbr[i] = noNbr;
@@ -995,7 +995,7 @@ uint1 CellMaker<real_t>::getReverseLabel(uint1 label) const {
 }
 
 template <typename real_t>
-bool CellMaker<real_t>::applyCut(const Array<real_t, 3> &p, real_t rSqHalf, uint2 nbr) {
+bool CellMaker<real_t>::applyCut(const std::array<real_t, 3> &p, real_t rSqHalf, uint2 nbr) {
   if (kUseCutCell2)
     return cutCell2(p, rSqHalf, nbr);
   return cutCell(p, rSqHalf, nbr);
@@ -1106,7 +1106,7 @@ void CellMaker<real_t>::resetDist() {
 }
 
 template <typename real_t>
-real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p, const real_t rSqHalf) {
+real_t CellMaker<real_t>::computeDist(uint1 i, const std::array<real_t, 3> p, const real_t rSqHalf) {
   if (m_knownDistGen[i] != m_distGen) {
     m_dist[i] =
         m_vertexPos[i][0] * p[0] + m_vertexPos[i][1] * p[1] + m_vertexPos[i][2] * p[2] - rSqHalf;
@@ -1120,7 +1120,7 @@ real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p, const r
 }
 
 template <typename real_t>
-real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p) {
+real_t CellMaker<real_t>::computeDist(uint1 i, const std::array<real_t, 3> p) {
   if (m_knownDistGen[i] != m_distGen) {
     m_dist[i] = 0;
     for (uint0 k(0); k < 3; ++k)
@@ -1135,7 +1135,7 @@ real_t CellMaker<real_t>::computeDist(uint1 i, const Array<real_t, 3> p) {
 }
 
 template <typename real_t>
-void CellMaker<real_t>::computeAllDist(const Array<real_t, 3> p, const real_t rSqHalf) {
+void CellMaker<real_t>::computeAllDist(const std::array<real_t, 3> p, const real_t rSqHalf) {
   const std::numeric_limits<real_t> lim;
   m_distMax = -lim.max();
   m_vDistMax = maxNumVertices;
@@ -1204,9 +1204,9 @@ void CellMaker<real_t>::renumber() {
 }
 
 template <typename real_t>
-void CellMaker<real_t>::computeGCOrig(uint2 indx, const Array<real_t, 3> &pos) {
+void CellMaker<real_t>::computeGCOrig(uint2 indx, const std::array<real_t, 3> &pos) {
   Indx indcs(p_nbrList->getGrid().expand(indx));
-  const Array<real_t, 3> &L(p_nbrList->getBox().getL());
+  const std::array<real_t, 3> &L(p_nbrList->getBox().getL());
   for (uint0 k(0); k < 3; ++k) {
     // Wrap the grid cell center (not corner) to the nearest periodic image
     // using floor(x/L + 0.5) which shifts by ±L to minimize |center|.
@@ -1220,7 +1220,7 @@ void CellMaker<real_t>::computeGCOrig(uint2 indx, const Array<real_t, 3> &pos) {
 
 template <typename real_t>
 real_t CellMaker<real_t>::computeRsqMinGC() const {
-  Array<real_t, 3> dx(m_relOrigGC);
+  std::array<real_t, 3> dx(m_relOrigGC);
   real_t rSq(0);
   for (uint0 k(0); k < 3; ++k) {
     (dx[k] < 0 ? (dx[k] < -m_dLGC[k] ? dx[k] += m_dLGC[k] : dx[k] = 0) : dx[k]);
@@ -1247,8 +1247,8 @@ real_t CellMaker<real_t>::computeDistGC(uint1 indx) {
 }
 
 template <typename real_t>
-Array<real_t, 3> CellMaker<real_t>::getClosestPointGC(uint1 indx) const {
-  Array<real_t, 3> pos;
+std::array<real_t, 3> CellMaker<real_t>::getClosestPointGC(uint1 indx) const {
+  std::array<real_t, 3> pos;
   real_t vDiffSq = 0, vSq = 0;
   for (uint0 k(0); k < 3; ++k) {
     if (m_relOrigGC[k] > m_vertexPos[indx][k])
@@ -1287,7 +1287,7 @@ real_t CellMaker<real_t>::computeMaxDistGCVerb() {
   if (m_slotsV.empty())
     return 0;
   uint1 v1 = m_slotsV.firstAlive();
-  Array<real_t, 3> posGC(getClosestPointGC(v1));
+  std::array<real_t, 3> posGC(getClosestPointGC(v1));
   real_t rSqHalf = 0.5 * (posGC[0] * posGC[0] + posGC[1] * posGC[1] + posGC[2] * posGC[2]);
   real_t distMax = m_vertexPos[v1][0] * posGC[0] + m_vertexPos[v1][1] * posGC[1] +
                    m_vertexPos[v1][2] * posGC[2] - rSqHalf;
@@ -1345,7 +1345,7 @@ void CellMaker<real_t>::getAllDistGCVerb() {
 }
 
 template <typename real_t>
-bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
+bool CellMaker<real_t>::cutCell2(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
   //    printf("entering cutCell\n");
   resetDist();
   if (m_slotsV.empty())
@@ -1555,7 +1555,7 @@ bool CellMaker<real_t>::cutCell2(const Array<real_t, 3> p, real_t rSqHalf, uint2
 }
 
 template <typename real_t>
-bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
+bool CellMaker<real_t>::cutCell(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
   //    printf("entering cutCell\n");
   computeAllDist(p, rSqHalf);
   if (m_distMax <= 0)
@@ -1716,11 +1716,11 @@ bool CellMaker<real_t>::cutCell(const Array<real_t, 3> p, real_t rSqHalf, uint2 
 }
 
 template <typename real_t>
-bool CellMaker<real_t>::build(uint2 id, const std::vector<Array<real_t, 3> > &pos,
+bool CellMaker<real_t>::build(uint2 id, const std::vector<std::array<real_t, 3> > &pos,
                               const NbrList<uint2, real_t> &nbrList, const Cell<real_t> &initCell) {
   p_nbrList = &nbrList;
   {
-    const Array<real_t, 3> &L(p_nbrList->getBox().getL());
+    const std::array<real_t, 3> &L(p_nbrList->getBox().getL());
     const Indx &N(p_nbrList->getGrid().getN());
     for (uint0 k(0); k < 3; ++k)
       m_dLGC[k] = L[k] / static_cast<real_t>(N[k]);
@@ -1807,7 +1807,7 @@ bool CellMaker<real_t>::build(uint2 id, const std::vector<Array<real_t, 3> > &po
 }
 
 template <typename real_t>
-bool CellMaker<real_t>::rebuild(const std::vector<Array<real_t, 3> > &pos, const Box<real_t> &box,
+bool CellMaker<real_t>::rebuild(const std::vector<std::array<real_t, 3> > &pos, const Box<real_t> &box,
                                 const Cell<real_t> &initCell) {
   m_nbrsWrk.clear();
   for (uint1 i = 0; i < m_slotsF.numAllocated(); ++i) {
@@ -1834,7 +1834,7 @@ bool CellMaker<real_t>::rebuild(const std::vector<Array<real_t, 3> > &pos, const
 template <typename real_t>
 bool CellMaker<real_t>::processNbrs(
     typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin,
-    typename std::vector<PosAndId<uint2, real_t> >::const_iterator end, const Array<real_t, 3> pos0,
+    typename std::vector<PosAndId<uint2, real_t> >::const_iterator end, const std::array<real_t, 3> pos0,
     const Box<real_t> &box) {
   //    printf("number of nbrs: %lu\n", end-begin);
   bool isCut(false);
@@ -1847,7 +1847,7 @@ bool CellMaker<real_t>::processNbrs(
       continue;
     nbrDist.id = itr->id;
     //      printf("nbr: %u ", itr->id);
-    Array<real_t, 3> relPos;
+    std::array<real_t, 3> relPos;
     for (uint0 k(0); k < 3; ++k)
       relPos[k] = (itr->pos)[k] - pos0[k];
     box.makeShortestDistance(relPos);
@@ -1979,7 +1979,7 @@ void CellUpdater<real_t>::updateNbrInserts() {
 template <typename real_t>
 bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end,
                                             CellMaker<real_t> &maker,
-                                            const std::vector<Array<real_t, 3> > &pos,
+                                            const std::vector<std::array<real_t, 3> > &pos,
                                             const Box<real_t> &box,
                                             CellComplexUpdateStats *stats) {
   //    printf("begin %u %u %u\n", (*begin)[0], (*begin)[1], (*begin)[2]);
@@ -2012,7 +2012,7 @@ bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end
         maker = cell;
         hasSetMaker = true;
       }
-      Array<real_t, 3> relPos;
+      std::array<real_t, 3> relPos;
       real_t rSqHalf;
       for (uint0 k(0); k < 3; ++k)
         relPos[k] = pos[(*itr)[1]][k] - pos[id][k];
@@ -2125,7 +2125,7 @@ CellGeometry<real_t> &CellGeometry<real_t>::operator=(const CellGeometry<real_t>
 }
 
 template <typename real_t>
-void CellGeometry<real_t>::computeConnectingVectors(const std::vector<Array<real_t, 3> > &pos,
+void CellGeometry<real_t>::computeConnectingVectors(const std::vector<std::array<real_t, 3> > &pos,
                                                     const Box<real_t> &box) {
   m_connV.resize(p_cell->m_numFacets);
   m_rSq.resize(p_cell->m_numFacets);
@@ -2176,7 +2176,7 @@ void CellGeometry<real_t>::computeEdgeInv() {
 template <typename real_t>
 void CellGeometry<real_t>::updateVertexPos() {
   for (uint1 i(0); i < p_cell->m_numVertices; ++i) {
-    Array<uint1, 3> indxF;
+    std::array<uint1, 3> indxF;
     indxF[0] = getFacet(p_cell->m_vertices[i][2]);
     indxF[1] = getFacet(p_cell->m_vertices[i][0]);
     indxF[2] = getFacet(p_cell->m_vertices[i][1]);
@@ -2258,7 +2258,7 @@ void CellGeometry<real_t>::computeAreas() {
   for (uint i(0); i < p_cell->m_numFacets; ++i)
     for (uint0 k(0); k < 3; ++k)
       m_areas[i][k] = 0;
-  Array<real_t, 3> dA;
+  std::array<real_t, 3> dA;
   for (uint1 i(0); i < p_cell->m_numVertices; ++i)
     for (uint0 k(0); k < 3; ++k) {
       uint1 label0(p_cell->m_vertices[i][k]);
@@ -2371,9 +2371,9 @@ void CellGeometry<real_t>::computeAll() {
   m_dV.resize(numFacets);
   m_areas.resize(numFacets);
   m_omega.resize(numFacets);
-  std::vector<Array<Array<real_t, 3>, 3> > dA(numVertices);
-  std::vector<Array<Array<real_t, 3>, 3> > dv(numVertices);
-  std::vector<Array<real_t, 3> > xcm(numFacets);
+  std::vector<std::array<std::array<real_t, 3>, 3> > dA(numVertices);
+  std::vector<std::array<std::array<real_t, 3>, 3> > dv(numVertices);
+  std::vector<std::array<real_t, 3> > xcm(numFacets);
   std::vector<real_t> volFacet(numFacets, 0.0);
   uint1 f[3];
   uint1 vNbr[3];
@@ -2464,11 +2464,11 @@ void CellGeometry<real_t>::computeAll() {
 }
 
 // template<typename real_t>
-// Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const std::vector<Array<real_t,
+// std::array<std::array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(const std::vector<std::array<real_t,
 // 3> > & velocities) const
 // {
-//   Array<Array<real_t, 3>, 3> gradV; //gradV[i][j] = dv[i]/dx[j]
-//   Array<real_t, 3> vCenter = velocities[p_cell->m_id];
+//   std::array<std::array<real_t, 3>, 3> gradV; //gradV[i][j] = dv[i]/dx[j]
+//   std::array<real_t, 3> vCenter = velocities[p_cell->m_id];
 //   // omega[i][j][l][k]
 //   // neighbor corresponding to facet i differentiated into j-direction
 //   // l: displacement direction, k: normal direction
@@ -2476,7 +2476,7 @@ void CellGeometry<real_t>::computeAll() {
 //     for(int k(0); k<3; ++k)
 // 	gradV[l][k] = 0.0;
 //   for(int i(0); i< m_omega.size(); ++i){
-//     Array<real_t, 3> v = velocities[p_cell->m_nbr[i]];
+//     std::array<real_t, 3> v = velocities[p_cell->m_nbr[i]];
 //     for(int j(0); j<3; ++j){
 // 	real_t dv = v[j] - vCenter[j];
 // 	  for(int l(0); l<3; ++l)
@@ -2496,14 +2496,14 @@ void CellGeometry<real_t>::computeAll() {
 // }
 
 template <typename real_t>
-Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(
-    const std::vector<Array<real_t, 3> > &velocities) const {
-  Array<Array<real_t, 3>, 3> gradV;  // gradV[i][j] = dv[i]/dx[j]
+std::array<std::array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(
+    const std::vector<std::array<real_t, 3> > &velocities) const {
+  std::array<std::array<real_t, 3>, 3> gradV;  // gradV[i][j] = dv[i]/dx[j]
   for (int l(0); l < 3; ++l)
     for (int k(0); k < 3; ++k)
       gradV[l][k] = 0.0;
   for (int i(0); i < m_areas.size(); ++i) {
-    Array<real_t, 3> v = velocities[p_cell->m_nbr[i]];
+    std::array<real_t, 3> v = velocities[p_cell->m_nbr[i]];
     for (int j(0); j < 3; ++j)
       for (int k(0); k < 3; ++k)
         gradV[j][k] += m_areas[i][j] * v[k];
@@ -2518,8 +2518,8 @@ Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(
 }
 
 template <typename real_t>
-void CellGeometry<real_t>::getDelaunayNbrs(uint1 iVertex, Array<uint2, 3> &nbrs) const {
-  Array<uint1, 3> indxF;
+void CellGeometry<real_t>::getDelaunayNbrs(uint1 iVertex, std::array<uint2, 3> &nbrs) const {
+  std::array<uint1, 3> indxF;
   indxF[0] = getFacet(p_cell->m_vertices[iVertex][2]);
   indxF[1] = getFacet(p_cell->m_vertices[iVertex][0]);
   indxF[2] = getFacet(p_cell->m_vertices[iVertex][1]);
@@ -2528,17 +2528,17 @@ void CellGeometry<real_t>::getDelaunayNbrs(uint1 iVertex, Array<uint2, 3> &nbrs)
 }
 
 template <typename real_t>
-Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradientDelaunay(
-    uint1 iVertex, const Array<uint2, 3> &nbrs,
-    const std::vector<Array<real_t, 3> > &velocities) const {
-  Array<Array<real_t, 3>, 3> gradV;  // gradV[i][j] = dv[i]/dx[j]
+std::array<std::array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradientDelaunay(
+    uint1 iVertex, const std::array<uint2, 3> &nbrs,
+    const std::vector<std::array<real_t, 3> > &velocities) const {
+  std::array<std::array<real_t, 3>, 3> gradV;  // gradV[i][j] = dv[i]/dx[j]
   for (int l(0); l < 3; ++l)
     for (int k(0); k < 3; ++k)
       gradV[l][k] = 0.0;
-  Array<real_t, 3> v0 = velocities[p_cell->getID()];
+  std::array<real_t, 3> v0 = velocities[p_cell->getID()];
   for (uint0 m(0); m < 3; ++m) {
-    Array<real_t, 3> v = velocities[nbrs[m]];
-    Array<real_t, 3> dv;
+    std::array<real_t, 3> v = velocities[nbrs[m]];
+    std::array<real_t, 3> dv;
     for (uint0 k(0); k < 3; ++k)
       dv[k] = v[k] - v0[k];
     for (uint0 l(0); l < 3; ++l)
@@ -2550,8 +2550,8 @@ Array<Array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradientDelaunay(
 
 template <typename real_t>
 void CellGeometry<real_t>::computeDelaunayForces(uint1 iVertex,
-                                                 const Array<Array<real_t, 3>, 3> &stress,
-                                                 Array<Array<real_t, 3>, 3> &forces) {
+                                                 const std::array<std::array<real_t, 3>, 3> &stress,
+                                                 std::array<std::array<real_t, 3>, 3> &forces) {
   for (uint0 m(0); m < 3; ++m)
     for (uint0 k(0); k < 3; ++k) {
       forces[m][k] = 0;
@@ -2562,18 +2562,18 @@ void CellGeometry<real_t>::computeDelaunayForces(uint1 iVertex,
 }
 
 template <typename real_t>
-Array<real_t, 3> CellGeometry<real_t>::force(
-    const std::vector<Array<Array<real_t, 3>, 3> > &stresses) const {
-  Array<real_t, 3> f;  // gradV[i][j] = dv[i]/dx[j]
-  Array<Array<real_t, 3>, 3> stressCenter = stresses[p_cell->id];
+std::array<real_t, 3> CellGeometry<real_t>::force(
+    const std::vector<std::array<std::array<real_t, 3>, 3> > &stresses) const {
+  std::array<real_t, 3> f;  // gradV[i][j] = dv[i]/dx[j]
+  std::array<std::array<real_t, 3>, 3> stressCenter = stresses[p_cell->id];
   // omega[i][j][l][k]
   // neighbor corresponding to facet i differentiated into j-direction
   // l: displacement direction, k: normal direction
   for (int j(0); j < 3; ++j)
     f[j] = 0.0;
   for (int i(0); i < m_omega.size(); ++i) {
-    Array<Array<real_t, 3>, 3> stress = stresses[p_cell->m_nbr[i]];
-    Array<Array<real_t, 3>, 3> dStress;
+    std::array<std::array<real_t, 3>, 3> stress = stresses[p_cell->m_nbr[i]];
+    std::array<std::array<real_t, 3>, 3> dStress;
     for (int l(0); l < 3; ++l)
       for (int k(0); k < 3; ++k)
         dStress[l][k] = stress[l][k] - stressCenter[l][k];
@@ -2587,7 +2587,7 @@ Array<real_t, 3> CellGeometry<real_t>::force(
 
 template <typename real_t>
 void CellGeometry<real_t>::gradFacetAreaSq(uint1 indxFacet, std::vector<uint2> &indxFacets,
-                                           std::vector<Array<real_t, 3> > &grad) const {
+                                           std::vector<std::array<real_t, 3> > &grad) const {
   std::vector<uint1> labels;
   labels.reserve(10);
   uint1 labelStart(p_cell->m_facets[indxFacet]);
@@ -2647,8 +2647,8 @@ void CellGeometry<real_t>::gradFacetAreaSq(uint1 indxFacet, std::vector<uint2> &
 }
 
 template <typename real_t>
-void CellComplex<real_t>::initNbrList(const std::vector<Array<real_t, 3> > &p) {
-  const Array<real_t, 3> &L(m_nbrList.getBox().getL());
+void CellComplex<real_t>::initNbrList(const std::vector<std::array<real_t, 3> > &p) {
+  const std::array<real_t, 3> &L(m_nbrList.getBox().getL());
   real_t density = real_t(p.size()) / (L[0] * L[1] * L[2]);
   real_t rcut = 1.75 * (std::pow(density, -1.0 / 3.0));
   m_nbrList.setup(p, rcut);
@@ -2656,9 +2656,9 @@ void CellComplex<real_t>::initNbrList(const std::vector<Array<real_t, 3> > &p) {
 }
 
 template <typename real_t>
-void CellComplex<real_t>::build(const std::vector<Array<real_t, 3> > &p) {
+void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> > &p) {
   initNbrList(p);
-  const Array<real_t, 3> &L(m_nbrList.getBox().getL());
+  const std::array<real_t, 3> &L(m_nbrList.getBox().getL());
   Cuboid<real_t> cub(L);
   m_cells.resize(p.size());
 #pragma omp parallel
@@ -2677,7 +2677,7 @@ void CellComplex<real_t>::build(const std::vector<Array<real_t, 3> > &p) {
 }
 
 template <typename real_t>
-void CellComplex<real_t>::buildGeometry(const std::vector<Array<real_t, 3> > &p) {
+void CellComplex<real_t>::buildGeometry(const std::vector<std::array<real_t, 3> > &p) {
   if (m_cellArena.numCells() != m_cells.size())
     m_cellArena.rebuildFromCells(m_cells);
   m_geom.resize(p.size());
@@ -2696,7 +2696,7 @@ void CellComplex<real_t>::buildGeometry(const std::vector<Array<real_t, 3> > &p)
 }
 
 template <typename real_t>
-void CellComplex<real_t>::update(const std::vector<Array<real_t, 3> > &p) {
+void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> > &p) {
   m_lastUpdateStats = CellComplexUpdateStats();
   m_lastUpdateStats.num_cells = static_cast<uint2>(p.size());
   (p.size() == m_cells.size() ? m_isBuild : m_isBuild = false);
@@ -2726,7 +2726,7 @@ void CellComplex<real_t>::update(const std::vector<Array<real_t, 3> > &p) {
   //    printf("number changed cells: %u\n",numChanged);
   if (numChanged == 0)
     return;
-  const Array<real_t, 3> &L(box.getL());
+  const std::array<real_t, 3> &L(box.getL());
   Cuboid<real_t> cub(L);
   std::vector<uint2> emptyCells;
   {
@@ -2775,7 +2775,7 @@ void CellComplex<real_t>::update(const std::vector<Array<real_t, 3> > &p) {
 }
 
 template <typename real_t>
-void CellComplex<real_t>::repair(const std::vector<Array<real_t, 3> > &p) {
+void CellComplex<real_t>::repair(const std::vector<std::array<real_t, 3> > &p) {
   //    ProfilerStart("test.prof");
   const bool debugRepair = (std::getenv("VOR_DEBUG_REPAIR") != NULL);
   for (size_t i = 0; i < m_updaters.size(); ++i) {
@@ -2859,7 +2859,7 @@ void CellComplex<real_t>::repair(const std::vector<Array<real_t, 3> > &p) {
 
 template <typename real_t>
 void CellComplex<real_t>::drawInterfaceGnuplot(uint0 iType, uint0 jType,
-                                               const std::vector<Array<real_t, 3> > &pos,
+                                               const std::vector<std::array<real_t, 3> > &pos,
                                                FILE *fp) const {
 #pragma omp parallel for
   for (size_t i = 0; i < m_types.size(); ++i) {
@@ -2970,7 +2970,7 @@ NbrsToFacets NbrsToFacets::transposedV(const std::vector<real_t> &values,
     tr.m_ptr[i + 1] += tr.m_ptr[i];
   }
   std::vector<uint2> ptrTmp(tr.m_ptr.size());
-  std::vector<std::pair<uint2, std::pair<uint1, Array<real_t, 3> > > > nbrTmp(m_nbr.size());
+  std::vector<std::pair<uint2, std::pair<uint1, std::array<real_t, 3> > > > nbrTmp(m_nbr.size());
 #pragma omp parallel for
   for (uint2 i = 0; i < tr.m_ptr.size(); ++i)
     ptrTmp[i] = tr.m_ptr[i];
@@ -3005,15 +3005,15 @@ NbrsToFacets NbrsToFacets::transposedV(const std::vector<real_t> &values,
 //   void NbrsToFacets::makeMatrixdVdV(const std::vector<CellGeometry<real_t> > & geoms, const
 //   std::vector<real_t> & masses)
 //   {
-//     std::vector< Array<real_t, 3> > values(m_nbr.size());
+//     std::vector< std::array<real_t, 3> > values(m_nbr.size());
 // #pragma omp parallel for
 //     for(uint2 i=0; i< m_ptr.size()-1; ++i){
-//       const std::vector< Array<real_t, 3> > & dV(geoms[i].getdV());
+//       const std::vector< std::array<real_t, 3> > & dV(geoms[i].getdV());
 //       for(uint2 j=m_ptr[i]; j < m_ptr[i+1]; ++j)
 // 	for(uint0 k(0); k<3; ++k)
 // 	  values[j][k] = dV[m_facet[j]][k];
 //     }
-//     std::vector< Array<real_t, 3> > valuesTr();
+//     std::vector< std::array<real_t, 3> > valuesTr();
 //     NbrsToFacets tr(this->transposedV(values, valuesTr));
 
 //     std::vector<CoordMatrix<real_t> > cMat;

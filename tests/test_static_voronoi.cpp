@@ -12,7 +12,6 @@
 #include <voronoi_dynamics/voronoi.hpp>
 
 using std::vector;
-using vor::Array;
 using vor::Box;
 using vor::Cell;
 using vor::CellComplex;
@@ -29,7 +28,7 @@ static int testRandomPoints(int numParticles, double Lx, double Ly, double Lz, u
   rng_type rng(seed);
   gen_type pointGen(rng, dist_type());
 
-  Array<real_t, 3> L;
+  std::array<real_t, 3> L;
   L[0] = Lx;
   L[1] = Ly;
   L[2] = Lz;
@@ -39,7 +38,7 @@ static int testRandomPoints(int numParticles, double Lx, double Ly, double Lz, u
   CellComplex<real_t> complex(&box);
 
   // Generate random positions
-  vector<Array<real_t, 3> > pos(numParticles);
+  vector<std::array<real_t, 3> > pos(numParticles);
   for (int i = 0; i < numParticles; ++i) {
     pos[i][0] = L[0] * pointGen();
     pos[i][1] = L[1] * pointGen();
@@ -131,7 +130,7 @@ int main() {
     rng_type rng(999);
     gen_type pointGen(rng, dist_type());
 
-    Array<real_t, 3> L;
+    std::array<real_t, 3> L;
     L[0] = 1;
     L[1] = 1;
     L[2] = 1;
@@ -139,7 +138,7 @@ int main() {
     CellComplex<real_t> complex(&box);
 
     int N = 200;
-    vector<Array<real_t, 3> > pos(N);
+    vector<std::array<real_t, 3> > pos(N);
     for (int i = 0; i < N; ++i) {
       pos[i][0] = pointGen();
       pos[i][1] = pointGen();

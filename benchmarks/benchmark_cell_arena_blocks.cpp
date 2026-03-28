@@ -26,7 +26,7 @@
 
 using Clock = std::chrono::high_resolution_clock;
 using Millis = std::chrono::duration<double, std::milli>;
-using Pos3d = vor::Array<double, 3>;
+using Pos3d = vor::std::array<double, 3>;
 
 struct TimingResult {
   double mean_ms;
@@ -141,7 +141,7 @@ int main(int argc, char *argv[]) {
   constexpr double kL = 1.0;
   const auto pos = random_uniform(n, kL, seed);
 
-  vor::Array<double, 3> Lv;
+  vor::std::array<double, 3> Lv;
   Lv[0] = kL;
   Lv[1] = kL;
   Lv[2] = kL;

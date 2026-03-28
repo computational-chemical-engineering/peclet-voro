@@ -21,7 +21,7 @@
 
 #include <voronoi_dynamics/voronoi.hpp>
 
-using Pos3d = vor::Array<double, 3>;
+using Pos3d = vor::std::array<double, 3>;
 
 namespace {
 
@@ -83,7 +83,7 @@ int main(int argc, char *argv[]) {
   constexpr double kBoxLength = 1.0;
   auto pos = RandomUniformPositions(N, kBoxLength, seed);
 
-  vor::Array<double, 3> L;
+  vor::std::array<double, 3> L;
   L[0] = kBoxLength;
   L[1] = kBoxLength;
   L[2] = kBoxLength;

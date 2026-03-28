@@ -54,7 +54,7 @@
 // ---------------------------------------------------------------------------
 using Clock  = std::chrono::high_resolution_clock;
 using Millis = std::chrono::duration<double, std::milli>;
-using Pos3d  = vor::Array<double, 3>;
+using Pos3d  = vor::std::array<double, 3>;
 
 // ---------------------------------------------------------------------------
 // Timing helpers
@@ -338,7 +338,7 @@ static void run_case(FILE*                      out,
   const int N    = static_cast<int>(pos.size());
   const int reps = nreps(N);
 
-  vor::Array<double, 3> Lv;
+  vor::std::array<double, 3> Lv;
   Lv[0] = Lv[1] = Lv[2] = L;
   vor::Box<double> box(Lv);
 

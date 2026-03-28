@@ -10,6 +10,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <utility>
@@ -30,29 +31,12 @@ static const uint2 noNbr(~0);
 static const uint1 maxNumVertices(1 << 7);
 static const uint1 maxNumFacets(1 << 7);
 
-/**
- * @class Array
- * @brief class simple class for static arrays. The purpose is to provide the use of [][]-notation
- * when using e.g. vectors of arrays
- * @tparam T type of the elements of the array
- * @tparam n size of the array
- */
-template <typename T, unsigned int n>
-class Array {
- public:
-  inline T& operator[](unsigned int i) { return m[i]; }
-  inline const T& operator[](unsigned int i) const { return m[i]; }
-
- private:
-  T m[n];
-};
-
-typedef Array<uint1, 3> Vertex;
-typedef Array<uint2, 3> NbrInsert;
+typedef std::array<uint1, 3> Vertex;
+typedef std::array<uint2, 3> NbrInsert;
 typedef std::vector<NbrInsert>::const_iterator NbrInsertItr;
 
 template <typename real_t>
-class NbrDist : public Array<real_t, 3> {
+class NbrDist : public std::array<real_t, 3> {
  public:
   uint2 id;
   real_t rSqHalf;

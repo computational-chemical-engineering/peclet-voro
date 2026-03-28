@@ -14,13 +14,12 @@ using vor::uint0;
 using vor::uint1;
 using vor::uint2;
 
-using vor::Array;
 using vor::NavierStokes;
 
 int main() {
   typedef double real_t;
   NavierStokes<real_t> sim;
-  Array<real_t, 3> L;
+  std::array<real_t, 3> L;
   L[0] = 1;
   L[1] = 1;
   L[2] = 1;
@@ -32,8 +31,8 @@ int main() {
   real_t dt(0.001);
   {
     int numPart = 10000;
-    vector<Array<real_t, 3> > pos(numPart);
-    vector<Array<real_t, 3> > vel(numPart);
+    vector<std::array<real_t, 3> > pos(numPart);
+    vector<std::array<real_t, 3> > vel(numPart);
     FILE *pFile;
     char filename[255];
     sprintf(filename, "pos_eq_%d.dat", numPart);
@@ -56,7 +55,7 @@ int main() {
     }
     fclose(pFile);
     sim.getCellComplex().getNbrList().getBox().putInBox(pos);
-    vector<Array<real_t, 3> > pos2(numPart);
+    vector<std::array<real_t, 3> > pos2(numPart);
     vector<uint0> types(numPart);
     types.resize(numPart);
     size_t iBegin = 0, iLast = numPart - 1;
@@ -96,14 +95,14 @@ int main() {
       sim.step(10, dt);
       printf("%16.8g %16.8g %16.8g\n", sim.getTime(), sim.getKineticEnergy(),
              sim.getInternalEnergy());
-      //       vector<Array<real_t,3> > & vel(sim.getVelocities());
+      //       vector<std::array<real_t,3> > & vel(sim.getVelocities());
       // #pragma omp parallel for
       //       for(int i=0; i<vel.size(); ++i)
       // 	for(int k=0; k<3; ++k)
       // 	  vel[i][k] *= 0.995;
     }
-    const vector<Array<real_t, 3> > &pos(sim.getPositions());
-    const vector<Array<real_t, 3> > &vel(sim.getVelocities());
+    const vector<std::array<real_t, 3> > &pos(sim.getPositions());
+    const vector<std::array<real_t, 3> > &vel(sim.getVelocities());
     //    sim.getCellComplex().getNbrList().getBox().putInBox(pos);
     sim.putInBox();
     char filename[50];

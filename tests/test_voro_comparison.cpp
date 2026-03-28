@@ -26,7 +26,6 @@
 #include <voro++.hh>
 
 using std::vector;
-using vor::Array;
 using vor::Box;
 using vor::CellComplex;
 using vor::CellGeometry;
@@ -36,7 +35,7 @@ using vor::uint2;
 // Helper: build a voro++ periodic tessellation and return per-particle volumes
 // sorted by particle id.
 // ---------------------------------------------------------------------------
-static vector<double> voropp_volumes(const vector<Array<double, 3> > &pos, double Lx, double Ly,
+static vector<double> voropp_volumes(const vector<std::array<double, 3> > &pos, double Lx, double Ly,
                                      double Lz) {
   const int n = static_cast<int>(pos.size());
   // Choose grid dimensions: roughly n^(1/3) blocks per side
@@ -63,12 +62,12 @@ static vector<double> voropp_volumes(const vector<Array<double, 3> > &pos, doubl
 // ---------------------------------------------------------------------------
 // Helper: build a voronoi_dynamics tessellation and return per-particle volumes.
 // ---------------------------------------------------------------------------
-static vector<double> vordyn_volumes(const vector<Array<double, 3> > &pos, double Lx, double Ly,
+static vector<double> vordyn_volumes(const vector<std::array<double, 3> > &pos, double Lx, double Ly,
                                      double Lz) {
   typedef double real_t;
   const int n = static_cast<int>(pos.size());
 
-  Array<real_t, 3> L;
+  std::array<real_t, 3> L;
   L[0] = Lx;
   L[1] = Ly;
   L[2] = Lz;
@@ -98,7 +97,7 @@ static int testStaticComparison(int n, double Lx, double Ly, double Lz, unsigned
   rng_type rng(seed);
   gen_type gen(rng, dist_type());
 
-  vector<Array<real_t, 3> > pos(n);
+  vector<std::array<real_t, 3> > pos(n);
   for (int i = 0; i < n; ++i) {
     pos[i][0] = Lx * gen();
     pos[i][1] = Ly * gen();
@@ -145,14 +144,14 @@ static int testMovingComparison(int n, double Lx, double Ly, double Lz, unsigned
   gen_type gen(rng, dist_type());
 
   // Initial positions
-  vector<Array<real_t, 3> > pos(n);
+  vector<std::array<real_t, 3> > pos(n);
   for (int i = 0; i < n; ++i) {
     pos[i][0] = Lx * gen();
     pos[i][1] = Ly * gen();
     pos[i][2] = Lz * gen();
   }
 
-  Array<real_t, 3> L;
+  std::array<real_t, 3> L;
   L[0] = Lx;
   L[1] = Ly;
   L[2] = Lz;

@@ -16,7 +16,6 @@ using std::clock;
 using std::clock_t;
 using std::sort;
 using std::vector;
-using vor::Array;
 using vor::Box;
 using vor::BoxLE;
 using vor::Cell;
@@ -37,7 +36,7 @@ int main() {
   gen_type pointGen(rng, distribution_type());
 
   // generate random particle positions
-  Array<real_t, 3> L;
+  std::array<real_t, 3> L;
   L[0] = 1;
   L[1] = 1;
   L[2] = 1;
@@ -46,7 +45,7 @@ int main() {
   vector<Cell<real_t> >& cells(complex.getCells());
   vector<CellGeometry<real_t> >& geoms(complex.getGeoms());
 
-  vector<Array<real_t, 3> > p(10000);
+  vector<std::array<real_t, 3> > p(10000);
   for (int i = 0; i < p.size(); ++i) {
     for (uint k(0); k < 3; ++k)
       p[i][k] = L[k] * pointGen();
@@ -125,13 +124,13 @@ int main() {
   // vol = con.sum_cell_volumes();
   // printf("summed volume cells: %f\n", vol);
 
-  Array<real_t, 3> orig;
+  std::array<real_t, 3> orig;
   orig[0] = 0;
   orig[1] = 0;
   orig[2] = 0;
   //  cells[0].drawGnuplot(orig, stdout);
 
-  // vector<Array<real_t,3> > areas;
+  // vector<std::array<real_t,3> > areas;
   // printf("volume: %f\n", cells[0].computeAreas(areas));
 
   // CellGeometry<real_t> geom(cells[0]);
@@ -139,7 +138,7 @@ int main() {
   // geom.computeEdgeInv();
   // geom.updateVertexPos();
 
-  // vector<Array<real_t, 3> > dp(p.size());
+  // vector<std::array<real_t, 3> > dp(p.size());
   // for(size_t i(0); i < dp.size(); ++i)
   //   for(uint0 k(0); k<3; ++k)
   //     dp[i][k] = 1e-9*pointGen();
@@ -154,7 +153,7 @@ int main() {
 
   // geom.diffVolume();
   // double vol = geom.getVol();
-  // vector< Array<real_t, 3> > dV(geom.getdV());
+  // vector< std::array<real_t, 3> > dV(geom.getdV());
   // real_t volTot(0);
   // for(size_t i(0); i < dV.size(); ++i){
   //   uint2 j(cells[0].getNbr(i));
@@ -188,7 +187,7 @@ int main() {
   // geom.updateVertexPos();
   // //  geom.computeVolume();
   // geom.computeAll();
-  // vector< Array<real_t, 3> > areasNew = geom.getAreas();
+  // vector< std::array<real_t, 3> > areasNew = geom.getAreas();
 
   // // for(uint1 i(0); i< cells[0].m_numVertices; ++i)
   // //   for(uint0 k(0); k< 3; ++k)
@@ -205,7 +204,7 @@ int main() {
 
   // printf("\n");
   // vector<uint2> indx;
-  // vector<Array<real_t, 3> > grad;
+  // vector<std::array<real_t, 3> > grad;
   // for(size_t i(0); i< areas.size(); ++i){
   //   printf("%lu: ", i);
   //   geom.gradFacetAreaSq(i, indx, grad);
@@ -255,7 +254,7 @@ int main() {
 
   //   }
 
-  //   vector<Array<real_t, 3> > dVself(cells.size(),0);
+  //   vector<std::array<real_t, 3> > dVself(cells.size(),0);
   // #pragma omp parallel
   //   {
   //     vector<IndxValue> indxValue;
@@ -263,7 +262,7 @@ int main() {
   //     for(size_t i=0; i< geoms.size(); ++i){
   //       geoms[i].computeAll();
   //       //    printf("volume cell %lu: %f\n", i, dVol);
-  //       vector< Array<real_t, 3> > & dV(geoms[i].getdV());
+  //       vector< std::array<real_t, 3> > & dV(geoms[i].getdV());
   //       for(uint1 j(0); j< dV.size(); ++j)
   // 	for(uint0 k(0); k<3; ++k)
   // 	  dVself[i][k] -= dV[j][k];

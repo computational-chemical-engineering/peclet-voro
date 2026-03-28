@@ -29,7 +29,7 @@
 namespace {
 
 using Real = double;
-using Pos3 = vor::Array<Real, 3>;
+using Pos3 = vor::std::array<Real, 3>;
 
 /**
  * @brief Compact per-cell topology signature used for final comparisons.
