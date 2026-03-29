@@ -46,6 +46,8 @@ target_compile_definitions(voro++ PRIVATE NDEBUG)
 add_executable(benchmark_cell_creation benchmark_cell_creation.cpp)
 add_executable(benchmark_cell_creation_targeted benchmark_cell_creation_targeted.cpp)
 add_executable(benchmark_nbrlist_setup_diagnostic benchmark_nbrlist_setup_diagnostic.cpp)
+add_executable(benchmark_update_fast_study benchmark_update_fast_study.cpp)
+add_executable(benchmark_update_strategy_study benchmark_update_strategy_study.cpp)
 
 target_link_libraries(benchmark_cell_creation
   PRIVATE
@@ -65,6 +67,18 @@ target_link_libraries(benchmark_nbrlist_setup_diagnostic
     voro++
 )
 
+target_link_libraries(benchmark_update_fast_study
+  PRIVATE
+    voronoi_dynamics::voronoi_dynamics
+    voro++
+)
+
+target_link_libraries(benchmark_update_strategy_study
+  PRIVATE
+    voronoi_dynamics::voronoi_dynamics
+    voro++
+)
+
 target_compile_definitions(benchmark_cell_creation
   PRIVATE
     VORONOI_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
@@ -78,6 +92,18 @@ target_compile_definitions(benchmark_cell_creation_targeted
 )
 
 target_compile_definitions(benchmark_nbrlist_setup_diagnostic
+  PRIVATE
+    VORONOI_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+    NDEBUG
+)
+
+target_compile_definitions(benchmark_update_fast_study
+  PRIVATE
+    VORONOI_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
+    NDEBUG
+)
+
+target_compile_definitions(benchmark_update_strategy_study
   PRIVATE
     VORONOI_DATA_DIR="${CMAKE_SOURCE_DIR}/data"
     NDEBUG
@@ -110,6 +136,32 @@ target_compile_options(benchmark_cell_creation_targeted
 )
 
 target_compile_options(benchmark_nbrlist_setup_diagnostic
+  PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:
+      -O3
+      -march=native
+      -mtune=native
+      -ffast-math
+      -funroll-loops
+      -fno-omit-frame-pointer
+      -Wno-unused-result
+    >
+)
+
+target_compile_options(benchmark_update_fast_study
+  PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:
+      -O3
+      -march=native
+      -mtune=native
+      -ffast-math
+      -funroll-loops
+      -fno-omit-frame-pointer
+      -Wno-unused-result
+    >
+)
+
+target_compile_options(benchmark_update_strategy_study
   PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:
       -O3

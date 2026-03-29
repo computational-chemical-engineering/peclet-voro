@@ -428,6 +428,25 @@ class CellMaker {
   bool build(uint2 id, const std::vector<std::array<real_t, 3> > &pos,
              const NbrList<uint2, real_t> &nbrList, const Cell<real_t> &initCell);
   /**
+   * @brief build a Voronoi cell using the standard expanding neighbor search while skipping a set
+   * of already-satisfied neighbors
+   *
+   * This is primarily used by local update paths that seed the builder from an existing convex
+   * cell. The neighbor search is identical to the full builder; only the seed cell and the set of
+   * skipped neighbors differ.
+   *
+   * @param id the unique id of the cell to be build. It also refers to the particle index.
+   * @param pos positions of all particles to be considered
+   * @param nbrList neighbor list used to efficiently find the closest particles
+   * @param initCell initial cell used to carve out the Voronoi cell
+   * @param skipNbrs sorted ids of neighbors that already define facets of initCell and should be
+   * ignored during the build
+   * @return true if the final cell is different form initCell
+   */
+  bool build(uint2 id, const std::vector<std::array<real_t, 3> > &pos,
+             const NbrList<uint2, real_t> &nbrList, const Cell<real_t> &initCell,
+             const std::vector<uint2> &skipNbrs);
+  /**
    * @brief rebuild a Voronoi cell
    *
    * The Voronoi cell is carved out using only the neighbors as stored in initCell.
@@ -519,6 +538,13 @@ class CellMaker {
   inline uint1 allocVertexChecked(const char *caller);
   inline uint1 allocFacetChecked(const char *caller);
   [[noreturn]] inline void failCapacity(const char *caller, const char *kind, uint1 capacity) const;
+  bool buildWithNeighborSearch(uint2 id, const std::vector<std::array<real_t, 3> > &pos,
+                               const NbrList<uint2, real_t> &nbrList, const Cell<real_t> &initCell,
+                               const std::vector<uint2> *skipNbrs);
+  inline bool processNbrsFiltered(
+      typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin,
+      typename std::vector<PosAndId<uint2, real_t> >::const_iterator end,
+      const std::array<real_t, 3> pos0, const Box<real_t> &box, const std::vector<uint2> *skipNbrs);
 #ifndef VOR_CELLMAKER_USE_CUTCELL2
 #define VOR_CELLMAKER_USE_CUTCELL2 1
 #endif
@@ -881,13 +907,17 @@ class ConnectivityArena {
   void overwrite(uint2 cellId, const std::vector<uint2> &directNbrs,
                  const std::vector<uint2> &extraCandidates) {
     std::vector<uint2> merged;
-    merged.reserve(directNbrs.size());
+    merged.reserve(directNbrs.size() + extraCandidates.size());
     for (size_t i = 0; i < directNbrs.size(); ++i)
       if (directNbrs[i] != noNbr)
         if (std::find(merged.begin(), merged.end(), directNbrs[i]) == merged.end())
           merged.push_back(directNbrs[i]);
-    (void)extraCandidates;
-    m_directCounts[cellId] = static_cast<uint1>(merged.size());
+    const uint1 directCount = static_cast<uint1>(merged.size());
+    for (size_t i = 0; i < extraCandidates.size(); ++i)
+      if (extraCandidates[i] != noNbr)
+        if (std::find(merged.begin(), merged.end(), extraCandidates[i]) == merged.end())
+          merged.push_back(extraCandidates[i]);
+    m_directCounts[cellId] = directCount;
     m_candidates.overwrite(cellId, merged.data(), static_cast<uint1>(merged.size()));
   }
 
@@ -1009,12 +1039,27 @@ template <typename real_t>
 class CellComplex {
  public:
   CellComplex(Box<real_t> *box);
+  CellComplex(Box<real_t> *box, size_t workerCount);
   ~CellComplex() = default;
   void build(const std::vector<std::array<real_t, 3> > &p);
   /// Build geometry data (connecting vectors, edge inverses, volume derivatives)
   /// for all cells. Called automatically by build(); call separately if needed.
   void buildGeometry(const std::vector<std::array<real_t, 3> > &p);
   void update(const std::vector<std::array<real_t, 3> > &p);
+  /// Experimental incremental path: fast-lane convex update followed by
+  /// connectivity-driven repair waves over 1-ring/2-ring candidates.
+  void updateFast(const std::vector<std::array<real_t, 3> > &p);
+  /// Experimental one-pass path: use the updated neighbor list for every cell,
+  /// rebuild non-convex cells from scratch, and use convex cells as local seeds
+  /// that are only cut by genuinely new neighbor candidates.
+  void updateNbrListLocal(const std::vector<std::array<real_t, 3> > &p);
+  /// Experimental sweep path: first rebuild all non-convex cells, then sweep
+  /// outward over old/new neighbors. Each cell is updated at most once.
+  void updateNbrListSweep(const std::vector<std::array<real_t, 3> > &p);
+  /// Experimental asynchronous sweep path: claimed cells are processed at most
+  /// once, and old/new neighbor proposals are queued without global sweep
+  /// barriers.
+  void updateNbrListSweepAsync(const std::vector<std::array<real_t, 3> > &p);
   size_t numCells() const { return m_cellArena.numCells(); }
   CellView<real_t> getCellView(size_t i) const { return m_cellArena.getView(i); }
   ConnectivityView<real_t> getConnectivityView(size_t i) const { return m_connectivity.getView(i); }
@@ -1037,6 +1082,14 @@ class CellComplex {
   const CellArena<real_t> &getCellArena() const { return m_cellArena; }
   const NbrList<uint2, real_t> &getNbrList() const { return m_nbrList; }
   const CellComplexUpdateStats &getLastUpdateStats() const { return m_lastUpdateStats; }
+  void setSweepRebuildAllSwitchFraction(real_t fraction) {
+    if (fraction < real_t(0))
+      fraction = real_t(0);
+    if (fraction > real_t(1))
+      fraction = real_t(1);
+    m_sweepRebuildAllSwitchFraction = fraction;
+  }
+  real_t getSweepRebuildAllSwitchFraction() const { return m_sweepRebuildAllSwitchFraction; }
   void drawInterfaceGnuplot(uint0 iType, uint0 jType, const std::vector<std::array<real_t, 3> > &p,
                             FILE *fp) const;
 
@@ -1156,6 +1209,10 @@ class CellComplex {
   void ensureWorkerContexts(size_t count);
   void rebuildLegacyGeometryCache(const std::vector<std::array<real_t, 3> > &p);
   void commitCellGeometry(uint2 cellId, const std::vector<std::array<real_t, 3> > &p);
+  void updateAllCellsNbrListSharedSearch(const std::vector<std::array<real_t, 3> > &p,
+                                         const Box<real_t> &box,
+                                         const Cuboid<real_t> &cub,
+                                         const std::vector<uint8_t> *convexState);
   void initNbrList(const std::vector<std::array<real_t, 3> > &p);
   NbrList<uint2, real_t> m_nbrList;
   std::vector<uint0> m_types;
@@ -1165,6 +1222,7 @@ class CellComplex {
   std::vector<CellGeometry<real_t> > m_geom;
   PersistentWorkerTeam m_team;
   std::vector<std::unique_ptr<WorkerContext> > m_workers;
+  real_t m_sweepRebuildAllSwitchFraction;
   CellComplexUpdateStats m_lastUpdateStats;
   bool m_isBuild;
 };
@@ -2357,6 +2415,22 @@ bool CellMaker<real_t>::cutCell(const std::array<real_t, 3> p, real_t rSqHalf, u
 template <typename real_t>
 bool CellMaker<real_t>::build(uint2 id, const std::vector<std::array<real_t, 3> > &pos,
                               const NbrList<uint2, real_t> &nbrList, const Cell<real_t> &initCell) {
+  return buildWithNeighborSearch(id, pos, nbrList, initCell, nullptr);
+}
+
+template <typename real_t>
+bool CellMaker<real_t>::build(uint2 id, const std::vector<std::array<real_t, 3> > &pos,
+                              const NbrList<uint2, real_t> &nbrList, const Cell<real_t> &initCell,
+                              const std::vector<uint2> &skipNbrs) {
+  return buildWithNeighborSearch(id, pos, nbrList, initCell, &skipNbrs);
+}
+
+template <typename real_t>
+bool CellMaker<real_t>::buildWithNeighborSearch(uint2 id,
+                                                const std::vector<std::array<real_t, 3> > &pos,
+                                                const NbrList<uint2, real_t> &nbrList,
+                                                const Cell<real_t> &initCell,
+                                                const std::vector<uint2> *skipNbrs) {
   p_nbrList = &nbrList;
   {
     const std::array<real_t, 3> &L(p_nbrList->getBox().getL());
@@ -2389,8 +2463,9 @@ bool CellMaker<real_t>::build(uint2 id, const std::vector<std::array<real_t, 3> 
     uint2 indx = m_checkGridCell[m_checkGCHead];
     p_nbrList->getCellContent(indx, begin, end);
     if (end != begin)
-      (processNbrs(begin, end, pos[m_id], p_nbrList->getBox()) == true ? isUpdated = true
-                                                                       : isUpdated);
+      (processNbrsFiltered(begin, end, pos[m_id], p_nbrList->getBox(), skipNbrs) == true
+           ? isUpdated = true
+           : isUpdated);
     p_nbrList->getGrid().getNbrs(indx, nbrGC);
     for (uint2 j(0); j < nbrGC.size(); ++j) {
       if (!m_visited.isVisited(nbrGC[j])) {
@@ -2409,8 +2484,9 @@ bool CellMaker<real_t>::build(uint2 id, const std::vector<std::array<real_t, 3> 
       continue;
     p_nbrList->getCellContent(indx, begin, end);
     if (end != begin)
-      (processNbrs(begin, end, pos[m_id], p_nbrList->getBox()) == true ? isUpdated = true
-                                                                       : isUpdated);
+      (processNbrsFiltered(begin, end, pos[m_id], p_nbrList->getBox(), skipNbrs) == true
+           ? isUpdated = true
+           : isUpdated);
     p_nbrList->getGrid().getNbrs(indx, nbrGC);  // for LE b.c. this needs to be adapted
     for (uint2 j(0); j < nbrGC.size(); ++j) {
       if (!m_visited.isVisited(nbrGC[j])) {
@@ -2431,8 +2507,9 @@ bool CellMaker<real_t>::build(uint2 id, const std::vector<std::array<real_t, 3> 
       continue;
     p_nbrList->getCellContent(indx, begin, end);
     if (end != begin)
-      (processNbrs(begin, end, pos[m_id], p_nbrList->getBox()) == true ? isUpdated = true
-                                                                       : isUpdated);
+      (processNbrsFiltered(begin, end, pos[m_id], p_nbrList->getBox(), skipNbrs) == true
+           ? isUpdated = true
+           : isUpdated);
     p_nbrList->getGrid().getNbrs(indx, nbrGC);
     for (uint2 j(0); j < nbrGC.size(); ++j) {
       if (!m_visited.isVisited(nbrGC[j])) {
@@ -2503,6 +2580,26 @@ bool CellMaker<real_t>::processNbrs(
     (applyCut(p, p.rSqHalf, p.id) ? isCut = true : m_isAllCut = false);
   }
   return isCut;
+}
+
+template <typename real_t>
+bool CellMaker<real_t>::processNbrsFiltered(
+    typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin,
+    typename std::vector<PosAndId<uint2, real_t> >::const_iterator end, const std::array<real_t, 3> pos0,
+    const Box<real_t> &box, const std::vector<uint2> *skipNbrs) {
+  if (skipNbrs == nullptr || skipNbrs->empty())
+    return processNbrs(begin, end, pos0, box);
+
+  m_nbrsWrk.clear();
+  m_nbrsWrk.reserve(static_cast<size_t>(end - begin));
+  for (typename std::vector<PosAndId<uint2, real_t> >::const_iterator itr(begin); itr != end; ++itr) {
+    if (std::binary_search(skipNbrs->begin(), skipNbrs->end(), itr->id))
+      continue;
+    m_nbrsWrk.push_back(*itr);
+  }
+  if (m_nbrsWrk.empty())
+    return false;
+  return processNbrs(m_nbrsWrk.begin(), m_nbrsWrk.end(), pos0, box);
 }
 
 template <typename real_t>
@@ -3139,8 +3236,14 @@ void GeometryArena<real_t>::rebuildFromLegacy(const TopologyArena<real_t> &topol
 }
 
 template <typename real_t>
-CellComplex<real_t>::CellComplex(Box<real_t> *box) : m_nbrList(box), m_isBuild(false) {
-  const size_t workerCount = defaultPersistentWorkerCount();
+CellComplex<real_t>::CellComplex(Box<real_t> *box)
+    : CellComplex(box, defaultPersistentWorkerCount()) {}
+
+template <typename real_t>
+CellComplex<real_t>::CellComplex(Box<real_t> *box, size_t workerCount)
+    : m_nbrList(box),
+      m_sweepRebuildAllSwitchFraction(real_t(2055.0 / 10000.0)),
+      m_isBuild(false) {
   m_team.start(workerCount);
   ensureWorkerContexts(std::max<size_t>(workerCount, 1));
 }
@@ -3247,6 +3350,135 @@ void CellComplex<real_t>::buildGeometry(const std::vector<std::array<real_t, 3> 
 }
 
 template <typename real_t>
+void CellComplex<real_t>::updateAllCellsNbrListSharedSearch(
+    const std::vector<std::array<real_t, 3> > &p, const Box<real_t> &box, const Cuboid<real_t> &cub,
+    const std::vector<uint8_t> *convexState) {
+  const size_t workerCount = std::max<size_t>(m_team.threadCount(), 1u);
+  std::vector<uint2> nonConvexByWorker(workerCount, 0u);
+  std::vector<uint2> localByWorker(workerCount, 0u);
+  std::vector<uint2> fullByWorker(workerCount, 0u);
+  std::vector<uint2> emptyAfterLocalByWorker(workerCount, 0u);
+
+  auto collectDirectNbrs = [](const uint2 *nbrs, uint1 numFacets, std::vector<uint2> &out,
+                              bool &hasNoNbr) {
+    out.clear();
+    hasNoNbr = false;
+    out.reserve(numFacets);
+    for (uint1 facet = 0; facet < numFacets; ++facet) {
+      const uint2 nbrId = nbrs[facet];
+      if (nbrId == noNbr) {
+        hasNoNbr = true;
+        continue;
+      }
+      if (std::find(out.begin(), out.end(), nbrId) == out.end())
+        out.push_back(nbrId);
+    }
+    std::sort(out.begin(), out.end());
+  };
+
+  parallelForPersistent(p.size(), [&](size_t i, size_t workerId) {
+    const uint2 cellId = static_cast<uint2>(i);
+    WorkerContext &worker = *m_workers[workerId];
+    CellMaker<real_t> &maker = worker.maker;
+
+    bool isConvex = false;
+    CellGeometry<real_t> geom;
+    if (convexState != NULL) {
+      isConvex = ((*convexState)[i] == 1u);
+      if (isConvex)
+        geom = m_geom[cellId];
+    } else {
+      geom = m_geom[cellId];
+      geom.computeConnectingVectors(p, box);
+      geom.computeEdgeInv();
+      geom.updateVertexPos();
+      isConvex = geom.isConvex();
+      if (!isConvex)
+        ++nonConvexByWorker[workerId];
+    }
+
+    std::vector<uint2> oldDirect;
+    {
+      const ConnectivityView<real_t> connView = m_connectivity.getView(cellId);
+      oldDirect.reserve(connView.numDirectNbrs());
+      for (uint1 facet = 0; facet < connView.numDirectNbrs(); ++facet)
+        oldDirect.push_back(connView.getDirectNbr(facet));
+      std::sort(oldDirect.begin(), oldDirect.end());
+    }
+
+    std::vector<uint2> newDirect;
+    bool hasNoNbr = false;
+    bool usedLocal = false;
+    bool localCutChanged = false;
+
+    if (isConvex) {
+      usedLocal = true;
+      ++localByWorker[workerId];
+      localCutChanged = maker.build(cellId, p, m_nbrList, geom.getCell(), oldDirect);
+      maker.renumber();
+      collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+
+      if (!localCutChanged && newDirect == oldDirect && !hasNoNbr) {
+        if (convexState == NULL) {
+          geom.diffVolume();
+          m_geom[cellId] = geom;
+        }
+        m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), m_geom[cellId]);
+        m_connectivity.overwrite(cellId, oldDirect, std::vector<uint2>());
+        return;
+      }
+
+      bool keepLocal = !(maker.numVertices() == 0 || maker.numFacets() == 0 || hasNoNbr);
+      if (keepLocal) {
+        Cell<real_t> checkedCell;
+        checkedCell = maker;
+        CellGeometry<real_t> checkedGeom(checkedCell);
+        checkedGeom.computeConnectingVectors(p, box);
+        checkedGeom.computeEdgeInv();
+        checkedGeom.updateVertexPos();
+        checkedGeom.computeVolume();
+        keepLocal = checkedGeom.isConvex() && (checkedGeom.getVolume() > real_t(0));
+      }
+      if (!keepLocal) {
+        ++emptyAfterLocalByWorker[workerId];
+        usedLocal = false;
+      }
+    }
+
+    if (!isConvex || !usedLocal) {
+      maker.build(cellId, p, m_nbrList, cub);
+      maker.renumber();
+      collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+      ++fullByWorker[workerId];
+    }
+
+    if (!usedLocal && isConvex && newDirect == oldDirect && !hasNoNbr) {
+      if (convexState == NULL) {
+        geom.diffVolume();
+        m_geom[cellId] = geom;
+      }
+      m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), m_geom[cellId]);
+      m_connectivity.overwrite(cellId, oldDirect, std::vector<uint2>());
+      return;
+    }
+
+    m_cellArena.overwriteFromMaker(cellId, maker);
+    m_connectivity.overwrite(cellId, newDirect, std::vector<uint2>());
+    commitCellGeometry(cellId, p);
+  });
+
+  if (convexState == NULL) {
+    for (size_t workerId = 0; workerId < workerCount; ++workerId)
+      m_lastUpdateStats.num_non_convex_before += nonConvexByWorker[workerId];
+  }
+  for (size_t workerId = 0; workerId < workerCount; ++workerId) {
+    m_lastUpdateStats.num_local_rebuild_cells += localByWorker[workerId];
+    m_lastUpdateStats.num_full_rebuild_cells += fullByWorker[workerId];
+    m_lastUpdateStats.num_empty_after_local_rebuild += emptyAfterLocalByWorker[workerId];
+  }
+}
+
+template <typename real_t>
 void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> > &p) {
   m_lastUpdateStats = CellComplexUpdateStats();
   m_lastUpdateStats.num_cells = static_cast<uint2>(p.size());
@@ -3321,6 +3553,914 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> > &p) {
     m_lastUpdateStats.num_rebuild_candidates += changedByWorker[workerId];
     m_lastUpdateStats.num_full_rebuild_cells += changedByWorker[workerId];
   }
+}
+
+template <typename real_t>
+void CellComplex<real_t>::updateFast(const std::vector<std::array<real_t, 3> > &p) {
+  m_lastUpdateStats = CellComplexUpdateStats();
+  m_lastUpdateStats.num_cells = static_cast<uint2>(p.size());
+  if (!m_isBuild || p.size() != m_cellArena.numCells()) {
+    m_lastUpdateStats.rebuilt_from_scratch = true;
+    build(p);
+    return;
+  }
+  if (m_geom.size() != p.size() || m_geometry.numCells() != p.size())
+    buildGeometry(p);
+
+  const Box<real_t> &box(m_nbrList.getBox());
+  const size_t workerCount = std::max<size_t>(m_team.threadCount(), 1u);
+  auto collectDirectNbrs = [](const uint2 *nbrs, uint1 numFacets, std::vector<uint2> &out,
+                              bool &hasNoNbr) {
+    out.clear();
+    hasNoNbr = false;
+    out.reserve(numFacets);
+    for (uint1 facet = 0; facet < numFacets; ++facet) {
+      const uint2 nbrId = nbrs[facet];
+      if (nbrId == noNbr) {
+        hasNoNbr = true;
+        continue;
+      }
+      if (std::find(out.begin(), out.end(), nbrId) == out.end())
+        out.push_back(nbrId);
+    }
+    std::sort(out.begin(), out.end());
+  };
+
+  std::vector<std::vector<uint2> > directSnapshot(m_connectivity.numCells());
+  std::vector<std::vector<uint2> > candidateSnapshot(m_connectivity.numCells());
+  for (size_t i = 0; i < m_connectivity.numCells(); ++i) {
+    const ConnectivityView<real_t> snapshotView = m_connectivity.getView(i);
+    candidateSnapshot[i].reserve(snapshotView.numCandidates());
+    for (uint1 j = 0; j < snapshotView.numCandidates(); ++j)
+      candidateSnapshot[i].push_back(snapshotView.getCandidate(j));
+    directSnapshot[i].reserve(snapshotView.numDirectNbrs());
+    for (uint1 j = 0; j < snapshotView.numDirectNbrs(); ++j)
+      directSnapshot[i].push_back(snapshotView.getDirectNbr(j));
+  }
+
+  std::vector<uint1> processedThisUpdate(p.size(), 0u);
+  std::vector<std::vector<uint2> > activeByWorker(workerCount);
+  std::vector<uint2> initialLocalByWorker(workerCount, 0u);
+  std::vector<uint2> initialNonConvexByWorker(workerCount, 0u);
+  std::vector<uint2> initialTopologyChangedByWorker(workerCount, 0u);
+
+  parallelForPersistent(p.size(), [&](size_t i, size_t workerId) {
+    const uint2 cellId = static_cast<uint2>(i);
+    WorkerContext &worker = *m_workers[workerId];
+    ConstructionArena<real_t> &arena = worker.arena;
+    CellMaker<real_t> &maker = worker.maker;
+    arena.ensureVisitedSize(static_cast<uint2>(p.size()));
+    arena.startNewCell();
+
+    const std::vector<uint2> &oldDirect = directSnapshot[cellId];
+    std::vector<uint2> &candidateIds = arena.checkGridCell();
+    candidateIds.clear();
+    arena.markAndCheckVisited(cellId);
+    for (size_t j = 0; j < oldDirect.size(); ++j) {
+      const uint2 nbrId = oldDirect[j];
+      if (nbrId == noNbr || arena.markAndCheckVisited(nbrId))
+        continue;
+      candidateIds.push_back(nbrId);
+    }
+    const size_t oneRingCount = candidateIds.size();
+    for (size_t j = 0; j < oldDirect.size(); ++j) {
+      const uint2 nbrId = oldDirect[j];
+      if (nbrId >= directSnapshot.size())
+        continue;
+      const std::vector<uint2> &nbrDirect = directSnapshot[nbrId];
+      for (size_t k = 0; k < nbrDirect.size(); ++k) {
+        const uint2 nbr2 = nbrDirect[k];
+        if (nbr2 == noNbr || arena.markAndCheckVisited(nbr2))
+          continue;
+        candidateIds.push_back(nbr2);
+      }
+    }
+
+    CellGeometry<real_t> geom = m_geom[cellId];
+    geom.computeConnectingVectors(p, box);
+    geom.computeEdgeInv();
+    geom.updateVertexPos();
+    if (!geom.isConvex()) {
+      ++initialNonConvexByWorker[workerId];
+      activeByWorker[workerId].push_back(cellId);
+      return;
+    }
+
+    const Cell<real_t> &baseCell = geom.getCell();
+    if (baseCell.numVertices() > 96u || baseCell.numFacets() > 48u || candidateIds.size() > 48u) {
+      activeByWorker[workerId].push_back(cellId);
+      return;
+    }
+
+    maker = baseCell;
+    maker.rebuild(p, box, baseCell);
+    ++initialLocalByWorker[workerId];
+
+    std::vector<PosAndId<uint2, real_t> > &nbrsWrk = arena.nbrsWrk();
+    nbrsWrk.clear();
+    nbrsWrk.reserve(candidateIds.size() - oneRingCount);
+    for (size_t j = oneRingCount; j < candidateIds.size(); ++j) {
+      PosAndId<uint2, real_t> nbr;
+      nbr.id = candidateIds[j];
+      nbr.pos = p[nbr.id];
+      nbrsWrk.push_back(nbr);
+    }
+    maker.processNbrs(nbrsWrk.begin(), nbrsWrk.end(), p[cellId], box);
+    maker.renumber();
+
+    std::vector<uint2> newDirect;
+    bool hasNoNbr = false;
+    collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+    std::vector<uint2> extraCandidates;
+    extraCandidates.reserve(candidateIds.size() - oneRingCount);
+    for (size_t j = oneRingCount; j < candidateIds.size(); ++j)
+      extraCandidates.push_back(candidateIds[j]);
+
+    bool keepLocal = !(maker.numVertices() == 0 || maker.numFacets() == 0 || hasNoNbr);
+    if (keepLocal) {
+      Cell<real_t> checkedCell;
+      checkedCell = maker;
+      CellGeometry<real_t> checkedGeom(checkedCell);
+      checkedGeom.computeConnectingVectors(p, box);
+      checkedGeom.computeEdgeInv();
+      checkedGeom.updateVertexPos();
+      checkedGeom.computeVolume();
+      keepLocal = checkedGeom.isConvex() && (checkedGeom.getVolume() > real_t(0));
+    }
+    if (!keepLocal) {
+      activeByWorker[workerId].push_back(cellId);
+      return;
+    }
+
+    processedThisUpdate[cellId] = 1u;
+    if (newDirect != oldDirect) {
+      ++initialTopologyChangedByWorker[workerId];
+      m_cellArena.overwriteFromMaker(cellId, maker);
+      m_connectivity.overwrite(cellId, newDirect, extraCandidates);
+      commitCellGeometry(cellId, p);
+      for (size_t j = 0; j < oldDirect.size(); ++j) {
+        const uint2 nbrId = oldDirect[j];
+        if (std::find(newDirect.begin(), newDirect.end(), nbrId) == newDirect.end())
+          activeByWorker[workerId].push_back(nbrId);
+      }
+      for (size_t j = 0; j < newDirect.size(); ++j) {
+        const uint2 nbrId = newDirect[j];
+        if (std::find(oldDirect.begin(), oldDirect.end(), nbrId) == oldDirect.end())
+          activeByWorker[workerId].push_back(nbrId);
+      }
+    } else {
+      geom.diffVolume();
+      m_geom[cellId] = geom;
+      m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), geom);
+      m_connectivity.overwrite(cellId, oldDirect, extraCandidates);
+    }
+  });
+
+  std::vector<uint2> activeQueue;
+  for (size_t workerId = 0; workerId < workerCount; ++workerId) {
+    activeQueue.insert(activeQueue.end(), activeByWorker[workerId].begin(), activeByWorker[workerId].end());
+    m_lastUpdateStats.num_local_rebuild_cells += initialLocalByWorker[workerId];
+    m_lastUpdateStats.num_non_convex_before += initialNonConvexByWorker[workerId];
+    m_lastUpdateStats.num_repair_cells_changed_total += initialTopologyChangedByWorker[workerId];
+  }
+  std::sort(activeQueue.begin(), activeQueue.end());
+  activeQueue.erase(std::remove(activeQueue.begin(), activeQueue.end(), noNbr), activeQueue.end());
+  activeQueue.erase(std::unique(activeQueue.begin(), activeQueue.end()), activeQueue.end());
+  m_lastUpdateStats.num_rebuild_candidates = static_cast<uint2>(activeQueue.size());
+  if (activeQueue.empty())
+    return;
+
+  initNbrList(p);
+  const std::array<real_t, 3> &L(box.getL());
+  Cuboid<real_t> cub(L);
+  std::vector<std::vector<uint2> > nextByWorker(workerCount);
+  std::vector<uint2> localRebuildByWorker(workerCount, 0u);
+  std::vector<uint2> emptyAfterLocalByWorker(workerCount, 0u);
+  std::vector<uint2> fullRebuildByWorker(workerCount, 0u);
+  std::vector<uint2> indirectByWorker(workerCount, 0u);
+  std::vector<uint2> directAttemptsByWorker(workerCount, 0u);
+  std::vector<uint2> directSuccessesByWorker(workerCount, 0u);
+  std::vector<uint2> batchCallsByWorker(workerCount, 0u);
+  std::vector<uint2> batchChangesByWorker(workerCount, 0u);
+
+  while (!activeQueue.empty()) {
+    ++m_lastUpdateStats.num_repair_iterations;
+    m_lastUpdateStats.num_repair_target_groups_total += static_cast<uint2>(activeQueue.size());
+
+    directSnapshot.assign(m_connectivity.numCells(), std::vector<uint2>());
+    candidateSnapshot.assign(m_connectivity.numCells(), std::vector<uint2>());
+    for (size_t i = 0; i < m_connectivity.numCells(); ++i) {
+      const ConnectivityView<real_t> snapshotView = m_connectivity.getView(i);
+      candidateSnapshot[i].reserve(snapshotView.numCandidates());
+      for (uint1 j = 0; j < snapshotView.numCandidates(); ++j)
+        candidateSnapshot[i].push_back(snapshotView.getCandidate(j));
+      directSnapshot[i].reserve(snapshotView.numDirectNbrs());
+      for (uint1 j = 0; j < snapshotView.numDirectNbrs(); ++j)
+        directSnapshot[i].push_back(snapshotView.getDirectNbr(j));
+    }
+
+    for (size_t workerId = 0; workerId < workerCount; ++workerId) {
+      nextByWorker[workerId].clear();
+      localRebuildByWorker[workerId] = 0u;
+      emptyAfterLocalByWorker[workerId] = 0u;
+      fullRebuildByWorker[workerId] = 0u;
+      indirectByWorker[workerId] = 0u;
+      directAttemptsByWorker[workerId] = 0u;
+      directSuccessesByWorker[workerId] = 0u;
+      batchCallsByWorker[workerId] = 0u;
+      batchChangesByWorker[workerId] = 0u;
+    }
+
+    parallelForPersistent(activeQueue.size(), [&](size_t idx, size_t workerId) {
+      const uint2 cellId = activeQueue[idx];
+      WorkerContext &worker = *m_workers[workerId];
+      ConstructionArena<real_t> &arena = worker.arena;
+      CellMaker<real_t> &maker = worker.maker;
+      arena.ensureVisitedSize(static_cast<uint2>(p.size()));
+      arena.startNewCell();
+
+      const std::vector<uint2> &oldDirect = directSnapshot[cellId];
+      std::vector<uint2> &candidateIds = arena.checkGridCell();
+      candidateIds.clear();
+      arena.markAndCheckVisited(cellId);
+      for (size_t i = 0; i < oldDirect.size(); ++i) {
+        const uint2 nbrId = oldDirect[i];
+        if (nbrId == noNbr || arena.markAndCheckVisited(nbrId))
+          continue;
+        candidateIds.push_back(nbrId);
+      }
+      const size_t oneRingCount = candidateIds.size();
+      for (size_t i = 0; i < oldDirect.size(); ++i) {
+        const uint2 nbrId = oldDirect[i];
+        if (nbrId >= directSnapshot.size())
+          continue;
+        const std::vector<uint2> &nbrDirect = directSnapshot[nbrId];
+        for (size_t j = 0; j < nbrDirect.size(); ++j) {
+          const uint2 nbr2 = nbrDirect[j];
+          if (nbr2 == noNbr || arena.markAndCheckVisited(nbr2))
+            continue;
+          candidateIds.push_back(nbr2);
+        }
+      }
+
+      directAttemptsByWorker[workerId] += static_cast<uint2>(oldDirect.size());
+      indirectByWorker[workerId] += static_cast<uint2>(candidateIds.size() - oneRingCount);
+
+      CellGeometry<real_t> geom = m_geom[cellId];
+      geom.computeConnectingVectors(p, box);
+      geom.computeEdgeInv();
+      geom.updateVertexPos();
+      const bool baseConvex = geom.isConvex();
+      const Cell<real_t> &baseCell = geom.getCell();
+      const std::vector<uint2> &oldCandidates = candidateSnapshot[cellId];
+      std::vector<uint2> newDirect;
+      bool hasNoNbr = false;
+      std::vector<uint2> extraCandidates;
+      extraCandidates.reserve(candidateIds.size() - oneRingCount);
+      for (size_t i = oneRingCount; i < candidateIds.size(); ++i)
+        extraCandidates.push_back(candidateIds[i]);
+
+      const bool forceFullBuild =
+          !baseConvex || (baseCell.numVertices() > 96u) || (baseCell.numFacets() > 48u) ||
+          (candidateIds.size() > 48u);
+
+      if (forceFullBuild) {
+        maker.build(cellId, p, m_nbrList, cub);
+        maker.renumber();
+        collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+        extraCandidates.clear();
+        ++fullRebuildByWorker[workerId];
+      } else {
+        maker = baseCell;
+        maker.rebuild(p, box, baseCell);
+        ++localRebuildByWorker[workerId];
+
+        std::vector<PosAndId<uint2, real_t> > &nbrsWrk = arena.nbrsWrk();
+        nbrsWrk.clear();
+        nbrsWrk.reserve(candidateIds.size() - oneRingCount);
+        for (size_t i = oneRingCount; i < candidateIds.size(); ++i) {
+          const uint2 nbrId = candidateIds[i];
+          if (processedThisUpdate[cellId] &&
+              std::find(oldCandidates.begin(), oldCandidates.end(), nbrId) != oldCandidates.end())
+            continue;
+          PosAndId<uint2, real_t> nbr;
+          nbr.id = nbrId;
+          nbr.pos = p[nbr.id];
+          nbrsWrk.push_back(nbr);
+        }
+        if (!nbrsWrk.empty())
+          ++batchCallsByWorker[workerId];
+        if (!nbrsWrk.empty() && maker.processNbrs(nbrsWrk.begin(), nbrsWrk.end(), p[cellId], box))
+          ++batchChangesByWorker[workerId];
+
+        maker.renumber();
+        collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+      }
+
+      for (size_t i = 0; i < oldDirect.size(); ++i)
+        if (std::find(newDirect.begin(), newDirect.end(), oldDirect[i]) != newDirect.end())
+          ++directSuccessesByWorker[workerId];
+
+      if (!forceFullBuild && (maker.numVertices() == 0 || maker.numFacets() == 0 || hasNoNbr)) {
+        ++emptyAfterLocalByWorker[workerId];
+        maker.build(cellId, p, m_nbrList, cub);
+        maker.renumber();
+        collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+        extraCandidates.clear();
+        ++fullRebuildByWorker[workerId];
+      }
+
+      Cell<real_t> checkedCell;
+      checkedCell = maker;
+      CellGeometry<real_t> checkedGeom(checkedCell);
+      checkedGeom.computeConnectingVectors(p, box);
+      checkedGeom.computeEdgeInv();
+      checkedGeom.updateVertexPos();
+      checkedGeom.computeVolume();
+      if (!forceFullBuild && (!checkedGeom.isConvex() || checkedGeom.getVolume() <= real_t(0))) {
+        ++fullRebuildByWorker[workerId];
+        maker.build(cellId, p, m_nbrList, cub);
+        maker.renumber();
+        collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+        extraCandidates.clear();
+      }
+
+      processedThisUpdate[cellId] = 1u;
+      for (size_t i = 0; i < oldDirect.size(); ++i) {
+        const uint2 nbrId = oldDirect[i];
+        if (std::find(newDirect.begin(), newDirect.end(), nbrId) == newDirect.end())
+          nextByWorker[workerId].push_back(nbrId);
+      }
+      for (size_t i = 0; i < newDirect.size(); ++i) {
+        const uint2 nbrId = newDirect[i];
+        if (std::find(oldDirect.begin(), oldDirect.end(), nbrId) == oldDirect.end())
+          nextByWorker[workerId].push_back(nbrId);
+      }
+
+      m_cellArena.overwriteFromMaker(cellId, maker);
+      m_connectivity.overwrite(cellId, newDirect, extraCandidates);
+      commitCellGeometry(cellId, p);
+    });
+
+    std::vector<uint2> nextQueue;
+    size_t rawProposalCount = 0;
+    for (size_t workerId = 0; workerId < workerCount; ++workerId) {
+      rawProposalCount += nextByWorker[workerId].size();
+      nextQueue.insert(nextQueue.end(), nextByWorker[workerId].begin(), nextByWorker[workerId].end());
+      m_lastUpdateStats.num_local_rebuild_cells += localRebuildByWorker[workerId];
+      m_lastUpdateStats.num_empty_after_local_rebuild += emptyAfterLocalByWorker[workerId];
+      m_lastUpdateStats.num_full_rebuild_cells += fullRebuildByWorker[workerId];
+      m_lastUpdateStats.num_repair_indirect_candidates += indirectByWorker[workerId];
+      m_lastUpdateStats.num_repair_direct_attempts += directAttemptsByWorker[workerId];
+      m_lastUpdateStats.num_repair_direct_successes += directSuccessesByWorker[workerId];
+      m_lastUpdateStats.num_repair_batch_calls += batchCallsByWorker[workerId];
+      m_lastUpdateStats.num_repair_batch_changes += batchChangesByWorker[workerId];
+    }
+    m_lastUpdateStats.num_repair_cells_changed_total += static_cast<uint2>(activeQueue.size());
+    m_lastUpdateStats.num_repair_proposals_total += static_cast<uint2>(rawProposalCount);
+
+    std::sort(nextQueue.begin(), nextQueue.end());
+    nextQueue.erase(std::remove(nextQueue.begin(), nextQueue.end(), noNbr), nextQueue.end());
+    nextQueue.erase(std::unique(nextQueue.begin(), nextQueue.end()), nextQueue.end());
+    activeQueue.swap(nextQueue);
+  }
+}
+
+template <typename real_t>
+void CellComplex<real_t>::updateNbrListLocal(const std::vector<std::array<real_t, 3> > &p) {
+  m_lastUpdateStats = CellComplexUpdateStats();
+  m_lastUpdateStats.num_cells = static_cast<uint2>(p.size());
+  if (!m_isBuild || p.size() != m_cellArena.numCells()) {
+    m_lastUpdateStats.rebuilt_from_scratch = true;
+    build(p);
+    return;
+  }
+  if (m_geom.size() != p.size() || m_geometry.numCells() != p.size())
+    buildGeometry(p);
+
+  initNbrList(p);
+  const Box<real_t> &box(m_nbrList.getBox());
+  const std::array<real_t, 3> &L(box.getL());
+  Cuboid<real_t> cub(L);
+
+  m_lastUpdateStats.num_rebuild_candidates = static_cast<uint2>(p.size());
+  m_lastUpdateStats.num_repair_iterations = p.empty() ? 0u : 1u;
+  m_lastUpdateStats.num_repair_target_groups_total = static_cast<uint2>(p.size());
+  updateAllCellsNbrListSharedSearch(p, box, cub, NULL);
+}
+
+template <typename real_t>
+void CellComplex<real_t>::updateNbrListSweep(const std::vector<std::array<real_t, 3> > &p) {
+  m_lastUpdateStats = CellComplexUpdateStats();
+  m_lastUpdateStats.num_cells = static_cast<uint2>(p.size());
+  if (!m_isBuild || p.size() != m_cellArena.numCells()) {
+    m_lastUpdateStats.rebuilt_from_scratch = true;
+    build(p);
+    return;
+  }
+  if (m_geom.size() != p.size() || m_geometry.numCells() != p.size())
+    buildGeometry(p);
+
+  initNbrList(p);
+  const Box<real_t> &box(m_nbrList.getBox());
+  const std::array<real_t, 3> &L(box.getL());
+  Cuboid<real_t> cub(L);
+  const size_t workerCount = std::max<size_t>(m_team.threadCount(), 1u);
+  std::vector<uint2> nonConvexByWorker(workerCount, 0u);
+  std::vector<uint8_t> convexState(p.size(), 0u);
+
+  auto collectDirectNbrs = [](const uint2 *nbrs, uint1 numFacets, std::vector<uint2> &out,
+                              bool &hasNoNbr) {
+    out.clear();
+    hasNoNbr = false;
+    out.reserve(numFacets);
+    for (uint1 facet = 0; facet < numFacets; ++facet) {
+      const uint2 nbrId = nbrs[facet];
+      if (nbrId == noNbr) {
+        hasNoNbr = true;
+        continue;
+      }
+      if (std::find(out.begin(), out.end(), nbrId) == out.end())
+        out.push_back(nbrId);
+    }
+    std::sort(out.begin(), out.end());
+  };
+
+  parallelForPersistent(p.size(), [&](size_t i, size_t workerId) {
+    CellGeometry<real_t> geom = m_geom[i];
+    geom.computeConnectingVectors(p, box);
+    geom.computeEdgeInv();
+    geom.updateVertexPos();
+    if (!geom.isConvex()) {
+      convexState[i] = 2u;
+      ++nonConvexByWorker[workerId];
+      return;
+    }
+
+    convexState[i] = 1u;
+    geom.diffVolume();
+    m_geom[i] = geom;
+    m_geometry.overwriteFromLegacy(static_cast<uint2>(i), m_cellArena.cellId(i), geom);
+  });
+
+  std::vector<uint2> activeQueue;
+  for (size_t workerId = 0; workerId < workerCount; ++workerId) {
+    m_lastUpdateStats.num_non_convex_before += nonConvexByWorker[workerId];
+  }
+  const real_t nonConvexFraction = p.empty()
+                                       ? real_t(0)
+                                       : static_cast<real_t>(m_lastUpdateStats.num_non_convex_before) /
+                                             static_cast<real_t>(p.size());
+  if (!p.empty() && m_sweepRebuildAllSwitchFraction < real_t(1) &&
+      nonConvexFraction >= m_sweepRebuildAllSwitchFraction) {
+    m_lastUpdateStats.num_rebuild_candidates = static_cast<uint2>(p.size());
+    m_lastUpdateStats.num_repair_iterations = 1u;
+    m_lastUpdateStats.num_repair_target_groups_total = static_cast<uint2>(p.size());
+    updateAllCellsNbrListSharedSearch(p, box, cub, &convexState);
+    return;
+  }
+
+  for (size_t i = 0; i < convexState.size(); ++i) {
+    if (convexState[i] == 2u)
+      activeQueue.push_back(static_cast<uint2>(i));
+  }
+  m_lastUpdateStats.num_rebuild_candidates = static_cast<uint2>(activeQueue.size());
+
+  std::vector<uint8_t> processed(p.size(), 0u);
+  std::vector<uint2> activeStamp(p.size(), 0u);
+  std::vector<uint2> queuedStamp(p.size(), 0u);
+  uint2 queueGeneration = 0u;
+  uint2 activeGeneration = 0u;
+
+  while (!activeQueue.empty()) {
+    ++m_lastUpdateStats.num_repair_iterations;
+    m_lastUpdateStats.num_repair_target_groups_total += static_cast<uint2>(activeQueue.size());
+
+    if (++activeGeneration == 0u) {
+      std::fill(activeStamp.begin(), activeStamp.end(), 0u);
+      activeGeneration = 1u;
+    }
+    for (size_t i = 0; i < activeQueue.size(); ++i)
+      activeStamp[activeQueue[i]] = activeGeneration;
+
+    std::vector<std::vector<uint2> > nextByWorker(workerCount);
+    std::vector<uint2> localByWorker(workerCount, 0u);
+    std::vector<uint2> fullByWorker(workerCount, 0u);
+    std::vector<uint2> emptyAfterLocalByWorker(workerCount, 0u);
+    std::vector<uint2> changedByWorker(workerCount, 0u);
+    std::vector<uint2> proposalByWorker(workerCount, 0u);
+
+    const uint2 sweepIndex = m_lastUpdateStats.num_repair_iterations;
+
+    parallelForPersistent(activeQueue.size(), [&](size_t idx, size_t workerId) {
+      const uint2 cellId = activeQueue[idx];
+      WorkerContext &worker = *m_workers[workerId];
+      CellMaker<real_t> &maker = worker.maker;
+
+      CellGeometry<real_t> geom = m_geom[cellId];
+      geom.computeConnectingVectors(p, box);
+      geom.computeEdgeInv();
+      geom.updateVertexPos();
+      const bool isConvex = geom.isConvex();
+      const Cell<real_t> &baseCell = geom.getCell();
+
+      std::vector<uint2> oldDirect;
+      {
+        const ConnectivityView<real_t> connView = m_connectivity.getView(cellId);
+        oldDirect.reserve(connView.numDirectNbrs());
+        for (uint1 facet = 0; facet < connView.numDirectNbrs(); ++facet)
+          oldDirect.push_back(connView.getDirectNbr(facet));
+        std::sort(oldDirect.begin(), oldDirect.end());
+      }
+
+      std::vector<uint2> newDirect;
+      bool hasNoNbr = false;
+      bool usedLocal = false;
+      bool localCutChanged = false;
+
+      if (isConvex) {
+        usedLocal = true;
+        ++localByWorker[workerId];
+        localCutChanged = maker.build(cellId, p, m_nbrList, baseCell, oldDirect);
+        maker.renumber();
+        collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+
+        if (!localCutChanged && newDirect == oldDirect && !hasNoNbr) {
+          geom.diffVolume();
+          m_geom[cellId] = geom;
+          m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), geom);
+          m_connectivity.overwrite(cellId, oldDirect, std::vector<uint2>());
+          return;
+        }
+
+        bool keepLocal = !(maker.numVertices() == 0 || maker.numFacets() == 0 || hasNoNbr);
+        if (keepLocal) {
+          Cell<real_t> checkedCell;
+          checkedCell = maker;
+          CellGeometry<real_t> checkedGeom(checkedCell);
+          checkedGeom.computeConnectingVectors(p, box);
+          checkedGeom.computeEdgeInv();
+          checkedGeom.updateVertexPos();
+          checkedGeom.computeVolume();
+          keepLocal = checkedGeom.isConvex() && (checkedGeom.getVolume() > real_t(0));
+        }
+        if (!keepLocal) {
+          ++emptyAfterLocalByWorker[workerId];
+          usedLocal = false;
+        }
+      }
+
+      if (!isConvex || !usedLocal) {
+        maker.build(cellId, p, m_nbrList, cub);
+        maker.renumber();
+        collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+        ++fullByWorker[workerId];
+      }
+
+      if (!usedLocal && isConvex && newDirect == oldDirect && !hasNoNbr) {
+        geom.diffVolume();
+        m_geom[cellId] = geom;
+        m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), geom);
+        m_connectivity.overwrite(cellId, oldDirect, std::vector<uint2>());
+        return;
+      }
+
+      const bool topologyChanged = hasNoNbr || (newDirect != oldDirect);
+      if (topologyChanged)
+        ++changedByWorker[workerId];
+
+      m_cellArena.overwriteFromMaker(cellId, maker);
+      m_connectivity.overwrite(cellId, newDirect, std::vector<uint2>());
+      commitCellGeometry(cellId, p);
+
+      if (sweepIndex == 1u || topologyChanged) {
+        std::vector<uint2> &next = nextByWorker[workerId];
+        for (size_t i = 0; i < oldDirect.size(); ++i) {
+          const uint2 nbrId = oldDirect[i];
+          if (nbrId == noNbr || nbrId >= processed.size() || processed[nbrId] ||
+              activeStamp[nbrId] == activeGeneration)
+            continue;
+          next.push_back(nbrId);
+          ++proposalByWorker[workerId];
+        }
+        for (size_t i = 0; i < newDirect.size(); ++i) {
+          const uint2 nbrId = newDirect[i];
+          if (nbrId == noNbr || nbrId >= processed.size() || processed[nbrId] ||
+              activeStamp[nbrId] == activeGeneration)
+            continue;
+          next.push_back(nbrId);
+          ++proposalByWorker[workerId];
+        }
+      }
+    });
+
+    for (size_t i = 0; i < activeQueue.size(); ++i)
+      processed[activeQueue[i]] = 1u;
+
+    std::vector<uint2> nextQueue;
+    if (++queueGeneration == 0u) {
+      std::fill(queuedStamp.begin(), queuedStamp.end(), 0u);
+      queueGeneration = 1u;
+    }
+
+    for (size_t workerId = 0; workerId < workerCount; ++workerId) {
+      m_lastUpdateStats.num_local_rebuild_cells += localByWorker[workerId];
+      m_lastUpdateStats.num_full_rebuild_cells += fullByWorker[workerId];
+      m_lastUpdateStats.num_empty_after_local_rebuild += emptyAfterLocalByWorker[workerId];
+      m_lastUpdateStats.num_repair_cells_changed_total += changedByWorker[workerId];
+      m_lastUpdateStats.num_repair_proposals_total += proposalByWorker[workerId];
+
+      const std::vector<uint2> &proposals = nextByWorker[workerId];
+      for (size_t i = 0; i < proposals.size(); ++i) {
+        const uint2 nbrId = proposals[i];
+        if (nbrId == noNbr || nbrId >= processed.size() || processed[nbrId])
+          continue;
+        if (queuedStamp[nbrId] == queueGeneration)
+          continue;
+        queuedStamp[nbrId] = queueGeneration;
+        nextQueue.push_back(nbrId);
+      }
+    }
+
+    activeQueue.swap(nextQueue);
+  }
+}
+
+template <typename real_t>
+void CellComplex<real_t>::updateNbrListSweepAsync(const std::vector<std::array<real_t, 3> > &p) {
+  m_lastUpdateStats = CellComplexUpdateStats();
+  m_lastUpdateStats.num_cells = static_cast<uint2>(p.size());
+  if (!m_isBuild || p.size() != m_cellArena.numCells()) {
+    m_lastUpdateStats.rebuilt_from_scratch = true;
+    build(p);
+    return;
+  }
+  if (m_geom.size() != p.size() || m_geometry.numCells() != p.size())
+    buildGeometry(p);
+
+  initNbrList(p);
+  const Box<real_t> &box(m_nbrList.getBox());
+  const std::array<real_t, 3> &L(box.getL());
+  Cuboid<real_t> cub(L);
+  const size_t workerCount = std::max<size_t>(m_team.threadCount(), 1u);
+
+  struct AsyncTask {
+    uint2 cellId;
+    uint2 depth;
+  };
+  enum CellTaskState : uint8_t { kTaskUnseen = 0u, kTaskQueued = 1u, kTaskProcessing = 2u, kTaskDone = 3u };
+
+  std::vector<uint2> nonConvexByWorker(workerCount, 0u);
+  std::vector<uint8_t> convexState(p.size(), 0u);
+
+  auto collectDirectNbrs = [](const uint2 *nbrs, uint1 numFacets, std::vector<uint2> &out,
+                              bool &hasNoNbr) {
+    out.clear();
+    hasNoNbr = false;
+    out.reserve(numFacets);
+    for (uint1 facet = 0; facet < numFacets; ++facet) {
+      const uint2 nbrId = nbrs[facet];
+      if (nbrId == noNbr) {
+        hasNoNbr = true;
+        continue;
+      }
+      if (std::find(out.begin(), out.end(), nbrId) == out.end())
+        out.push_back(nbrId);
+    }
+    std::sort(out.begin(), out.end());
+  };
+
+  parallelForPersistent(p.size(), [&](size_t i, size_t workerId) {
+    CellGeometry<real_t> geom = m_geom[i];
+    geom.computeConnectingVectors(p, box);
+    geom.computeEdgeInv();
+    geom.updateVertexPos();
+    if (!geom.isConvex()) {
+      convexState[i] = 2u;
+      ++nonConvexByWorker[workerId];
+      return;
+    }
+
+    convexState[i] = 1u;
+    geom.diffVolume();
+    m_geom[i] = geom;
+    m_geometry.overwriteFromLegacy(static_cast<uint2>(i), m_cellArena.cellId(i), geom);
+  });
+
+  for (size_t workerId = 0; workerId < workerCount; ++workerId) {
+    m_lastUpdateStats.num_non_convex_before += nonConvexByWorker[workerId];
+  }
+  const real_t nonConvexFraction = p.empty()
+                                       ? real_t(0)
+                                       : static_cast<real_t>(m_lastUpdateStats.num_non_convex_before) /
+                                             static_cast<real_t>(p.size());
+  if (!p.empty() && m_sweepRebuildAllSwitchFraction < real_t(1) &&
+      nonConvexFraction >= m_sweepRebuildAllSwitchFraction) {
+    m_lastUpdateStats.num_rebuild_candidates = static_cast<uint2>(p.size());
+    m_lastUpdateStats.num_repair_iterations = 1u;
+    m_lastUpdateStats.num_repair_target_groups_total = static_cast<uint2>(p.size());
+    updateAllCellsNbrListSharedSearch(p, box, cub, &convexState);
+    return;
+  }
+
+  std::vector<std::atomic<uint8_t> > taskState(p.size());
+  for (size_t i = 0; i < taskState.size(); ++i)
+    taskState[i].store(kTaskUnseen, std::memory_order_relaxed);
+
+  size_t initialQueued = 0;
+  std::vector<std::vector<AsyncTask> > workQueues(workerCount);
+  std::vector<std::mutex> queueMutex(workerCount);
+  for (size_t i = 0; i < convexState.size(); ++i) {
+    if (convexState[i] != 2u)
+      continue;
+    taskState[i].store(kTaskQueued, std::memory_order_relaxed);
+    workQueues[i % workerCount].push_back(AsyncTask{static_cast<uint2>(i), 1u});
+    ++initialQueued;
+  }
+  m_lastUpdateStats.num_rebuild_candidates = static_cast<uint2>(initialQueued);
+  if (initialQueued == 0)
+    return;
+
+  std::atomic<size_t> outstanding(initialQueued);
+  std::vector<uint2> queuedByWorker(workerCount, 0u);
+  std::vector<uint2> localByWorker(workerCount, 0u);
+  std::vector<uint2> fullByWorker(workerCount, 0u);
+  std::vector<uint2> emptyAfterLocalByWorker(workerCount, 0u);
+  std::vector<uint2> changedByWorker(workerCount, 0u);
+  std::vector<uint2> proposalByWorker(workerCount, 0u);
+  std::vector<uint2> processedByWorker(workerCount, 0u);
+  std::vector<uint2> maxDepthByWorker(workerCount, 0u);
+
+  auto tryQueueCandidate = [&](uint2 cellId, uint2 depth, size_t ownerTid) -> bool {
+    if (cellId == noNbr || cellId >= taskState.size())
+      return false;
+    uint8_t expected = kTaskUnseen;
+    if (!taskState[cellId].compare_exchange_strong(expected, kTaskQueued, std::memory_order_acq_rel,
+                                                   std::memory_order_relaxed))
+      return false;
+
+    outstanding.fetch_add(1u, std::memory_order_acq_rel);
+    ++queuedByWorker[ownerTid];
+    {
+      std::lock_guard<std::mutex> lock(queueMutex[ownerTid]);
+      workQueues[ownerTid].push_back(AsyncTask{cellId, depth});
+    }
+    return true;
+  };
+
+  auto popLocalTask = [&](size_t tid, AsyncTask &task) -> bool {
+    std::lock_guard<std::mutex> lock(queueMutex[tid]);
+    if (workQueues[tid].empty())
+      return false;
+    task = workQueues[tid].back();
+    workQueues[tid].pop_back();
+    return true;
+  };
+
+  auto stealTask = [&](size_t tid, AsyncTask &task) -> bool {
+    for (size_t offset = 1; offset < workerCount; ++offset) {
+      const size_t src = (tid + offset) % workerCount;
+      std::lock_guard<std::mutex> lock(queueMutex[src]);
+      if (workQueues[src].empty())
+        continue;
+      task = workQueues[src].back();
+      workQueues[src].pop_back();
+      return true;
+    }
+    return false;
+  };
+
+  m_team.run([&](size_t tid, size_t /*teamSize*/) {
+    AsyncTask task{0u, 0u};
+    while (true) {
+      if (!popLocalTask(tid, task) && !stealTask(tid, task)) {
+        if (outstanding.load(std::memory_order_acquire) == 0u)
+          break;
+        std::this_thread::yield();
+        continue;
+      }
+
+      uint8_t expected = kTaskQueued;
+      if (!taskState[task.cellId].compare_exchange_strong(expected, kTaskProcessing,
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_relaxed))
+        continue;
+
+      ++processedByWorker[tid];
+      if (task.depth > maxDepthByWorker[tid])
+        maxDepthByWorker[tid] = task.depth;
+
+      WorkerContext &worker = *m_workers[tid];
+      CellMaker<real_t> &maker = worker.maker;
+      const uint2 cellId = task.cellId;
+
+      CellGeometry<real_t> geom = m_geom[cellId];
+      geom.computeConnectingVectors(p, box);
+      geom.computeEdgeInv();
+      geom.updateVertexPos();
+      const bool isConvex = geom.isConvex();
+      const Cell<real_t> &baseCell = geom.getCell();
+
+      std::vector<uint2> oldDirect;
+      {
+        const ConnectivityView<real_t> connView = m_connectivity.getView(cellId);
+        oldDirect.reserve(connView.numDirectNbrs());
+        for (uint1 facet = 0; facet < connView.numDirectNbrs(); ++facet)
+          oldDirect.push_back(connView.getDirectNbr(facet));
+        std::sort(oldDirect.begin(), oldDirect.end());
+      }
+
+      std::vector<uint2> newDirect;
+      bool hasNoNbr = false;
+      bool usedLocal = false;
+      bool localCutChanged = false;
+
+      if (isConvex) {
+        usedLocal = true;
+        ++localByWorker[tid];
+        localCutChanged = maker.build(cellId, p, m_nbrList, baseCell, oldDirect);
+        maker.renumber();
+        collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+
+        if (!localCutChanged && newDirect == oldDirect && !hasNoNbr) {
+          geom.diffVolume();
+          m_geom[cellId] = geom;
+          m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), geom);
+          m_connectivity.overwrite(cellId, oldDirect, std::vector<uint2>());
+          taskState[cellId].store(kTaskDone, std::memory_order_release);
+          outstanding.fetch_sub(1u, std::memory_order_acq_rel);
+          continue;
+        }
+
+        bool keepLocal = !(maker.numVertices() == 0 || maker.numFacets() == 0 || hasNoNbr);
+        if (keepLocal) {
+          Cell<real_t> checkedCell;
+          checkedCell = maker;
+          CellGeometry<real_t> checkedGeom(checkedCell);
+          checkedGeom.computeConnectingVectors(p, box);
+          checkedGeom.computeEdgeInv();
+          checkedGeom.updateVertexPos();
+          checkedGeom.computeVolume();
+          keepLocal = checkedGeom.isConvex() && (checkedGeom.getVolume() > real_t(0));
+        }
+        if (!keepLocal) {
+          ++emptyAfterLocalByWorker[tid];
+          usedLocal = false;
+        }
+      }
+
+      if (!isConvex || !usedLocal) {
+        maker.build(cellId, p, m_nbrList, cub);
+        maker.renumber();
+        collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
+        ++fullByWorker[tid];
+      }
+
+      if (!usedLocal && isConvex && newDirect == oldDirect && !hasNoNbr) {
+        geom.diffVolume();
+        m_geom[cellId] = geom;
+        m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), geom);
+        m_connectivity.overwrite(cellId, oldDirect, std::vector<uint2>());
+        taskState[cellId].store(kTaskDone, std::memory_order_release);
+        outstanding.fetch_sub(1u, std::memory_order_acq_rel);
+        continue;
+      }
+
+      const bool topologyChanged = hasNoNbr || (newDirect != oldDirect);
+      if (topologyChanged)
+        ++changedByWorker[tid];
+
+      m_cellArena.overwriteFromMaker(cellId, maker);
+      m_connectivity.overwrite(cellId, newDirect, std::vector<uint2>());
+      commitCellGeometry(cellId, p);
+
+      if (task.depth == 1u || topologyChanged) {
+        proposalByWorker[tid] += static_cast<uint2>(oldDirect.size() + newDirect.size());
+        const uint2 nextDepth = task.depth + 1u;
+        for (size_t i = 0; i < oldDirect.size(); ++i)
+          tryQueueCandidate(oldDirect[i], nextDepth, tid);
+        for (size_t i = 0; i < newDirect.size(); ++i)
+          tryQueueCandidate(newDirect[i], nextDepth, tid);
+      }
+
+      taskState[cellId].store(kTaskDone, std::memory_order_release);
+      outstanding.fetch_sub(1u, std::memory_order_acq_rel);
+    }
+  });
+
+  uint2 maxDepth = 0u;
+  for (size_t workerId = 0; workerId < workerCount; ++workerId) {
+    m_lastUpdateStats.num_rebuild_candidates += queuedByWorker[workerId];
+    m_lastUpdateStats.num_local_rebuild_cells += localByWorker[workerId];
+    m_lastUpdateStats.num_full_rebuild_cells += fullByWorker[workerId];
+    m_lastUpdateStats.num_empty_after_local_rebuild += emptyAfterLocalByWorker[workerId];
+    m_lastUpdateStats.num_repair_cells_changed_total += changedByWorker[workerId];
+    m_lastUpdateStats.num_repair_proposals_total += proposalByWorker[workerId];
+    m_lastUpdateStats.num_repair_target_groups_total += processedByWorker[workerId];
+    if (maxDepthByWorker[workerId] > maxDepth)
+      maxDepth = maxDepthByWorker[workerId];
+  }
+  m_lastUpdateStats.num_repair_iterations = maxDepth;
 }
 
 template <typename real_t>
