@@ -223,19 +223,17 @@ class ChunkedPool {
       std::abort();
     }
 
+    std::lock_guard<std::mutex> lock(m_mutex);
     uint2 chunkIdx = InvalidIdx;
-    {
-      std::lock_guard<std::mutex> lock(m_mutex);
-      if (!m_freeList.empty()) {
-        chunkIdx = m_freeList.back();
-        m_freeList.pop_back();
-      }
+    if (!m_freeList.empty()) {
+      chunkIdx = m_freeList.back();
+      m_freeList.pop_back();
     }
 
     if (chunkIdx == InvalidIdx)
       chunkIdx = static_cast<uint2>(m_nextChunk.fetch_add(1, std::memory_order_relaxed));
 
-    ensureChunk(static_cast<size_t>(chunkIdx) + 1);
+    ensureChunkLocked(static_cast<size_t>(chunkIdx) + 1);
     outOverflowIdx = static_cast<uint2>(static_cast<size_t>(chunkIdx) * m_chunkSize);
     return m_chunks[chunkIdx].get();
   }
@@ -248,22 +246,37 @@ class ChunkedPool {
     m_freeList.push_back(chunkIdx);
   }
 
-  T &get(size_t idx) { return m_chunks[idx / m_chunkSize][idx % m_chunkSize]; }
-  const T &get(size_t idx) const { return m_chunks[idx / m_chunkSize][idx % m_chunkSize]; }
+  T &get(size_t idx) {
+    T *chunk = chunkPtr(idx / m_chunkSize);
+    return chunk[idx % m_chunkSize];
+  }
+  const T &get(size_t idx) const {
+    const T *chunk = chunkPtr(idx / m_chunkSize);
+    return chunk[idx % m_chunkSize];
+  }
   size_t chunkSize() const { return m_chunkSize; }
 
  private:
-  void ensureChunk(size_t requiredChunks) {
-    std::lock_guard<std::mutex> lock(m_mutex);
+  void ensureChunkLocked(size_t requiredChunks) {
     while (m_chunks.size() < requiredChunks)
       m_chunks.emplace_back(new T[m_chunkSize]());
+  }
+
+  T *chunkPtr(size_t chunkIdx) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_chunks[chunkIdx].get();
+  }
+
+  const T *chunkPtr(size_t chunkIdx) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_chunks[chunkIdx].get();
   }
 
   std::vector<std::unique_ptr<T[]> > m_chunks;
   std::vector<uint2> m_freeList;
   std::atomic<size_t> m_nextChunk;
   size_t m_chunkSize;
-  std::mutex m_mutex;
+  mutable std::mutex m_mutex;
 };
 
 template <typename T, uint1 PrimaryCap>
