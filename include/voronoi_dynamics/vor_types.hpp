@@ -205,6 +205,12 @@ class ChunkedPool {
     m_nextChunk.store(0, std::memory_order_relaxed);
   }
 
+  void resetReuse() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_freeList.clear();
+    m_nextChunk.store(0, std::memory_order_relaxed);
+  }
+
   T *allocate(size_t count, uint2 &outOverflowIdx) {
     if (count == 0) {
       outOverflowIdx = InvalidIdx;
@@ -279,6 +285,19 @@ class PrimaryOverflowArray {
     m_counts.assign(numCells, 0);
     m_overflowIdx.assign(numCells, InvalidOverflow);
     m_overflow.clear();
+  }
+
+  void prepare(uint2 numCells) {
+    const size_t primarySize = static_cast<size_t>(numCells) * static_cast<size_t>(PrimaryCap);
+    if (m_primary.size() != primarySize)
+      m_primary.resize(primarySize);
+    if (m_counts.size() != numCells)
+      m_counts.resize(numCells);
+    if (m_overflowIdx.size() != numCells)
+      m_overflowIdx.resize(numCells);
+    std::fill(m_counts.begin(), m_counts.end(), 0);
+    std::fill(m_overflowIdx.begin(), m_overflowIdx.end(), InvalidOverflow);
+    m_overflow.resetReuse();
   }
 
   void insert(uint2 cellId, const T *data, uint1 count) {

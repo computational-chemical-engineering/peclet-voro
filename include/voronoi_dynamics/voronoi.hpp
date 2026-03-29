@@ -818,6 +818,15 @@ class TopologyArena {
     m_nbrs.resize(numCells);
   }
 
+  void prepare(uint2 numCells) {
+    if (m_ids.size() != numCells)
+      m_ids.resize(numCells);
+    m_vertexPos.prepare(numCells);
+    m_vertices.prepare(numCells);
+    m_facets.prepare(numCells);
+    m_nbrs.prepare(numCells);
+  }
+
   size_t numCells() const { return m_ids.size(); }
   uint2 cellId(size_t i) const { return m_ids[i]; }
   uint1 cellNumVertices(size_t i) const { return m_vertexPos.count(static_cast<uint2>(i)); }
@@ -900,6 +909,13 @@ class ConnectivityArena {
     clear();
     m_directCounts.resize(numCells, 0u);
     m_candidates.resize(numCells);
+  }
+
+  void prepare(uint2 numCells) {
+    if (m_directCounts.size() != numCells)
+      m_directCounts.resize(numCells);
+    std::fill(m_directCounts.begin(), m_directCounts.end(), 0u);
+    m_candidates.prepare(numCells);
   }
 
   size_t numCells() const { return m_directCounts.size(); }
@@ -1001,6 +1017,17 @@ class GeometryArena {
     m_connVSq.resize(numCells);
   }
 
+  void prepare(uint2 numCells) {
+    if (m_ids.size() != numCells)
+      m_ids.resize(numCells);
+    if (m_volumes.size() != numCells)
+      m_volumes.resize(numCells);
+    m_dV.prepare(numCells);
+    m_areas.prepare(numCells);
+    m_connV.prepare(numCells);
+    m_connVSq.prepare(numCells);
+  }
+
   size_t numCells() const { return m_ids.size(); }
   real_t cellVolume(size_t i) const { return m_volumes[i]; }
   uint1 cellFacetCount(size_t i) const { return m_dV.count(static_cast<uint2>(i)); }
@@ -1041,9 +1068,13 @@ class CellComplex {
   CellComplex(Box<real_t> *box);
   CellComplex(Box<real_t> *box, size_t workerCount);
   ~CellComplex() = default;
-  void build(const std::vector<std::array<real_t, 3> > &p);
+  /// Build the packed topology/connectivity. Geometry is computed by default
+  /// because update paths depend on it for convexity checks and local refresh,
+  /// but it can be skipped and rebuilt lazily later.
+  void build(const std::vector<std::array<real_t, 3> > &p, bool computeGeometry = true);
   /// Build geometry data (connecting vectors, edge inverses, volume derivatives)
-  /// for all cells. Called automatically by build(); call separately if needed.
+  /// for all cells. Called automatically by build() when computeGeometry=true;
+  /// call separately if needed.
   void buildGeometry(const std::vector<std::array<real_t, 3> > &p);
   void update(const std::vector<std::array<real_t, 3> > &p);
   /// Experimental incremental path: fast-lane convex update followed by
@@ -1207,6 +1238,7 @@ class CellComplex {
   template <typename Func>
   void parallelForPersistent(size_t count, Func fn);
   void ensureWorkerContexts(size_t count);
+  void clearGeometryCache();
   void rebuildLegacyGeometryCache(const std::vector<std::array<real_t, 3> > &p);
   void commitCellGeometry(uint2 cellId, const std::vector<std::array<real_t, 3> > &p);
   void updateAllCellsNbrListSharedSearch(const std::vector<std::array<real_t, 3> > &p,
@@ -3305,12 +3337,12 @@ void CellComplex<real_t>::ensureWorkerContexts(size_t count) {
 }
 
 template <typename real_t>
-void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> > &p) {
+void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> > &p, bool computeGeometry) {
   initNbrList(p);
   const std::array<real_t, 3> &L(m_nbrList.getBox().getL());
   Cuboid<real_t> cub(L);
-  m_cellArena.resize(static_cast<uint2>(p.size()));
-  m_connectivity.resize(static_cast<uint2>(p.size()));
+  m_cellArena.prepare(static_cast<uint2>(p.size()));
+  m_connectivity.prepare(static_cast<uint2>(p.size()));
   parallelForPersistent(p.size(), [&](size_t i, size_t workerId) {
     CellMaker<real_t> &maker = m_workers[workerId]->maker;
     m_workers[workerId]->arena.ensureVisitedSize(static_cast<uint2>(p.size()));
@@ -3319,8 +3351,17 @@ void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> > &p) {
     m_connectivity.overwriteFromMaker(static_cast<uint2>(i), maker);
   });
   m_nbrList.clear();
-  buildGeometry(p);
+  if (computeGeometry)
+    buildGeometry(p);
+  else
+    clearGeometryCache();
   m_isBuild = true;
+}
+
+template <typename real_t>
+void CellComplex<real_t>::clearGeometryCache() {
+  m_geom.clear();
+  m_geometry.clear();
 }
 
 template <typename real_t>
@@ -3338,7 +3379,7 @@ void CellComplex<real_t>::commitCellGeometry(uint2 cellId,
 template <typename real_t>
 void CellComplex<real_t>::rebuildLegacyGeometryCache(const std::vector<std::array<real_t, 3> > &p) {
   m_geom.resize(p.size());
-  m_geometry.resize(static_cast<uint2>(p.size()));
+  m_geometry.prepare(static_cast<uint2>(p.size()));
   parallelForPersistent(p.size(), [&](size_t i, size_t) {
     commitCellGeometry(static_cast<uint2>(i), p);
   });
