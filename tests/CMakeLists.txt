@@ -23,7 +23,7 @@ endfunction()
 # sets; does NOT need the sample data file.
 add_voronoi_test(test_static_voronoi       test_static_voronoi.cpp)
 
-# Build and rebuild under Lees-Edwards shear deformation
+# Incremental update under periodic random displacements, validated against a rebuild
 add_voronoi_test(test_build_rebuild        test_build_rebuild.cpp)
 
 # Alternative build trials and stress testing

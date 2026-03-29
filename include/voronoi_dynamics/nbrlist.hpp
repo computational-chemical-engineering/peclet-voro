@@ -698,10 +698,10 @@ void NbrList<UInt, real_t>::getNbrs(const UInt indxPos, const std::vector<std::a
   indcs.clear();
   indcs.reserve(numNbrs);
   for (UInt i(m_headCell[indxCell]); i < m_headCell[indxCell + 1]; ++i)
-    if (m_cell2Pos[i] != indxPos)
-      indcs.push_back(m_cell2Pos[i]);
+    if (m_cell2Pos[i].id != indxPos)
+      indcs.push_back(m_cell2Pos[i].id);
   for (UInt k(0); k < nbrCells.size(); ++k)
     for (UInt i(m_headCell[nbrCells[k]]); i < m_headCell[nbrCells[k] + 1]; ++i)
-      indcs.push_back(m_cell2Pos[i]);
+      indcs.push_back(m_cell2Pos[i].id);
 }
 }  // namespace vor

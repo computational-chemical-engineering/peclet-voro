@@ -14,6 +14,8 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -194,12 +196,13 @@ class ChunkedPool {
   static constexpr uint2 InvalidIdx = static_cast<uint2>(~0u);
 
   explicit ChunkedPool(size_t chunkSize = 1024)
-      : m_globalOffset(0), m_chunkSize(std::max<size_t>(chunkSize, 1)) {}
+      : m_nextChunk(0), m_chunkSize(std::max<size_t>(chunkSize, 1)) {}
 
   void clear() {
-    std::lock_guard<std::mutex> lock(m_chunkMutex);
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_chunks.clear();
-    m_globalOffset.store(0, std::memory_order_relaxed);
+    m_freeList.clear();
+    m_nextChunk.store(0, std::memory_order_relaxed);
   }
 
   T *allocate(size_t count, uint2 &outOverflowIdx) {
@@ -207,11 +210,36 @@ class ChunkedPool {
       outOverflowIdx = InvalidIdx;
       return NULL;
     }
+    if (count > m_chunkSize) {
+      std::fprintf(stderr,
+                   "Fatal: ChunkedPool allocation of %zu items exceeds chunk size %zu\n", count,
+                   m_chunkSize);
+      std::abort();
+    }
 
-    const size_t start = claimOffset(count);
-    ensureChunk((start / m_chunkSize) + 1);
-    outOverflowIdx = static_cast<uint2>(start);
-    return m_chunks[start / m_chunkSize].get() + (start % m_chunkSize);
+    uint2 chunkIdx = InvalidIdx;
+    {
+      std::lock_guard<std::mutex> lock(m_mutex);
+      if (!m_freeList.empty()) {
+        chunkIdx = m_freeList.back();
+        m_freeList.pop_back();
+      }
+    }
+
+    if (chunkIdx == InvalidIdx)
+      chunkIdx = static_cast<uint2>(m_nextChunk.fetch_add(1, std::memory_order_relaxed));
+
+    ensureChunk(static_cast<size_t>(chunkIdx) + 1);
+    outOverflowIdx = static_cast<uint2>(static_cast<size_t>(chunkIdx) * m_chunkSize);
+    return m_chunks[chunkIdx].get();
+  }
+
+  void releaseChunk(uint2 overflowIdx) {
+    if (overflowIdx == InvalidIdx)
+      return;
+    const uint2 chunkIdx = static_cast<uint2>(overflowIdx / m_chunkSize);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_freeList.push_back(chunkIdx);
   }
 
   T &get(size_t idx) { return m_chunks[idx / m_chunkSize][idx % m_chunkSize]; }
@@ -219,29 +247,17 @@ class ChunkedPool {
   size_t chunkSize() const { return m_chunkSize; }
 
  private:
-  size_t claimOffset(size_t count) {
-    size_t current = m_globalOffset.load(std::memory_order_relaxed);
-    while (true) {
-      const size_t inChunk = current % m_chunkSize;
-      const size_t start = (inChunk + count <= m_chunkSize) ? current : (current + (m_chunkSize - inChunk));
-      const size_t next = start + count;
-      if (m_globalOffset.compare_exchange_weak(current, next, std::memory_order_relaxed,
-                                               std::memory_order_relaxed)) {
-        return start;
-      }
-    }
-  }
-
   void ensureChunk(size_t requiredChunks) {
-    std::lock_guard<std::mutex> lock(m_chunkMutex);
+    std::lock_guard<std::mutex> lock(m_mutex);
     while (m_chunks.size() < requiredChunks)
       m_chunks.emplace_back(new T[m_chunkSize]());
   }
 
   std::vector<std::unique_ptr<T[]> > m_chunks;
-  std::atomic<size_t> m_globalOffset;
+  std::vector<uint2> m_freeList;
+  std::atomic<size_t> m_nextChunk;
   size_t m_chunkSize;
-  std::mutex m_chunkMutex;
+  std::mutex m_mutex;
 };
 
 template <typename T, uint1 PrimaryCap>
@@ -285,6 +301,19 @@ class PrimaryOverflowArray {
     }
   }
 
+  void overwrite(uint2 cellId, const T *data, uint1 count) {
+    releaseCellOverflow(cellId);
+    insert(cellId, data, count);
+  }
+
+  void clearCell(uint2 cellId) {
+    releaseCellOverflow(cellId);
+    m_counts[cellId] = 0;
+    T *primary = primaryData(cellId);
+    for (uint1 i = 0; i < PrimaryCap; ++i)
+      primary[i] = T();
+  }
+
   uint1 count(uint2 cellId) const { return m_counts[cellId]; }
   bool hasOverflow(uint2 cellId) const { return m_overflowIdx[cellId] != InvalidOverflow; }
   const T &get(uint2 cellId, uint1 idx) const {
@@ -304,6 +333,13 @@ class PrimaryOverflowArray {
   const std::vector<uint2> &overflowIdx() const { return m_overflowIdx; }
 
  private:
+  void releaseCellOverflow(uint2 cellId) {
+    if (m_overflowIdx[cellId] != InvalidOverflow) {
+      m_overflow.releaseChunk(m_overflowIdx[cellId]);
+      m_overflowIdx[cellId] = InvalidOverflow;
+    }
+  }
+
   std::vector<T> m_primary;
   ChunkedPool<T> m_overflow;
   std::vector<uint1> m_counts;

@@ -8,7 +8,6 @@
  *  - Cuboid        – helper that initialises a cell as a rectangular cuboid
  *  - CellMaker     – incremental half-plane cutting algorithm
  *  - CellGeometry  – geometric properties (volume, areas, velocity gradients)
- *  - CellUpdater   – topology-repair after particle movement
  *  - CellComplex   – collection of cells and high-level build/update interface
  *  - NbrsToFacets  – neighbour-to-facet mapping for sparse-matrix assembly
  */
@@ -17,7 +16,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <boost/container/flat_set.hpp>
 #include <condition_variable>
 #include <cstdlib>
 #include <cstdio>
@@ -130,8 +128,6 @@ inline uint1 getEdge(uint1 label) {
 template <typename real_t>
 class CellMaker;
 template <typename real_t>
-class CellUpdater;
-template <typename real_t>
 class CellGeometry;
 template <typename real_t>
 class ConstructionArena;
@@ -141,6 +137,10 @@ template <typename real_t>
 struct GeometryView;
 template <typename real_t>
 class TopologyArena;
+template <typename real_t>
+struct ConnectivityView;
+template <typename real_t>
+class ConnectivityArena;
 template <typename real_t>
 class GeometryArena;
 
@@ -234,7 +234,6 @@ class Cell {
   //! @return true, if there are 1 or more facets without neighbors in a cell. false otherwise
   inline bool hasNoNbr();
   friend class CellMaker<real_t>;
-  friend class CellUpdater<real_t>;
   friend class CellGeometry<real_t>;
   friend class TopologyArena<real_t>;
 
@@ -318,6 +317,28 @@ class ConstructionArena {
   uint1 vertexCapacity() const { return static_cast<uint1>(m_vertexPos.size()); }
   uint1 facetCapacity() const { return static_cast<uint1>(m_facets.size()); }
 
+  void ensureVisitedSize(uint2 count) {
+    if (m_visitedGen.size() < count)
+      m_visitedGen.resize(count, 0u);
+  }
+
+  void startNewCell() {
+    ++m_currentGeneration;
+    if (m_currentGeneration == 0) {
+      std::fill(m_visitedGen.begin(), m_visitedGen.end(), 0u);
+      m_currentGeneration = 1;
+    }
+  }
+
+  bool markAndCheckVisited(uint2 nbrId) {
+    if (nbrId >= m_visitedGen.size())
+      m_visitedGen.resize(static_cast<size_t>(nbrId) + 1, 0u);
+    if (m_visitedGen[nbrId] == m_currentGeneration)
+      return true;
+    m_visitedGen[nbrId] = m_currentGeneration;
+    return false;
+  }
+
   std::array<real_t, 3> *vertexPosData() { return m_vertexPos.data(); }
   real_t *rSqData() { return m_rSq.data(); }
   Vertex *verticesData() { return m_vertices.data(); }
@@ -366,6 +387,8 @@ class ConstructionArena {
   std::vector<PosAndId<uint2, real_t> > m_nbrsWrk;
   std::vector<NbrDist<real_t> > m_nbrDistWrk;
   std::vector<uint1> m_vStackWrk;
+  uint2 m_currentGeneration = 0;
+  std::vector<uint2> m_visitedGen;
 };
 
 /**
@@ -384,9 +407,6 @@ class CellMaker {
   //! @param rhs cell used to initialize the cellmaker
   CellMaker &operator=(const Cell<real_t> &rhs);
   CellMaker &operator=(const CellView<real_t> &rhs);
-  //! @brief initialize a cellmaker by equating it to a cellUpdatet
-  //! @param rhs cellupdater used to initialize the cellmaker
-  CellMaker &operator=(const CellUpdater<real_t> &rhs);
   /**
    * @brief build a Voronoi cell
    *
@@ -435,10 +455,12 @@ class CellMaker {
   void getCloseNbrs(NbrInsert &nbrs);
   // void drawGnuplot(FILE *fp) const;
   // void testTopo() const;
+  inline uint1 numVertices() const { return m_numVertices; }
+  inline uint1 numFacets() const { return m_numFacets; }
   const uint2 *getNbrs() const { return m_nbr; }
   friend class Cell<real_t>;
-  friend class CellUpdater<real_t>;
   friend class TopologyArena<real_t>;
+  friend class ConnectivityArena<real_t>;
   void renumber();
 
  protected:
@@ -501,8 +523,8 @@ class CellMaker {
 #define VOR_CELLMAKER_USE_CUTCELL2 1
 #endif
   static constexpr bool kUseCutCell2 = (VOR_CELLMAKER_USE_CUTCELL2 != 0);
-  static constexpr uint1 kMaxV = maxNumVertices - 1;
-  static constexpr uint1 kMaxF = maxNumFacets - 1;
+  static constexpr uint1 kMaxV = maxNumVertices;
+  static constexpr uint1 kMaxF = maxNumFacets;
   static constexpr uint1 kInitialV = 128;
   static constexpr uint1 kInitialF = 64;
   uint2 m_id;
@@ -642,7 +664,10 @@ class CellGeometry {
  public:
   CellGeometry();
   CellGeometry(Cell<real_t> &cell);
+  CellGeometry(const CellView<real_t> &cell);
+  CellGeometry(const CellGeometry<real_t> &rhs);
   CellGeometry &operator=(Cell<real_t> &rhs);
+  CellGeometry &operator=(const CellView<real_t> &rhs);
   CellGeometry &operator=(const CellGeometry<real_t> &rhs);
   void computeConnectingVectors(const std::vector<std::array<real_t, 3> > &pos, const Box<real_t> &box);
   void computeEdgeInv();
@@ -669,10 +694,13 @@ class CellGeometry {
   const std::vector<std::array<std::array<std::array<real_t, 3>, 3>, 3> > &getOmega() const { return m_omega; }
   bool isConvex() const;
   inline Cell<real_t> &getCell() { return *p_cell; }
+  inline const Cell<real_t> &getCell() const { return *p_cell; }
   inline const std::vector<std::array<real_t, 3> > &getConnVect() const { return m_connV; }
   inline const std::vector<real_t> &getConnVectSq() const { return m_rSq; }
 
  protected:
+  void resetDerived();
+  Cell<real_t> m_ownedCell;
   Cell<real_t> *p_cell;
   std::vector<std::array<real_t, 3> > m_connV;
   std::vector<real_t> m_rSq;
@@ -685,38 +713,6 @@ class CellGeometry {
   // l: displacement direction, k: normal direction
   std::vector<std::array<std::array<std::array<real_t, 3>, 3>, 3> > m_omega;
   std::vector<std::array<real_t, 3> > m_dV;
-};
-
-template <typename real_t>
-class CellUpdater {
- public:
-  CellUpdater() : m_isSetup(false) {}
-  CellUpdater(CellGeometry<real_t> &geom);
-  CellUpdater &operator=(CellGeometry<real_t> &rhs);
-  CellUpdater &operator=(const CellUpdater<real_t> &rhs);
-  inline void reset();
-  uint1 findFacet(uint2 nbr) const;
-  void updateNbrInserts();
-  inline const std::vector<NbrInsert> &getNbrInserts() { return m_nbrInserts; }
-  inline void clearNbrInserts() { m_nbrInserts.clear(); }
-  bool processNbrInserts(NbrInsertItr begin, NbrInsertItr end, CellMaker<real_t> &maker,
-                         const std::vector<std::array<real_t, 3> > &pos, const Box<real_t> &box,
-                         CellComplexUpdateStats *stats = NULL);
-  friend class CellMaker<real_t>;
-  friend class CellGeometry<real_t>;
-  // inline bool isConvex2() const;
- protected:
-  void setupNbrSet();
-  inline bool isSetupNbrSet() { return m_isSetup; }
-  inline bool isInNbrs(uint2 nbr) const;
-  // inline bool isConvex() const;
-  CellGeometry<real_t> *p_geom;
-  boost::container::flat_set<uint2> m_nbrs;
-  std::vector<uint2> m_nbrsWrk;
-  std::vector<NbrInsert> m_nbrInserts;
-  bool m_isSetup;
-  std::vector<PosAndId<uint2, real_t> > m_newNbrsWrk;
-  std::vector<std::array<bool, 3> > m_visitedWrk;
 };
 
 /**
@@ -776,6 +772,15 @@ class TopologyArena {
     m_vertices.insert(cellId, maker.m_vertices, maker.m_numVertices);
     m_facets.insert(cellId, maker.m_facets, maker.m_numFacets);
     m_nbrs.insert(cellId, maker.m_nbr, maker.m_numFacets);
+  }
+
+  void overwriteFromMaker(uint2 cellId, CellMaker<real_t> &maker) {
+    maker.renumber();
+    m_ids[cellId] = maker.m_id;
+    m_vertexPos.overwrite(cellId, maker.m_vertexPos, maker.m_numVertices);
+    m_vertices.overwrite(cellId, maker.m_vertices, maker.m_numVertices);
+    m_facets.overwrite(cellId, maker.m_facets, maker.m_numFacets);
+    m_nbrs.overwrite(cellId, maker.m_nbr, maker.m_numFacets);
   }
 
   void resize(uint2 numCells) {
@@ -845,6 +850,73 @@ template <typename real_t>
 using CellArena = TopologyArena<real_t>;
 
 template <typename real_t>
+struct ConnectivityView {
+  uint2 cellIndex;
+  const ConnectivityArena<real_t> *arena;
+
+  inline uint1 numDirectNbrs() const { return arena->cellDirectCount(cellIndex); }
+  inline uint1 numCandidates() const { return arena->cellCandidateCount(cellIndex); }
+  inline uint2 getDirectNbr(uint1 i) const { return arena->cellCandidate(cellIndex, i); }
+  inline uint2 getCandidate(uint1 i) const { return arena->cellCandidate(cellIndex, i); }
+};
+
+template <typename real_t>
+class ConnectivityArena {
+ public:
+  static constexpr uint1 PrimaryF = TopologyArena<real_t>::PrimaryF;
+
+  void clear() {
+    m_directCounts.clear();
+    m_candidates.clear();
+  }
+
+  void resize(uint2 numCells) {
+    clear();
+    m_directCounts.resize(numCells, 0u);
+    m_candidates.resize(numCells);
+  }
+
+  size_t numCells() const { return m_directCounts.size(); }
+
+  void overwrite(uint2 cellId, const std::vector<uint2> &directNbrs,
+                 const std::vector<uint2> &extraCandidates) {
+    std::vector<uint2> merged;
+    merged.reserve(directNbrs.size());
+    for (size_t i = 0; i < directNbrs.size(); ++i)
+      if (directNbrs[i] != noNbr)
+        if (std::find(merged.begin(), merged.end(), directNbrs[i]) == merged.end())
+          merged.push_back(directNbrs[i]);
+    (void)extraCandidates;
+    m_directCounts[cellId] = static_cast<uint1>(merged.size());
+    m_candidates.overwrite(cellId, merged.data(), static_cast<uint1>(merged.size()));
+  }
+
+  void overwriteFromMaker(uint2 cellId, CellMaker<real_t> &maker) {
+    std::vector<uint2> directNbrs;
+    directNbrs.reserve(maker.m_numFacets);
+    for (uint1 i = 0; i < maker.m_numFacets; ++i)
+      if (maker.m_nbr[i] != noNbr)
+        directNbrs.push_back(maker.m_nbr[i]);
+    overwrite(cellId, directNbrs, std::vector<uint2>());
+  }
+
+  uint1 cellDirectCount(size_t i) const { return m_directCounts[i]; }
+  uint1 cellCandidateCount(size_t i) const { return m_candidates.count(static_cast<uint2>(i)); }
+  uint2 cellCandidate(size_t i, uint1 j) const { return m_candidates.get(static_cast<uint2>(i), j); }
+
+  ConnectivityView<real_t> getView(size_t i) const {
+    ConnectivityView<real_t> view;
+    view.cellIndex = static_cast<uint2>(i);
+    view.arena = this;
+    return view;
+  }
+
+ private:
+  std::vector<uint1> m_directCounts;
+  PrimaryOverflowArray<uint2, PrimaryF> m_candidates;
+};
+
+template <typename real_t>
 struct GeometryView {
   uint2 id;
   uint2 cellIndex;
@@ -874,6 +946,20 @@ class GeometryArena {
 
   void rebuildFromLegacy(const TopologyArena<real_t> &topology,
                          const std::vector<CellGeometry<real_t> > &geoms);
+
+  void overwriteFromLegacy(uint2 cellId, uint2 id, const CellGeometry<real_t> &geom) {
+    const uint1 facetCount = geom.getCell().numFacets();
+    m_ids[cellId] = id;
+    m_volumes[cellId] = geom.getVolume();
+    const std::vector<std::array<real_t, 3> > &dV = geom.getdV();
+    const std::vector<std::array<real_t, 3> > &areas = geom.getAreas();
+    const std::vector<std::array<real_t, 3> > &connV = geom.getConnVect();
+    const std::vector<real_t> &connVSq = geom.getConnVectSq();
+    m_dV.overwrite(cellId, dV.data(), facetCount);
+    m_areas.overwrite(cellId, areas.data(), facetCount);
+    m_connV.overwrite(cellId, connV.data(), facetCount);
+    m_connVSq.overwrite(cellId, connVSq.data(), facetCount);
+  }
 
   void resize(uint2 numCells) {
     clear();
@@ -931,6 +1017,7 @@ class CellComplex {
   void update(const std::vector<std::array<real_t, 3> > &p);
   size_t numCells() const { return m_cellArena.numCells(); }
   CellView<real_t> getCellView(size_t i) const { return m_cellArena.getView(i); }
+  ConnectivityView<real_t> getConnectivityView(size_t i) const { return m_connectivity.getView(i); }
   GeometryView<real_t> getGeometryView(size_t i) const { return m_geometry.getView(i); }
   void materializeCell(size_t i, Cell<real_t> &cell) const { m_cellArena.materializeCell(i, cell); }
   void materializeCells(std::vector<Cell<real_t> > &cells) const {
@@ -944,6 +1031,8 @@ class CellComplex {
   const std::vector<CellGeometry<real_t> > &getGeoms() const { return m_geom; }
   GeometryArena<real_t> &getGeometryArena() { return m_geometry; }
   const GeometryArena<real_t> &getGeometryArena() const { return m_geometry; }
+  ConnectivityArena<real_t> &getConnectivityArena() { return m_connectivity; }
+  const ConnectivityArena<real_t> &getConnectivityArena() const { return m_connectivity; }
   CellArena<real_t> &getCellArena() { return m_cellArena; }
   const CellArena<real_t> &getCellArena() const { return m_cellArena; }
   const NbrList<uint2, real_t> &getNbrList() const { return m_nbrList; }
@@ -1065,19 +1154,17 @@ class CellComplex {
   template <typename Func>
   void parallelForPersistent(size_t count, Func fn);
   void ensureWorkerContexts(size_t count);
-  void repair(const std::vector<std::array<real_t, 3> > &p);
+  void rebuildLegacyGeometryCache(const std::vector<std::array<real_t, 3> > &p);
+  void commitCellGeometry(uint2 cellId, const std::vector<std::array<real_t, 3> > &p);
   void initNbrList(const std::vector<std::array<real_t, 3> > &p);
   NbrList<uint2, real_t> m_nbrList;
   std::vector<uint0> m_types;
-  std::vector<Cell<real_t> > m_cells;
   TopologyArena<real_t> m_cellArena;
+  ConnectivityArena<real_t> m_connectivity;
   GeometryArena<real_t> m_geometry;
-  std::vector<Cell<real_t> > m_geomCells;
   std::vector<CellGeometry<real_t> > m_geom;
-  std::vector<CellUpdater<real_t> > m_updaters;
   PersistentWorkerTeam m_team;
   std::vector<std::unique_ptr<WorkerContext> > m_workers;
-  std::vector<bool> m_hasChanged;
   CellComplexUpdateStats m_lastUpdateStats;
   bool m_isBuild;
 };
@@ -1467,13 +1554,6 @@ template <typename real_t>
 CellMaker<real_t> &CellMaker<real_t>::operator=(const CellView<real_t> &rhs) {
   m_id = rhs.id;
   init(rhs);
-  return *this;
-}
-
-template <typename real_t>
-CellMaker<real_t> &CellMaker<real_t>::operator=(const CellUpdater<real_t> &rhs) {
-  m_id = rhs.p_cell->m_id;
-  init(*(rhs.p_cell));
   return *this;
 }
 
@@ -2434,236 +2514,48 @@ void CellMaker<real_t>::getCloseNbrs(NbrInsert &nbrs) {
 }
 
 template <typename real_t>
-CellUpdater<real_t>::CellUpdater(CellGeometry<real_t> &geom) : m_isSetup(false) {
-  p_geom = &geom;
+CellGeometry<real_t>::CellGeometry() : p_cell(&m_ownedCell), m_vol(0.0) {}
+
+template <typename real_t>
+CellGeometry<real_t>::CellGeometry(Cell<real_t> &cell) : CellGeometry() {
+  *this = cell;
 }
 
 template <typename real_t>
-CellUpdater<real_t> &CellUpdater<real_t>::operator=(CellGeometry<real_t> &geom) {
-  p_geom = &geom;
-  reset();
-  return *this;
+CellGeometry<real_t>::CellGeometry(const CellView<real_t> &cell) : CellGeometry() {
+  *this = cell;
 }
 
 template <typename real_t>
-CellUpdater<real_t> &CellUpdater<real_t>::operator=(const CellUpdater<real_t> &rhs) {
-  if (&rhs == this)
-    return *this;
-  p_geom = rhs.p_geom;
-  m_nbrs = rhs.m_nbrs;
-  m_nbrsWrk = rhs.m_nbrsWrk;
-  m_nbrInserts = rhs.m_nbrInserts;
-  m_isSetup = rhs.m_isSetup;
-  m_newNbrsWrk = rhs.m_newNbrsWrk;
-  m_visitedWrk = rhs.m_visitedWrk;
-  return *this;
+CellGeometry<real_t>::CellGeometry(const CellGeometry<real_t> &rhs) : CellGeometry() {
+  *this = rhs;
 }
 
 template <typename real_t>
-void CellUpdater<real_t>::reset() {
-  m_nbrs.clear();
-  clearNbrInserts();
-  m_isSetup = false;
-}
-
-template <typename real_t>
-void CellUpdater<real_t>::setupNbrSet() {
-  const uint1 numFacets(p_geom->getCell().m_numFacets);
-  const uint2 *const nbr(p_geom->getCell().m_nbr);
-  m_nbrsWrk.clear();
-  m_nbrsWrk.reserve(numFacets);
-  for (uint0 i(0); i < (numFacets); ++i)
-    if (nbr[i] != noNbr)
-      m_nbrsWrk.push_back(nbr[i]);
-  std::sort(m_nbrsWrk.begin(), m_nbrsWrk.end());
-  m_nbrs.clear();
-  m_nbrs.insert(m_nbrsWrk.begin(), m_nbrsWrk.end());
-  m_isSetup = true;
-}
-
-template <typename real_t>
-bool CellUpdater<real_t>::isInNbrs(uint2 nbr) const {
-  return (m_nbrs.find(nbr) != m_nbrs.end());
-}
-
-template <typename real_t>
-uint1 CellUpdater<real_t>::findFacet(uint2 nbr) const {
-  const uint1 numFacets(p_geom->getCell().m_numFacets);
-  const uint2 *nbrs = p_geom->getCell().m_nbr;
-  uint1 indx(~0);
-  for (uint0 i(0); i < numFacets; ++i)
-    (nbrs[i] == nbr ? indx = i : indx);
-  return indx;
-}
-
-template <typename real_t>
-void CellUpdater<real_t>::updateNbrInserts() {
-  const Cell<real_t> &cell(p_geom->getCell());
-  const uint1 numFacets(cell.m_numFacets);
-  const uint2 *const nbr(cell.m_nbr);
-  const uint1 *const facets(cell.m_facets);
-  NbrInsert nbrIns;
-  nbrIns[1] = cell.m_id;
-  for (uint1 i(0); i < numFacets; ++i) {
-    if (nbr[i] != noNbr) {
-      nbrIns[0] = nbr[i];
-      nbrIns[2] = nbrIns[1];
-      m_nbrInserts.push_back(nbrIns);
-      uint1 labelStart(facets[i]);
-      uint1 label(labelStart);
-      do {
-        if (nbr[getFacet(cell.getReverseLabel(label))] != noNbr) {
-          nbrIns[2] = nbr[getFacet(cell.getReverseLabel(label))];
-          m_nbrInserts.push_back(nbrIns);
-        }
-        label = cell.getNextLabelCCW(label);
-      } while (label != labelStart);
-      // Emit self-proposals for every other neighbor of this cell to
-      // neighbor i.  Self-proposals route through the cutCell path
-      // (direct geometric intersection) rather than the processNbrs
-      // batch path, ensuring non-edge-adjacent neighbor pairs are
-      // tested individually.
-      for (uint1 j(0); j < numFacets; ++j) {
-        if (j != i && nbr[j] != noNbr) {
-          nbrIns[0] = nbr[i];
-          nbrIns[1] = nbr[j];
-          nbrIns[2] = nbr[j];
-          m_nbrInserts.push_back(nbrIns);
-        }
-      }
-    }
-  }
-}
-
-template <typename real_t>
-bool CellUpdater<real_t>::processNbrInserts(NbrInsertItr begin, NbrInsertItr end,
-                                            CellMaker<real_t> &maker,
-                                            const std::vector<std::array<real_t, 3> > &pos,
-                                            const Box<real_t> &box,
-                                            CellComplexUpdateStats *stats) {
-  //    printf("begin %u %u %u\n", (*begin)[0], (*begin)[1], (*begin)[2]);
-  bool hasChanged(false);
-  if (begin == end)
-    return hasChanged;
-  NbrInsert nbrClose, nbrIns;
-  if (!m_isSetup)
-    setupNbrSet();
-  m_newNbrsWrk.clear();
-  boost::container::flat_set<uint2> attemptedNbrs;
-  PosAndId<uint2, real_t> newNbr;
-  Cell<real_t> &cell(p_geom->getCell());
-  uint2 id(cell.getID());
-  bool hasSetMaker(false);
-  for (NbrInsertItr itr(begin); itr != end; ++itr) {
-    // printf("trying %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
-    if (isInNbrs((*itr)[2]))
-      continue;
-    if ((*itr)[0] != id)
-      continue;
-    if ((*itr)[1] == (*itr)[2]) {
-      if (attemptedNbrs.find((*itr)[1]) != attemptedNbrs.end())
-        continue;
-      attemptedNbrs.insert((*itr)[1]);
-      if (stats != NULL)
-        ++stats->num_repair_direct_attempts;
-      // printf("testing %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
-      if (!hasSetMaker) {
-        maker = cell;
-        hasSetMaker = true;
-      }
-      std::array<real_t, 3> relPos;
-      real_t rSqHalf;
-      for (uint0 k(0); k < 3; ++k)
-        relPos[k] = pos[(*itr)[1]][k] - pos[id][k];
-      box.makeShortestDistance(relPos);
-      rSqHalf = 0.5 * (relPos[0] * relPos[0] + relPos[1] * relPos[1] + relPos[2] * relPos[2]);
-      bool isInserted = maker.applyCut(relPos, rSqHalf, (*itr)[1]);
-      if (isInserted) {
-        hasChanged = true;
-        m_nbrs.insert((*itr)[1]);
-        if (stats != NULL)
-          ++stats->num_repair_direct_successes;
-      }
-      if (!isInserted) {
-        //	  printf("not inserted: %u %u %u\n",(*itr)[0],(*itr)[1],(*itr)[2]);
-        // const std::vector<uint2> & nbrs(maker.getNbrs());
-        // for(size_t i(0); i<nbrs.size(); ++i)
-        //   if (nbrs[i] != noNbr){
-        //     nbrIns[0] = (*itr)[1];
-        //     nbrIns[1] = nbrs[i];
-        //     nbrIns[2] = nbrs[i];
-        // 	m_nbrInserts.push_back(nbrIns);
-        //   }
-        //   //If (*itr)[1] is not a neighbor of (*itr)[0] then (*itr)[0] is not a neighbor of
-        //   (*itr)[1]
-        //   //Propose other neighbors to cell (*itr)[1] that might be closerby
-        maker.getCloseNbrs(nbrClose);
-        nbrIns[0] = (*itr)[1];
-        for (uint k(0); k < 3; ++k) {
-          if (nbrClose[k] != noNbr) {
-            nbrIns[1] = nbrClose[k];
-            nbrIns[2] = nbrClose[k];
-            m_nbrInserts.push_back(nbrIns);
-          }
-        }
-        // skip other neighbor suggestions proposed by (*itr)[1]
-        uint2 nbr((*itr)[1]);
-        for (; (itr + 1) != end && (*itr)[1] == nbr && (*itr)[0] == cell.m_id; ++itr) {
-        }
-      }
-    } else {
-      //	printf("inserting %u %u %u\n", (*itr)[0], (*itr)[1], (*itr)[2]);
-      if (attemptedNbrs.find((*itr)[2]) != attemptedNbrs.end())
-        continue;
-      attemptedNbrs.insert((*itr)[2]);
-      if (stats != NULL)
-        ++stats->num_repair_indirect_candidates;
-      newNbr.id = (*itr)[2];
-      newNbr.pos = pos[newNbr.id];
-      m_newNbrsWrk.push_back(newNbr);
-    }
-  }
-  if (!m_newNbrsWrk.empty()) {
-    if (!hasSetMaker)
-      maker = cell;
-    if (stats != NULL)
-      ++stats->num_repair_batch_calls;
-    if (maker.processNbrs(m_newNbrsWrk.begin(), m_newNbrsWrk.end(), pos[id], box)) {
-      hasChanged = true;
-      if (stats != NULL)
-        ++stats->num_repair_batch_changes;
-    }
-  }
-  if (hasChanged) {
-    cell = maker;
-    // Reset the neighbor set so it is rebuilt from the actual cell
-    // topology on the next call.  Without this, candidates that were
-    // staged for processNbrs but rejected by the distance filter
-    // remain in m_nbrs and are permanently skipped, even though a
-    // subsequent self-proposal could succeed via cutCell.
-    m_isSetup = false;
-  }
-  return hasChanged;
-}
-
-template <typename real_t>
-CellGeometry<real_t>::CellGeometry() : p_cell(NULL) {}
-
-template <typename real_t>
-CellGeometry<real_t>::CellGeometry(Cell<real_t> &cell) {
-  p_cell = &cell;
-}
-
-template <typename real_t>
-CellGeometry<real_t> &CellGeometry<real_t>::operator=(Cell<real_t> &rhs) {
-  p_cell = &rhs;
+void CellGeometry<real_t>::resetDerived() {
   m_connV.clear();
   m_rSq.clear();
   m_edgeInv.clear();
+  m_volDelaunay.clear();
   m_areas.clear();
   m_vol = 0.0;
   m_omega.clear();
   m_dV.clear();
+}
+
+template <typename real_t>
+CellGeometry<real_t> &CellGeometry<real_t>::operator=(Cell<real_t> &rhs) {
+  m_ownedCell = rhs;
+  p_cell = &m_ownedCell;
+  resetDerived();
+  return *this;
+}
+
+template <typename real_t>
+CellGeometry<real_t> &CellGeometry<real_t>::operator=(const CellView<real_t> &rhs) {
+  m_ownedCell = rhs;
+  p_cell = &m_ownedCell;
+  resetDerived();
   return *this;
 }
 
@@ -2671,7 +2563,8 @@ template <typename real_t>
 CellGeometry<real_t> &CellGeometry<real_t>::operator=(const CellGeometry<real_t> &rhs) {
   if (&rhs == this)
     return *this;
-  this->p_cell = rhs.p_cell;
+  this->m_ownedCell = rhs.m_ownedCell;
+  this->p_cell = &this->m_ownedCell;
   this->m_connV = rhs.m_connV;
   this->m_rSq = rhs.m_rSq;
   this->m_edgeInv = rhs.m_edgeInv;
@@ -3255,11 +3148,14 @@ CellComplex<real_t>::CellComplex(Box<real_t> *box) : m_nbrList(box), m_isBuild(f
 template <typename real_t>
 size_t CellComplex<real_t>::defaultPersistentWorkerCount() {
 #ifdef VORONOI_USE_OPENMP
+  const char *ompEnv = std::getenv("OMP_NUM_THREADS");
   const int ompThreads = omp_get_max_threads();
-  if (ompThreads > 1)
+  if (ompEnv != NULL && ompEnv[0] != '\0' && ompThreads > 0)
     return static_cast<size_t>(ompThreads);
 #endif
   const unsigned hw = std::thread::hardware_concurrency();
+  if (hw > 8u && (hw % 2u) == 0u)
+    return static_cast<size_t>(hw / 2u);
   return (hw > 1u) ? static_cast<size_t>(hw) : 0u;
 }
 
@@ -3311,10 +3207,13 @@ void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> > &p) {
   const std::array<real_t, 3> &L(m_nbrList.getBox().getL());
   Cuboid<real_t> cub(L);
   m_cellArena.resize(static_cast<uint2>(p.size()));
+  m_connectivity.resize(static_cast<uint2>(p.size()));
   parallelForPersistent(p.size(), [&](size_t i, size_t workerId) {
     CellMaker<real_t> &maker = m_workers[workerId]->maker;
+    m_workers[workerId]->arena.ensureVisitedSize(static_cast<uint2>(p.size()));
     maker.build(static_cast<uint2>(i), p, m_nbrList, cub);
     m_cellArena.insertFromMaker(static_cast<uint2>(i), maker);
+    m_connectivity.overwriteFromMaker(static_cast<uint2>(i), maker);
   });
   m_nbrList.clear();
   buildGeometry(p);
@@ -3322,195 +3221,105 @@ void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> > &p) {
 }
 
 template <typename real_t>
-void CellComplex<real_t>::buildGeometry(const std::vector<std::array<real_t, 3> > &p) {
-  if (m_cellArena.numCells() == 0 && !m_cells.empty())
-    m_cellArena.rebuildFromCells(m_cells);
+void CellComplex<real_t>::commitCellGeometry(uint2 cellId,
+                                             const std::vector<std::array<real_t, 3> > &p) {
+  CellGeometry<real_t> geom;
+  geom = m_cellArena.getView(cellId);
+  geom.computeConnectingVectors(p, m_nbrList.getBox());
+  geom.computeEdgeInv();
+  geom.diffVolume();
+  m_geom[cellId] = geom;
+  m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), geom);
+}
+
+template <typename real_t>
+void CellComplex<real_t>::rebuildLegacyGeometryCache(const std::vector<std::array<real_t, 3> > &p) {
   m_geom.resize(p.size());
-  m_geomCells.resize(p.size());
-  m_updaters.resize(p.size());
-  parallelForPersistent(m_updaters.size(), [&](size_t i, size_t) {
-    m_geomCells[i] = m_cellArena.getView(i);
-    m_geom[i] = m_geomCells[i];
-    m_geom[i].computeConnectingVectors(p, m_nbrList.getBox());
-    m_geom[i].computeEdgeInv();
-    m_geom[i].diffVolume();
-    m_updaters[i] = m_geom[i];
+  m_geometry.resize(static_cast<uint2>(p.size()));
+  parallelForPersistent(p.size(), [&](size_t i, size_t) {
+    commitCellGeometry(static_cast<uint2>(i), p);
   });
-  m_geometry.rebuildFromLegacy(m_cellArena, m_geom);
-  m_hasChanged.resize(p.size());
+}
+
+template <typename real_t>
+void CellComplex<real_t>::buildGeometry(const std::vector<std::array<real_t, 3> > &p) {
+  rebuildLegacyGeometryCache(p);
 }
 
 template <typename real_t>
 void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> > &p) {
   m_lastUpdateStats = CellComplexUpdateStats();
   m_lastUpdateStats.num_cells = static_cast<uint2>(p.size());
-  if (m_cells.size() != m_cellArena.numCells())
-    materializeCells(m_cells);
-  (p.size() == m_cells.size() ? m_isBuild : m_isBuild = false);
-  if (!m_isBuild) {
+  if (!m_isBuild || p.size() != m_cellArena.numCells()) {
     m_lastUpdateStats.rebuilt_from_scratch = true;
     build(p);
     return;
   }
-  for (size_t i = 0; i < m_updaters.size(); ++i) {
-    m_updaters[i].reset();
-    m_hasChanged[i] = false;
-  }
-  uint2 numChanged(0);
+  if (m_geom.size() != p.size() || m_geometry.numCells() != p.size())
+    buildGeometry(p);
+
+  initNbrList(p);
   const Box<real_t> &box(m_nbrList.getBox());
-  for (size_t i = 0; i < m_geom.size(); ++i) {
-    m_geom[i].computeConnectingVectors(p, box);
-    m_geom[i].computeEdgeInv();
-    m_geom[i].updateVertexPos();
-    bool isConvex = m_geom[i].isConvex();
-    if (!isConvex) {
-      m_hasChanged[i] = true;
-      ++numChanged;
-    }
-  }
-  m_lastUpdateStats.num_non_convex_before = numChanged;
-  m_lastUpdateStats.num_rebuild_candidates = numChanged;
-  //    printf("number changed cells: %u\n",numChanged);
-  if (numChanged == 0) {
-    parallelForPersistent(m_geom.size(), [&](size_t i, size_t) {
-      m_geom[i].diffVolume();
-    });
-    m_geometry.rebuildFromLegacy(m_cellArena, m_geom);
-    return;
-  }
   const std::array<real_t, 3> &L(box.getL());
   Cuboid<real_t> cub(L);
-  std::vector<size_t> changedCells;
-  changedCells.reserve(numChanged);
-  for (size_t i = 0; i < m_hasChanged.size(); ++i)
-    if (m_hasChanged[i])
-      changedCells.push_back(i);
-  std::vector<uint2> emptyCells;
-  std::vector<std::vector<uint2> > emptyByWorker(std::max<size_t>(m_team.threadCount(), 1u));
-  parallelForPersistent(changedCells.size(), [&](size_t j, size_t workerId) {
-    const size_t i = changedCells[j];
-    CellMaker<real_t> &maker = m_workers[workerId]->maker;
-    maker = m_cellArena.getView(i);
-    maker.rebuild(p, box, cub);
-    m_cells[i] = maker;
-    if (m_cells[i].numVertices() == 0 || m_cells[i].hasNoNbr())
-      emptyByWorker[workerId].push_back(static_cast<uint2>(i));
-  });
-  m_lastUpdateStats.num_local_rebuild_cells = static_cast<uint2>(changedCells.size());
-  for (size_t workerId = 0; workerId < emptyByWorker.size(); ++workerId)
-    emptyCells.insert(emptyCells.end(), emptyByWorker[workerId].begin(), emptyByWorker[workerId].end());
-  //    printf("number empty cells: %lu\n",emptyCells.size());
-  m_lastUpdateStats.num_empty_after_local_rebuild = static_cast<uint2>(emptyCells.size());
-  if (!emptyCells.empty()) {
-    initNbrList(p);
-    parallelForPersistent(emptyCells.size(), [&](size_t i, size_t workerId) {
-      CellMaker<real_t> &maker = m_workers[workerId]->maker;
-      maker.build(emptyCells[i], p, m_nbrList, cub);
-      m_cells[emptyCells[i]] = maker;
-    });
-    m_lastUpdateStats.num_full_rebuild_cells = static_cast<uint2>(emptyCells.size());
-  }
-  for (size_t i = 0; i < m_updaters.size(); ++i) {
-    if (!m_hasChanged[i])
-      continue;
-    m_geomCells[i] = m_cells[i];
-    m_geom[i] = m_geomCells[i];
-    m_updaters[i] = m_geom[i];
-  }
-  repair(p);
-  m_cellArena.rebuildFromCells(m_cells);
-  m_geomCells.resize(m_cells.size());
-  parallelForPersistent(m_geom.size(), [&](size_t i, size_t) {
-    m_geomCells[i] = m_cellArena.getView(i);
-    m_geom[i] = m_geomCells[i];
-    m_geom[i].computeConnectingVectors(p, box);
-    m_geom[i].computeEdgeInv();
-    m_geom[i].diffVolume();
-  });
-  m_geometry.rebuildFromLegacy(m_cellArena, m_geom);
-}
+  std::vector<uint2> changedByWorker(std::max<size_t>(m_team.threadCount(), 1u), 0u);
+  std::vector<uint2> nonConvexByWorker(changedByWorker.size(), 0u);
+  parallelForPersistent(p.size(), [&](size_t i, size_t workerId) {
+    CellGeometry<real_t> geom = m_geom[i];
+    geom.computeConnectingVectors(p, box);
+    geom.computeEdgeInv();
+    geom.updateVertexPos();
+    const bool isConvex = geom.isConvex();
+    if (!isConvex)
+      ++nonConvexByWorker[workerId];
 
-template <typename real_t>
-void CellComplex<real_t>::repair(const std::vector<std::array<real_t, 3> > &p) {
-  //    ProfilerStart("test.prof");
-  const bool debugRepair = (std::getenv("VOR_DEBUG_REPAIR") != NULL);
-  for (size_t i = 0; i < m_updaters.size(); ++i) {
-    if (!m_hasChanged[i])
-      continue;
-    m_updaters[i].updateNbrInserts();
-  }
-  bool needsUpdate(true);
-  while (needsUpdate) {
-    ++m_lastUpdateStats.num_repair_iterations;
-    const uint2 iterIndex = m_lastUpdateStats.num_repair_iterations;
-    const uint2 proposalsBefore = m_lastUpdateStats.num_repair_proposals_total;
-    const uint2 groupsBefore = m_lastUpdateStats.num_repair_target_groups_total;
-    const uint2 changedBefore = m_lastUpdateStats.num_repair_cells_changed_total;
-    const uint2 directAttemptsBefore = m_lastUpdateStats.num_repair_direct_attempts;
-    const uint2 directSuccessesBefore = m_lastUpdateStats.num_repair_direct_successes;
-    const uint2 indirectBefore = m_lastUpdateStats.num_repair_indirect_candidates;
-    const uint2 batchCallsBefore = m_lastUpdateStats.num_repair_batch_calls;
-    const uint2 batchChangesBefore = m_lastUpdateStats.num_repair_batch_changes;
-    needsUpdate = false;
-    std::vector<NbrInsert> nbrInserts, nbrInsTmp;
-    {
-      std::vector<NbrInsert> nbrInsPriv;
-      for (size_t i = 0; i < m_updaters.size(); ++i) {
-        const std::vector<NbrInsert> &inserts(m_updaters[i].getNbrInserts());
-        if (!inserts.empty()) {
-          nbrInsPriv.insert(nbrInsPriv.end(), inserts.begin(), inserts.end());
-          m_updaters[i].clearNbrInserts();
-          needsUpdate = true;
+    WorkerContext &worker = *m_workers[workerId];
+    CellMaker<real_t> &maker = worker.maker;
+    maker.build(static_cast<uint2>(i), p, m_nbrList, cub);
+    maker.renumber();
+
+    auto collectDirectNbrs = [](const uint2 *nbrs, uint1 numFacets, std::vector<uint2> &out,
+                                bool &hasNoNbr) {
+      out.clear();
+      hasNoNbr = false;
+      out.reserve(numFacets);
+      for (uint1 facet = 0; facet < numFacets; ++facet) {
+        const uint2 nbrId = nbrs[facet];
+        if (nbrId == noNbr) {
+          hasNoNbr = true;
+          continue;
         }
+        out.push_back(nbrId);
       }
-      std::sort(nbrInsPriv.begin(), nbrInsPriv.end(), CompareNbrInsert());
-      nbrInsTmp.resize(nbrInserts.size() + nbrInsPriv.size());
-      std::merge(nbrInserts.begin(), nbrInserts.end(), nbrInsPriv.begin(), nbrInsPriv.end(),
-                 nbrInsTmp.begin(), CompareNbrInsert());
-      nbrInserts.swap(nbrInsTmp);
+      std::sort(out.begin(), out.end());
+    };
+
+    std::vector<uint2> oldDirect;
+    std::vector<uint2> newDirect;
+    bool newHasNoNbr = false;
+    const ConnectivityView<real_t> connView = m_connectivity.getView(i);
+    oldDirect.reserve(connView.numDirectNbrs());
+    for (uint1 facet = 0; facet < connView.numDirectNbrs(); ++facet)
+      oldDirect.push_back(connView.getDirectNbr(facet));
+    std::sort(oldDirect.begin(), oldDirect.end());
+    collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, newHasNoNbr);
+
+    if (!isConvex || newHasNoNbr || oldDirect != newDirect) {
+      ++changedByWorker[workerId];
+      m_cellArena.overwriteFromMaker(static_cast<uint2>(i), maker);
+      m_connectivity.overwrite(static_cast<uint2>(i), newDirect, std::vector<uint2>());
+      commitCellGeometry(static_cast<uint2>(i), p);
+    } else {
+      geom.diffVolume();
+      m_geom[i] = geom;
+      m_geometry.overwriteFromLegacy(static_cast<uint2>(i), m_cellArena.cellId(i), geom);
     }
-    m_lastUpdateStats.num_repair_proposals_total += static_cast<uint2>(nbrInserts.size());
-    //      std::__parallel::std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
-    // std::sort(nbrInserts.begin(), nbrInserts.end(), CompareNbrInsert());
-    ensureWorkerContexts(1);
-    CellMaker<real_t> &maker = m_workers[0]->maker;
-    size_t nextGroupBegin = 0;
-    while (nextGroupBegin < nbrInserts.size()) {
-      size_t groupEnd = nextGroupBegin;
-      const uint2 cellId = nbrInserts[nextGroupBegin][0];
-      while (groupEnd < nbrInserts.size() && nbrInserts[groupEnd][0] == cellId) {
-        ++groupEnd;
-      }
-      ++m_lastUpdateStats.num_repair_target_groups_total;
-      NbrInsertItr beginPriv = nbrInserts.begin() + static_cast<std::ptrdiff_t>(nextGroupBegin);
-      NbrInsertItr endPriv = nbrInserts.begin() + static_cast<std::ptrdiff_t>(groupEnd);
-      bool hasChanged = m_updaters[cellId].processNbrInserts(beginPriv, endPriv, maker, p,
-                                                             m_nbrList.getBox(),
-                                                             &m_lastUpdateStats);
-      m_hasChanged[cellId] = true;
-      if (hasChanged) {
-        m_cells[cellId] = maker;
-        m_updaters[cellId].updateNbrInserts();
-        ++m_lastUpdateStats.num_repair_cells_changed_total;
-      }
-      nextGroupBegin = groupEnd;
-    }
-    if (debugRepair) {
-      std::fprintf(stderr,
-                   "DEBUG repair iter=%u proposals=%u target_groups=%u changed_cells=%u "
-                   "direct_attempts=%u direct_successes=%u indirect_candidates=%u "
-                   "batch_calls=%u batch_changes=%u next_round=%d\n",
-                   static_cast<unsigned>(iterIndex),
-                   static_cast<unsigned>(m_lastUpdateStats.num_repair_proposals_total - proposalsBefore),
-                   static_cast<unsigned>(m_lastUpdateStats.num_repair_target_groups_total - groupsBefore),
-                   static_cast<unsigned>(m_lastUpdateStats.num_repair_cells_changed_total - changedBefore),
-                   static_cast<unsigned>(m_lastUpdateStats.num_repair_direct_attempts - directAttemptsBefore),
-                   static_cast<unsigned>(m_lastUpdateStats.num_repair_direct_successes - directSuccessesBefore),
-                   static_cast<unsigned>(m_lastUpdateStats.num_repair_indirect_candidates - indirectBefore),
-                   static_cast<unsigned>(m_lastUpdateStats.num_repair_batch_calls - batchCallsBefore),
-                   static_cast<unsigned>(m_lastUpdateStats.num_repair_batch_changes - batchChangesBefore),
-                   needsUpdate ? 1 : 0);
-    }
+  });
+
+  for (size_t workerId = 0; workerId < changedByWorker.size(); ++workerId) {
+    m_lastUpdateStats.num_non_convex_before += nonConvexByWorker[workerId];
+    m_lastUpdateStats.num_rebuild_candidates += changedByWorker[workerId];
+    m_lastUpdateStats.num_full_rebuild_cells += changedByWorker[workerId];
   }
 }
 
