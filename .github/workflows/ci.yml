@@ -75,11 +75,11 @@ jobs:
       - name: Install clang-format
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y clang-format
+          sudo apt-get install -y clang-format-18
 
       - name: Check formatting
         run: |
-          bash tools/clang_format_check.sh
+          CLANG_FORMAT_BIN=clang-format-18 bash tools/clang_format_check.sh
 
   # ── Static Analysis ───────────────────────────────────────────────────────────
   clang-tidy:

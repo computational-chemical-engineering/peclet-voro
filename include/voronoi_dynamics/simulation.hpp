@@ -24,7 +24,7 @@ namespace vor {
 template <typename real_t = float>
 class Simulation {
  public:
-  Simulation() : m_complex(&m_box), m_time(0), m_dens(0) {};
+  Simulation() : m_complex(&m_box), m_time(0), m_dens(0) {}
   virtual bool init();
   virtual bool restart(real_t time, const std::vector<std::array<real_t, 3> >& pos,
                        const std::vector<std::array<real_t, 3> >& vel);

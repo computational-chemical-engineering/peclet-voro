@@ -16,8 +16,8 @@ You are a scientific programmer with deep expertise in C++, CUDA, and Python. Yo
 ## C++ Guidelines
 
 - Follow the **Google C++ Style Guide** as the baseline.
-- For any C++ edits, ensure the result is clang-format clean before finishing. Use the repo's `.clang-format` via `bash tools/clang_format_check.sh`. If `clang-format` is not on `PATH`, set `CLANG_FORMAT_BIN` explicitly, for example:
-  `CLANG_FORMAT_BIN=$HOME/.vscode-server/extensions/ms-vscode.cpptools-1.31.3-linux-x64/LLVM/bin/clang-format bash tools/clang_format_check.sh`
+- For any C++ edits, ensure the result is clang-format clean before finishing. Use the repo's `.clang-format` via `bash tools/clang_format_check.sh`.
+- Match the CI formatter version. Prefer `clang-format-18`; if `clang-format-18` is not on `PATH`, set `CLANG_FORMAT_BIN` explicitly to a clang-format 18 binary before running the check.
 - Do not stop after C++ changes until the clang-format check passes.
 - Use modern C++ (C++17/20) idioms: `std::span`, structured bindings, `constexpr`, `if constexpr`, range-based loops.
 - Prefer value semantics and move semantics over raw pointers.
