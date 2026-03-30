@@ -26,6 +26,9 @@ add_voronoi_test(test_static_voronoi       test_static_voronoi.cpp)
 # Incremental update under periodic random displacements, validated against a rebuild
 add_voronoi_test(test_build_rebuild        test_build_rebuild.cpp)
 
+# Particle insertion/deletion/renumbering against sparse and dense rebuilds
+add_voronoi_test(test_particle_lifecycle   test_particle_lifecycle.cpp)
+
 # Alternative build trials and stress testing
 add_voronoi_test(test_build_trial          test_build_trial.cpp)
 
@@ -38,6 +41,9 @@ add_voronoi_test(test_cell_maker_growth test_cell_maker_growth.cpp)
 
 # Compressible Euler equations (needs pos_eq_10000.dat)
 add_voronoi_test(test_simulation           test_simulation.cpp)
+
+# Sparse-cell simulation step after logical particle deletion
+add_voronoi_test(test_simulation_sparse_particles test_simulation_sparse_particles.cpp)
 
 # Droplet dynamics in viscous flow (needs pos_eq_10000.dat)
 add_voronoi_test(test_droplet              test_droplet.cpp)

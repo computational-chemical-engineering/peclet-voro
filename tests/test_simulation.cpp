@@ -31,7 +31,7 @@ int main() {
     int numPart = 10000;
     vector<std::array<real_t, 3> > pos(numPart);
     vector<std::array<real_t, 3> > vel(numPart);
-    FILE *pFile;
+    FILE* pFile;
     char filename[255];
     sprintf(filename, "pos_eq_%d.dat", numPart);
     pFile = fopen(filename, "r");
@@ -99,11 +99,11 @@ int main() {
       // 	for(int k=0; k<3; ++k)
       // 	  vel[i][k] *= 0.995;
     }
-    const vector<std::array<real_t, 3> > &pos(sim.getPositions());
+    const vector<std::array<real_t, 3> >& pos(sim.getPositions());
     //    sim.getCellComplex().getNbrList().getBox().putInBox(pos);
     sim.putInBox();
     char filename[50];
-    FILE *pFile;
+    FILE* pFile;
     sprintf(filename, "pos_%03d.dat", m);
     pFile = fopen(filename, "w");
     for (int i = 0; i < pos.size(); ++i) {

@@ -35,8 +35,8 @@ using vor::uint2;
 // Helper: build a voro++ periodic tessellation and return per-particle volumes
 // sorted by particle id.
 // ---------------------------------------------------------------------------
-static vector<double> voropp_volumes(const vector<std::array<double, 3> > &pos, double Lx, double Ly,
-                                     double Lz) {
+static vector<double> voropp_volumes(const vector<std::array<double, 3> >& pos, double Lx,
+                                     double Ly, double Lz) {
   const int n = static_cast<int>(pos.size());
   // Choose grid dimensions: roughly n^(1/3) blocks per side
   int nblk = std::max(1, static_cast<int>(std::cbrt(static_cast<double>(n) / 8.0)));
@@ -62,8 +62,8 @@ static vector<double> voropp_volumes(const vector<std::array<double, 3> > &pos, 
 // ---------------------------------------------------------------------------
 // Helper: build a voronoi_dynamics tessellation and return per-particle volumes.
 // ---------------------------------------------------------------------------
-static vector<double> vordyn_volumes(const vector<std::array<double, 3> > &pos, double Lx, double Ly,
-                                     double Lz) {
+static vector<double> vordyn_volumes(const vector<std::array<double, 3> >& pos, double Lx,
+                                     double Ly, double Lz) {
   typedef double real_t;
   const int n = static_cast<int>(pos.size());
 
@@ -75,7 +75,7 @@ static vector<double> vordyn_volumes(const vector<std::array<double, 3> > &pos, 
   CellComplex<real_t> cx(&box);
   cx.build(pos);
 
-  vector<CellGeometry<real_t> > &geoms = cx.getGeoms();
+  vector<CellGeometry<real_t> >& geoms = cx.getGeoms();
   vector<double> vols(n);
   for (int i = 0; i < n; ++i) {
     geoms[i].computeVolume();
@@ -92,7 +92,7 @@ static int testStaticComparison(int n, double Lx, double Ly, double Lz, unsigned
   typedef double real_t;
   typedef boost::mt19937 rng_type;
   typedef boost::uniform_01<real_t> dist_type;
-  typedef boost::variate_generator<rng_type &, dist_type> gen_type;
+  typedef boost::variate_generator<rng_type&, dist_type> gen_type;
 
   rng_type rng(seed);
   gen_type gen(rng, dist_type());
@@ -138,7 +138,7 @@ static int testMovingComparison(int n, double Lx, double Ly, double Lz, unsigned
   typedef double real_t;
   typedef boost::mt19937 rng_type;
   typedef boost::uniform_01<real_t> dist_type;
-  typedef boost::variate_generator<rng_type &, dist_type> gen_type;
+  typedef boost::variate_generator<rng_type&, dist_type> gen_type;
 
   rng_type rng(seed);
   gen_type gen(rng, dist_type());
@@ -176,7 +176,7 @@ static int testMovingComparison(int n, double Lx, double Ly, double Lz, unsigned
   // Rebuild with voronoi_dynamics
   cx.build(pos);
 
-  vector<CellGeometry<real_t> > &geoms = cx.getGeoms();
+  vector<CellGeometry<real_t> >& geoms = cx.getGeoms();
   vector<double> vd(n);
   for (int i = 0; i < n; ++i) {
     geoms[i].computeVolume();

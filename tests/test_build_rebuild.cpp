@@ -29,7 +29,7 @@ using vor::uint2;
 namespace {
 
 template <typename real_t>
-real_t sumCellVolumes(std::vector<CellGeometry<real_t> > &geoms) {
+real_t sumCellVolumes(std::vector<CellGeometry<real_t> >& geoms) {
   long double vol = 0.0L;
   for (size_t i = 0; i < geoms.size(); ++i) {
     geoms[i].computeVolume();
@@ -39,7 +39,7 @@ real_t sumCellVolumes(std::vector<CellGeometry<real_t> > &geoms) {
 }
 
 template <typename real_t>
-void collectSortedNbrs(const CellView<real_t> &cell, std::vector<uint2> &nbrs) {
+void collectSortedNbrs(const CellView<real_t>& cell, std::vector<uint2>& nbrs) {
   nbrs.clear();
   nbrs.reserve(cell.numFacets());
   for (uint1 facet = 0; facet < cell.numFacets(); ++facet) {
@@ -56,7 +56,7 @@ int main() {
   typedef double real_t;
   typedef boost::mt11213b base_generator_type;
   typedef boost::uniform_01<real_t> distribution_type;
-  typedef boost::variate_generator<base_generator_type &, distribution_type> gen_type;
+  typedef boost::variate_generator<base_generator_type&, distribution_type> gen_type;
 
   base_generator_type rng(1);
   gen_type pointGen(rng, distribution_type());
@@ -68,8 +68,8 @@ int main() {
   Box<real_t> box(L);
   CellComplex<real_t> complex(&box);
   CellComplex<real_t> reference(&box);
-  vector<CellGeometry<real_t> > &geoms(complex.getGeoms());
-  vector<CellGeometry<real_t> > &refGeoms(reference.getGeoms());
+  vector<CellGeometry<real_t> >& geoms(complex.getGeoms());
+  vector<CellGeometry<real_t> >& refGeoms(reference.getGeoms());
 
   vector<std::array<real_t, 3> > p(10000);
   for (size_t i = 0; i < p.size(); ++i)
@@ -79,8 +79,8 @@ int main() {
   clock_t start = clock();
   complex.build(p);
   real_t duration = real_t(clock() - start) / real_t(CLOCKS_PER_SEC);
-  printf("%lu Voronoi cells created in %f seconds\n", static_cast<unsigned long>(complex.numCells()),
-         duration);
+  printf("%lu Voronoi cells created in %f seconds\n",
+         static_cast<unsigned long>(complex.numCells()), duration);
 
   reference.build(p);
 
@@ -130,7 +130,8 @@ int main() {
       collectSortedNbrs(complex.getCellView(mismatchCell), nbrsUpdate);
       collectSortedNbrs(reference.getCellView(mismatchCell), nbrsReference);
       printf("topology mismatch in cell %lu: update facets=%lu reference facets=%lu\n",
-             static_cast<unsigned long>(mismatchCell), static_cast<unsigned long>(nbrsUpdate.size()),
+             static_cast<unsigned long>(mismatchCell),
+             static_cast<unsigned long>(nbrsUpdate.size()),
              static_cast<unsigned long>(nbrsReference.size()));
     }
     std::fprintf(stderr,

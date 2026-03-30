@@ -24,7 +24,7 @@ namespace vor {
 template <typename real_t = float>
 class Simulation {
  public:
-  Simulation() : m_complex(&m_box), m_time(0), m_dens(0){};
+  Simulation() : m_complex(&m_box), m_time(0), m_dens(0) {};
   virtual bool init();
   virtual bool restart(real_t time, const std::vector<std::array<real_t, 3> >& pos,
                        const std::vector<std::array<real_t, 3> >& vel);
@@ -124,8 +124,9 @@ class IntfDyn : public NavierStokes<real_t> {
 // class StressModel
 // {
 // public:
-//   virtual void update(std::array<std::array<real_t, 3>, 3> & stress, const std::array<std::array<real_t, 3>, 3> &
-//   gradV) {} virtual void setParameter(char * name, real_t value);
+//   virtual void update(std::array<std::array<real_t, 3>, 3> & stress, const
+//   std::array<std::array<real_t, 3>, 3> & gradV) {} virtual void setParameter(char * name, real_t
+//   value);
 // };
 
 // template<typename real_t = float>
@@ -133,8 +134,9 @@ class IntfDyn : public NavierStokes<real_t> {
 // {
 // public:
 //   ViscousStress():m_two_third(2.0/3.0) {}
-//   virtual void update(std::array<std::array<real_t, 3>, 3> & stress, const std::array<std::array<real_t, 3>, 3> &
-//   gradV); virtual void setParameter(char * name, real_t value);
+//   virtual void update(std::array<std::array<real_t, 3>, 3> & stress, const
+//   std::array<std::array<real_t, 3>, 3> & gradV); virtual void setParameter(char * name, real_t
+//   value);
 // private:
 //   const real_t m_two_third;
 //   real_t m_visc, m_bulkVisc;
@@ -188,8 +190,9 @@ bool Simulation<real_t>::restart(real_t time, const std::vector<std::array<real_
 
 template <typename real_t>
 template <std::size_t m>
-void Simulation<real_t>::computeGradients(const std::vector<std::array<real_t, m> >& phi,
-                                          std::vector<std::array<std::array<real_t, m>, 3> >& grads) const {
+void Simulation<real_t>::computeGradients(
+    const std::vector<std::array<real_t, m> >& phi,
+    std::vector<std::array<std::array<real_t, m>, 3> >& grads) const {
   const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
   if (this->m_complex.numParticles() > phi.size())
     return;
@@ -228,8 +231,9 @@ void Simulation<real_t>::computeGradients(const std::vector<std::array<real_t, m
 
 template <typename real_t>
 template <std::size_t m>
-void Simulation<real_t>::computeGradients2(const std::vector<std::array<real_t, m> >& phi,
-                                           std::vector<std::array<std::array<real_t, m>, 3> >& grads) const {
+void Simulation<real_t>::computeGradients2(
+    const std::vector<std::array<real_t, m> >& phi,
+    std::vector<std::array<std::array<real_t, m>, 3> >& grads) const {
   const GeometryArena<real_t>& geometry(this->m_complex.getGeometryArena());
   if (this->m_complex.numParticles() > phi.size())
     return;
@@ -565,7 +569,8 @@ void IntfDyn<real_t>::computeIntfForces() {
       const uint2 nbr = cell.getNbr(j);
       if (types[nbr] < types[selfId]) {
         const std::array<real_t, 3>& areaV(geom.getAreas()[j]);
-        const real_t area = std::sqrt(areaV[0] * areaV[0] + areaV[1] * areaV[1] + areaV[2] * areaV[2]);
+        const real_t area =
+            std::sqrt(areaV[0] * areaV[0] + areaV[1] * areaV[1] + areaV[2] * areaV[2]);
         geom.gradFacetAreaSq(j, indxFacets, grad);
         const real_t intfTension = getIntfTension(types[selfId], types[nbr]);
         for (size_t m = 0; m < indxFacets.size(); ++m) {
@@ -598,7 +603,8 @@ real_t IntfDyn<real_t>::getIntfEnergy() const {
       const uint2 nbr = cell.getNbr(j);
       if (types[nbr] < types[selfId]) {
         const std::array<real_t, 3>& areaV(geom.getAreas()[j]);
-        const real_t area = std::sqrt(areaV[0] * areaV[0] + areaV[1] * areaV[1] + areaV[2] * areaV[2]);
+        const real_t area =
+            std::sqrt(areaV[0] * areaV[0] + areaV[1] * areaV[1] + areaV[2] * areaV[2]);
         E += getIntfTension(types[selfId], types[nbr]) * area;
       }
     }
@@ -721,12 +727,13 @@ void Incompressible<real_t>::buildConstraintMatrix() {
   duration = real_t(clock() - start);
   printf("summation in %f seconds\n", duration / (real_t(CLOCKS_PER_SEC)));
 
-  printf("matConstr size per cell (after summation): %lu\n", matConstr.size() / geometry.numCells());
+  printf("matConstr size per cell (after summation): %lu\n",
+         matConstr.size() / geometry.numCells());
 }
 
 // template<typename real_t>
-// void ViscousStress<real_t>::update(std::array<std::array<real_t, 3>, 3> & stress, const std::array<std::array<real_t,
-// 3>, 3> & gradV)
+// void ViscousStress<real_t>::update(std::array<std::array<real_t, 3>, 3> & stress, const
+// std::array<std::array<real_t, 3>, 3> & gradV)
 // {
 //   real_t divVel=0;
 //   // compute viscous stress in cell

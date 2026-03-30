@@ -16,14 +16,13 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdlib>
 #include <cmath>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
 #include <random>
 #include <vector>
-
 #include <voronoi_dynamics/voronoi.hpp>
 
 namespace {
@@ -73,7 +72,7 @@ std::vector<Pos3> RandomUniformPositions(int n, Real box_len, std::uint64_t seed
   std::uniform_real_distribution<Real> uniform_dist(0.0, box_len);
 
   std::vector<Pos3> pos(static_cast<std::size_t>(n));
-  for (Pos3 &p : pos) {
+  for (Pos3& p : pos) {
     p[0] = uniform_dist(rng);
     p[1] = uniform_dist(rng);
     p[2] = uniform_dist(rng);
@@ -89,7 +88,7 @@ std::vector<Pos3> RandomNormalVelocities(int n, Real sigma, std::uint64_t seed) 
   std::normal_distribution<Real> normal_dist(0.0, sigma);
 
   std::vector<Pos3> vel(static_cast<std::size_t>(n));
-  for (Pos3 &v : vel) {
+  for (Pos3& v : vel) {
     v[0] = normal_dist(rng);
     v[1] = normal_dist(rng);
     v[2] = normal_dist(rng);
@@ -100,8 +99,8 @@ std::vector<Pos3> RandomNormalVelocities(int n, Real sigma, std::uint64_t seed) 
 /**
  * @brief Move points linearly for one timestep and wrap periodically.
  */
-void AdvectAndWrap(std::vector<Pos3> &pos, const std::vector<Pos3> &vel, Real dt,
-                   vor::Box<Real> &box) {
+void AdvectAndWrap(std::vector<Pos3>& pos, const std::vector<Pos3>& vel, Real dt,
+                   vor::Box<Real>& box) {
   for (std::size_t i = 0; i < pos.size(); ++i) {
     pos[i][0] += vel[i][0] * dt;
     pos[i][1] += vel[i][1] * dt;
@@ -113,9 +112,9 @@ void AdvectAndWrap(std::vector<Pos3> &pos, const std::vector<Pos3> &vel, Real dt
 /**
  * @brief Count non-convex cells for a given point set and current tessellation.
  */
-int CountNonConvexCells(vor::CellComplex<Real> &complex, const std::vector<Pos3> &pos,
-                        const vor::Box<Real> &box) {
-  std::vector<vor::CellGeometry<Real> > &geoms = complex.getGeoms();
+int CountNonConvexCells(vor::CellComplex<Real>& complex, const std::vector<Pos3>& pos,
+                        const vor::Box<Real>& box) {
+  std::vector<vor::CellGeometry<Real> >& geoms = complex.getGeoms();
   int non_convex = 0;
   for (std::size_t i = 0; i < geoms.size(); ++i) {
     geoms[i].computeConnectingVectors(pos, box);
@@ -128,9 +127,9 @@ int CountNonConvexCells(vor::CellComplex<Real> &complex, const std::vector<Pos3>
   return non_convex;
 }
 
-Real MaxConvexViolation(vor::CellComplex<Real> &complex, const std::vector<Pos3> &pos,
-                        const vor::Box<Real> &box) {
-  std::vector<vor::CellGeometry<Real> > &geoms = complex.getGeoms();
+Real MaxConvexViolation(vor::CellComplex<Real>& complex, const std::vector<Pos3>& pos,
+                        const vor::Box<Real>& box) {
+  std::vector<vor::CellGeometry<Real> >& geoms = complex.getGeoms();
   Real max_violation = 0.0;
   for (std::size_t i = 0; i < geoms.size(); ++i) {
     geoms[i].computeConnectingVectors(pos, box);
@@ -147,9 +146,9 @@ Real MaxConvexViolation(vor::CellComplex<Real> &complex, const std::vector<Pos3>
 /**
  * @brief Build per-cell signatures from the packed CellArena representation.
  */
-std::vector<CellSignature> BuildSignaturesByCellId(const vor::CellComplex<Real> &complex,
+std::vector<CellSignature> BuildSignaturesByCellId(const vor::CellComplex<Real>& complex,
                                                    int num_cells) {
-  const vor::CellArena<Real> &arena = complex.getCellArena();
+  const vor::CellArena<Real>& arena = complex.getCellArena();
   std::vector<CellSignature> sigs(static_cast<std::size_t>(num_cells));
 
   for (std::size_t i = 0; i < arena.numCells(); ++i) {
@@ -162,7 +161,7 @@ std::vector<CellSignature> BuildSignaturesByCellId(const vor::CellComplex<Real> 
     sig.num_vertices = arena.cellNumVertices(i);
     sig.num_facets = arena.cellNumFacets(i);
 
-    const vor::uint2 *nbr_ptr = arena.cellNbrData(i);
+    const vor::uint2* nbr_ptr = arena.cellNbrData(i);
     for (vor::uint1 f = 0; f < sig.num_facets; ++f) {
       const vor::uint2 nbr = nbr_ptr[f];
       if (nbr != vor::noNbr) {
@@ -179,11 +178,11 @@ std::vector<CellSignature> BuildSignaturesByCellId(const vor::CellComplex<Real> 
 /**
  * @brief Count cells with at least one facet lacking a neighbor id.
  */
-int CountNoNeighborCells(const vor::CellComplex<Real> &complex) {
-  const vor::CellArena<Real> &arena = complex.getCellArena();
+int CountNoNeighborCells(const vor::CellComplex<Real>& complex) {
+  const vor::CellArena<Real>& arena = complex.getCellArena();
   int count = 0;
   for (std::size_t i = 0; i < arena.numCells(); ++i) {
-    const vor::uint2 *nbr_ptr = arena.cellNbrData(i);
+    const vor::uint2* nbr_ptr = arena.cellNbrData(i);
     const vor::uint1 nf = arena.cellNumFacets(i);
     bool has_no_nbr = false;
     for (vor::uint1 f = 0; f < nf; ++f) {
@@ -202,20 +201,18 @@ int CountNoNeighborCells(const vor::CellComplex<Real> &complex) {
 /**
  * @brief Compute max absolute and relative per-cell volume differences.
  */
-void ComputeVolumeDiffStatsByCellId(vor::CellComplex<Real> &a, vor::CellComplex<Real> &b,
-                                    int num_cells, Real *max_abs_diff, Real *max_rel_diff) {
+void ComputeVolumeDiffStatsByCellId(vor::CellComplex<Real>& a, vor::CellComplex<Real>& b,
+                                    int num_cells, Real* max_abs_diff, Real* max_rel_diff) {
   *max_abs_diff = 0.0;
   *max_rel_diff = 0.0;
 
-  const vor::CellArena<Real> &arena_a = a.getCellArena();
-  const vor::CellArena<Real> &arena_b = b.getCellArena();
-  std::vector<vor::CellGeometry<Real> > &ga = a.getGeoms();
-  std::vector<vor::CellGeometry<Real> > &gb = b.getGeoms();
+  const vor::CellArena<Real>& arena_a = a.getCellArena();
+  const vor::CellArena<Real>& arena_b = b.getCellArena();
+  std::vector<vor::CellGeometry<Real> >& ga = a.getGeoms();
+  std::vector<vor::CellGeometry<Real> >& gb = b.getGeoms();
 
-  std::vector<std::array<Real, 2> > vol_by_id_a(static_cast<std::size_t>(num_cells),
-                                                {{0.0, 0.0}});
-  std::vector<std::array<Real, 2> > vol_by_id_b(static_cast<std::size_t>(num_cells),
-                                                {{0.0, 0.0}});
+  std::vector<std::array<Real, 2> > vol_by_id_a(static_cast<std::size_t>(num_cells), {{0.0, 0.0}});
+  std::vector<std::array<Real, 2> > vol_by_id_b(static_cast<std::size_t>(num_cells), {{0.0, 0.0}});
 
   for (std::size_t i = 0; i < arena_a.numCells(); ++i) {
     const vor::uint2 id = arena_a.cellId(i);
@@ -257,7 +254,7 @@ void ComputeVolumeDiffStatsByCellId(vor::CellComplex<Real> &a, vor::CellComplex<
 
 }  // namespace
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
   int num_particles = 1000;
   int num_steps = 8;
   const Real box_len = 1.0;
@@ -334,17 +331,17 @@ int main(int argc, char **argv) {
     const int non_convex_before = CountNonConvexCells(complex_incremental, pos, box);
 
     const std::vector<CellSignature> sig_before =
-      BuildSignaturesByCellId(complex_incremental, num_particles);
+        BuildSignaturesByCellId(complex_incremental, num_particles);
 
     complex_incremental.update(pos);
 
     const int non_convex_after = CountNonConvexCells(complex_incremental, pos, box);
     const int no_nbr_cells_after = CountNoNeighborCells(complex_incremental);
     const Real max_convex_violation_after = MaxConvexViolation(complex_incremental, pos, box);
-    const vor::CellComplexUpdateStats &update_stats = complex_incremental.getLastUpdateStats();
+    const vor::CellComplexUpdateStats& update_stats = complex_incremental.getLastUpdateStats();
 
     const std::vector<CellSignature> sig_after =
-      BuildSignaturesByCellId(complex_incremental, num_particles);
+        BuildSignaturesByCellId(complex_incremental, num_particles);
     int changed_cells = 0;
     for (std::size_t i = 0; i < sig_before.size(); ++i) {
       if (sig_before[i].num_vertices != sig_after[i].num_vertices ||
@@ -379,14 +376,13 @@ int main(int argc, char **argv) {
     cumulative_non_convex_before += non_convex_before;
     cumulative_topology_changed += changed_cells;
 
-    std::printf("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.16e\n",
-                s.step, s.non_convex_before, s.non_convex_after, s.convex_fixed_cells,
-                s.rebuild_candidates, s.local_rebuild_cells, s.full_rebuild_cells,
-                s.repair_iterations, s.repair_proposals_total, s.repair_target_groups_total,
-                s.repair_cells_changed_total, s.repair_direct_attempts,
-                s.repair_direct_successes, s.repair_indirect_candidates, s.repair_batch_calls,
-                s.repair_batch_changes, s.topology_changed_cells, s.no_nbr_cells_after,
-                s.max_convex_violation_after);
+    std::printf("%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%.16e\n", s.step,
+                s.non_convex_before, s.non_convex_after, s.convex_fixed_cells, s.rebuild_candidates,
+                s.local_rebuild_cells, s.full_rebuild_cells, s.repair_iterations,
+                s.repair_proposals_total, s.repair_target_groups_total,
+                s.repair_cells_changed_total, s.repair_direct_attempts, s.repair_direct_successes,
+                s.repair_indirect_candidates, s.repair_batch_calls, s.repair_batch_changes,
+                s.topology_changed_cells, s.no_nbr_cells_after, s.max_convex_violation_after);
   }
 
   int signature_mismatch_cells = 0;
@@ -409,37 +405,38 @@ int main(int argc, char **argv) {
           sig_incremental[i].num_facets != sig_clean[i].num_facets ||
           sig_incremental[i].nbrs_sorted != sig_clean[i].nbrs_sorted) {
         ++signature_mismatch_cells;
-        std::printf("# MISMATCH cell %zu: incr(V=%u F=%u nbrs=",
-                    i, sig_incremental[i].num_vertices, sig_incremental[i].num_facets);
-        for (auto n : sig_incremental[i].nbrs_sorted) std::printf("%u ", n);
-        std::printf(") clean(V=%u F=%u nbrs=",
-                    sig_clean[i].num_vertices, sig_clean[i].num_facets);
-        for (auto n : sig_clean[i].nbrs_sorted) std::printf("%u ", n);
+        std::printf("# MISMATCH cell %zu: incr(V=%u F=%u nbrs=", i, sig_incremental[i].num_vertices,
+                    sig_incremental[i].num_facets);
+        for (auto n : sig_incremental[i].nbrs_sorted)
+          std::printf("%u ", n);
+        std::printf(") clean(V=%u F=%u nbrs=", sig_clean[i].num_vertices, sig_clean[i].num_facets);
+        for (auto n : sig_clean[i].nbrs_sorted)
+          std::printf("%u ", n);
         std::printf(")\n");
         std::vector<vor::uint2> missing, extra;
         std::set_difference(sig_clean[i].nbrs_sorted.begin(), sig_clean[i].nbrs_sorted.end(),
                             sig_incremental[i].nbrs_sorted.begin(),
-                            sig_incremental[i].nbrs_sorted.end(),
-                            std::back_inserter(missing));
+                            sig_incremental[i].nbrs_sorted.end(), std::back_inserter(missing));
         std::set_difference(sig_incremental[i].nbrs_sorted.begin(),
-                            sig_incremental[i].nbrs_sorted.end(),
-                            sig_clean[i].nbrs_sorted.begin(), sig_clean[i].nbrs_sorted.end(),
-                            std::back_inserter(extra));
+                            sig_incremental[i].nbrs_sorted.end(), sig_clean[i].nbrs_sorted.begin(),
+                            sig_clean[i].nbrs_sorted.end(), std::back_inserter(extra));
         if (!missing.empty()) {
           std::printf("#   missing from incr: ");
-          for (auto n : missing) std::printf("%u ", n);
+          for (auto n : missing)
+            std::printf("%u ", n);
           std::printf("\n");
         }
         if (!extra.empty()) {
           std::printf("#   extra in incr: ");
-          for (auto n : extra) std::printf("%u ", n);
+          for (auto n : extra)
+            std::printf("%u ", n);
           std::printf("\n");
         }
       }
     }
 
     {
-      const vor::CellArena<Real> &arena = complex_incremental.getCellArena();
+      const vor::CellArena<Real>& arena = complex_incremental.getCellArena();
       std::vector<std::size_t> id_to_idx(static_cast<std::size_t>(num_particles), SIZE_MAX);
       for (std::size_t i = 0; i < arena.numCells(); ++i) {
         const vor::uint2 cid = arena.cellId(i);
@@ -450,7 +447,7 @@ int main(int argc, char **argv) {
         const vor::uint2 cid = arena.cellId(i);
         if (cid >= static_cast<vor::uint2>(num_particles))
           continue;
-        const vor::uint2 *nbr_ptr = arena.cellNbrData(i);
+        const vor::uint2* nbr_ptr = arena.cellNbrData(i);
         const vor::uint1 nf = arena.cellNumFacets(i);
         for (vor::uint1 f = 0; f < nf; ++f) {
           const vor::uint2 n = nbr_ptr[f];
@@ -459,7 +456,7 @@ int main(int argc, char **argv) {
           std::size_t nidx = id_to_idx[n];
           if (nidx == SIZE_MAX)
             continue;
-          const vor::uint2 *nbr2 = arena.cellNbrData(nidx);
+          const vor::uint2* nbr2 = arena.cellNbrData(nidx);
           const vor::uint1 nf2 = arena.cellNumFacets(nidx);
           bool found = false;
           for (vor::uint1 g = 0; g < nf2; ++g) {
@@ -469,8 +466,8 @@ int main(int argc, char **argv) {
             }
           }
           if (!found) {
-            std::printf("# NON-RECIPROCAL: cell %u has nbr %u, but %u does not have %u\n",
-                        cid, n, n, cid);
+            std::printf("# NON-RECIPROCAL: cell %u has nbr %u, but %u does not have %u\n", cid, n,
+                        n, cid);
             ++non_reciprocal_pairs;
           }
         }
@@ -484,13 +481,11 @@ int main(int argc, char **argv) {
   }
 
   const bool all_steps_convex_after =
-      std::all_of(step_stats.begin(), step_stats.end(), [](const StepStats &s) {
-        return s.non_convex_after == 0;
-      });
+      std::all_of(step_stats.begin(), step_stats.end(),
+                  [](const StepStats& s) { return s.non_convex_after == 0; });
   const bool no_no_nbr_after =
-      std::all_of(step_stats.begin(), step_stats.end(), [](const StepStats &s) {
-        return s.no_nbr_cells_after == 0;
-      });
+      std::all_of(step_stats.begin(), step_stats.end(),
+                  [](const StepStats& s) { return s.no_nbr_cells_after == 0; });
 
   const bool final_ok = compare_final ? (final_topology_match && final_volume_match) : true;
 

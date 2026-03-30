@@ -131,10 +131,14 @@ class DenseSlotsView {
   static constexpr UInt InvalidIdx = static_cast<UInt>(~0);
 
   DenseSlotsView()
-      : m_alive(NULL), m_freeStack(NULL), m_capacity(0), m_numAllocated(0), m_numAlive(0),
-        m_freeTop(0) {}
+      : m_alive(NULL)
+      , m_freeStack(NULL)
+      , m_capacity(0)
+      , m_numAllocated(0)
+      , m_numAlive(0)
+      , m_freeTop(0) {}
 
-  void setStorage(uint8_t *alivePtr, UInt *stackPtr, UInt capacity) {
+  void setStorage(uint8_t* alivePtr, UInt* stackPtr, UInt capacity) {
     m_alive = alivePtr;
     m_freeStack = stackPtr;
     m_capacity = capacity;
@@ -182,8 +186,8 @@ class DenseSlotsView {
   }
 
  private:
-  uint8_t *m_alive;
-  UInt *m_freeStack;
+  uint8_t* m_alive;
+  UInt* m_freeStack;
   UInt m_capacity;
   UInt m_numAllocated;
   UInt m_numAlive;
@@ -211,7 +215,7 @@ class ChunkedPool {
     m_nextChunk.store(0, std::memory_order_relaxed);
   }
 
-  void swap(ChunkedPool &other) {
+  void swap(ChunkedPool& other) {
     if (this == &other)
       return;
     std::scoped_lock<std::mutex, std::mutex> lock(m_mutex, other.m_mutex);
@@ -223,15 +227,14 @@ class ChunkedPool {
     std::swap(m_chunkSize, other.m_chunkSize);
   }
 
-  T *allocate(size_t count, uint2 &outOverflowIdx) {
+  T* allocate(size_t count, uint2& outOverflowIdx) {
     if (count == 0) {
       outOverflowIdx = InvalidIdx;
       return NULL;
     }
     if (count > m_chunkSize) {
-      std::fprintf(stderr,
-                   "Fatal: ChunkedPool allocation of %zu items exceeds chunk size %zu\n", count,
-                   m_chunkSize);
+      std::fprintf(stderr, "Fatal: ChunkedPool allocation of %zu items exceeds chunk size %zu\n",
+                   count, m_chunkSize);
       std::abort();
     }
 
@@ -258,12 +261,12 @@ class ChunkedPool {
     m_freeList.push_back(chunkIdx);
   }
 
-  T &get(size_t idx) {
-    T *chunk = chunkPtr(idx / m_chunkSize);
+  T& get(size_t idx) {
+    T* chunk = chunkPtr(idx / m_chunkSize);
     return chunk[idx % m_chunkSize];
   }
-  const T &get(size_t idx) const {
-    const T *chunk = chunkPtr(idx / m_chunkSize);
+  const T& get(size_t idx) const {
+    const T* chunk = chunkPtr(idx / m_chunkSize);
     return chunk[idx % m_chunkSize];
   }
   size_t chunkSize() const { return m_chunkSize; }
@@ -274,12 +277,12 @@ class ChunkedPool {
       m_chunks.emplace_back(new T[m_chunkSize]());
   }
 
-  T *chunkPtr(size_t chunkIdx) {
+  T* chunkPtr(size_t chunkIdx) {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_chunks[chunkIdx].get();
   }
 
-  const T *chunkPtr(size_t chunkIdx) const {
+  const T* chunkPtr(size_t chunkIdx) const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_chunks[chunkIdx].get();
   }
@@ -325,9 +328,9 @@ class PrimaryOverflowArray {
     m_overflow.resetReuse();
   }
 
-  void insert(uint2 cellId, const T *data, uint1 count) {
+  void insert(uint2 cellId, const T* data, uint1 count) {
     m_counts[cellId] = count;
-    T *primary = primaryData(cellId);
+    T* primary = primaryData(cellId);
     const uint1 primaryCount = std::min<uint1>(count, PrimaryCap);
     for (uint1 i = 0; i < primaryCount; ++i)
       primary[i] = data[i];
@@ -336,7 +339,7 @@ class PrimaryOverflowArray {
 
     if (count > PrimaryCap) {
       uint2 overflowIdx = InvalidOverflow;
-      T *overflow = m_overflow.allocate(static_cast<size_t>(count - PrimaryCap), overflowIdx);
+      T* overflow = m_overflow.allocate(static_cast<size_t>(count - PrimaryCap), overflowIdx);
       for (uint1 i = PrimaryCap; i < count; ++i)
         overflow[i - PrimaryCap] = data[i];
       m_overflowIdx[cellId] = overflowIdx;
@@ -345,7 +348,7 @@ class PrimaryOverflowArray {
     }
   }
 
-  void overwrite(uint2 cellId, const T *data, uint1 count) {
+  void overwrite(uint2 cellId, const T* data, uint1 count) {
     releaseCellOverflow(cellId);
     insert(cellId, data, count);
   }
@@ -353,30 +356,30 @@ class PrimaryOverflowArray {
   void clearCell(uint2 cellId) {
     releaseCellOverflow(cellId);
     m_counts[cellId] = 0;
-    T *primary = primaryData(cellId);
+    T* primary = primaryData(cellId);
     for (uint1 i = 0; i < PrimaryCap; ++i)
       primary[i] = T();
   }
 
   uint1 count(uint2 cellId) const { return m_counts[cellId]; }
   bool hasOverflow(uint2 cellId) const { return m_overflowIdx[cellId] != InvalidOverflow; }
-  const T &get(uint2 cellId, uint1 idx) const {
+  const T& get(uint2 cellId, uint1 idx) const {
     if (idx < PrimaryCap)
       return m_primary[(static_cast<size_t>(cellId) * static_cast<size_t>(PrimaryCap)) + idx];
     return m_overflow.get(static_cast<size_t>(m_overflowIdx[cellId]) + (idx - PrimaryCap));
   }
-  T *primaryData(uint2 cellId) {
+  T* primaryData(uint2 cellId) {
     return m_primary.data() + (static_cast<size_t>(cellId) * static_cast<size_t>(PrimaryCap));
   }
-  const T *primaryData(uint2 cellId) const {
+  const T* primaryData(uint2 cellId) const {
     return m_primary.data() + (static_cast<size_t>(cellId) * static_cast<size_t>(PrimaryCap));
   }
 
-  const std::vector<T> &primary() const { return m_primary; }
-  const std::vector<uint1> &counts() const { return m_counts; }
-  const std::vector<uint2> &overflowIdx() const { return m_overflowIdx; }
+  const std::vector<T>& primary() const { return m_primary; }
+  const std::vector<uint1>& counts() const { return m_counts; }
+  const std::vector<uint2>& overflowIdx() const { return m_overflowIdx; }
 
-  void swap(PrimaryOverflowArray &other) {
+  void swap(PrimaryOverflowArray& other) {
     m_primary.swap(other.m_primary);
     m_overflow.swap(other.m_overflow);
     m_counts.swap(other.m_counts);

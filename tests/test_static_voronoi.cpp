@@ -23,7 +23,7 @@ static int testRandomPoints(int numParticles, double Lx, double Ly, double Lz, u
   typedef double real_t;
   typedef boost::mt19937 rng_type;
   typedef boost::uniform_01<real_t> dist_type;
-  typedef boost::variate_generator<rng_type &, dist_type> gen_type;
+  typedef boost::variate_generator<rng_type&, dist_type> gen_type;
 
   rng_type rng(seed);
   gen_type pointGen(rng, dist_type());
@@ -48,7 +48,7 @@ static int testRandomPoints(int numParticles, double Lx, double Ly, double Lz, u
   // Build Voronoi tessellation
   complex.build(pos);
 
-  vector<CellGeometry<real_t> > &geoms = complex.getGeoms();
+  vector<CellGeometry<real_t> >& geoms = complex.getGeoms();
   vector<Cell<real_t> > cells;
   complex.materializeCells(cells);
 
@@ -126,7 +126,7 @@ int main() {
     typedef double real_t;
     typedef boost::mt19937 rng_type;
     typedef boost::uniform_01<real_t> dist_type;
-    typedef boost::variate_generator<rng_type &, dist_type> gen_type;
+    typedef boost::variate_generator<rng_type&, dist_type> gen_type;
 
     rng_type rng(999);
     gen_type pointGen(rng, dist_type());
@@ -148,7 +148,7 @@ int main() {
 
     // Build twice and compare volumes
     complex.build(pos);
-  vector<CellGeometry<real_t> > &geoms1 = complex.getGeoms();
+    vector<CellGeometry<real_t> >& geoms1 = complex.getGeoms();
     vector<real_t> vols1(N);
     for (int i = 0; i < N; ++i) {
       geoms1[i].computeVolume();
@@ -156,7 +156,7 @@ int main() {
     }
 
     complex.build(pos);
-    vector<CellGeometry<real_t> > &geoms2 = complex.getGeoms();
+    vector<CellGeometry<real_t> >& geoms2 = complex.getGeoms();
     real_t maxDiff = 0;
     for (int i = 0; i < N; ++i) {
       geoms2[i].computeVolume();

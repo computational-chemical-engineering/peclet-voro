@@ -8,7 +8,6 @@
 #include <cstdio>
 #include <random>
 #include <vector>
-
 #include <voronoi_dynamics/simulation.hpp>
 
 using std::array;

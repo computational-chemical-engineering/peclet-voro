@@ -35,7 +35,7 @@ int main() {
   typedef double real_t;
   typedef boost::mt11213b base_generator_type;
   typedef boost::uniform_01<real_t> distribution_type;
-  typedef boost::variate_generator<base_generator_type &, distribution_type> gen_type;
+  typedef boost::variate_generator<base_generator_type&, distribution_type> gen_type;
   base_generator_type rng(1);
   gen_type pointGen(rng, distribution_type());
 
@@ -46,7 +46,7 @@ int main() {
   L[2] = 1;
   BoxLE<real_t> box(L);
   CellComplex<real_t> complex(&box);
-  vector<CellGeometry<real_t> > &geoms(complex.getGeoms());
+  vector<CellGeometry<real_t> >& geoms(complex.getGeoms());
   vector<Cell<real_t> > cells;
 
   uint particle_type, no_particles, no_particles_x, no_particles_y, no_particles_z;
@@ -118,7 +118,7 @@ int main() {
   printf("Running CCW on facet : %u\n", facet_id);
   cells[cell_id].printFacetInfo(p[cell_id], facet_id);
 
-  FILE *printFile;
+  FILE* printFile;
   printFile = fopen("GNUPlotfile.txt", "w");
   cells[cell_id].drawGnuplot(p[cell_id], printFile);
   fclose(printFile);

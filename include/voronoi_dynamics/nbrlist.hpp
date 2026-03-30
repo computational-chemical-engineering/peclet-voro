@@ -118,8 +118,8 @@ class NbrList {
   inline const Box<real_t>& getBox() const { return *p_box; }
   void setup(const std::vector<std::array<real_t, 3> >& pos, real_t rcut);
   void setupCurrentTeam(const std::vector<std::array<real_t, 3> >& pos, real_t rcut);
-  void setupSubset(const std::vector<std::array<real_t, 3> >& pos,
-                   const std::vector<UInt>& ids, real_t rcut);
+  void setupSubset(const std::vector<std::array<real_t, 3> >& pos, const std::vector<UInt>& ids,
+                   real_t rcut);
   inline UInt computeCellIndex(const std::array<real_t, 3>& pos) const;
   inline void getGridNbrs(const std::array<real_t, 3>& pos, std::vector<UInt>& nbrs) const;
   void getNbrs(UInt posIndx, const std::vector<std::array<real_t, 3> >& pos,
@@ -134,7 +134,7 @@ class NbrList {
   }
 
  private:
- Grid<UInt> m_grid;
+  Grid<UInt> m_grid;
   Box<real_t>* p_box;
   std::vector<UInt> m_headCell;
   std::vector<PosAndId<UInt, real_t> > m_cell2Pos;
@@ -726,7 +726,8 @@ void NbrList<UInt, real_t>::getCellContent(
 }
 
 template <typename UInt, typename real_t>
-void NbrList<UInt, real_t>::getNbrs(const UInt indxPos, const std::vector<std::array<real_t, 3> >& pos,
+void NbrList<UInt, real_t>::getNbrs(const UInt indxPos,
+                                    const std::vector<std::array<real_t, 3> >& pos,
                                     std::vector<UInt>& indcs) const {
   UInt indxCell(computeCellIndex(pos[indxPos]));
   std::vector<UInt> nbrCells;

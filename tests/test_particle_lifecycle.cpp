@@ -24,9 +24,8 @@ using vor::uint2;
 namespace {
 
 template <typename real_t>
-void collectSortedNbrsByParticle(const CellComplex<real_t> &complex,
-                                 uint2 particleId,
-                                 vector<uint2> &nbrs) {
+void collectSortedNbrsByParticle(const CellComplex<real_t>& complex, uint2 particleId,
+                                 vector<uint2>& nbrs) {
   nbrs.clear();
   const uint2 cellIndex = complex.getCellIndexForParticle(particleId);
   if (cellIndex == vor::noNbr)
@@ -42,11 +41,8 @@ void collectSortedNbrsByParticle(const CellComplex<real_t> &complex,
 }
 
 template <typename real_t>
-bool compareByParticleId(const CellComplex<real_t> &a,
-                         const CellComplex<real_t> &b,
-                         const vector<uint2> &particleIds,
-                         real_t tol,
-                         const char *label) {
+bool compareByParticleId(const CellComplex<real_t>& a, const CellComplex<real_t>& b,
+                         const vector<uint2>& particleIds, real_t tol, const char* label) {
   vector<uint2> nbrsA;
   vector<uint2> nbrsB;
   for (size_t i = 0; i < particleIds.size(); ++i) {
@@ -54,7 +50,8 @@ bool compareByParticleId(const CellComplex<real_t> &a,
     const uint2 cellA = a.getCellIndexForParticle(particleId);
     const uint2 cellB = b.getCellIndexForParticle(particleId);
     if (cellA == vor::noNbr || cellB == vor::noNbr) {
-      std::fprintf(stderr, "%s: missing cell for particle %u\n", label, static_cast<unsigned>(particleId));
+      std::fprintf(stderr, "%s: missing cell for particle %u\n", label,
+                   static_cast<unsigned>(particleId));
       return false;
     }
 
@@ -79,7 +76,7 @@ bool compareByParticleId(const CellComplex<real_t> &a,
 }
 
 template <typename real_t>
-real_t sumVolumes(const CellComplex<real_t> &complex) {
+real_t sumVolumes(const CellComplex<real_t>& complex) {
   real_t sum = real_t(0);
   for (size_t i = 0; i < complex.numCells(); ++i)
     sum += complex.getGeometryView(i).getVolume();
@@ -125,8 +122,8 @@ int main() {
   }
 
   vector<uint8_t> active(pos.size(), 1u);
-  const vector<uint2> deletedIds = {
-      3u, 17u, 42u, static_cast<uint2>(oldSize + 1u), static_cast<uint2>(oldSize + 5u)};
+  const vector<uint2> deletedIds = {3u, 17u, 42u, static_cast<uint2>(oldSize + 1u),
+                                    static_cast<uint2>(oldSize + 5u)};
   complex.deactivateParticles(deletedIds);
   for (size_t i = 0; i < deletedIds.size(); ++i)
     active[deletedIds[i]] = 0u;

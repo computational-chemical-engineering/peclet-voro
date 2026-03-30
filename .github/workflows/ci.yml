@@ -79,9 +79,7 @@ jobs:
 
       - name: Check formatting
         run: |
-          find include tests \
-            -name '*.hpp' -o -name '*.cpp' \
-            | xargs clang-format --dry-run --Werror
+          bash tools/clang_format_check.sh
 
   # ── Static Analysis ───────────────────────────────────────────────────────────
   clang-tidy:

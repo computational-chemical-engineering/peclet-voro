@@ -31,7 +31,7 @@ int main() {
   {
     int numPart = 10000;
     vector<std::array<real_t, 3> > pos(numPart);
-    FILE *pFile;
+    FILE* pFile;
     char filename[255];
     sprintf(filename, "pos_eq_%d.dat", numPart);
     pFile = fopen(filename, "r");
@@ -109,13 +109,13 @@ int main() {
       printf("%16.8g %16.8g %16.8g %16.8g\n", sim.getTime(), sim.getKineticEnergy(),
              sim.getInternalEnergy(), sim.getIntfEnergy());
     }
-    const vector<std::array<real_t, 3> > &pos(sim.getPositions());
+    const vector<std::array<real_t, 3> >& pos(sim.getPositions());
     //    sim.getCellComplex().getNbrList().getBox().putInBox(pos);
     sim.putInBox();
 
-    const vector<uint0> &types(sim.getCellComplex().getTypes());
+    const vector<uint0>& types(sim.getCellComplex().getTypes());
     char filename[255];
-    FILE *pFile;
+    FILE* pFile;
     sprintf(filename, "pos_%03d.dat", m);
     pFile = fopen(filename, "w");
     for (int i = 0; i < pos.size(); ++i) {
