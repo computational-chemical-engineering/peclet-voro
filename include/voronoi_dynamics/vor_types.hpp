@@ -211,6 +211,18 @@ class ChunkedPool {
     m_nextChunk.store(0, std::memory_order_relaxed);
   }
 
+  void swap(ChunkedPool &other) {
+    if (this == &other)
+      return;
+    std::scoped_lock<std::mutex, std::mutex> lock(m_mutex, other.m_mutex);
+    m_chunks.swap(other.m_chunks);
+    m_freeList.swap(other.m_freeList);
+    const size_t nextChunk = m_nextChunk.load(std::memory_order_relaxed);
+    m_nextChunk.store(other.m_nextChunk.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    other.m_nextChunk.store(nextChunk, std::memory_order_relaxed);
+    std::swap(m_chunkSize, other.m_chunkSize);
+  }
+
   T *allocate(size_t count, uint2 &outOverflowIdx) {
     if (count == 0) {
       outOverflowIdx = InvalidIdx;
@@ -363,6 +375,13 @@ class PrimaryOverflowArray {
   const std::vector<T> &primary() const { return m_primary; }
   const std::vector<uint1> &counts() const { return m_counts; }
   const std::vector<uint2> &overflowIdx() const { return m_overflowIdx; }
+
+  void swap(PrimaryOverflowArray &other) {
+    m_primary.swap(other.m_primary);
+    m_overflow.swap(other.m_overflow);
+    m_counts.swap(other.m_counts);
+    m_overflowIdx.swap(other.m_overflowIdx);
+  }
 
  private:
   void releaseCellOverflow(uint2 cellId) {

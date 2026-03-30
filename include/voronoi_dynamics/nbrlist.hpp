@@ -118,6 +118,8 @@ class NbrList {
   inline const Box<real_t>& getBox() const { return *p_box; }
   void setup(const std::vector<std::array<real_t, 3> >& pos, real_t rcut);
   void setupCurrentTeam(const std::vector<std::array<real_t, 3> >& pos, real_t rcut);
+  void setupSubset(const std::vector<std::array<real_t, 3> >& pos,
+                   const std::vector<UInt>& ids, real_t rcut);
   inline UInt computeCellIndex(const std::array<real_t, 3>& pos) const;
   inline void getGridNbrs(const std::array<real_t, 3>& pos, std::vector<UInt>& nbrs) const;
   void getNbrs(UInt posIndx, const std::vector<std::array<real_t, 3> >& pos,
@@ -581,6 +583,43 @@ void NbrList<UInt, real_t>::setup(const std::vector<std::array<real_t, 3> >& pos
   // 	  m_cell2Pos[j].pos[k] - =orig[k];
   // 	}
   //     }
+}
+
+template <typename UInt, typename real_t>
+void NbrList<UInt, real_t>::setupSubset(const std::vector<std::array<real_t, 3> >& pos,
+                                        const std::vector<UInt>& ids, real_t rcut) {
+  Indx n;
+  const std::array<real_t, 3>& L(p_box->getL());
+  const std::array<real_t, 3>& invL(p_box->getInvL());
+  for (uint0 i(0); i < 3; ++i)
+    n[i] = static_cast<uint2>(floor(L[i] / rcut));
+  m_grid.init(n);
+  const size_t numCells = static_cast<size_t>(m_grid.numCells());
+
+  m_headCell.assign(numCells + 1, 0);
+  m_cell2Pos.clear();
+  if (ids.empty())
+    return;
+
+  std::vector<UInt> indx(ids.size());
+  for (size_t i = 0; i < ids.size(); ++i)
+    indx[i] = computeCellIndex(pos[ids[i]]);
+
+  std::vector<UInt> counts(numCells, 0);
+  for (size_t i = 0; i < ids.size(); ++i)
+    ++counts[indx[i]];
+
+  std::partial_sum(counts.begin(), counts.end(), m_headCell.begin() + 1);
+
+  counts = m_headCell;
+  m_cell2Pos.resize(ids.size());
+  for (size_t i = 0; i < ids.size(); ++i) {
+    const UInt head = counts[indx[i]]++;
+    m_cell2Pos[head].id = ids[i];
+    m_cell2Pos[head].pos = pos[ids[i]];
+    for (uint0 k(0); k < 3; ++k)
+      m_cell2Pos[head].pos[k] -= L[k] * floor(m_cell2Pos[head].pos[k] * invL[k]);
+  }
 }
 
 template <typename UInt, typename real_t>
