@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate report for cell-creation benchmark (no sphere) with thread scaling."""
+"""Generate report for fair basic-build benchmark with thread scaling."""
 
 from __future__ import annotations
 
@@ -22,16 +22,16 @@ def read_csv(path: Path) -> pd.DataFrame:
 
 
 def make_fair_single_thread_plot(df_noomp: pd.DataFrame, out_file: Path) -> pd.DataFrame:
-    vd = df_noomp[df_noomp["library"] == "voronoi_dynamics_tess"].copy()
+    vd = df_noomp[df_noomp["library"] == "voronoi_dynamics_build_basic"].copy()
     vp = df_noomp[df_noomp["library"] == "voropp_compute_cell"].copy()
     merged = vd.merge(vp, on=["point_set", "N"], suffixes=("_vd", "_vpp")).sort_values(["point_set", "N"])
     merged["ratio_vd_over_vpp"] = merged["time_ms_mean_vd"] / merged["time_ms_mean_vpp"]
 
     fig, ax = plt.subplots(figsize=(8.2, 5.4))
     styles = {
-        ("random_uniform", "vd"): dict(color="#1f77b4", marker="o", ls="-", label="vd_tess random"),
+        ("random_uniform", "vd"): dict(color="#1f77b4", marker="o", ls="-", label="vd build(false) random"),
         ("random_uniform", "vpp"): dict(color="#1f77b4", marker="s", ls="--", label="voro++ compute_cell random"),
-        ("cubic_lattice", "vd"): dict(color="#ff7f0e", marker="o", ls="-", label="vd_tess lattice"),
+        ("cubic_lattice", "vd"): dict(color="#ff7f0e", marker="o", ls="-", label="vd build(false) lattice"),
         ("cubic_lattice", "vpp"): dict(color="#ff7f0e", marker="s", ls="--", label="voro++ compute_cell lattice"),
     }
 
@@ -45,7 +45,7 @@ def make_fair_single_thread_plot(df_noomp: pd.DataFrame, out_file: Path) -> pd.D
     ax.grid(True, which="both", linestyle="--", linewidth=0.4, alpha=0.7)
     ax.set_xlabel("Number of particles N")
     ax.set_ylabel("Time (ms)")
-    ax.set_title("Fair single-thread comparison: vd_tess vs voro++ compute_cell")
+    ax.set_title("Fair single-thread comparison: vd build(false) vs voro++ compute_cell")
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(out_file, dpi=170)
@@ -55,22 +55,20 @@ def make_fair_single_thread_plot(df_noomp: pd.DataFrame, out_file: Path) -> pd.D
 
 
 def make_vd_scaling_plot(df_threads: pd.DataFrame, df_noomp: pd.DataFrame, out_file: Path) -> pd.DataFrame:
-    vd = df_threads[df_threads["library"] == "voronoi_dynamics_tess"].copy()
+    vd = df_threads[df_threads["library"] == "voronoi_dynamics_build_basic"].copy()
 
-    # Speedup relative to no-OpenMP single-thread baseline.
-    base = df_noomp[df_noomp["library"] == "voronoi_dynamics_tess"][
+    base = df_noomp[df_noomp["library"] == "voronoi_dynamics_build_basic"][
         ["point_set", "N", "time_ms_mean"]
     ].rename(columns={"time_ms_mean": "t_noomp"})
     merged = vd.merge(base, on=["point_set", "N"])
     merged["speedup_vs_noomp"] = merged["t_noomp"] / merged["time_ms_mean"]
 
-    # Plot a compact set of representative N values to avoid clutter
     reps = {
         "random_uniform": [10000, 100000, 1000000],
         "cubic_lattice": [8000, 125000, 1000000],
     }
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.8), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(12.5, 4.8), sharey=True)
     for ax, ps in zip(axes, ["random_uniform", "cubic_lattice"]):
         sps = merged[merged["point_set"] == ps]
         cmap = ["#1f77b4", "#2ca02c", "#d62728"]
@@ -94,7 +92,7 @@ def make_vd_scaling_plot(df_threads: pd.DataFrame, df_noomp: pd.DataFrame, out_f
         ax.legend(fontsize=8)
 
     axes[0].set_ylabel("Speedup vs no-OpenMP single-thread")
-    fig.suptitle("voronoi_dynamics thread scaling (vd_tess only)")
+    fig.suptitle("voronoi_dynamics basic-build thread scaling")
     fig.tight_layout()
     fig.savefig(out_file, dpi=170)
     plt.close(fig)
@@ -108,7 +106,6 @@ def make_markdown(
     out_md: Path,
     fig_fair: str,
     fig_scaling: str,
-    has_voro_threads: bool,
 ) -> None:
     rnd = fair[fair["point_set"] == "random_uniform"].copy()
     lat = fair[fair["point_set"] == "cubic_lattice"].copy()
@@ -130,7 +127,6 @@ def make_markdown(
         svp = np.polyfit(x, y_vp, 1)[0]
         slope_rows.append((ps, svd, svp))
 
-    # scaling summary at largest N
     scale_summary = []
     for ps in ["random_uniform", "cubic_lattice"]:
         s = scaling[(scaling["point_set"] == ps) & (scaling["N"] == scaling[scaling["point_set"] == ps]["N"].max())]
@@ -140,22 +136,14 @@ def make_markdown(
             scale_summary.append((ps, int(best["nthreads"]), float(best["speedup_vs_noomp"])))
 
     lines: list[str] = []
-    lines.append("# Cell-Creation Benchmark Report (No Sphere)")
+    lines.append("# Basic-Build Benchmark Report (No Sphere)")
     lines.append("")
     lines.append("## Scope")
     lines.append("")
-    lines.append("- Cell creation only: vd_tess vs voro++ compute_cell")
+    lines.append("- Fair comparison: `CellComplex::build(false)` vs `voro++ compute_cell`")
     lines.append("- Sphere case excluded")
     lines.append("- Single-thread no-OpenMP fair comparison")
     lines.append(f"- vd thread scaling at {thread_counts_txt} threads")
-    lines.append("")
-    lines.append("## Is Voro++ multithreaded?")
-    lines.append("")
-    if has_voro_threads:
-        lines.append("- Threading constructs were detected in the inspected Voro++ source tree.")
-    else:
-        lines.append("- No OpenMP pragmas or thread constructs were found in the inspected Voro++ source tree.")
-        lines.append("- In this benchmark workflow, Voro++ is treated as effectively single-threaded.")
     lines.append("")
     lines.append("## Fair Single-thread Comparison")
     lines.append("")
@@ -166,7 +154,7 @@ def make_markdown(
     lines.append("")
     lines.append("### Scaling exponents (log-log fit)")
     lines.append("")
-    lines.append("| Dataset | vd_tess slope | voro++ compute_cell slope |")
+    lines.append("| Dataset | vd build(false) slope | voro++ compute_cell slope |")
     lines.append("|---|---:|---:|")
     for ps, svd, svp in slope_rows:
         lines.append(f"| {ps} | {svd:.3f} | {svp:.3f} |")
@@ -176,7 +164,7 @@ def make_markdown(
     for ps, s in [("random_uniform", rnd), ("cubic_lattice", lat)]:
         lines.append("")
         lines.append(f"#### {ps}")
-        lines.append("| N | vd_tess (ms) | voro++ compute_cell (ms) | vd/voro++ |")
+        lines.append("| N | vd build(false) (ms) | voro++ compute_cell (ms) | vd/voro++ |")
         lines.append("|---:|---:|---:|---:|")
         for _, r in s.iterrows():
             lines.append(
@@ -202,33 +190,26 @@ def main() -> None:
     ap.add_argument("--noomp-csv", type=Path, required=True)
     ap.add_argument("--threads-dir", type=Path, required=True)
     ap.add_argument("--out-dir", type=Path, required=True)
-    ap.add_argument("--voro-thread-scan", type=Path, default=None)
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
     df_noomp = read_csv(args.noomp_csv)
 
-    thread_csvs = sorted(args.threads_dir.glob("benchmark_cell_creation_vd_t*.csv"))
+    thread_csvs = sorted(args.threads_dir.glob("benchmark_full_build_vd_t*.csv"))
     if not thread_csvs:
         raise RuntimeError("No thread sweep CSV files found.")
     df_threads = pd.concat([read_csv(p) for p in thread_csvs], ignore_index=True)
 
-    fair = make_fair_single_thread_plot(df_noomp, args.out_dir / "cell_creation_fair_single_thread.png")
-    scaling = make_vd_scaling_plot(df_threads, df_noomp, args.out_dir / "cell_creation_vd_thread_scaling.png")
-
-    has_voro_threads = False
-    if args.voro_thread_scan is not None and args.voro_thread_scan.exists():
-        txt = args.voro_thread_scan.read_text(encoding="utf-8", errors="ignore").strip()
-        has_voro_threads = len(txt) > 0
+    fair = make_fair_single_thread_plot(df_noomp, args.out_dir / "full_build_fair_single_thread.png")
+    scaling = make_vd_scaling_plot(df_threads, df_noomp, args.out_dir / "full_build_vd_thread_scaling.png")
 
     make_markdown(
         fair=fair,
         scaling=scaling,
-        out_md=args.out_dir / "CELL_CREATION_THREADS_REPORT.md",
-        fig_fair="cell_creation_fair_single_thread.png",
-        fig_scaling="cell_creation_vd_thread_scaling.png",
-        has_voro_threads=has_voro_threads,
+        out_md=args.out_dir / "FULL_BUILD_THREADS_REPORT.md",
+        fig_fair="full_build_fair_single_thread.png",
+        fig_scaling="full_build_vd_thread_scaling.png",
     )
 
 

@@ -14,13 +14,12 @@ using vor::uint0;
 using vor::uint1;
 using vor::uint2;
 
-using vor::Array;
 using vor::IntfDyn;
 
 int main() {
   typedef double real_t;
   // generate random particle positions
-  Array<real_t, 3> L;
+  std::array<real_t, 3> L;
   L[0] = 1;
   L[1] = 1;
   L[2] = 1;
@@ -31,8 +30,8 @@ int main() {
   real_t dt(0.001);
   {
     int numPart = 10000;
-    vector<Array<real_t, 3> > pos(numPart);
-    FILE *pFile;
+    vector<std::array<real_t, 3> > pos(numPart);
+    FILE* pFile;
     char filename[255];
     sprintf(filename, "pos_eq_%d.dat", numPart);
     pFile = fopen(filename, "r");
@@ -57,7 +56,7 @@ int main() {
     sim.setPositions(pos);
 
     vector<uint0> types(numPart);
-    vector<Array<real_t, 3> > pos2(numPart);
+    vector<std::array<real_t, 3> > pos2(numPart);
     size_t iBegin = 0, iLast = numPart - 1;
     real_t rSq = 0.018 * L[1] * L[1];
     for (int i = 0; i < pos.size(); ++i) {
@@ -77,7 +76,7 @@ int main() {
     vector<real_t> masses(types.size());
     vector<real_t> visc(types.size());
     vector<real_t> bulkVisc(types.size());
-    vector<Array<real_t, 3> > vel(types.size());
+    vector<std::array<real_t, 3> > vel(types.size());
     real_t mass = 1.0 / types.size();
     sim.setIntfTension(1.e-2, 0, 1);
     for (size_t i = 0; i < types.size(); ++i) {
@@ -110,13 +109,13 @@ int main() {
       printf("%16.8g %16.8g %16.8g %16.8g\n", sim.getTime(), sim.getKineticEnergy(),
              sim.getInternalEnergy(), sim.getIntfEnergy());
     }
-    const vector<Array<real_t, 3> > &pos(sim.getPositions());
+    const vector<std::array<real_t, 3> >& pos(sim.getPositions());
     //    sim.getCellComplex().getNbrList().getBox().putInBox(pos);
     sim.putInBox();
 
-    const vector<uint0> &types(sim.getCellComplex().getTypes());
+    const vector<uint0>& types(sim.getCellComplex().getTypes());
     char filename[255];
-    FILE *pFile;
+    FILE* pFile;
     sprintf(filename, "pos_%03d.dat", m);
     pFile = fopen(filename, "w");
     for (int i = 0; i < pos.size(); ++i) {

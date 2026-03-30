@@ -12,7 +12,6 @@
 #include <voronoi_dynamics/voronoi.hpp>
 
 using std::vector;
-using vor::Array;
 using vor::Box;
 using vor::Cell;
 using vor::CellComplex;
@@ -24,12 +23,12 @@ static int testRandomPoints(int numParticles, double Lx, double Ly, double Lz, u
   typedef double real_t;
   typedef boost::mt19937 rng_type;
   typedef boost::uniform_01<real_t> dist_type;
-  typedef boost::variate_generator<rng_type &, dist_type> gen_type;
+  typedef boost::variate_generator<rng_type&, dist_type> gen_type;
 
   rng_type rng(seed);
   gen_type pointGen(rng, dist_type());
 
-  Array<real_t, 3> L;
+  std::array<real_t, 3> L;
   L[0] = Lx;
   L[1] = Ly;
   L[2] = Lz;
@@ -39,7 +38,7 @@ static int testRandomPoints(int numParticles, double Lx, double Ly, double Lz, u
   CellComplex<real_t> complex(&box);
 
   // Generate random positions
-  vector<Array<real_t, 3> > pos(numParticles);
+  vector<std::array<real_t, 3> > pos(numParticles);
   for (int i = 0; i < numParticles; ++i) {
     pos[i][0] = L[0] * pointGen();
     pos[i][1] = L[1] * pointGen();
@@ -49,8 +48,9 @@ static int testRandomPoints(int numParticles, double Lx, double Ly, double Lz, u
   // Build Voronoi tessellation
   complex.build(pos);
 
-  vector<Cell<real_t> > &cells = complex.getCells();
-  vector<CellGeometry<real_t> > &geoms = complex.getGeoms();
+  vector<CellGeometry<real_t> >& geoms = complex.getGeoms();
+  vector<Cell<real_t> > cells;
+  complex.materializeCells(cells);
 
   if ((int)cells.size() != numParticles) {
     fprintf(stderr, "FAIL: expected %d cells, got %lu\n", numParticles,
@@ -126,12 +126,12 @@ int main() {
     typedef double real_t;
     typedef boost::mt19937 rng_type;
     typedef boost::uniform_01<real_t> dist_type;
-    typedef boost::variate_generator<rng_type &, dist_type> gen_type;
+    typedef boost::variate_generator<rng_type&, dist_type> gen_type;
 
     rng_type rng(999);
     gen_type pointGen(rng, dist_type());
 
-    Array<real_t, 3> L;
+    std::array<real_t, 3> L;
     L[0] = 1;
     L[1] = 1;
     L[2] = 1;
@@ -139,7 +139,7 @@ int main() {
     CellComplex<real_t> complex(&box);
 
     int N = 200;
-    vector<Array<real_t, 3> > pos(N);
+    vector<std::array<real_t, 3> > pos(N);
     for (int i = 0; i < N; ++i) {
       pos[i][0] = pointGen();
       pos[i][1] = pointGen();
@@ -148,7 +148,7 @@ int main() {
 
     // Build twice and compare volumes
     complex.build(pos);
-    vector<CellGeometry<real_t> > &geoms1 = complex.getGeoms();
+    vector<CellGeometry<real_t> >& geoms1 = complex.getGeoms();
     vector<real_t> vols1(N);
     for (int i = 0; i < N; ++i) {
       geoms1[i].computeVolume();
@@ -156,7 +156,7 @@ int main() {
     }
 
     complex.build(pos);
-    vector<CellGeometry<real_t> > &geoms2 = complex.getGeoms();
+    vector<CellGeometry<real_t> >& geoms2 = complex.getGeoms();
     real_t maxDiff = 0;
     for (int i = 0; i < N; ++i) {
       geoms2[i].computeVolume();

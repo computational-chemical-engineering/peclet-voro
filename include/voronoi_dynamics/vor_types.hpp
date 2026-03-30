@@ -10,8 +10,15 @@
 
 #pragma once
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <utility>
 #include <vector>
 
@@ -30,29 +37,12 @@ static const uint2 noNbr(~0);
 static const uint1 maxNumVertices(1 << 7);
 static const uint1 maxNumFacets(1 << 7);
 
-/**
- * @class Array
- * @brief class simple class for static arrays. The purpose is to provide the use of [][]-notation
- * when using e.g. vectors of arrays
- * @tparam T type of the elements of the array
- * @tparam n size of the array
- */
-template <typename T, unsigned int n>
-class Array {
- public:
-  inline T& operator[](unsigned int i) { return m[i]; }
-  inline const T& operator[](unsigned int i) const { return m[i]; }
-
- private:
-  T m[n];
-};
-
-typedef Array<uint1, 3> Vertex;
-typedef Array<uint2, 3> NbrInsert;
+typedef std::array<uint1, 3> Vertex;
+typedef std::array<uint2, 3> NbrInsert;
 typedef std::vector<NbrInsert>::const_iterator NbrInsertItr;
 
 template <typename real_t>
-class NbrDist : public Array<real_t, 3> {
+class NbrDist : public std::array<real_t, 3> {
  public:
   uint2 id;
   real_t rSqHalf;
@@ -116,83 +106,298 @@ class CompareNbrDist {
 
 class CompareNbrInsert {
  public:
-  inline bool operator()(const NbrInsert& a, const NbrInsert& b) const { return a[0] < b[0]; }
+  inline bool operator()(const NbrInsert& a, const NbrInsert& b) const {
+    if (a[0] != b[0])
+      return a[0] < b[0];
+    if (a[1] != b[1])
+      return a[1] < b[1];
+    return a[2] < b[2];
+  }
 };
 
 /**
- * @class DenseSlots
- * @brief Cache-friendly slot allocator replacing linked-list-based IndxList.
+ * @class DenseSlotsView
+ * @brief Logic-only slot allocator view backed by externally owned storage.
  *
- * Manages a fixed-capacity pool of slot indices.  Alive slots are tracked via
- * a byte array (no bit-packing).  A small stack caches recently freed indices
- * for O(1) re-allocation.  Iteration is a simple sequential scan over the
- * [0, numAllocated) range, checking the alive flag — ideal for the hardware
- * prefetcher.
+ * Alive flags and the free stack are supplied by the caller via `setStorage()`.
+ * This keeps slot-management logic portable while leaving allocation policy to
+ * the owner.
  *
  * @tparam UInt unsigned integer type for slot indices
- * @tparam Capacity maximum number of slots
  */
-template <typename UInt, UInt Capacity>
-class DenseSlots {
+template <typename UInt>
+class DenseSlotsView {
  public:
-  DenseSlots() : m_numAllocated(0), m_numAlive(0), m_freeTop(0) {
-    std::memset(m_alive, 0, Capacity);
+  static constexpr UInt InvalidIdx = static_cast<UInt>(~0);
+
+  DenseSlotsView()
+      : m_alive(NULL)
+      , m_freeStack(NULL)
+      , m_capacity(0)
+      , m_numAllocated(0)
+      , m_numAlive(0)
+      , m_freeTop(0) {}
+
+  void setStorage(uint8_t* alivePtr, UInt* stackPtr, UInt capacity) {
+    m_alive = alivePtr;
+    m_freeStack = stackPtr;
+    m_capacity = capacity;
   }
-  /// Reset: slots 0..n-1 are alive, rest are dead.
+
   void reset(UInt n) {
     m_numAllocated = n;
     m_numAlive = n;
     m_freeTop = 0;
-    std::memset(m_alive, 0, Capacity);
-    for (UInt i = 0; i < n; ++i)
-      m_alive[i] = 1;
   }
-  /// Allocate a free slot (returns Capacity if none available).
+
   UInt getFree() {
     UInt idx;
     if (m_freeTop > 0) {
       idx = m_freeStack[--m_freeTop];
-    } else if (m_numAllocated < Capacity) {
+    } else if (m_numAllocated < m_capacity) {
       idx = m_numAllocated++;
     } else {
-      return Capacity;
+      return InvalidIdx;
     }
     m_alive[idx] = 1;
     ++m_numAlive;
     return idx;
   }
-  /// Release slot i. Returns true if it was alive.
+
   bool release(UInt i) {
-    if (i >= Capacity || !m_alive[i])
+    if (i >= m_capacity || !m_alive[i])
       return false;
     m_alive[i] = 0;
-    if (m_freeTop < Capacity)
-      m_freeStack[m_freeTop++] = i;
+    m_freeStack[m_freeTop++] = i;
     --m_numAlive;
     return true;
   }
-  /// Check if slot i is free (dead).
+
   inline bool isFree(UInt i) const { return !m_alive[i]; }
-  /// Number of slots ever allocated (high-water mark for iteration).
   inline UInt numAllocated() const { return m_numAllocated; }
-  /// Number of currently alive slots.
   inline UInt numAlive() const { return m_numAlive; }
-  /// True if no alive slots.
+  inline UInt activeCapacity() const { return m_capacity; }
   inline bool empty() const { return m_numAlive == 0; }
-  /// Find first alive slot index (returns Capacity if empty).
   inline UInt firstAlive() const {
     for (UInt i = 0; i < m_numAllocated; ++i)
       if (m_alive[i])
         return i;
-    return Capacity;
+    return InvalidIdx;
   }
 
  private:
-  uint8_t m_alive[Capacity];
-  UInt m_freeStack[Capacity];
-  UInt m_freeTop;
+  uint8_t* m_alive;
+  UInt* m_freeStack;
+  UInt m_capacity;
   UInt m_numAllocated;
   UInt m_numAlive;
+  UInt m_freeTop;
+};
+
+template <typename T>
+class ChunkedPool {
+ public:
+  static constexpr uint2 InvalidIdx = static_cast<uint2>(~0u);
+
+  explicit ChunkedPool(size_t chunkSize = 1024)
+      : m_nextChunk(0), m_chunkSize(std::max<size_t>(chunkSize, 1)) {}
+
+  void clear() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_chunks.clear();
+    m_freeList.clear();
+    m_nextChunk.store(0, std::memory_order_relaxed);
+  }
+
+  void resetReuse() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_freeList.clear();
+    m_nextChunk.store(0, std::memory_order_relaxed);
+  }
+
+  void swap(ChunkedPool& other) {
+    if (this == &other)
+      return;
+    std::scoped_lock<std::mutex, std::mutex> lock(m_mutex, other.m_mutex);
+    m_chunks.swap(other.m_chunks);
+    m_freeList.swap(other.m_freeList);
+    const size_t nextChunk = m_nextChunk.load(std::memory_order_relaxed);
+    m_nextChunk.store(other.m_nextChunk.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    other.m_nextChunk.store(nextChunk, std::memory_order_relaxed);
+    std::swap(m_chunkSize, other.m_chunkSize);
+  }
+
+  T* allocate(size_t count, uint2& outOverflowIdx) {
+    if (count == 0) {
+      outOverflowIdx = InvalidIdx;
+      return NULL;
+    }
+    if (count > m_chunkSize) {
+      std::fprintf(stderr, "Fatal: ChunkedPool allocation of %zu items exceeds chunk size %zu\n",
+                   count, m_chunkSize);
+      std::abort();
+    }
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    uint2 chunkIdx = InvalidIdx;
+    if (!m_freeList.empty()) {
+      chunkIdx = m_freeList.back();
+      m_freeList.pop_back();
+    }
+
+    if (chunkIdx == InvalidIdx)
+      chunkIdx = static_cast<uint2>(m_nextChunk.fetch_add(1, std::memory_order_relaxed));
+
+    ensureChunkLocked(static_cast<size_t>(chunkIdx) + 1);
+    outOverflowIdx = static_cast<uint2>(static_cast<size_t>(chunkIdx) * m_chunkSize);
+    return m_chunks[chunkIdx].get();
+  }
+
+  void releaseChunk(uint2 overflowIdx) {
+    if (overflowIdx == InvalidIdx)
+      return;
+    const uint2 chunkIdx = static_cast<uint2>(overflowIdx / m_chunkSize);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_freeList.push_back(chunkIdx);
+  }
+
+  T& get(size_t idx) {
+    T* chunk = chunkPtr(idx / m_chunkSize);
+    return chunk[idx % m_chunkSize];
+  }
+  const T& get(size_t idx) const {
+    const T* chunk = chunkPtr(idx / m_chunkSize);
+    return chunk[idx % m_chunkSize];
+  }
+  size_t chunkSize() const { return m_chunkSize; }
+
+ private:
+  void ensureChunkLocked(size_t requiredChunks) {
+    while (m_chunks.size() < requiredChunks)
+      m_chunks.emplace_back(new T[m_chunkSize]());
+  }
+
+  T* chunkPtr(size_t chunkIdx) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_chunks[chunkIdx].get();
+  }
+
+  const T* chunkPtr(size_t chunkIdx) const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_chunks[chunkIdx].get();
+  }
+
+  std::vector<std::unique_ptr<T[]> > m_chunks;
+  std::vector<uint2> m_freeList;
+  std::atomic<size_t> m_nextChunk;
+  size_t m_chunkSize;
+  mutable std::mutex m_mutex;
+};
+
+template <typename T, uint1 PrimaryCap>
+class PrimaryOverflowArray {
+ public:
+  static constexpr uint2 InvalidOverflow = ChunkedPool<T>::InvalidIdx;
+
+  explicit PrimaryOverflowArray(size_t overflowChunkSize = 1024) : m_overflow(overflowChunkSize) {}
+
+  void clear() {
+    m_primary.clear();
+    m_counts.clear();
+    m_overflowIdx.clear();
+    m_overflow.clear();
+  }
+
+  void resize(uint2 numCells) {
+    m_primary.assign(static_cast<size_t>(numCells) * static_cast<size_t>(PrimaryCap), T());
+    m_counts.assign(numCells, 0);
+    m_overflowIdx.assign(numCells, InvalidOverflow);
+    m_overflow.clear();
+  }
+
+  void prepare(uint2 numCells) {
+    const size_t primarySize = static_cast<size_t>(numCells) * static_cast<size_t>(PrimaryCap);
+    if (m_primary.size() != primarySize)
+      m_primary.resize(primarySize);
+    if (m_counts.size() != numCells)
+      m_counts.resize(numCells);
+    if (m_overflowIdx.size() != numCells)
+      m_overflowIdx.resize(numCells);
+    std::fill(m_counts.begin(), m_counts.end(), 0);
+    std::fill(m_overflowIdx.begin(), m_overflowIdx.end(), InvalidOverflow);
+    m_overflow.resetReuse();
+  }
+
+  void insert(uint2 cellId, const T* data, uint1 count) {
+    m_counts[cellId] = count;
+    T* primary = primaryData(cellId);
+    const uint1 primaryCount = std::min<uint1>(count, PrimaryCap);
+    for (uint1 i = 0; i < primaryCount; ++i)
+      primary[i] = data[i];
+    for (uint1 i = primaryCount; i < PrimaryCap; ++i)
+      primary[i] = T();
+
+    if (count > PrimaryCap) {
+      uint2 overflowIdx = InvalidOverflow;
+      T* overflow = m_overflow.allocate(static_cast<size_t>(count - PrimaryCap), overflowIdx);
+      for (uint1 i = PrimaryCap; i < count; ++i)
+        overflow[i - PrimaryCap] = data[i];
+      m_overflowIdx[cellId] = overflowIdx;
+    } else {
+      m_overflowIdx[cellId] = InvalidOverflow;
+    }
+  }
+
+  void overwrite(uint2 cellId, const T* data, uint1 count) {
+    releaseCellOverflow(cellId);
+    insert(cellId, data, count);
+  }
+
+  void clearCell(uint2 cellId) {
+    releaseCellOverflow(cellId);
+    m_counts[cellId] = 0;
+    T* primary = primaryData(cellId);
+    for (uint1 i = 0; i < PrimaryCap; ++i)
+      primary[i] = T();
+  }
+
+  uint1 count(uint2 cellId) const { return m_counts[cellId]; }
+  bool hasOverflow(uint2 cellId) const { return m_overflowIdx[cellId] != InvalidOverflow; }
+  const T& get(uint2 cellId, uint1 idx) const {
+    if (idx < PrimaryCap)
+      return m_primary[(static_cast<size_t>(cellId) * static_cast<size_t>(PrimaryCap)) + idx];
+    return m_overflow.get(static_cast<size_t>(m_overflowIdx[cellId]) + (idx - PrimaryCap));
+  }
+  T* primaryData(uint2 cellId) {
+    return m_primary.data() + (static_cast<size_t>(cellId) * static_cast<size_t>(PrimaryCap));
+  }
+  const T* primaryData(uint2 cellId) const {
+    return m_primary.data() + (static_cast<size_t>(cellId) * static_cast<size_t>(PrimaryCap));
+  }
+
+  const std::vector<T>& primary() const { return m_primary; }
+  const std::vector<uint1>& counts() const { return m_counts; }
+  const std::vector<uint2>& overflowIdx() const { return m_overflowIdx; }
+
+  void swap(PrimaryOverflowArray& other) {
+    m_primary.swap(other.m_primary);
+    m_overflow.swap(other.m_overflow);
+    m_counts.swap(other.m_counts);
+    m_overflowIdx.swap(other.m_overflowIdx);
+  }
+
+ private:
+  void releaseCellOverflow(uint2 cellId) {
+    if (m_overflowIdx[cellId] != InvalidOverflow) {
+      m_overflow.releaseChunk(m_overflowIdx[cellId]);
+      m_overflowIdx[cellId] = InvalidOverflow;
+    }
+  }
+
+  std::vector<T> m_primary;
+  ChunkedPool<T> m_overflow;
+  std::vector<uint1> m_counts;
+  std::vector<uint2> m_overflowIdx;
 };
 
 /**

@@ -14,13 +14,12 @@ using vor::uint0;
 using vor::uint1;
 using vor::uint2;
 
-using vor::Array;
 using vor::IntfDyn;
 
 int main() {
   typedef double real_t;
   // generate random particle positions
-  Array<real_t, 3> L;
+  std::array<real_t, 3> L;
   L[0] = 2;
   L[1] = 1;
   L[2] = 1;
@@ -30,9 +29,9 @@ int main() {
   sim.setMassDensity(1);
   real_t dt(0.0005);
   {
-    vector<Array<real_t, 3> > pos;
+    vector<std::array<real_t, 3> > pos;
     vector<uint0> types;
-    FILE *pFile;
+    FILE* pFile;
     char filename[255];
     sprintf(filename, "pos_init.dat");
     pFile = fopen(filename, "r");
@@ -48,7 +47,7 @@ int main() {
       ierr = fscanf(pFile, "%d", &type);
       if (ierr == EOF)
         break;
-      Array<real_t, 3> coord;
+      std::array<real_t, 3> coord;
       for (int k = 0; k < 3; ++k) {
         double a;
         ierr = fscanf(pFile, "%lf", &a);
@@ -79,7 +78,7 @@ int main() {
     vector<real_t> masses(pos.size());
     vector<real_t> bulkVisc(pos.size());
     vector<real_t> visc(pos.size());
-    vector<Array<real_t, 3> > vel(pos.size());
+    vector<std::array<real_t, 3> > vel(pos.size());
     real_t mass = 1.0 / pos.size();
 
     sim.setIntfTension(1.e-1, 0, 1);
@@ -122,13 +121,13 @@ int main() {
       printf("%16.8g %16.8g %16.8g %16.8g\n", sim.getTime(), sim.getKineticEnergy(),
              sim.getInternalEnergy(), sim.getIntfEnergy());
     }
-    const vector<Array<real_t, 3> > &pos(sim.getPositions());
+    const vector<std::array<real_t, 3> >& pos(sim.getPositions());
     //    sim.getCellComplex().getNbrList().getBox().putInBox(pos);
     sim.putInBox();
 
-    const vector<uint0> &types(sim.getCellComplex().getTypes());
+    const vector<uint0>& types(sim.getCellComplex().getTypes());
     char filename[255];
-    FILE *pFile;
+    FILE* pFile;
     sprintf(filename, "pos_%03d.dat", m);
     pFile = fopen(filename, "w");
     for (int i = 0; i < pos.size(); ++i) {
