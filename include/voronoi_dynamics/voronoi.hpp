@@ -125,7 +125,7 @@ inline uint1 getEdge(uint1 label) {
   return (label & maskEdge);
 }
 
-template <typename real_t>
+template <typename real_t, bool Weighted = false>
 class CellMaker;
 template <typename real_t>
 class CellGeometry;
@@ -168,6 +168,50 @@ struct ParticleRenumberResult {
   std::vector<uint2> new_to_old;
 };
 
+namespace detail {
+
+template <typename real_t, bool Weighted>
+class CellMakerWeightState {};
+
+template <typename real_t>
+class CellMakerWeightState<real_t, true> {
+ protected:
+  const std::vector<real_t>* m_weights = NULL;
+
+  inline void setWeightStorage(const std::vector<real_t>* weights) { m_weights = weights; }
+  inline real_t getWeight(uint2 id) const {
+    return (m_weights != NULL && id < m_weights->size()) ? (*m_weights)[id] : real_t(0);
+  }
+};
+
+template <typename real_t, bool Weighted>
+class CellComplexWeightState {};
+
+template <typename real_t>
+class CellComplexWeightState<real_t, true> {
+ protected:
+  std::vector<real_t> m_weights;
+  std::vector<uint8_t> m_particleHasCell;
+  std::vector<uint2> m_cellParticleIds;
+  bool m_weightsDirty = false;
+
+  inline void syncWeights(size_t numParticles) {
+    if (m_weights.size() < numParticles)
+      m_weights.resize(numParticles, real_t(0));
+    else if (m_weights.size() > numParticles)
+      m_weights.resize(numParticles);
+    if (m_particleHasCell.size() < numParticles)
+      m_particleHasCell.resize(numParticles, 0u);
+    else if (m_particleHasCell.size() > numParticles)
+      m_particleHasCell.resize(numParticles);
+  }
+  inline void markWeightsDirty() { m_weightsDirty = true; }
+  inline void clearWeightDirty() { m_weightsDirty = false; }
+  inline bool weightsDirty() const { return m_weightsDirty; }
+};
+
+}  // namespace detail
+
 /**
  * @class Cell
  * @brief class for storage of a single (Voronoi) cell
@@ -190,7 +234,8 @@ class Cell {
   //! @brief copy operator
   //! @param rhs of type CellMaker (\sa CellMaker)
   //! @return reference to the copied cell
-  Cell& operator=(CellMaker<real_t>& rhs);
+  template <bool Weighted>
+  Cell& operator=(CellMaker<real_t, Weighted>& rhs);
   //! @brief set the id of a cell
   //! @param id the id to be set
   void setId(uint2 id) { m_id = id; }
@@ -238,7 +283,8 @@ class Cell {
   //! Not every facet need necesarrily have an neighbor cell associated to it.
   //! @return true, if there are 1 or more facets without neighbors in a cell. false otherwise
   inline bool hasNoNbr();
-  friend class CellMaker<real_t>;
+  template <typename, bool>
+  friend class CellMaker;
   friend class CellGeometry<real_t>;
   friend class TopologyArena<real_t>;
 
@@ -401,8 +447,8 @@ class ConstructionArena {
  * @brief class for making a cell using planar cuts
  * @tparam real_t real type used for floating point numbers (e.g. real or double)
  */
-template <typename real_t>
-class CellMaker {
+template <typename real_t, bool Weighted>
+class CellMaker : private detail::CellMakerWeightState<real_t, Weighted> {
  public:
   //! @brief constructot
   explicit CellMaker(ConstructionArena<real_t>& arena);
@@ -412,6 +458,10 @@ class CellMaker {
   //! @param rhs cell used to initialize the cellmaker
   CellMaker& operator=(const Cell<real_t>& rhs);
   CellMaker& operator=(const CellView<real_t>& rhs);
+  void setWeights(const std::vector<real_t>* weights) {
+    if constexpr (Weighted)
+      this->setWeightStorage(weights);
+  }
   /**
    * @brief build a Voronoi cell
    *
@@ -532,11 +582,13 @@ class CellMaker {
   void computeAllDistGC();
   uint1 m_numVertices, m_numFacets;  // only to be used after renumber()!
  private:
-  CellMaker(const CellMaker<real_t>& rhs);
-  CellMaker& operator=(const CellMaker<real_t>& rhs);
+  CellMaker(const CellMaker<real_t, Weighted>& rhs);
+  CellMaker& operator=(const CellMaker<real_t, Weighted>& rhs);
   inline uint1 getNextLabelCCW(uint1 label) const;
   inline uint1 getReverseLabel(uint1 label) const;
   inline bool applyCut(const std::array<real_t, 3>& p, real_t rSqHalf, uint2 nbr);
+  inline real_t cutPlaneOffset(real_t rSqHalf, uint2 nbr) const;
+  inline bool candidateMightCut(real_t planeOffset, real_t relNorm) const;
   inline void bindArenaStorage();
   inline void ensureVertexBuffers(uint1 minSize);
   inline void ensureFacetBuffers(uint1 minSize);
@@ -796,7 +848,8 @@ class TopologyArena {
     }
   }
 
-  void insertFromMaker(uint2 cellId, CellMaker<real_t>& maker) {
+  template <bool Weighted>
+  void insertFromMaker(uint2 cellId, CellMaker<real_t, Weighted>& maker) {
     maker.renumber();
     m_ids[cellId] = maker.m_id;
     m_vertexPos.insert(cellId, maker.m_vertexPos, maker.m_numVertices);
@@ -805,7 +858,8 @@ class TopologyArena {
     m_nbrs.insert(cellId, maker.m_nbr, maker.m_numFacets);
   }
 
-  void overwriteFromMaker(uint2 cellId, CellMaker<real_t>& maker) {
+  template <bool Weighted>
+  void overwriteFromMaker(uint2 cellId, CellMaker<real_t, Weighted>& maker) {
     maker.renumber();
     m_ids[cellId] = maker.m_id;
     m_vertexPos.overwrite(cellId, maker.m_vertexPos, maker.m_numVertices);
@@ -958,7 +1012,8 @@ class ConnectivityArena {
     m_candidates.overwrite(cellId, merged.data(), static_cast<uint1>(merged.size()));
   }
 
-  void overwriteFromMaker(uint2 cellId, CellMaker<real_t>& maker) {
+  template <bool Weighted>
+  void overwriteFromMaker(uint2 cellId, CellMaker<real_t, Weighted>& maker) {
     std::vector<uint2> directNbrs;
     directNbrs.reserve(maker.m_numFacets);
     for (uint1 i = 0; i < maker.m_numFacets; ++i)
@@ -1101,8 +1156,8 @@ class GeometryArena {
   PrimaryOverflowArray<real_t, TopologyArena<real_t>::PrimaryF> m_connVSq;
 };
 
-template <typename real_t>
-class CellComplex {
+template <typename real_t, bool Weighted = false>
+class CellComplex : private detail::CellComplexWeightState<real_t, Weighted> {
  public:
   CellComplex(Box<real_t>* box);
   CellComplex(Box<real_t>* box, size_t workerCount);
@@ -1147,8 +1202,35 @@ class CellComplex {
   size_t numParticles() const { return m_particleActive.size(); }
   const std::vector<uint8_t>& getParticleActivity() const { return m_particleActive; }
   const std::vector<uint2>& getActiveParticleIds() const { return m_activeParticleIds; }
+  const std::vector<uint2>& getCellParticleIds() const {
+    if constexpr (Weighted)
+      return this->m_cellParticleIds;
+    return m_activeParticleIds;
+  }
+  const std::vector<real_t>& getWeights() const {
+    if constexpr (Weighted)
+      return this->m_weights;
+    static const std::vector<real_t> kEmpty;
+    return kEmpty;
+  }
+  void setWeights(const std::vector<real_t>& weights) {
+    if constexpr (Weighted) {
+      this->m_weights = weights;
+      this->markWeightsDirty();
+    } else {
+      if (!weights.empty()) {
+        std::fprintf(stderr, "CellComplex::setWeights only valid for power-cell specialization\n");
+        std::abort();
+      }
+    }
+  }
   bool isParticleActive(uint2 particleId) const {
     return particleId < m_particleActive.size() && m_particleActive[particleId] != 0u;
+  }
+  bool hasCell(uint2 particleId) const {
+    if constexpr (Weighted)
+      return particleId < this->m_particleHasCell.size() && this->m_particleHasCell[particleId] != 0u;
+    return isParticleActive(particleId);
   }
   uint2 getCellIndexForParticle(uint2 particleId) const {
     return particleId < m_cellIndexByParticle.size() ? m_cellIndexByParticle[particleId] : noNbr;
@@ -1269,7 +1351,7 @@ class CellComplex {
     // Per-thread scratch reused across build/update calls. The CellMaker owns no
     // storage; it is permanently bound to this worker's arena.
     ConstructionArena<real_t> arena;
-    CellMaker<real_t> maker;
+    CellMaker<real_t, Weighted> maker;
   };
 
   static size_t defaultPersistentWorkerCount();
@@ -1282,6 +1364,9 @@ class CellComplex {
   static void normalizeActivity(std::vector<uint8_t>& active);
   static void collectActiveParticleIds(const std::vector<uint8_t>& active,
                                        std::vector<uint2>& particleIds);
+  void buildFromCurrentActivity(const std::vector<std::array<real_t, 3> >& p, bool computeGeometry);
+  void buildWeighted(const std::vector<std::array<real_t, 3> >& p,
+                     const std::vector<uint8_t>* enabledMask, bool computeGeometry);
   void clearGeometryCache();
   void rebuildLegacyGeometryCache(const std::vector<std::array<real_t, 3> >& p);
   void commitCellGeometry(uint2 cellId, const TopologyArena<real_t>& cellArena,
@@ -1304,6 +1389,12 @@ class CellComplex {
   CellComplexUpdateStats m_lastUpdateStats;
   bool m_isBuild;
 };
+
+template <typename real_t = float>
+using PowerCellComplex = CellComplex<real_t, true>;
+
+template <typename real_t = float>
+using PowerCellMaker = CellMaker<real_t, true>;
 
 class NbrsToFacets {
  public:
@@ -1383,7 +1474,8 @@ Cell<real_t>& Cell<real_t>::operator=(const CellView<real_t>& rhs) {
 }
 
 template <typename real_t>
-Cell<real_t>& Cell<real_t>::operator=(CellMaker<real_t>& rhs) {
+template <bool Weighted>
+Cell<real_t>& Cell<real_t>::operator=(CellMaker<real_t, Weighted>& rhs) {
   m_id = rhs.m_id;
   rhs.renumber();
   if (rhs.m_numVertices > maxNumVertices || rhs.m_numFacets > maxNumFacets) {
@@ -1614,8 +1706,8 @@ Cuboid<real_t>::Cuboid(const std::array<real_t, 3>& L) {
   this->m_vertices[6][0] = makeLabel(1, 4, 1);
 }
 
-template <typename real_t>
-CellMaker<real_t>::CellMaker(ConstructionArena<real_t>& arena)
+template <typename real_t, bool Weighted>
+CellMaker<real_t, Weighted>::CellMaker(ConstructionArena<real_t>& arena)
     : m_numVertices(0)
     , m_numFacets(0)
     , m_id(0)
@@ -1648,8 +1740,8 @@ CellMaker<real_t>::CellMaker(ConstructionArena<real_t>& arena)
   std::fill(m_knownDistGen, m_knownDistGen + m_arena->vertexCapacity(), 0u);
 }
 
-template <typename real_t>
-void CellMaker<real_t>::bindArenaStorage() {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::bindArenaStorage() {
   m_vertexPos = m_arena->vertexPosData();
   m_rSq = m_arena->rSqData();
   m_vertices = m_arena->verticesData();
@@ -1664,37 +1756,37 @@ void CellMaker<real_t>::bindArenaStorage() {
   m_slotsF.setStorage(m_arena->aliveFData(), m_arena->freeStackFData(), m_arena->facetCapacity());
 }
 
-template <typename real_t>
-void CellMaker<real_t>::ensureVertexBuffers(uint1 minSize) {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::ensureVertexBuffers(uint1 minSize) {
   m_arena->ensureCapacity(minSize, m_arena->facetCapacity());
   bindArenaStorage();
 }
 
-template <typename real_t>
-void CellMaker<real_t>::ensureFacetBuffers(uint1 minSize) {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::ensureFacetBuffers(uint1 minSize) {
   m_arena->ensureCapacity(m_arena->vertexCapacity(), minSize);
   bindArenaStorage();
 }
 
-template <typename real_t>
-CellMaker<real_t>::~CellMaker() {}
+template <typename real_t, bool Weighted>
+CellMaker<real_t, Weighted>::~CellMaker() {}
 
-template <typename real_t>
-CellMaker<real_t>& CellMaker<real_t>::operator=(const Cell<real_t>& rhs) {
+template <typename real_t, bool Weighted>
+CellMaker<real_t, Weighted>& CellMaker<real_t, Weighted>::operator=(const Cell<real_t>& rhs) {
   m_id = rhs.m_id;
   init(rhs);
   return *this;
 }
 
-template <typename real_t>
-CellMaker<real_t>& CellMaker<real_t>::operator=(const CellView<real_t>& rhs) {
+template <typename real_t, bool Weighted>
+CellMaker<real_t, Weighted>& CellMaker<real_t, Weighted>::operator=(const CellView<real_t>& rhs) {
   m_id = rhs.id;
   init(rhs);
   return *this;
 }
 
-template <typename real_t>
-uint1 CellMaker<real_t>::getNextLabelCCW(uint1 label) const {
+template <typename real_t, bool Weighted>
+uint1 CellMaker<real_t, Weighted>::getNextLabelCCW(uint1 label) const {
   uint1 facetMasked(label & maskFacet);
   uint1 revLabel(m_vertices[getVertex(label)][getEdge(label)]);
   uint1 vertexMasked(revLabel & maskVertex);
@@ -1703,20 +1795,40 @@ uint1 CellMaker<real_t>::getNextLabelCCW(uint1 label) const {
   return (facetMasked | vertexMasked | edge);
 }
 
-template <typename real_t>
-uint1 CellMaker<real_t>::getReverseLabel(uint1 label) const {
+template <typename real_t, bool Weighted>
+uint1 CellMaker<real_t, Weighted>::getReverseLabel(uint1 label) const {
   return m_vertices[getVertex(label)][getEdge(label)];
 }
 
-template <typename real_t>
-bool CellMaker<real_t>::applyCut(const std::array<real_t, 3>& p, real_t rSqHalf, uint2 nbr) {
-  if (kUseCutCell2)
-    return cutCell2(p, rSqHalf, nbr);
-  return cutCell(p, rSqHalf, nbr);
+template <typename real_t, bool Weighted>
+real_t CellMaker<real_t, Weighted>::cutPlaneOffset(real_t rSqHalf, uint2 nbr) const {
+  if constexpr (Weighted)
+    return rSqHalf + real_t(0.5) * (this->getWeight(m_id) - this->getWeight(nbr));
+  return rSqHalf;
 }
 
-template <typename real_t>
-uint1 CellMaker<real_t>::allocVertexChecked(const char* caller) {
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::candidateMightCut(real_t planeOffset, real_t relNorm) const {
+  if constexpr (!Weighted) {
+    (void)relNorm;
+    return planeOffset < real_t(2) * m_rSq[m_vRsqMax];
+  } else {
+    (void)planeOffset;
+    (void)relNorm;
+    return true;
+  }
+}
+
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::applyCut(const std::array<real_t, 3>& p, real_t rSqHalf, uint2 nbr) {
+  const real_t planeOffset = cutPlaneOffset(rSqHalf, nbr);
+  if (kUseCutCell2)
+    return cutCell2(p, planeOffset, nbr);
+  return cutCell(p, planeOffset, nbr);
+}
+
+template <typename real_t, bool Weighted>
+uint1 CellMaker<real_t, Weighted>::allocVertexChecked(const char* caller) {
   uint1 v_new = m_slotsV.getFree();
   if (v_new == DenseSlotsView<uint1>::InvalidIdx) {
     if (m_arena->vertexCapacity() >= kMaxV)
@@ -1737,8 +1849,8 @@ uint1 CellMaker<real_t>::allocVertexChecked(const char* caller) {
   return v_new;
 }
 
-template <typename real_t>
-uint1 CellMaker<real_t>::allocFacetChecked(const char* caller) {
+template <typename real_t, bool Weighted>
+uint1 CellMaker<real_t, Weighted>::allocFacetChecked(const char* caller) {
   uint1 f_new = m_slotsF.getFree();
   if (f_new == DenseSlotsView<uint1>::InvalidIdx) {
     if (m_arena->facetCapacity() >= kMaxF)
@@ -1759,8 +1871,8 @@ uint1 CellMaker<real_t>::allocFacetChecked(const char* caller) {
   return f_new;
 }
 
-template <typename real_t>
-[[noreturn]] void CellMaker<real_t>::failCapacity(const char* caller, const char* kind,
+template <typename real_t, bool Weighted>
+[[noreturn]] void CellMaker<real_t, Weighted>::failCapacity(const char* caller, const char* kind,
                                                   uint1 capacity) const {
   if (kind[0] == 'v') {
     cellMakerTelemetry().vertex_overflow_events.fetch_add(1, std::memory_order_relaxed);
@@ -1774,8 +1886,8 @@ template <typename real_t>
   std::abort();
 }
 
-template <typename real_t>
-void CellMaker<real_t>::init(const Cell<real_t>& cell) {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::init(const Cell<real_t>& cell) {
   if (m_arena->vertexCapacity() < cell.m_numVertices) {
     m_arena->ensureCapacity(cell.m_numVertices, m_arena->facetCapacity());
     bindArenaStorage();
@@ -1801,8 +1913,8 @@ void CellMaker<real_t>::init(const Cell<real_t>& cell) {
   m_vDistGCMax = maxNumVertices;
 }
 
-template <typename real_t>
-void CellMaker<real_t>::init(const CellView<real_t>& cell) {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::init(const CellView<real_t>& cell) {
   const uint1 vertexCount = cell.numVertices();
   const uint1 facetCount = cell.numFacets();
   if (m_arena->vertexCapacity() < vertexCount) {
@@ -1834,8 +1946,8 @@ void CellMaker<real_t>::init(const CellView<real_t>& cell) {
   m_vDistGCMax = maxNumVertices;
 }
 
-template <typename real_t>
-void CellMaker<real_t>::computeAllRsq() {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::computeAllRsq() {
   m_vRsqMax = m_slotsV.firstAlive();
   for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
     if (m_slotsV.isFree(i))
@@ -1844,8 +1956,8 @@ void CellMaker<real_t>::computeAllRsq() {
   }
 }
 
-template <typename real_t>
-void CellMaker<real_t>::computeRsq(uint1 i) {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::computeRsq(uint1 i) {
   m_rSq[i] = m_vertexPos[i][0] * m_vertexPos[i][0];
   for (uint0 k(1); k < 3; ++k)
     m_rSq[i] += m_vertexPos[i][k] * m_vertexPos[i][k];
@@ -1854,8 +1966,8 @@ void CellMaker<real_t>::computeRsq(uint1 i) {
   }
 }
 
-template <typename real_t>
-void CellMaker<real_t>::findRsqMax() {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::findRsqMax() {
   real_t rSqMax = 0;
   for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
     if (m_slotsV.isFree(i))
@@ -1867,16 +1979,16 @@ void CellMaker<real_t>::findRsqMax() {
   }
 }
 
-template <typename real_t>
-void CellMaker<real_t>::resetDist() {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::resetDist() {
   const std::numeric_limits<real_t> lim;
   m_distMax = -lim.max();
   m_vDistMax = maxNumVertices;
   ++m_distGen;
 }
 
-template <typename real_t>
-real_t CellMaker<real_t>::computeDist(uint1 i, const std::array<real_t, 3> p,
+template <typename real_t, bool Weighted>
+real_t CellMaker<real_t, Weighted>::computeDist(uint1 i, const std::array<real_t, 3> p,
                                       const real_t rSqHalf) {
   if (m_knownDistGen[i] != m_distGen) {
     m_dist[i] =
@@ -1890,8 +2002,8 @@ real_t CellMaker<real_t>::computeDist(uint1 i, const std::array<real_t, 3> p,
   return m_dist[i];
 }
 
-template <typename real_t>
-real_t CellMaker<real_t>::computeDist(uint1 i, const std::array<real_t, 3> p) {
+template <typename real_t, bool Weighted>
+real_t CellMaker<real_t, Weighted>::computeDist(uint1 i, const std::array<real_t, 3> p) {
   if (m_knownDistGen[i] != m_distGen) {
     m_dist[i] = 0;
     for (uint0 k(0); k < 3; ++k)
@@ -1905,8 +2017,8 @@ real_t CellMaker<real_t>::computeDist(uint1 i, const std::array<real_t, 3> p) {
   return m_dist[i];
 }
 
-template <typename real_t>
-void CellMaker<real_t>::computeAllDist(const std::array<real_t, 3> p, const real_t rSqHalf) {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::computeAllDist(const std::array<real_t, 3> p, const real_t rSqHalf) {
   const std::numeric_limits<real_t> lim;
   m_distMax = -lim.max();
   m_vDistMax = maxNumVertices;
@@ -1923,8 +2035,8 @@ void CellMaker<real_t>::computeAllDist(const std::array<real_t, 3> p, const real
   }
 }
 
-template <typename real_t>
-void CellMaker<real_t>::renumber() {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::renumber() {
   m_numVertices = 0;
   {
     for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
@@ -1978,8 +2090,8 @@ void CellMaker<real_t>::renumber() {
   }
 }
 
-template <typename real_t>
-void CellMaker<real_t>::computeGCOrig(uint2 indx, const std::array<real_t, 3>& pos) {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::computeGCOrig(uint2 indx, const std::array<real_t, 3>& pos) {
   Indx indcs(p_nbrList->getGrid().expand(indx));
   const std::array<real_t, 3>& L(p_nbrList->getBox().getL());
   for (uint0 k(0); k < 3; ++k) {
@@ -1993,8 +2105,8 @@ void CellMaker<real_t>::computeGCOrig(uint2 indx, const std::array<real_t, 3>& p
   }
 }
 
-template <typename real_t>
-real_t CellMaker<real_t>::computeRsqMinGC() const {
+template <typename real_t, bool Weighted>
+real_t CellMaker<real_t, Weighted>::computeRsqMinGC() const {
   std::array<real_t, 3> dx(m_relOrigGC);
   real_t rSq(0);
   for (uint0 k(0); k < 3; ++k) {
@@ -2004,8 +2116,8 @@ real_t CellMaker<real_t>::computeRsqMinGC() const {
   return rSq;
 }
 
-template <typename real_t>
-real_t CellMaker<real_t>::computeDistGC(uint1 indx) {
+template <typename real_t, bool Weighted>
+real_t CellMaker<real_t, Weighted>::computeDistGC(uint1 indx) {
   real_t vDiffSq = 0, vSq = 0;
   for (uint0 k(0); k < 3; ++k) {
     real_t vDiff(m_vertexPos[indx][k] - m_relOrigGC[k]);
@@ -2021,8 +2133,8 @@ real_t CellMaker<real_t>::computeDistGC(uint1 indx) {
   return m_distGC[indx];
 }
 
-template <typename real_t>
-std::array<real_t, 3> CellMaker<real_t>::getClosestPointGC(uint1 indx) const {
+template <typename real_t, bool Weighted>
+std::array<real_t, 3> CellMaker<real_t, Weighted>::getClosestPointGC(uint1 indx) const {
   std::array<real_t, 3> pos;
   real_t vDiffSq = 0, vSq = 0;
   for (uint0 k(0); k < 3; ++k) {
@@ -2036,8 +2148,8 @@ std::array<real_t, 3> CellMaker<real_t>::getClosestPointGC(uint1 indx) const {
   return pos;
 }
 
-template <typename real_t>
-real_t CellMaker<real_t>::computeMaxDistGC() {
+template <typename real_t, bool Weighted>
+real_t CellMaker<real_t, Weighted>::computeMaxDistGC() {
   if (m_slotsV.empty())
     return 0;
   uint1 v1 = m_slotsV.firstAlive();
@@ -2057,8 +2169,8 @@ real_t CellMaker<real_t>::computeMaxDistGC() {
   return distMax;
 }
 
-template <typename real_t>
-real_t CellMaker<real_t>::computeMaxDistGCVerb() {
+template <typename real_t, bool Weighted>
+real_t CellMaker<real_t, Weighted>::computeMaxDistGCVerb() {
   if (m_slotsV.empty())
     return 0;
   uint1 v1 = m_slotsV.firstAlive();
@@ -2092,8 +2204,8 @@ real_t CellMaker<real_t>::computeMaxDistGCVerb() {
   return distMax;
 }
 
-template <typename real_t>
-void CellMaker<real_t>::computeAllDistGC() {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::computeAllDistGC() {
   const std::numeric_limits<real_t> lim;
   m_distGCMax = -lim.max();
   m_vDistGCMax = maxNumVertices;
@@ -2104,8 +2216,8 @@ void CellMaker<real_t>::computeAllDistGC() {
   }
 }
 
-template <typename real_t>
-void CellMaker<real_t>::getAllDistGCVerb() {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::getAllDistGCVerb() {
   // compute 0.5 [v^2 - (p-v)^2]
   //  for (uint1 indx = m_freeV.beginIndx(); indx != m_freeV.endIndx() ; indx =
   //  m_freeV.nextIndx(indx))
@@ -2119,8 +2231,8 @@ void CellMaker<real_t>::getAllDistGCVerb() {
          m_distGC[getVertex(m_vertices[m_vDistGCMax][2])]);
 }
 
-template <typename real_t>
-bool CellMaker<real_t>::cutCell2(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
   //    printf("entering cutCell\n");
   resetDist();
   if (m_slotsV.empty())
@@ -2329,8 +2441,8 @@ bool CellMaker<real_t>::cutCell2(const std::array<real_t, 3> p, real_t rSqHalf, 
   return true;
 }
 
-template <typename real_t>
-bool CellMaker<real_t>::cutCell(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::cutCell(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
   //    printf("entering cutCell\n");
   computeAllDist(p, rSqHalf);
   if (m_distMax <= 0)
@@ -2490,21 +2602,21 @@ bool CellMaker<real_t>::cutCell(const std::array<real_t, 3> p, real_t rSqHalf, u
   return true;
 }
 
-template <typename real_t>
-bool CellMaker<real_t>::build(uint2 id, const std::vector<std::array<real_t, 3> >& pos,
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::build(uint2 id, const std::vector<std::array<real_t, 3> >& pos,
                               const NbrList<uint2, real_t>& nbrList, const Cell<real_t>& initCell) {
   return buildWithNeighborSearch(id, pos, nbrList, initCell, nullptr);
 }
 
-template <typename real_t>
-bool CellMaker<real_t>::build(uint2 id, const std::vector<std::array<real_t, 3> >& pos,
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::build(uint2 id, const std::vector<std::array<real_t, 3> >& pos,
                               const NbrList<uint2, real_t>& nbrList, const Cell<real_t>& initCell,
                               const std::vector<uint2>& skipNbrs) {
   return buildWithNeighborSearch(id, pos, nbrList, initCell, &skipNbrs);
 }
 
-template <typename real_t>
-bool CellMaker<real_t>::buildWithNeighborSearch(uint2 id,
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::buildWithNeighborSearch(uint2 id,
                                                 const std::vector<std::array<real_t, 3> >& pos,
                                                 const NbrList<uint2, real_t>& nbrList,
                                                 const Cell<real_t>& initCell,
@@ -2556,10 +2668,12 @@ bool CellMaker<real_t>::buildWithNeighborSearch(uint2 id,
   headEnd = static_cast<uint32_t>(m_checkGridCell.size());
   for (; m_checkGCHead < headEnd; ++m_checkGCHead) {
     uint2 indx = m_checkGridCell[m_checkGCHead];
-    computeGCOrig(indx, pos[m_id]);
-    real_t rSqMin = computeRsqMinGC();
-    if (rSqMin > 4.0 * m_rSq[m_vRsqMax])
-      continue;
+    if constexpr (!Weighted) {
+      computeGCOrig(indx, pos[m_id]);
+      real_t rSqMin = computeRsqMinGC();
+      if (rSqMin > 4.0 * m_rSq[m_vRsqMax])
+        continue;
+    }
     p_nbrList->getCellContent(indx, begin, end);
     if (end != begin)
       (processNbrsFiltered(begin, end, pos[m_id], p_nbrList->getBox(), skipNbrs) == true
@@ -2576,13 +2690,15 @@ bool CellMaker<real_t>::buildWithNeighborSearch(uint2 id,
   // outer loop with exhautive nbr cell checking
   while (m_checkGCHead < m_checkGridCell.size()) {
     uint2 indx = m_checkGridCell[m_checkGCHead++];
-    computeGCOrig(indx, pos[m_id]);
-    real_t rSqMin = computeRsqMinGC();
-    if (rSqMin > 4.0 * m_rSq[m_vRsqMax])
-      continue;
-    computeAllDistGC();
-    if (m_distGCMax < 0)
-      continue;
+    if constexpr (!Weighted) {
+      computeGCOrig(indx, pos[m_id]);
+      real_t rSqMin = computeRsqMinGC();
+      if (rSqMin > 4.0 * m_rSq[m_vRsqMax])
+        continue;
+      computeAllDistGC();
+      if (m_distGCMax < 0)
+        continue;
+    }
     p_nbrList->getCellContent(indx, begin, end);
     if (end != begin)
       (processNbrsFiltered(begin, end, pos[m_id], p_nbrList->getBox(), skipNbrs) == true
@@ -2600,8 +2716,8 @@ bool CellMaker<real_t>::buildWithNeighborSearch(uint2 id,
   return isUpdated;
 }
 
-template <typename real_t>
-bool CellMaker<real_t>::rebuild(const std::vector<std::array<real_t, 3> >& pos,
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::rebuild(const std::vector<std::array<real_t, 3> >& pos,
                                 const Box<real_t>& box, const Cell<real_t>& initCell) {
   m_nbrsWrk.clear();
   for (uint1 i = 0; i < m_slotsF.numAllocated(); ++i) {
@@ -2625,8 +2741,8 @@ bool CellMaker<real_t>::rebuild(const std::vector<std::array<real_t, 3> >& pos,
   return m_isAllCut;
 }
 
-template <typename real_t>
-bool CellMaker<real_t>::processNbrs(
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::processNbrs(
     typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin,
     typename std::vector<PosAndId<uint2, real_t> >::const_iterator end,
     const std::array<real_t, 3> pos0, const Box<real_t>& box) {
@@ -2648,20 +2764,30 @@ bool CellMaker<real_t>::processNbrs(
     for (uint0 k(0); k < 3; ++k)
       nbrDist[k] = relPos[k];
     nbrDist.rSqHalf = 0.5 * (relPos[0] * relPos[0] + relPos[1] * relPos[1] + relPos[2] * relPos[2]);
-    if (nbrDist.rSqHalf < 2.0 * m_rSq[m_vRsqMax])
+    const real_t relNorm = std::sqrt(std::max(real_t(0), real_t(2) * nbrDist.rSqHalf));
+    if constexpr (Weighted) {
       m_nbrDistWrk.push_back(nbrDist);
+    } else if (candidateMightCut(cutPlaneOffset(nbrDist.rSqHalf, nbrDist.id), relNorm)) {
+      m_nbrDistWrk.push_back(nbrDist);
+    }
   }
   std::sort(m_nbrDistWrk.begin(), m_nbrDistWrk.end(), CompareNbrDist<real_t>());
-  for (size_t i(0); (i < m_nbrDistWrk.size()) && (m_nbrDistWrk[i].rSqHalf < 2.0 * m_rSq[m_vRsqMax]);
-       ++i) {
+  for (size_t i(0); i < m_nbrDistWrk.size(); ++i) {
     const NbrDist<real_t>& p(m_nbrDistWrk[i]);
-    (applyCut(p, p.rSqHalf, p.id) ? isCut = true : m_isAllCut = false);
+    if constexpr (Weighted) {
+      (applyCut(p, p.rSqHalf, p.id) ? isCut = true : m_isAllCut = false);
+    } else {
+      const real_t relNorm = std::sqrt(std::max(real_t(0), real_t(2) * p.rSqHalf));
+      if (!candidateMightCut(cutPlaneOffset(p.rSqHalf, p.id), relNorm))
+        break;
+      (applyCut(p, p.rSqHalf, p.id) ? isCut = true : m_isAllCut = false);
+    }
   }
   return isCut;
 }
 
-template <typename real_t>
-bool CellMaker<real_t>::processNbrsFiltered(
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::processNbrsFiltered(
     typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin,
     typename std::vector<PosAndId<uint2, real_t> >::const_iterator end,
     const std::array<real_t, 3> pos0, const Box<real_t>& box, const std::vector<uint2>* skipNbrs) {
@@ -2681,8 +2807,8 @@ bool CellMaker<real_t>::processNbrsFiltered(
   return processNbrs(m_nbrsWrk.begin(), m_nbrsWrk.end(), pos0, box);
 }
 
-template <typename real_t>
-void CellMaker<real_t>::getCloseNbrs(NbrInsert& nbrs) {
+template <typename real_t, bool Weighted>
+void CellMaker<real_t, Weighted>::getCloseNbrs(NbrInsert& nbrs) {
   for (uint k(0); k < 3; ++k) {
     uint1 facet(getFacet(m_vertices[m_vDistMax][k]));
     nbrs[k] = m_nbr[facet];
@@ -3314,19 +3440,19 @@ void GeometryArena<real_t>::rebuildFromLegacy(const TopologyArena<real_t>& topol
   }
 }
 
-template <typename real_t>
-CellComplex<real_t>::CellComplex(Box<real_t>* box)
+template <typename real_t, bool Weighted>
+CellComplex<real_t, Weighted>::CellComplex(Box<real_t>* box)
     : CellComplex(box, defaultPersistentWorkerCount()) {}
 
-template <typename real_t>
-CellComplex<real_t>::CellComplex(Box<real_t>* box, size_t workerCount)
+template <typename real_t, bool Weighted>
+CellComplex<real_t, Weighted>::CellComplex(Box<real_t>* box, size_t workerCount)
     : m_nbrList(box), m_isBuild(false) {
   m_team.start(workerCount);
   ensureWorkerContexts(std::max<size_t>(workerCount, 1));
 }
 
-template <typename real_t>
-size_t CellComplex<real_t>::defaultPersistentWorkerCount() {
+template <typename real_t, bool Weighted>
+size_t CellComplex<real_t, Weighted>::defaultPersistentWorkerCount() {
 #ifdef VORONOI_USE_OPENMP
   const char* ompEnv = std::getenv("OMP_NUM_THREADS");
   const int ompThreads = omp_get_max_threads();
@@ -3339,9 +3465,9 @@ size_t CellComplex<real_t>::defaultPersistentWorkerCount() {
   return (hw > 1u) ? static_cast<size_t>(hw) : 0u;
 }
 
-template <typename real_t>
+template <typename real_t, bool Weighted>
 template <typename Func>
-void CellComplex<real_t>::parallelForPersistent(size_t count, Func fn) {
+void CellComplex<real_t, Weighted>::parallelForPersistent(size_t count, Func fn) {
   if (count == 0)
     return;
 
@@ -3359,14 +3485,14 @@ void CellComplex<real_t>::parallelForPersistent(size_t count, Func fn) {
   });
 }
 
-template <typename real_t>
-void CellComplex<real_t>::normalizeActivity(std::vector<uint8_t>& active) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::normalizeActivity(std::vector<uint8_t>& active) {
   for (size_t i = 0; i < active.size(); ++i)
     active[i] = (active[i] != 0u ? 1u : 0u);
 }
 
-template <typename real_t>
-void CellComplex<real_t>::collectActiveParticleIds(const std::vector<uint8_t>& active,
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::collectActiveParticleIds(const std::vector<uint8_t>& active,
                                                    std::vector<uint2>& particleIds) {
   particleIds.clear();
   particleIds.reserve(active.size());
@@ -3375,8 +3501,10 @@ void CellComplex<real_t>::collectActiveParticleIds(const std::vector<uint8_t>& a
       particleIds.push_back(static_cast<uint2>(i));
 }
 
-template <typename real_t>
-void CellComplex<real_t>::syncParticleActivity(size_t numParticles) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::syncParticleActivity(size_t numParticles) {
+  if constexpr (Weighted)
+    this->syncWeights(numParticles);
   if (m_particleActive.empty())
     m_particleActive.assign(numParticles, 1u);
   else if (m_particleActive.size() < numParticles)
@@ -3386,34 +3514,55 @@ void CellComplex<real_t>::syncParticleActivity(size_t numParticles) {
   normalizeActivity(m_particleActive);
 }
 
-template <typename real_t>
-bool CellComplex<real_t>::allParticlesActive() const {
+template <typename real_t, bool Weighted>
+bool CellComplex<real_t, Weighted>::allParticlesActive() const {
   for (size_t i = 0; i < m_particleActive.size(); ++i)
     if (m_particleActive[i] == 0u)
       return false;
   return true;
 }
 
-template <typename real_t>
-void CellComplex<real_t>::rebuildBuiltParticleMaps(size_t numParticles) {
-  m_activeParticleIds.resize(m_cellArena.numCells());
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::rebuildBuiltParticleMaps(size_t numParticles) {
+  collectActiveParticleIds(m_particleActive, m_activeParticleIds);
   m_cellIndexByParticle.assign(numParticles, noNbr);
+  if constexpr (Weighted) {
+    this->m_cellParticleIds.resize(m_cellArena.numCells());
+    if (this->m_particleHasCell.size() != numParticles)
+      this->m_particleHasCell.resize(numParticles, 0u);
+    else
+      std::fill(this->m_particleHasCell.begin(), this->m_particleHasCell.end(), 0u);
+  }
   for (size_t i = 0; i < m_cellArena.numCells(); ++i) {
     const uint2 particleId = m_cellArena.cellId(i);
-    m_activeParticleIds[i] = particleId;
+    if constexpr (Weighted)
+      this->m_cellParticleIds[i] = particleId;
+    else
+      m_activeParticleIds[i] = particleId;
     if (particleId < m_cellIndexByParticle.size())
       m_cellIndexByParticle[particleId] = static_cast<uint2>(i);
+    if constexpr (Weighted) {
+      if (particleId < this->m_particleHasCell.size())
+        this->m_particleHasCell[particleId] = 1u;
+    }
   }
 }
 
-template <typename real_t>
-void CellComplex<real_t>::setParticleActivity(const std::vector<uint8_t>& active) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::setParticleActivity(const std::vector<uint8_t>& active) {
   m_particleActive = active;
   normalizeActivity(m_particleActive);
+  collectActiveParticleIds(m_particleActive, m_activeParticleIds);
+  if constexpr (Weighted) {
+    this->syncWeights(m_particleActive.size());
+    for (size_t i = 0; i < m_particleActive.size(); ++i)
+      if (m_particleActive[i] == 0u)
+        this->m_particleHasCell[i] = 0u;
+  }
 }
 
-template <typename real_t>
-void CellComplex<real_t>::activateParticles(const std::vector<uint2>& particleIds) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::activateParticles(const std::vector<uint2>& particleIds) {
   for (size_t i = 0; i < particleIds.size(); ++i) {
     if (particleIds[i] >= m_particleActive.size()) {
       std::fprintf(stderr, "CellComplex::activateParticles: particle id %u out of range (%zu)\n",
@@ -3422,10 +3571,11 @@ void CellComplex<real_t>::activateParticles(const std::vector<uint2>& particleId
     }
     m_particleActive[particleIds[i]] = 1u;
   }
+  collectActiveParticleIds(m_particleActive, m_activeParticleIds);
 }
 
-template <typename real_t>
-void CellComplex<real_t>::deactivateParticles(const std::vector<uint2>& particleIds) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::deactivateParticles(const std::vector<uint2>& particleIds) {
   for (size_t i = 0; i < particleIds.size(); ++i) {
     if (particleIds[i] >= m_particleActive.size()) {
       std::fprintf(stderr, "CellComplex::deactivateParticles: particle id %u out of range (%zu)\n",
@@ -3433,22 +3583,31 @@ void CellComplex<real_t>::deactivateParticles(const std::vector<uint2>& particle
       std::abort();
     }
     m_particleActive[particleIds[i]] = 0u;
+    if constexpr (Weighted)
+      this->m_particleHasCell[particleIds[i]] = 0u;
   }
+  collectActiveParticleIds(m_particleActive, m_activeParticleIds);
 }
 
-template <typename real_t>
-void CellComplex<real_t>::insertParticles(std::vector<std::array<real_t, 3> >& p,
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::insertParticles(std::vector<std::array<real_t, 3> >& p,
                                           const std::vector<std::array<real_t, 3> >& inserted) {
   syncParticleActivity(p.size());
   const size_t oldSize = p.size();
   p.insert(p.end(), inserted.begin(), inserted.end());
   m_particleActive.resize(p.size(), 1u);
+  if constexpr (Weighted) {
+    this->m_weights.resize(p.size(), real_t(0));
+    this->m_particleHasCell.resize(p.size(), 0u);
+    this->markWeightsDirty();
+  }
   if (!m_types.empty() && m_types.size() == oldSize)
     m_types.resize(p.size(), 0u);
+  collectActiveParticleIds(m_particleActive, m_activeParticleIds);
 }
 
-template <typename real_t>
-ParticleRenumberResult CellComplex<real_t>::renumberParticles(
+template <typename real_t, bool Weighted>
+ParticleRenumberResult CellComplex<real_t, Weighted>::renumberParticles(
     std::vector<std::array<real_t, 3> >& p, bool rebuild) {
   syncParticleActivity(p.size());
   ParticleRenumberResult result;
@@ -3461,6 +3620,12 @@ ParticleRenumberResult CellComplex<real_t>::renumberParticles(
   const bool compactTypesEnabled = (!m_types.empty() && m_types.size() == p.size());
   if (compactTypesEnabled)
     compactTypes.reserve(p.size());
+  std::vector<real_t> compactWeights;
+  if constexpr (Weighted)
+    compactWeights.reserve(p.size());
+  std::vector<uint8_t> compactHasCell;
+  if constexpr (Weighted)
+    compactHasCell.reserve(p.size());
 
   for (size_t oldId = 0; oldId < p.size(); ++oldId) {
     if (m_particleActive[oldId] == 0u)
@@ -3471,6 +3636,10 @@ ParticleRenumberResult CellComplex<real_t>::renumberParticles(
     compactPos.push_back(p[oldId]);
     if (compactTypesEnabled)
       compactTypes.push_back(m_types[oldId]);
+    if constexpr (Weighted) {
+      compactWeights.push_back(this->m_weights[oldId]);
+      compactHasCell.push_back(this->m_particleHasCell[oldId]);
+    }
   }
 
   p.swap(compactPos);
@@ -3478,25 +3647,54 @@ ParticleRenumberResult CellComplex<real_t>::renumberParticles(
     m_types.swap(compactTypes);
   else if (!m_types.empty() && m_types.size() > p.size())
     m_types.resize(p.size());
+  if constexpr (Weighted) {
+    this->m_weights.swap(compactWeights);
+    this->m_particleHasCell.swap(compactHasCell);
+    this->m_cellParticleIds.clear();
+  }
 
   m_particleActive.assign(p.size(), 1u);
-  m_activeParticleIds.clear();
+  collectActiveParticleIds(m_particleActive, m_activeParticleIds);
   m_cellIndexByParticle.clear();
   m_cellArena.clear();
   m_connectivity.clear();
   clearGeometryCache();
   m_isBuild = false;
+  if constexpr (Weighted)
+    std::fill(this->m_particleHasCell.begin(), this->m_particleHasCell.end(), 0u);
 
-  if (rebuild)
-    build(p);
+  if (rebuild) {
+    if constexpr (Weighted)
+      buildWeighted(p, NULL, true);
+    else
+      buildFromCurrentActivity(p, true);
+  }
 
   return result;
 }
 
-template <typename real_t>
-void CellComplex<real_t>::initNbrList(const std::vector<std::array<real_t, 3> >& p) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::initNbrList(const std::vector<std::array<real_t, 3> >& p) {
   syncParticleActivity(p.size());
   const std::array<real_t, 3>& L(m_nbrList.getBox().getL());
+  if constexpr (Weighted) {
+    if (p.empty()) {
+      std::vector<uint2> emptyIds;
+      m_nbrList.setupSubset(p, emptyIds, real_t(1));
+      return;
+    }
+    real_t density = real_t(p.size()) / (L[0] * L[1] * L[2]);
+    real_t rcut = real_t(1.75) * (std::pow(density, real_t(-1.0 / 3.0)));
+#ifdef VORONOI_USE_OPENMP
+    if (omp_in_parallel())
+      m_nbrList.setupCurrentTeam(p, rcut);
+    else
+      m_nbrList.setup(p, rcut);
+#else
+    m_nbrList.setup(p, rcut);
+#endif
+    return;
+  }
   std::vector<uint2> activeParticleIds;
   collectActiveParticleIds(m_particleActive, activeParticleIds);
   if (activeParticleIds.empty()) {
@@ -3522,15 +3720,15 @@ void CellComplex<real_t>::initNbrList(const std::vector<std::array<real_t, 3> >&
   //    printf("number grid cells: %u\n", m_nbrList.getGrid().getN()[0]);
 }
 
-template <typename real_t>
-void CellComplex<real_t>::ensureWorkerContexts(size_t count) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::ensureWorkerContexts(size_t count) {
   while (m_workers.size() < count)
     m_workers.emplace_back(new WorkerContext());
 }
 
-template <typename real_t>
-void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> >& p,
-                                bool computeGeometry) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::buildFromCurrentActivity(
+    const std::vector<std::array<real_t, 3> >& p, bool computeGeometry) {
   syncParticleActivity(p.size());
   std::vector<uint2> activeParticleIds;
   collectActiveParticleIds(m_particleActive, activeParticleIds);
@@ -3541,8 +3739,12 @@ void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> >& p,
     const std::array<real_t, 3>& L(m_nbrList.getBox().getL());
     Cuboid<real_t> cub(L);
     parallelForPersistent(activeParticleIds.size(), [&](size_t i, size_t workerId) {
-      CellMaker<real_t>& maker = m_workers[workerId]->maker;
+      CellMaker<real_t, Weighted>& maker = m_workers[workerId]->maker;
       m_workers[workerId]->arena.ensureVisitedSize(static_cast<uint2>(p.size()));
+      if constexpr (Weighted)
+        maker.setWeights(&this->m_weights);
+      else
+        maker.setWeights(NULL);
       maker.build(activeParticleIds[i], p, m_nbrList, cub);
       m_cellArena.insertFromMaker(static_cast<uint2>(i), maker);
       m_connectivity.overwriteFromMaker(static_cast<uint2>(i), maker);
@@ -3554,32 +3756,158 @@ void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> >& p,
   else
     clearGeometryCache();
   m_isBuild = true;
+  if constexpr (Weighted)
+    this->clearWeightDirty();
   rebuildBuiltParticleMaps(p.size());
 }
 
-template <typename real_t>
-void CellComplex<real_t>::build(const std::vector<std::array<real_t, 3> >& p,
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::buildWeighted(const std::vector<std::array<real_t, 3> >& p,
+                                                  const std::vector<uint8_t>* enabledMask,
+                                                  bool computeGeometry) {
+  syncParticleActivity(p.size());
+  std::vector<uint8_t> enabled(p.size(), 1u);
+  if (enabledMask != NULL) {
+    if (enabledMask->size() != p.size()) {
+      std::fprintf(stderr,
+                   "CellComplex::build: activity mask has %zu entries, expected %zu\n",
+                   enabledMask->size(), p.size());
+      std::abort();
+    }
+    enabled = *enabledMask;
+    normalizeActivity(enabled);
+  }
+
+  const std::array<real_t, 3>& L(m_nbrList.getBox().getL());
+  std::vector<uint2> enabledIds;
+  collectActiveParticleIds(enabled, enabledIds);
+  if (enabledIds.empty()) {
+    m_particleActive.assign(p.size(), 0u);
+    this->m_particleHasCell.assign(p.size(), 0u);
+    this->m_cellParticleIds.clear();
+    m_activeParticleIds.clear();
+    m_cellArena.clear();
+    m_connectivity.clear();
+    clearGeometryCache();
+    m_nbrList.setupSubset(p, enabledIds, real_t(1));
+    m_nbrList.clear();
+    m_isBuild = true;
+    this->clearWeightDirty();
+    rebuildBuiltParticleMaps(p.size());
+    return;
+  }
+
+  real_t density = real_t(enabledIds.size()) / (L[0] * L[1] * L[2]);
+  real_t rcut = real_t(1.75) * (std::pow(density, real_t(-1.0 / 3.0)));
+  if (enabledIds.size() == p.size()) {
+#ifdef VORONOI_USE_OPENMP
+    if (omp_in_parallel())
+      m_nbrList.setupCurrentTeam(p, rcut);
+    else
+      m_nbrList.setup(p, rcut);
+#else
+    m_nbrList.setup(p, rcut);
+#endif
+  } else {
+    m_nbrList.setupSubset(p, enabledIds, rcut);
+  }
+
+  Cuboid<real_t> cub(L);
+  std::vector<Cell<real_t> > builtCells(p.size());
+  std::vector<uint8_t> nonEmpty(p.size(), 0u);
+  parallelForPersistent(p.size(), [&](size_t i, size_t workerId) {
+    if (enabled[i] == 0u)
+      return;
+    CellMaker<real_t, Weighted>& maker = m_workers[workerId]->maker;
+    maker.setWeights(&this->m_weights);
+    maker.build(static_cast<uint2>(i), p, m_nbrList, cub);
+    maker.renumber();
+    if (maker.numVertices() == 0 || maker.numFacets() == 0)
+      return;
+    bool hasNoNbr = false;
+    for (uint1 facet = 0; facet < maker.numFacets(); ++facet) {
+      if (maker.getNbrs()[facet] == noNbr) {
+        hasNoNbr = true;
+        break;
+      }
+    }
+    if (hasNoNbr)
+      return;
+    builtCells[i] = maker;
+    nonEmpty[i] = 1u;
+  });
+  m_nbrList.clear();
+
+  std::vector<Cell<real_t> > packedCells;
+  packedCells.reserve(enabledIds.size());
+  m_particleActive = enabled;
+  this->m_particleHasCell.assign(p.size(), 0u);
+  for (size_t i = 0; i < p.size(); ++i) {
+    if (enabled[i] == 0u || nonEmpty[i] == 0u)
+      continue;
+    this->m_particleHasCell[i] = 1u;
+    packedCells.push_back(builtCells[i]);
+  }
+
+  m_cellArena.rebuildFromCells(packedCells);
+  m_connectivity.resize(static_cast<uint2>(packedCells.size()));
+  for (size_t i = 0; i < packedCells.size(); ++i) {
+    std::vector<uint2> directNbrs;
+    directNbrs.reserve(packedCells[i].numFacets());
+    for (uint1 facet = 0; facet < packedCells[i].numFacets(); ++facet) {
+      const uint2 nbrId = packedCells[i].getNbr(facet);
+      if (nbrId != noNbr)
+        directNbrs.push_back(nbrId);
+    }
+    m_connectivity.overwrite(static_cast<uint2>(i), directNbrs, std::vector<uint2>());
+  }
+
+  if (computeGeometry)
+    buildGeometry(p);
+  else
+    clearGeometryCache();
+  m_isBuild = true;
+  this->clearWeightDirty();
+  rebuildBuiltParticleMaps(p.size());
+}
+
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::build(const std::vector<std::array<real_t, 3> >& p,
+                                bool computeGeometry) {
+  if constexpr (Weighted) {
+    buildWeighted(p, NULL, computeGeometry);
+    return;
+  }
+  buildFromCurrentActivity(p, computeGeometry);
+}
+
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::build(const std::vector<std::array<real_t, 3> >& p,
                                 const std::vector<uint8_t>& active, bool computeGeometry) {
+  if constexpr (Weighted) {
+    buildWeighted(p, &active, computeGeometry);
+    return;
+  }
   setParticleActivity(active);
   if (active.size() != p.size()) {
     std::fprintf(stderr, "CellComplex::build: activity mask has %zu entries, expected %zu\n",
                  active.size(), p.size());
     std::abort();
   }
-  build(p, computeGeometry);
+  buildFromCurrentActivity(p, computeGeometry);
 }
 
-template <typename real_t>
-void CellComplex<real_t>::clearGeometryCache() {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::clearGeometryCache() {
   m_geom.clear();
   m_geometry.clear();
 }
 
-template <typename real_t>
-void CellComplex<real_t>::commitCellGeometry(uint2 cellId, const TopologyArena<real_t>& cellArena,
-                                             std::vector<CellGeometry<real_t> >& geomCache,
-                                             GeometryArena<real_t>& geometryArena,
-                                             const std::vector<std::array<real_t, 3> >& p) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::commitCellGeometry(uint2 cellId, const TopologyArena<real_t>& cellArena,
+                          std::vector<CellGeometry<real_t> >& geomCache,
+                          GeometryArena<real_t>& geometryArena,
+                          const std::vector<std::array<real_t, 3> >& p) {
   CellGeometry<real_t> geom;
   geom = cellArena.getView(cellId);
   geom.computeConnectingVectors(p, m_nbrList.getBox());
@@ -3589,35 +3917,45 @@ void CellComplex<real_t>::commitCellGeometry(uint2 cellId, const TopologyArena<r
   geometryArena.overwriteFromLegacy(cellId, cellArena.cellId(cellId), geom);
 }
 
-template <typename real_t>
-void CellComplex<real_t>::commitCellGeometry(uint2 cellId,
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::commitCellGeometry(uint2 cellId,
                                              const std::vector<std::array<real_t, 3> >& p) {
   commitCellGeometry(cellId, m_cellArena, m_geom, m_geometry, p);
 }
 
-template <typename real_t>
-void CellComplex<real_t>::rebuildLegacyGeometryCache(const std::vector<std::array<real_t, 3> >& p) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::rebuildLegacyGeometryCache(const std::vector<std::array<real_t, 3> >& p) {
   m_geom.resize(m_cellArena.numCells());
   m_geometry.prepare(static_cast<uint2>(m_cellArena.numCells()));
   parallelForPersistent(m_cellArena.numCells(),
                         [&](size_t i, size_t) { commitCellGeometry(static_cast<uint2>(i), p); });
 }
 
-template <typename real_t>
-void CellComplex<real_t>::buildGeometry(const std::vector<std::array<real_t, 3> >& p) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::buildGeometry(const std::vector<std::array<real_t, 3> >& p) {
   rebuildLegacyGeometryCache(p);
 }
 
-template <typename real_t>
-void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 3> >& p) {
   m_lastUpdateStats = CellComplexUpdateStats();
   syncParticleActivity(p.size());
   std::vector<uint2> desiredActiveIds;
   collectActiveParticleIds(m_particleActive, desiredActiveIds);
-  m_lastUpdateStats.num_cells = static_cast<uint2>(desiredActiveIds.size());
+  std::vector<uint2> currentCellParticleIds;
+  if constexpr (Weighted)
+    collectActiveParticleIds(this->m_particleHasCell, currentCellParticleIds);
+  m_lastUpdateStats.num_cells =
+      static_cast<uint2>(Weighted ? currentCellParticleIds.size() : desiredActiveIds.size());
+  bool weightsDirtyNow = false;
+  if constexpr (Weighted)
+    weightsDirtyNow = this->weightsDirty();
   if (!m_isBuild) {
     m_lastUpdateStats.rebuilt_from_scratch = true;
-    build(p);
+    if constexpr (Weighted)
+      buildWeighted(p, NULL, true);
+    else
+      buildFromCurrentActivity(p, true);
     return;
   }
   if (m_geom.size() != m_cellArena.numCells() || m_geometry.numCells() != m_cellArena.numCells())
@@ -3630,10 +3968,18 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
     rebuildBuiltParticleMaps(p.size());
     return;
   }
-  if (!allParticlesActive() || m_cellArena.numCells() != desiredActiveIds.size()) {
-    m_lastUpdateStats.rebuilt_from_scratch = true;
-    build(p);
-    return;
+  if constexpr (Weighted) {
+    if (m_cellArena.numCells() != currentCellParticleIds.size()) {
+      m_lastUpdateStats.rebuilt_from_scratch = true;
+      buildWeighted(p, NULL, true);
+      return;
+    }
+  } else {
+    if (!allParticlesActive() || m_cellArena.numCells() != desiredActiveIds.size()) {
+      m_lastUpdateStats.rebuilt_from_scratch = true;
+      buildFromCurrentActivity(p, true);
+      return;
+    }
   }
 
   initNbrList(p);
@@ -3643,7 +3989,7 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
   const size_t workerCount = std::max<size_t>(m_team.threadCount(), 1u);
 
   struct AsyncTask {
-    uint2 cellId;
+    uint2 particleId;
     uint2 depth;
   };
   enum CellTaskState : uint8_t {
@@ -3672,19 +4018,19 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
     std::sort(out.begin(), out.end());
   };
 
-  parallelForPersistent(p.size(), [&](size_t i, size_t workerId) {
+  parallelForPersistent(m_cellArena.numCells(), [&](size_t i, size_t workerId) {
     CellGeometry<real_t> geom = m_geom[i];
     geom.computeConnectingVectors(p, box);
     geom.computeEdgeInv();
     geom.updateVertexPos();
-      if (!geom.isConvex()) {
-        ++nonConvexByWorker[workerId];
-        return;
-      }
+    if (!geom.isConvex()) {
+      ++nonConvexByWorker[workerId];
+      return;
+    }
 
-      geom.diffVolume();
-      m_geom[i] = geom;
-      m_geometry.overwriteFromLegacy(static_cast<uint2>(i), m_cellArena.cellId(i), geom);
+    geom.diffVolume();
+    m_geom[i] = geom;
+    m_geometry.overwriteFromLegacy(static_cast<uint2>(i), m_cellArena.cellId(i), geom);
   });
 
   for (size_t workerId = 0; workerId < workerCount; ++workerId)
@@ -3694,19 +4040,59 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
   for (size_t i = 0; i < taskState.size(); ++i)
     taskState[i].store(kTaskUnseen, std::memory_order_relaxed);
 
+  std::vector<std::atomic<uint8_t> > forceFullState(p.size());
+  std::vector<std::atomic<uint8_t> > liveActiveState(p.size());
+  std::vector<std::atomic<uint8_t> > liveHasCellState(p.size());
+  std::unique_ptr<std::atomic<uint8_t>[]> reactivationState;
+  std::vector<std::atomic<uint8_t> > insertedState(p.size());
+  std::vector<Cell<real_t> > insertedCells(p.size());
+  const std::vector<uint2> oldCellIndexByParticle = m_cellIndexByParticle;
+  std::vector<uint8_t> oldHasCell;
+  if constexpr (Weighted)
+    oldHasCell = this->m_particleHasCell;
+  for (size_t i = 0; i < p.size(); ++i) {
+    forceFullState[i].store(0u, std::memory_order_relaxed);
+    liveActiveState[i].store(m_particleActive[i], std::memory_order_relaxed);
+    uint8_t hasCell = m_particleActive[i];
+    if constexpr (Weighted)
+      hasCell = this->m_particleHasCell[i];
+    liveHasCellState[i].store(hasCell, std::memory_order_relaxed);
+    insertedState[i].store(0u, std::memory_order_relaxed);
+  }
+  if constexpr (Weighted) {
+    reactivationState.reset(new std::atomic<uint8_t>[p.size()]);
+    for (size_t i = 0; i < p.size(); ++i)
+      reactivationState[i].store(0u, std::memory_order_relaxed);
+  }
+
   size_t initialQueued = 0;
   std::vector<std::vector<AsyncTask> > workQueues(workerCount);
   std::vector<std::mutex> queueMutex(workerCount);
-  for (size_t i = 0; i < m_geom.size(); ++i) {
-    CellGeometry<real_t> geom = m_geom[i];
-    geom.computeConnectingVectors(p, box);
-    geom.computeEdgeInv();
-    geom.updateVertexPos();
-    if (geom.isConvex())
-      continue;
-    taskState[i].store(kTaskQueued, std::memory_order_relaxed);
-    workQueues[i % workerCount].push_back(AsyncTask{static_cast<uint2>(i), 1u});
-    ++initialQueued;
+  if constexpr (Weighted) {
+    if (weightsDirtyNow) {
+      for (size_t i = 0; i < desiredActiveIds.size(); ++i) {
+        const uint2 particleId = desiredActiveIds[i];
+        taskState[particleId].store(kTaskQueued, std::memory_order_relaxed);
+        forceFullState[particleId].store(1u, std::memory_order_relaxed);
+        workQueues[i % workerCount].push_back(AsyncTask{particleId, 1u});
+        ++initialQueued;
+      }
+    }
+  }
+  if (initialQueued == 0) {
+    for (size_t i = 0; i < m_geom.size(); ++i) {
+      CellGeometry<real_t> geom = m_geom[i];
+      geom.computeConnectingVectors(p, box);
+      geom.computeEdgeInv();
+      geom.updateVertexPos();
+      if (geom.isConvex())
+        continue;
+      const uint2 particleId =
+          (Weighted ? m_cellArena.cellId(static_cast<uint2>(i)) : static_cast<uint2>(i));
+      taskState[particleId].store(kTaskQueued, std::memory_order_relaxed);
+      workQueues[i % workerCount].push_back(AsyncTask{particleId, 1u});
+      ++initialQueued;
+    }
   }
   m_lastUpdateStats.num_rebuild_candidates = static_cast<uint2>(initialQueued);
   if (initialQueued == 0)
@@ -3722,21 +4108,79 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
   std::vector<uint2> processedByWorker(workerCount, 0u);
   std::vector<uint2> maxDepthByWorker(workerCount, 0u);
 
-  auto tryQueueCandidate = [&](uint2 cellId, uint2 depth, size_t ownerTid) -> bool {
-    if (cellId == noNbr || cellId >= taskState.size())
+  auto tryQueueCandidate = [&](uint2 particleId, uint2 depth, size_t ownerTid,
+                               bool forceFull) -> bool {
+    if (particleId == noNbr || particleId >= taskState.size())
       return false;
+    if (forceFull)
+      forceFullState[particleId].store(1u, std::memory_order_release);
     uint8_t expected = kTaskUnseen;
-    if (!taskState[cellId].compare_exchange_strong(expected, kTaskQueued, std::memory_order_acq_rel,
-                                                   std::memory_order_relaxed))
-      return false;
+    if (!taskState[particleId].compare_exchange_strong(expected, kTaskQueued,
+                                                       std::memory_order_acq_rel,
+                                                       std::memory_order_relaxed)) {
+      if (!forceFull || expected != kTaskDone)
+        return false;
+      expected = kTaskDone;
+      if (!taskState[particleId].compare_exchange_strong(expected, kTaskQueued,
+                                                         std::memory_order_acq_rel,
+                                                         std::memory_order_relaxed))
+        return false;
+    }
 
     outstanding.fetch_add(1u, std::memory_order_acq_rel);
     ++queuedByWorker[ownerTid];
     {
       std::lock_guard<std::mutex> lock(queueMutex[ownerTid]);
-      workQueues[ownerTid].push_back(AsyncTask{cellId, depth});
+      workQueues[ownerTid].push_back(AsyncTask{particleId, depth});
     }
     return true;
+  };
+
+  auto tryReactivateNearbyInactive = [&](uint2 particleId, CellMaker<real_t, Weighted>& maker,
+                                         size_t ownerTid, uint2 depth) {
+    if constexpr (!Weighted)
+      return false;
+
+    std::vector<uint2> nbrGC;
+    m_nbrList.getGridNbrs(p[particleId], nbrGC);
+    typename std::vector<PosAndId<uint2, real_t> >::const_iterator begin;
+    typename std::vector<PosAndId<uint2, real_t> >::const_iterator end;
+    for (size_t i = 0; i < nbrGC.size(); ++i) {
+      m_nbrList.getCellContent(nbrGC[i], begin, end);
+      for (typename std::vector<PosAndId<uint2, real_t> >::const_iterator itr(begin); itr != end;
+           ++itr) {
+        const uint2 candidateId = itr->id;
+        if (candidateId == particleId || candidateId >= liveActiveState.size() ||
+            liveActiveState[candidateId].load(std::memory_order_acquire) == 0u ||
+            liveHasCellState[candidateId].load(std::memory_order_acquire) != 0u)
+          continue;
+        uint8_t expected = 0u;
+        if (!reactivationState[candidateId].compare_exchange_strong(expected, 1u,
+                                                                    std::memory_order_acq_rel,
+                                                                    std::memory_order_relaxed))
+          continue;
+        maker.build(candidateId, p, m_nbrList, cub);
+        maker.renumber();
+        bool hasNoNbr = false;
+        for (uint1 facet = 0; facet < maker.numFacets(); ++facet) {
+          if (maker.getNbrs()[facet] == noNbr) {
+            hasNoNbr = true;
+            break;
+          }
+        }
+        if (maker.numVertices() == 0 || maker.numFacets() == 0 || hasNoNbr)
+          continue;
+        insertedCells[candidateId] = maker;
+        insertedState[candidateId].store(1u, std::memory_order_release);
+        liveHasCellState[candidateId].store(1u, std::memory_order_release);
+        const uint2 nextDepth = depth + 1u;
+        for (uint1 facet = 0; facet < maker.numFacets(); ++facet)
+          tryQueueCandidate(maker.getNbrs()[facet], nextDepth, ownerTid, true);
+        proposalByWorker[ownerTid] += maker.numFacets();
+        return true;
+      }
+    }
+    return false;
   };
 
   auto popLocalTask = [&](size_t tid, AsyncTask& task) -> bool {
@@ -3772,7 +4216,7 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
       }
 
       uint8_t expected = kTaskQueued;
-      if (!taskState[task.cellId].compare_exchange_strong(
+      if (!taskState[task.particleId].compare_exchange_strong(
               expected, kTaskProcessing, std::memory_order_acq_rel, std::memory_order_relaxed))
         continue;
 
@@ -3781,18 +4225,50 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
         maxDepthByWorker[tid] = task.depth;
 
       WorkerContext& worker = *m_workers[tid];
-      CellMaker<real_t>& maker = worker.maker;
-      const uint2 cellId = task.cellId;
-
-      CellGeometry<real_t> geom = m_geom[cellId];
-      geom.computeConnectingVectors(p, box);
-      geom.computeEdgeInv();
-      geom.updateVertexPos();
-      const bool isConvex = geom.isConvex();
-      const Cell<real_t>& baseCell = geom.getCell();
-
+      CellMaker<real_t, Weighted>& maker = worker.maker;
+      if constexpr (Weighted)
+        maker.setWeights(&this->m_weights);
+      else
+        maker.setWeights(NULL);
+      const uint2 particleId = task.particleId;
+      const bool forceFull =
+          (forceFullState[particleId].exchange(0u, std::memory_order_acq_rel) != 0u);
+      if constexpr (Weighted) {
+        if (liveActiveState[particleId].load(std::memory_order_acquire) == 0u) {
+          taskState[particleId].store(kTaskDone, std::memory_order_release);
+          outstanding.fetch_sub(1u, std::memory_order_acq_rel);
+          continue;
+        }
+      }
+      const uint2 cellId =
+          (Weighted ? m_cellIndexByParticle[particleId] : static_cast<uint2>(particleId));
       std::vector<uint2> oldDirect;
-      {
+      CellGeometry<real_t> geom;
+      bool isConvex = false;
+      const Cell<real_t>* pBaseCell = NULL;
+      if constexpr (Weighted) {
+        if (cellId != noNbr) {
+          geom = m_geom[cellId];
+          geom.computeConnectingVectors(p, box);
+          geom.computeEdgeInv();
+          geom.updateVertexPos();
+          isConvex = geom.isConvex();
+          pBaseCell = &geom.getCell();
+
+          const ConnectivityView<real_t> connView = m_connectivity.getView(cellId);
+          oldDirect.reserve(connView.numDirectNbrs());
+          for (uint1 facet = 0; facet < connView.numDirectNbrs(); ++facet)
+            oldDirect.push_back(connView.getDirectNbr(facet));
+          std::sort(oldDirect.begin(), oldDirect.end());
+        }
+      } else {
+        geom = m_geom[cellId];
+        geom.computeConnectingVectors(p, box);
+        geom.computeEdgeInv();
+        geom.updateVertexPos();
+        isConvex = geom.isConvex();
+        pBaseCell = &geom.getCell();
+
         const ConnectivityView<real_t> connView = m_connectivity.getView(cellId);
         oldDirect.reserve(connView.numDirectNbrs());
         for (uint1 facet = 0; facet < connView.numDirectNbrs(); ++facet)
@@ -3805,10 +4281,10 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
       bool usedLocal = false;
       bool localCutChanged = false;
 
-      if (isConvex) {
+      if (!forceFull && isConvex) {
         usedLocal = true;
         ++localByWorker[tid];
-        localCutChanged = maker.build(cellId, p, m_nbrList, baseCell, oldDirect);
+        localCutChanged = maker.build(particleId, p, m_nbrList, *pBaseCell, oldDirect);
         maker.renumber();
         collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
 
@@ -3817,7 +4293,7 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
           m_geom[cellId] = geom;
           m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), geom);
           m_connectivity.overwrite(cellId, oldDirect, std::vector<uint2>());
-          taskState[cellId].store(kTaskDone, std::memory_order_release);
+          taskState[particleId].store(kTaskDone, std::memory_order_release);
           outstanding.fetch_sub(1u, std::memory_order_acq_rel);
           continue;
         }
@@ -3840,18 +4316,30 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
       }
 
       if (!isConvex || !usedLocal) {
-        maker.build(cellId, p, m_nbrList, cub);
+        maker.build(particleId, p, m_nbrList, cub);
         maker.renumber();
         collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
         ++fullByWorker[tid];
       }
 
-      if (!usedLocal && isConvex && newDirect == oldDirect && !hasNoNbr) {
+      if constexpr (Weighted) {
+        if (maker.numVertices() == 0 || maker.numFacets() == 0 || hasNoNbr) {
+          liveHasCellState[particleId].store(0u, std::memory_order_release);
+          const uint2 nextDepth = task.depth + 1u;
+          for (size_t i = 0; i < oldDirect.size(); ++i)
+            tryQueueCandidate(oldDirect[i], nextDepth, tid, true);
+          taskState[particleId].store(kTaskDone, std::memory_order_release);
+          outstanding.fetch_sub(1u, std::memory_order_acq_rel);
+          continue;
+        }
+      }
+
+      if (!usedLocal && !forceFull && isConvex && newDirect == oldDirect && !hasNoNbr) {
         geom.diffVolume();
         m_geom[cellId] = geom;
         m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), geom);
         m_connectivity.overwrite(cellId, oldDirect, std::vector<uint2>());
-        taskState[cellId].store(kTaskDone, std::memory_order_release);
+        taskState[particleId].store(kTaskDone, std::memory_order_release);
         outstanding.fetch_sub(1u, std::memory_order_acq_rel);
         continue;
       }
@@ -3860,20 +4348,36 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
       if (topologyChanged)
         ++changedByWorker[tid];
 
-      m_cellArena.overwriteFromMaker(cellId, maker);
-      m_connectivity.overwrite(cellId, newDirect, std::vector<uint2>());
-      commitCellGeometry(cellId, p);
+      bool insertedPackedCell = false;
+      if constexpr (Weighted) {
+        if (cellId == noNbr) {
+          insertedCells[particleId] = maker;
+          insertedState[particleId].store(1u, std::memory_order_release);
+          liveHasCellState[particleId].store(1u, std::memory_order_release);
+          insertedPackedCell = true;
+        }
+      }
+      if (!insertedPackedCell) {
+        m_cellArena.overwriteFromMaker(cellId, maker);
+        m_connectivity.overwrite(cellId, newDirect, std::vector<uint2>());
+        commitCellGeometry(cellId, p);
+      }
+
+      if constexpr (Weighted) {
+        if (topologyChanged)
+          tryReactivateNearbyInactive(particleId, maker, tid, task.depth);
+      }
 
       if (task.depth == 1u || topologyChanged) {
         proposalByWorker[tid] += static_cast<uint2>(oldDirect.size() + newDirect.size());
         const uint2 nextDepth = task.depth + 1u;
         for (size_t i = 0; i < oldDirect.size(); ++i)
-          tryQueueCandidate(oldDirect[i], nextDepth, tid);
+          tryQueueCandidate(oldDirect[i], nextDepth, tid, (Weighted && topologyChanged));
         for (size_t i = 0; i < newDirect.size(); ++i)
-          tryQueueCandidate(newDirect[i], nextDepth, tid);
+          tryQueueCandidate(newDirect[i], nextDepth, tid, (Weighted && topologyChanged));
       }
 
-      taskState[cellId].store(kTaskDone, std::memory_order_release);
+      taskState[particleId].store(kTaskDone, std::memory_order_release);
       outstanding.fetch_sub(1u, std::memory_order_acq_rel);
     }
   });
@@ -3891,22 +4395,95 @@ void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p) {
       maxDepth = maxDepthByWorker[workerId];
   }
   m_lastUpdateStats.num_repair_iterations = maxDepth;
+  if constexpr (Weighted) {
+    bool activityChanged = false;
+    bool cellMembershipChanged = false;
+    for (size_t i = 0; i < p.size(); ++i) {
+      const uint8_t nextActive = liveActiveState[i].load(std::memory_order_acquire);
+      const uint8_t nextHasCell = liveHasCellState[i].load(std::memory_order_acquire);
+      if (nextActive != m_particleActive[i])
+        activityChanged = true;
+      if (nextHasCell != this->m_particleHasCell[i])
+        cellMembershipChanged = true;
+      m_particleActive[i] = nextActive;
+      this->m_particleHasCell[i] = nextHasCell;
+    }
+    if (activityChanged || cellMembershipChanged) {
+      std::vector<Cell<real_t> > packedCells;
+      packedCells.reserve(desiredActiveIds.size() + 8u);
+      bool repackFailed = false;
+      for (size_t particleId = 0; particleId < p.size(); ++particleId) {
+        if (m_particleActive[particleId] == 0u || this->m_particleHasCell[particleId] == 0u)
+          continue;
+        Cell<real_t> cell;
+        if (insertedState[particleId].load(std::memory_order_acquire) != 0u) {
+          cell = insertedCells[particleId];
+        } else if (particleId < oldHasCell.size() && oldHasCell[particleId] != 0u &&
+                   oldCellIndexByParticle[particleId] != noNbr) {
+          m_cellArena.materializeCell(oldCellIndexByParticle[particleId], cell);
+        } else {
+          repackFailed = true;
+          break;
+        }
+        bool invalid = false;
+        for (uint1 facet = 0; facet < cell.numFacets(); ++facet) {
+          const uint2 nbrId = cell.getNbr(facet);
+          if (nbrId == noNbr ||
+              (nbrId < this->m_particleHasCell.size() && this->m_particleHasCell[nbrId] == 0u)) {
+            invalid = true;
+            break;
+          }
+        }
+        if (invalid) {
+          repackFailed = true;
+          break;
+        }
+        packedCells.push_back(cell);
+      }
+      if (repackFailed) {
+        m_lastUpdateStats.rebuilt_from_scratch = true;
+        buildWeighted(p, NULL, true);
+        return;
+      }
+      std::sort(packedCells.begin(), packedCells.end(),
+                [](const Cell<real_t>& a, const Cell<real_t>& b) { return a.getID() < b.getID(); });
+      m_cellArena.rebuildFromCells(packedCells);
+      m_connectivity.resize(static_cast<uint2>(packedCells.size()));
+      for (size_t i = 0; i < packedCells.size(); ++i) {
+        std::vector<uint2> directNbrs;
+        directNbrs.reserve(packedCells[i].numFacets());
+        for (uint1 facet = 0; facet < packedCells[i].numFacets(); ++facet) {
+          const uint2 nbrId = packedCells[i].getNbr(facet);
+          if (nbrId != noNbr && nbrId < this->m_particleHasCell.size() &&
+              this->m_particleHasCell[nbrId] != 0u)
+            directNbrs.push_back(nbrId);
+        }
+        m_connectivity.overwrite(static_cast<uint2>(i), directNbrs, std::vector<uint2>());
+      }
+      buildGeometry(p);
+      rebuildBuiltParticleMaps(p.size());
+    } else {
+      rebuildBuiltParticleMaps(p.size());
+    }
+    m_lastUpdateStats.num_cells = static_cast<uint2>(this->m_cellParticleIds.size());
+    this->clearWeightDirty();
+  }
 }
 
-template <typename real_t>
-void CellComplex<real_t>::update(const std::vector<std::array<real_t, 3> >& p,
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 3> >& p,
                                  const std::vector<uint8_t>& active) {
-  setParticleActivity(active);
   if (active.size() != p.size()) {
     std::fprintf(stderr, "CellComplex::update: activity mask has %zu entries, expected %zu\n",
                  active.size(), p.size());
     std::abort();
   }
+  setParticleActivity(active);
   update(p);
 }
 
-template <typename real_t>
-void CellComplex<real_t>::drawInterfaceGnuplot(uint0 iType, uint0 jType,
+template <typename real_t, bool Weighted>
+void CellComplex<real_t, Weighted>::drawInterfaceGnuplot(uint0 iType, uint0 jType,
                                                const std::vector<std::array<real_t, 3> >& pos,
                                                FILE* fp) const {
 #pragma omp parallel for
