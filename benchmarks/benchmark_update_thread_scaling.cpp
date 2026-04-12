@@ -1,13 +1,13 @@
 /**
  * @file benchmark_update_thread_scaling.cpp
- * @brief Large-N thread-scaling study for non-switching sweep updates versus full rebuild.
+ * @brief Large-N thread-scaling study for the default update versus full rebuild.
  *
  * This benchmark is intentionally performance-focused:
  *  - random positions in a unit periodic box
  *  - Gaussian velocities with sigma = N^(-1/3), so dt is dimensionless on the scale of a cell
  *  - advances the system for a small number of timesteps
  *  - measures per-step runtime and non-convex fraction before the update
- *  - compares full build, updateNbrListSweep(no switch), and updateNbrListSweepAsync(no switch)
+ *  - compares full build and the default asynchronous sweep update
  */
 
 #include <array>
@@ -31,8 +31,7 @@ using Pos3 = std::array<Real, 3>;
 
 enum MethodKind {
   kFullBuild = 0,
-  kSweep = 1,
-  kSweepAsync = 2,
+  kUpdate = 1,
 };
 
 struct MethodSpec {
@@ -124,8 +123,6 @@ MethodResult RunStudy(const MethodSpec& method, int num_particles, int num_steps
   result.worker_count = worker_count;
 
   vor::CellComplex<Real> complex(&box, static_cast<size_t>(std::max(worker_count, 0)));
-  if (method.kind != kFullBuild)
-    complex.setSweepRebuildAllSwitchFraction(1.0);
   complex.build(pos);
   result.initial_non_convex_at_build = CountNonConvexCells(complex, pos, box);
   result.step_stats.reserve(static_cast<std::size_t>(num_steps));
@@ -139,11 +136,8 @@ MethodResult RunStudy(const MethodSpec& method, int num_particles, int num_steps
       case kFullBuild:
         complex.build(pos);
         break;
-      case kSweep:
-        complex.updateNbrListSweep(pos);
-        break;
-      case kSweepAsync:
-        complex.updateNbrListSweepAsync(pos);
+      case kUpdate:
+        complex.update(pos);
         break;
     }
     const double update_ms = elapsed_ms(t0);
@@ -202,8 +196,7 @@ int main(int argc, char** argv) {
 
   const MethodSpec methods[] = {
       {"fullBuild", kFullBuild},
-      {"updateNbrListSweep", kSweep},
-      {"updateNbrListSweepAsync", kSweepAsync},
+      {"update", kUpdate},
   };
 
   std::printf("# benchmark_update_thread_scaling\n");

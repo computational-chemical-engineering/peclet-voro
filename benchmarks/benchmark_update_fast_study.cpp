@@ -1,12 +1,12 @@
 /**
  * @file benchmark_update_fast_study.cpp
- * @brief Parameter study for CellComplex::updateFast on random moving points.
+ * @brief Parameter study for the default CellComplex::update on random moving points.
  *
  * The benchmark:
  *  - builds an initial tessellation for 1e4 random particles
  *  - assigns normally distributed velocities
  *  - advances the system for several timesteps at a chosen dt
- *  - records per-step updateFast statistics and timing
+ *  - records per-step default-update statistics and timing
  *  - compares the final incrementally updated tessellation against a clean rebuild
  *
  * Output:
@@ -280,7 +280,7 @@ int main(int argc, char **argv) {
         BuildSignaturesByCellId(complex_incremental, num_particles);
 
     const auto t0 = Clock::now();
-    complex_incremental.updateFast(pos);
+    complex_incremental.update(pos);
     const double update_ms = elapsed_ms(t0);
 
     const int non_convex_after = CountNonConvexCells(complex_incremental, pos, box);

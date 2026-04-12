@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a markdown report for the updateFast timestep study."""
+"""Generate a markdown report for the default update timestep study."""
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def make_workload_plot(summary: pd.DataFrame, out_file: Path) -> None:
 
     axes[0, 1].plot(x, summary["mean_update_ms"], marker="o", linewidth=2, color="#1f77b4")
     axes[0, 1].set_ylabel("ms")
-    axes[0, 1].set_title("Mean updateFast runtime per step")
+    axes[0, 1].set_title("Mean update runtime per step")
 
     axes[1, 0].plot(x, summary["mean_local_rebuild_cells"], marker="o", linewidth=2, color="#2ca02c", label="local")
     axes[1, 0].plot(x, summary["mean_full_rebuild_cells"], marker="o", linewidth=2, color="#ff7f0e", label="fallback full")
@@ -121,7 +121,7 @@ def make_workload_plot(summary: pd.DataFrame, out_file: Path) -> None:
       ax.grid(True, linestyle="--", linewidth=0.4, alpha=0.7)
       ax.set_xlabel("dt")
 
-    fig.suptitle("updateFast workload vs timestep")
+    fig.suptitle("Default update workload vs timestep")
     fig.tight_layout()
     fig.savefig(out_file, dpi=170)
     plt.close(fig)
@@ -157,7 +157,7 @@ def make_quality_plot(summary: pd.DataFrame, out_file: Path) -> None:
     axes[2].set_ylabel("|V_update - V_rebuild|")
     axes[2].grid(True, linestyle="--", linewidth=0.4, alpha=0.7)
 
-    fig.suptitle("updateFast final tessellation quality vs timestep")
+    fig.suptitle("Default update final tessellation quality vs timestep")
     fig.tight_layout()
     fig.savefig(out_file, dpi=170)
     plt.close(fig)
@@ -178,14 +178,14 @@ def make_markdown(summary: pd.DataFrame, out_md: Path) -> None:
     heaviest = summary.sort_values("mean_update_ms").iloc[-1]
 
     lines: list[str] = []
-    lines.append("# updateFast Timestep Study")
+    lines.append("# Default Update Timestep Study")
     lines.append("")
     lines.append("## Scope")
     lines.append("")
     lines.append("- System: `N=10,000` random particles in a unit periodic box")
     lines.append("- Velocities: independent normal components with `sigma=1.0`")
     lines.append("- Timestep study over `dt = 1e-4 .. 1e-1`")
-    lines.append("- Update path: `CellComplex::updateFast()`")
+    lines.append("- Update path: `CellComplex::update()`")
     lines.append("- Final state is compared against a clean static rebuild")
     lines.append("")
     lines.append("## Figures")
@@ -215,7 +215,7 @@ def make_markdown(summary: pd.DataFrame, out_md: Path) -> None:
     lines.append(
         "- `final_non_reciprocal_pairs` is reported for the updated tessellation alone. "
         "When `final_signature_mismatch_cells` is zero, that count is shared by the clean rebuild "
-        "and is not evidence of an `updateFast` mismatch."
+        "and is not evidence of an `update()` mismatch."
     )
     lines.append("")
     lines.append("## Table")

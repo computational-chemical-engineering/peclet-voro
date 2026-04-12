@@ -15,16 +15,14 @@ import numpy as np
 import pandas as pd
 
 
-METHOD_ORDER = ["fullBuild", "updateNbrListSweep", "updateNbrListSweepAsync"]
+METHOD_ORDER = ["fullBuild", "update"]
 METHOD_LABELS = {
     "fullBuild": "fullBuild",
-    "updateNbrListSweep": "updateNbrListSweep",
-    "updateNbrListSweepAsync": "updateNbrListSweepAsync",
+    "update": "update",
 }
 METHOD_COLORS = {
     "fullBuild": "#1f77b4",
-    "updateNbrListSweep": "#2ca02c",
-    "updateNbrListSweepAsync": "#ff7f0e",
+    "update": "#ff7f0e",
 }
 
 
@@ -213,7 +211,7 @@ def make_markdown(summary: pd.DataFrame, out_md: Path) -> None:
     lines.append("## Scope")
     lines.append("")
     lines.append("- System sizes: " + ", ".join(f"`N={n:,}`" for n in ns))
-    lines.append("- Methods: `fullBuild`, `updateNbrListSweep` (no switch), `updateNbrListSweepAsync` (no switch)")
+    lines.append("- Methods: `fullBuild` and `update`")
     lines.append("- Threads: " + ", ".join(f"`{t}`" for t in threads))
     lines.append("- Timestep range: " + ", ".join(f"`{dt:.0e}`" if dt < 1.0 else f"`{dt:g}`" for dt in dts))
     lines.append("- Velocity standard deviation uses `sigma = N^(-1/3)` in a unit periodic box")
@@ -236,11 +234,7 @@ def make_markdown(summary: pd.DataFrame, out_md: Path) -> None:
         lines.append("| threads | pair | crossover dt | non-convex fraction | interpretation |")
         lines.append("|---:|:--|---:|---:|:--|")
         for threads_i in threads:
-            for a, b in [
-                ("updateNbrListSweep", "fullBuild"),
-                ("updateNbrListSweepAsync", "fullBuild"),
-                ("updateNbrListSweep", "updateNbrListSweepAsync"),
-            ]:
+            for a, b in [("update", "fullBuild")]:
                 est = estimate_crossover(summary, n, threads_i, a, b)
                 if est["status"] == "cross":
                     lines.append(

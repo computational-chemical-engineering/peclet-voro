@@ -1,13 +1,13 @@
 /**
  * @file benchmark_update_strategy_study.cpp
- * @brief Parameter study comparing incremental Voronoi update strategies.
+ * @brief Parameter study comparing the default update against full rebuild.
  *
  * The benchmark:
  *  - builds an initial tessellation for 1e4 random particles
  *  - assigns normally distributed velocities
  *  - advances the system for several timesteps at a chosen dt
- *  - records per-step statistics and timing for each update strategy
- *  - compares each final incrementally updated tessellation against a clean static rebuild
+ *  - records per-step statistics and timing for each method
+ *  - compares each final tessellation against a clean static rebuild
  *
  * Output:
  *  CSV rows, one per timestep per method, with repeated final-comparison metrics
@@ -34,7 +34,10 @@ using Clock = std::chrono::high_resolution_clock;
 using Millis = std::chrono::duration<double, std::milli>;
 using Real = double;
 using Pos3 = std::array<Real, 3>;
-using UpdateMethod = void (vor::CellComplex<Real>::*)(const std::vector<Pos3>&);
+enum MethodKind {
+  kFullBuild = 0,
+  kUpdate = 1,
+};
 
 struct CellSignature {
   vor::uint1 num_vertices = 0;
@@ -68,7 +71,7 @@ struct StepStats {
 struct MethodSpec {
   const char* key = "";
   const char* label = "";
-  UpdateMethod fn = NULL;
+  MethodKind kind = kFullBuild;
 };
 
 struct MethodResult {
@@ -309,7 +312,10 @@ MethodResult RunStudy(const MethodSpec& method, int num_particles, int num_steps
         BuildSignaturesByCellId(complex_incremental, num_particles);
 
     const auto t0 = Clock::now();
-    (complex_incremental.*(method.fn))(pos);
+    if (method.kind == kFullBuild)
+      complex_incremental.build(pos);
+    else
+      complex_incremental.update(pos);
     const double update_ms = elapsed_ms(t0);
 
     const int non_convex_after = CountNonConvexCells(complex_incremental, pos, box);
@@ -412,10 +418,8 @@ int main(int argc, char** argv) {
   const std::vector<Pos3> vel = RandomNormalVelocities(num_particles, velocity_sigma, vel_seed);
 
   const MethodSpec methods[] = {
-      {"updateFast", "updateFast", &vor::CellComplex<Real>::updateFast},
-      {"updateNbrListLocal", "updateNbrListLocal", &vor::CellComplex<Real>::updateNbrListLocal},
-      {"updateNbrListSweep", "updateNbrListSweep", &vor::CellComplex<Real>::updateNbrListSweep},
-      {"updateNbrListSweepAsync", "updateNbrListSweepAsync", &vor::CellComplex<Real>::updateNbrListSweepAsync},
+      {"fullBuild", "fullBuild", kFullBuild},
+      {"update", "update", kUpdate},
   };
 
   std::printf("# benchmark_update_strategy_study\n");

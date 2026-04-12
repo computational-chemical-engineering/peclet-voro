@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a markdown report comparing incremental update strategies."""
+"""Generate a markdown report comparing full rebuild and the default update."""
 
 from __future__ import annotations
 
@@ -14,17 +14,13 @@ import pandas as pd
 
 
 METHOD_LABELS = {
-    "updateFast": "updateFast",
-    "updateNbrListLocal": "updateNbrListLocal",
-    "updateNbrListSweep": "updateNbrListSweep",
-    "updateNbrListSweepAsync": "updateNbrListSweepAsync",
+    "fullBuild": "fullBuild",
+    "update": "update",
 }
 
 METHOD_COLORS = {
-    "updateFast": "#1f77b4",
-    "updateNbrListLocal": "#d62728",
-    "updateNbrListSweep": "#2ca02c",
-    "updateNbrListSweepAsync": "#ff7f0e",
+    "fullBuild": "#1f77b4",
+    "update": "#ff7f0e",
 }
 
 
@@ -140,7 +136,7 @@ def make_workload_plot(summary: pd.DataFrame, out_file: Path) -> None:
     plot_by_method(axes[1, 0], summary, "mean_local_rebuild_cells", "Mean local rebuild cells", "Cells")
     plot_by_method(axes[1, 1], summary, "mean_full_rebuild_cells", "Mean full rebuild cells", "Cells")
     axes[0, 0].legend(fontsize=8)
-    fig.suptitle("Incremental update workload vs timestep")
+    fig.suptitle("Update workload vs timestep")
     fig.tight_layout()
     fig.savefig(out_file, dpi=170)
     plt.close(fig)
@@ -162,7 +158,7 @@ def make_quality_plot(summary: pd.DataFrame, out_file: Path) -> None:
         axes[2], total_vol_diff, "final_total_vol_diff", "Final total-volume difference", "|V_update - V_rebuild|", "log"
     )
     axes[0].legend(fontsize=8)
-    fig.suptitle("Incremental update quality vs timestep")
+    fig.suptitle("Update quality vs timestep")
     fig.tight_layout()
     fig.savefig(out_file, dpi=170)
     plt.close(fig)
@@ -181,7 +177,7 @@ def make_markdown(summary: pd.DataFrame, out_md: Path) -> None:
     dt_values = sorted(summary["dt"].unique())
     dt_range = f"{dt_values[0]:.0e} .. {dt_values[-1]:.0e}"
     worker_values = sorted(summary["worker_count"].unique())
-    lines.append("# Incremental Update Strategy Study")
+    lines.append("# Update Strategy Study")
     lines.append("")
     lines.append("## Scope")
     lines.append("")
@@ -193,7 +189,7 @@ def make_markdown(summary: pd.DataFrame, out_md: Path) -> None:
             lines.append("- Execution mode: serial (`worker_count=0`)")
         else:
             lines.append(f"- Execution mode: persistent worker team with `worker_count={worker_values[0]}`")
-    lines.append("- Methods: `updateFast`, `updateNbrListLocal`, `updateNbrListSweep`, and `updateNbrListSweepAsync`")
+    lines.append("- Methods: `fullBuild` and `update`")
     lines.append("- Final state of each method is compared against a clean static rebuild")
     lines.append("")
     lines.append("## Figures")
