@@ -34,6 +34,7 @@ static const uint1 maskNoFacet((uint1)~maskFacet);
 static const uint1 maskEdge(3);
 static const uint1 maskVertex((uint1) ~(maskFacet | maskEdge));
 static const uint2 noNbr(~0);
+static const uint2 boundaryNbr(~0u - 1u);
 static const uint1 maxNumVertices(1 << 7);
 static const uint1 maxNumFacets(1 << 7);
 

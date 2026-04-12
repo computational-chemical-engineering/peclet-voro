@@ -40,6 +40,9 @@ add_voronoi_test(test_moving_points_repair_stats test_moving_points_repair_stats
 # and inactive-particle reactivation.
 add_voronoi_test(test_power_cells test_power_cells.cpp)
 
+# SDF boundary clipping and boundary-driven reactivation.
+add_voronoi_test(test_sdf_boundary test_sdf_boundary.cpp)
+
 # Force tiny CellMaker scratch arenas to grow and verify growth is handled.
 add_voronoi_test(test_cell_maker_growth test_cell_maker_growth.cpp)
 

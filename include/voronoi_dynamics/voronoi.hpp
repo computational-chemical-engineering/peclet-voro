@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -276,15 +277,20 @@ class Cell {
   //! @param i index of a facet
   //! @return id of neighbor cell
   inline uint2 getNbr(uint1 i) const { return m_nbr[i]; }
+  inline const std::array<real_t, 3>& getVertexPos(uint1 i) const { return m_vertexPos[i]; }
   //! @brief get the array of id's of the neighbor cells
   //! @return array of id's of neighbor cells
   inline const uint2* getNbrs() const { return m_nbr; }
+  inline const std::array<real_t, 3>& getFacetPlane(uint1 i) const { return m_planeVec[i]; }
+  inline real_t getFacetOffset(uint1 i) const { return m_planeOffset[i]; }
   //! @brief check of the cell has a facet that does not correspond to a neighbor cell
   //! Not every facet need necesarrily have an neighbor cell associated to it.
   //! @return true, if there are 1 or more facets without neighbors in a cell. false otherwise
   inline bool hasNoNbr();
   template <typename, bool>
   friend class CellMaker;
+  template <typename, bool>
+  friend class CellComplex;
   friend class CellGeometry<real_t>;
   friend class TopologyArena<real_t>;
 
@@ -296,6 +302,8 @@ class Cell {
   Vertex m_vertices[maxNumVertices];
   uint1 m_facets[maxNumFacets];
   uint2 m_nbr[maxNumFacets];
+  std::array<real_t, 3> m_planeVec[maxNumFacets];
+  real_t m_planeOffset[maxNumFacets];
   inline uint1 getNextLabelCCW(uint1 label) const {
     uint1 facetMasked(label & maskFacet);
     uint1 revLabel(m_vertices[getVertex(label)][getEdge(label)]);
@@ -359,6 +367,8 @@ class ConstructionArena {
       facetCapacity = std::max<size_t>(std::max<size_t>(facetCapacity * 2, minFacets), 1);
       m_facets.resize(facetCapacity);
       m_nbr.resize(facetCapacity);
+      m_planeVec.resize(facetCapacity);
+      m_planeOffset.resize(facetCapacity);
       m_renumFWrk.resize(facetCapacity);
       m_aliveF.resize(facetCapacity, 0u);
       m_freeStackF.resize(facetCapacity);
@@ -395,6 +405,8 @@ class ConstructionArena {
   Vertex* verticesData() { return m_vertices.data(); }
   uint1* facetsData() { return m_facets.data(); }
   uint2* nbrData() { return m_nbr.data(); }
+  std::array<real_t, 3>* planeVecData() { return m_planeVec.data(); }
+  real_t* planeOffsetData() { return m_planeOffset.data(); }
   real_t* distData() { return m_dist.data(); }
   uint2* knownDistGenData() { return m_knownDistGen.data(); }
   real_t* distGCData() { return m_distGC.data(); }
@@ -423,6 +435,8 @@ class ConstructionArena {
   std::vector<Vertex> m_vertices;
   std::vector<uint1> m_facets;
   std::vector<uint2> m_nbr;
+  std::vector<std::array<real_t, 3> > m_planeVec;
+  std::vector<real_t> m_planeOffset;
   std::vector<real_t> m_dist;
   std::vector<uint2> m_knownDistGen;
   std::vector<real_t> m_distGC;
@@ -527,6 +541,7 @@ class CellMaker : private detail::CellMakerWeightState<real_t, Weighted> {
                           const std::array<real_t, 3> pos0, const Box<real_t>& box);
   //    inline real_t getRsqMax() const {return m_rSq[m_vRsqMax];}
   void getCloseNbrs(NbrInsert& nbrs);
+  bool clipByPlane(const std::array<real_t, 3>& planeVec, real_t planeOffset, uint2 facetTag);
   // void drawGnuplot(FILE *fp) const;
   // void testTopo() const;
   inline uint1 numVertices() const { return m_numVertices; }
@@ -587,6 +602,7 @@ class CellMaker : private detail::CellMakerWeightState<real_t, Weighted> {
   inline uint1 getNextLabelCCW(uint1 label) const;
   inline uint1 getReverseLabel(uint1 label) const;
   inline bool applyCut(const std::array<real_t, 3>& p, real_t rSqHalf, uint2 nbr);
+  inline bool applyPlaneCut(const std::array<real_t, 3>& planeVec, real_t planeOffset, uint2 nbr);
   inline real_t cutPlaneOffset(real_t rSqHalf, uint2 nbr) const;
   inline bool candidateMightCut(real_t planeOffset, real_t relNorm) const;
   inline void bindArenaStorage();
@@ -618,6 +634,8 @@ class CellMaker : private detail::CellMakerWeightState<real_t, Weighted> {
   Vertex* m_vertices;
   uint1* m_facets;
   uint2* m_nbr;
+  std::array<real_t, 3>* m_planeVec;
+  real_t* m_planeOffset;
   DenseSlotsView<uint1> m_slotsV;
   DenseSlotsView<uint1> m_slotsF;
   VisitedIndx<uint2> m_visited;
@@ -656,6 +674,10 @@ struct CellView {
   inline const Vertex& getVertex(uint1 i) const { return arena->cellVertexLabel(cellIndex, i); }
   inline uint1 getFacet(uint1 i) const { return arena->cellFacetLabel(cellIndex, i); }
   inline uint2 getNbr(uint1 i) const { return arena->cellNbr(cellIndex, i); }
+  inline const std::array<real_t, 3>& getFacetPlane(uint1 i) const {
+    return arena->cellPlaneVec(cellIndex, i);
+  }
+  inline real_t getFacetOffset(uint1 i) const { return arena->cellPlaneOffset(cellIndex, i); }
   inline bool hasNoNbr() const {
     for (uint1 i = 0; i < numFacets(); ++i)
       if (getNbr(i) == noNbr)
@@ -748,7 +770,8 @@ class CellGeometry {
   CellGeometry& operator=(const CellView<real_t>& rhs);
   CellGeometry& operator=(const CellGeometry<real_t>& rhs);
   void computeConnectingVectors(const std::vector<std::array<real_t, 3> >& pos,
-                                const Box<real_t>& box);
+                                const Box<real_t>& box,
+                                const std::vector<real_t>* weights = NULL);
   void computeEdgeInv();
   void updateVertexPos();
   void computeAreas();
@@ -818,6 +841,8 @@ class TopologyArena {
     m_vertices.clear();
     m_facets.clear();
     m_nbrs.clear();
+    m_planeVec.clear();
+    m_planeOffset.clear();
   }
 
   void rebuildFromCells(const std::vector<Cell<real_t> >& cells) {
@@ -828,6 +853,8 @@ class TopologyArena {
     m_vertices.resize(numCells);
     m_facets.resize(numCells);
     m_nbrs.resize(numCells);
+    m_planeVec.resize(numCells);
+    m_planeOffset.resize(numCells);
 
     for (size_t i = 0; i < cells.size(); ++i) {
       const Cell<real_t>& cell = cells[i];
@@ -845,6 +872,8 @@ class TopologyArena {
       m_vertices.insert(static_cast<uint2>(i), cell.m_vertices, nv);
       m_facets.insert(static_cast<uint2>(i), cell.m_facets, nf);
       m_nbrs.insert(static_cast<uint2>(i), cell.m_nbr, nf);
+      m_planeVec.insert(static_cast<uint2>(i), cell.m_planeVec, nf);
+      m_planeOffset.insert(static_cast<uint2>(i), cell.m_planeOffset, nf);
     }
   }
 
@@ -856,6 +885,8 @@ class TopologyArena {
     m_vertices.insert(cellId, maker.m_vertices, maker.m_numVertices);
     m_facets.insert(cellId, maker.m_facets, maker.m_numFacets);
     m_nbrs.insert(cellId, maker.m_nbr, maker.m_numFacets);
+    m_planeVec.insert(cellId, maker.m_planeVec, maker.m_numFacets);
+    m_planeOffset.insert(cellId, maker.m_planeOffset, maker.m_numFacets);
   }
 
   template <bool Weighted>
@@ -866,6 +897,8 @@ class TopologyArena {
     m_vertices.overwrite(cellId, maker.m_vertices, maker.m_numVertices);
     m_facets.overwrite(cellId, maker.m_facets, maker.m_numFacets);
     m_nbrs.overwrite(cellId, maker.m_nbr, maker.m_numFacets);
+    m_planeVec.overwrite(cellId, maker.m_planeVec, maker.m_numFacets);
+    m_planeOffset.overwrite(cellId, maker.m_planeOffset, maker.m_numFacets);
   }
 
   void overwriteFromCell(uint2 cellId, const Cell<real_t>& cell) {
@@ -874,6 +907,8 @@ class TopologyArena {
     m_vertices.overwrite(cellId, cell.m_vertices, static_cast<uint1>(cell.m_numVertices));
     m_facets.overwrite(cellId, cell.m_facets, static_cast<uint1>(cell.m_numFacets));
     m_nbrs.overwrite(cellId, cell.m_nbr, static_cast<uint1>(cell.m_numFacets));
+    m_planeVec.overwrite(cellId, cell.m_planeVec, static_cast<uint1>(cell.m_numFacets));
+    m_planeOffset.overwrite(cellId, cell.m_planeOffset, static_cast<uint1>(cell.m_numFacets));
   }
 
   void resize(uint2 numCells) {
@@ -883,6 +918,8 @@ class TopologyArena {
     m_vertices.resize(numCells);
     m_facets.resize(numCells);
     m_nbrs.resize(numCells);
+    m_planeVec.resize(numCells);
+    m_planeOffset.resize(numCells);
   }
 
   void prepare(uint2 numCells) {
@@ -892,6 +929,8 @@ class TopologyArena {
     m_vertices.prepare(numCells);
     m_facets.prepare(numCells);
     m_nbrs.prepare(numCells);
+    m_planeVec.prepare(numCells);
+    m_planeOffset.prepare(numCells);
   }
 
   size_t numCells() const { return m_ids.size(); }
@@ -906,6 +945,12 @@ class TopologyArena {
   }
   uint1 cellFacetLabel(size_t i, uint1 j) const { return m_facets.get(static_cast<uint2>(i), j); }
   uint2 cellNbr(size_t i, uint1 j) const { return m_nbrs.get(static_cast<uint2>(i), j); }
+  const std::array<real_t, 3>& cellPlaneVec(size_t i, uint1 j) const {
+    return m_planeVec.get(static_cast<uint2>(i), j);
+  }
+  real_t cellPlaneOffset(size_t i, uint1 j) const {
+    return m_planeOffset.get(static_cast<uint2>(i), j);
+  }
   const uint2* cellNbrData(size_t i) const {
     const uint2 cellId = static_cast<uint2>(i);
     if (cellNumFacets(i) <= PrimaryF)
@@ -935,6 +980,8 @@ class TopologyArena {
     for (uint1 j = 0; j < cell.m_numFacets; ++j) {
       cell.m_facets[j] = cellFacetLabel(i, j);
       cell.m_nbr[j] = cellNbr(i, j);
+      cell.m_planeVec[j] = cellPlaneVec(i, j);
+      cell.m_planeOffset[j] = cellPlaneOffset(i, j);
     }
   }
 
@@ -946,6 +993,8 @@ class TopologyArena {
     m_vertices.swap(other.m_vertices);
     m_facets.swap(other.m_facets);
     m_nbrs.swap(other.m_nbrs);
+    m_planeVec.swap(other.m_planeVec);
+    m_planeOffset.swap(other.m_planeOffset);
   }
 
  private:
@@ -954,6 +1003,8 @@ class TopologyArena {
   PrimaryOverflowArray<Vertex, PrimaryV> m_vertices;
   PrimaryOverflowArray<uint1, PrimaryF> m_facets;
   PrimaryOverflowArray<uint2, PrimaryF> m_nbrs;
+  PrimaryOverflowArray<std::array<real_t, 3>, PrimaryF> m_planeVec;
+  PrimaryOverflowArray<real_t, PrimaryF> m_planeOffset;
 };
 
 template <typename real_t>
@@ -1000,12 +1051,12 @@ class ConnectivityArena {
     std::vector<uint2> merged;
     merged.reserve(directNbrs.size() + extraCandidates.size());
     for (size_t i = 0; i < directNbrs.size(); ++i)
-      if (directNbrs[i] != noNbr)
+      if (directNbrs[i] != noNbr && directNbrs[i] != boundaryNbr)
         if (std::find(merged.begin(), merged.end(), directNbrs[i]) == merged.end())
           merged.push_back(directNbrs[i]);
     const uint1 directCount = static_cast<uint1>(merged.size());
     for (size_t i = 0; i < extraCandidates.size(); ++i)
-      if (extraCandidates[i] != noNbr)
+      if (extraCandidates[i] != noNbr && extraCandidates[i] != boundaryNbr)
         if (std::find(merged.begin(), merged.end(), extraCandidates[i]) == merged.end())
           merged.push_back(extraCandidates[i]);
     m_directCounts[cellId] = directCount;
@@ -1017,7 +1068,7 @@ class ConnectivityArena {
     std::vector<uint2> directNbrs;
     directNbrs.reserve(maker.m_numFacets);
     for (uint1 i = 0; i < maker.m_numFacets; ++i)
-      if (maker.m_nbr[i] != noNbr)
+      if (maker.m_nbr[i] != noNbr && maker.m_nbr[i] != boundaryNbr)
         directNbrs.push_back(maker.m_nbr[i]);
     overwrite(cellId, directNbrs, std::vector<uint2>());
   }
@@ -1156,6 +1207,32 @@ class GeometryArena {
   PrimaryOverflowArray<real_t, TopologyArena<real_t>::PrimaryF> m_connVSq;
 };
 
+template <typename real_t>
+class SignedDistanceBoundary {
+ public:
+  virtual ~SignedDistanceBoundary() {}
+  virtual real_t value(const std::array<real_t, 3>& x) const = 0;
+  virtual std::array<real_t, 3> gradient(const std::array<real_t, 3>& x) const = 0;
+
+  virtual bool closestPoint(const std::array<real_t, 3>& x, std::array<real_t, 3>& c,
+                            std::array<real_t, 3>& normal) const {
+    const std::array<real_t, 3> grad = gradient(x);
+    real_t gradSq = real_t(0);
+    for (uint0 k = 0; k < 3; ++k)
+      gradSq += grad[k] * grad[k];
+    if (gradSq <= real_t(0))
+      return false;
+    const real_t phi = value(x);
+    const real_t invGradSq = real_t(1) / gradSq;
+    const real_t invGrad = real_t(1) / std::sqrt(gradSq);
+    for (uint0 k = 0; k < 3; ++k) {
+      c[k] = x[k] - phi * grad[k] * invGradSq;
+      normal[k] = grad[k] * invGrad;
+    }
+    return true;
+  }
+};
+
 template <typename real_t, bool Weighted = false>
 class CellComplex : private detail::CellComplexWeightState<real_t, Weighted> {
  public:
@@ -1177,6 +1254,9 @@ class CellComplex : private detail::CellComplexWeightState<real_t, Weighted> {
   /// rebuild fallback.
   void update(const std::vector<std::array<real_t, 3> >& p);
   void update(const std::vector<std::array<real_t, 3> >& p, const std::vector<uint8_t>& active);
+  void setBoundary(const SignedDistanceBoundary<real_t>* boundary) { m_boundary = boundary; }
+  void clearBoundary() { m_boundary = NULL; }
+  bool hasBoundary() const { return m_boundary != NULL; }
   size_t numCells() const { return m_cellArena.numCells(); }
   CellView<real_t> getCellView(size_t i) const { return m_cellArena.getView(i); }
   ConnectivityView<real_t> getConnectivityView(size_t i) const { return m_connectivity.getView(i); }
@@ -1367,6 +1447,10 @@ class CellComplex : private detail::CellComplexWeightState<real_t, Weighted> {
   void buildFromCurrentActivity(const std::vector<std::array<real_t, 3> >& p, bool computeGeometry);
   void buildWeighted(const std::vector<std::array<real_t, 3> >& p,
                      const std::vector<uint8_t>* enabledMask, bool computeGeometry);
+  bool clipCellAgainstBoundary(CellMaker<real_t, Weighted>& maker, uint2 particleId,
+                               const std::vector<std::array<real_t, 3> >& p,
+                               bool* touchedBoundary = NULL) const;
+  bool cellHasOpenFacet(const Cell<real_t>& cell) const;
   void clearGeometryCache();
   void rebuildLegacyGeometryCache(const std::vector<std::array<real_t, 3> >& p);
   void commitCellGeometry(uint2 cellId, const TopologyArena<real_t>& cellArena,
@@ -1387,6 +1471,9 @@ class CellComplex : private detail::CellComplexWeightState<real_t, Weighted> {
   std::vector<uint2> m_activeParticleIds;
   std::vector<uint2> m_cellIndexByParticle;
   CellComplexUpdateStats m_lastUpdateStats;
+  const SignedDistanceBoundary<real_t>* m_boundary;
+  uint1 m_boundaryMaxCuts;
+  real_t m_boundaryTol;
   bool m_isBuild;
 };
 
@@ -1421,12 +1508,18 @@ Cell<real_t>::Cell(const Cell<real_t>& rhs)
   std::memcpy(m_vertices, rhs.m_vertices, m_numVertices * sizeof(m_vertices[0]));
   std::memcpy(m_facets, rhs.m_facets, m_numFacets * sizeof(m_facets[0]));
   std::memcpy(m_nbr, rhs.m_nbr, m_numFacets * sizeof(m_nbr[0]));
+  std::memcpy(m_planeVec, rhs.m_planeVec, m_numFacets * sizeof(m_planeVec[0]));
+  std::memcpy(m_planeOffset, rhs.m_planeOffset, m_numFacets * sizeof(m_planeOffset[0]));
 }
 
 template <typename real_t>
 void Cell<real_t>::reset(uint0 numVertices, uint0 numFacets) {
   m_numVertices = numVertices;
   m_numFacets = numFacets;
+  for (uint0 i = 0; i < numFacets; ++i) {
+    m_planeVec[i] = std::array<real_t, 3>{real_t(0), real_t(0), real_t(0)};
+    m_planeOffset[i] = real_t(0);
+  }
 }
 
 template <typename real_t>
@@ -1440,6 +1533,8 @@ Cell<real_t>& Cell<real_t>::operator=(const Cell<real_t>& rhs) {
   std::memcpy(m_vertices, rhs.m_vertices, m_numVertices * sizeof(m_vertices[0]));
   std::memcpy(m_facets, rhs.m_facets, m_numFacets * sizeof(m_facets[0]));
   std::memcpy(m_nbr, rhs.m_nbr, m_numFacets * sizeof(m_nbr[0]));
+  std::memcpy(m_planeVec, rhs.m_planeVec, m_numFacets * sizeof(m_planeVec[0]));
+  std::memcpy(m_planeOffset, rhs.m_planeOffset, m_numFacets * sizeof(m_planeOffset[0]));
   return *this;
 }
 
@@ -1462,6 +1557,8 @@ Cell<real_t>& Cell<real_t>::operator=(const CellView<real_t>& rhs) {
   for (uint1 i = 0; i < m_numFacets; ++i) {
     m_facets[i] = rhs.getFacet(i);
     m_nbr[i] = rhs.getNbr(i);
+    m_planeVec[i] = rhs.getFacetPlane(i);
+    m_planeOffset[i] = rhs.getFacetOffset(i);
   }
   detail::CellTopologyRef ref;
   ref.id = m_id;
@@ -1497,6 +1594,8 @@ Cell<real_t>& Cell<real_t>::operator=(CellMaker<real_t, Weighted>& rhs) {
   std::memcpy(m_vertices, rhs.m_vertices, m_numVertices * sizeof(m_vertices[0]));
   std::memcpy(m_facets, rhs.m_facets, m_numFacets * sizeof(m_facets[0]));
   std::memcpy(m_nbr, rhs.m_nbr, m_numFacets * sizeof(m_nbr[0]));
+  std::memcpy(m_planeVec, rhs.m_planeVec, m_numFacets * sizeof(m_planeVec[0]));
+  std::memcpy(m_planeOffset, rhs.m_planeOffset, m_numFacets * sizeof(m_planeOffset[0]));
   return *this;
 }
 
@@ -1718,6 +1817,8 @@ CellMaker<real_t, Weighted>::CellMaker(ConstructionArena<real_t>& arena)
     , m_vertices(NULL)
     , m_facets(NULL)
     , m_nbr(NULL)
+    , m_planeVec(NULL)
+    , m_planeOffset(NULL)
     , m_checkGridCell(arena.checkGridCell())
     , m_checkGCHead(0u)
     , m_isAllCut(false)
@@ -1747,6 +1848,8 @@ void CellMaker<real_t, Weighted>::bindArenaStorage() {
   m_vertices = m_arena->verticesData();
   m_facets = m_arena->facetsData();
   m_nbr = m_arena->nbrData();
+  m_planeVec = m_arena->planeVecData();
+  m_planeOffset = m_arena->planeOffsetData();
   m_dist = m_arena->distData();
   m_knownDistGen = m_arena->knownDistGenData();
   m_distGC = m_arena->distGCData();
@@ -1822,9 +1925,21 @@ bool CellMaker<real_t, Weighted>::candidateMightCut(real_t planeOffset, real_t r
 template <typename real_t, bool Weighted>
 bool CellMaker<real_t, Weighted>::applyCut(const std::array<real_t, 3>& p, real_t rSqHalf, uint2 nbr) {
   const real_t planeOffset = cutPlaneOffset(rSqHalf, nbr);
+  return applyPlaneCut(p, planeOffset, nbr);
+}
+
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::applyPlaneCut(const std::array<real_t, 3>& planeVec,
+                                                real_t planeOffset, uint2 nbr) {
   if (kUseCutCell2)
-    return cutCell2(p, planeOffset, nbr);
-  return cutCell(p, planeOffset, nbr);
+    return cutCell2(planeVec, planeOffset, nbr);
+  return cutCell(planeVec, planeOffset, nbr);
+}
+
+template <typename real_t, bool Weighted>
+bool CellMaker<real_t, Weighted>::clipByPlane(const std::array<real_t, 3>& planeVec,
+                                              real_t planeOffset, uint2 facetTag) {
+  return applyPlaneCut(planeVec, planeOffset, facetTag);
 }
 
 template <typename real_t, bool Weighted>
@@ -1906,6 +2021,8 @@ void CellMaker<real_t, Weighted>::init(const Cell<real_t>& cell) {
   std::fill(m_arena->aliveF().begin(), m_arena->aliveF().begin() + cell.m_numFacets, uint8_t(1));
   std::memcpy(m_facets, cell.m_facets, cell.m_numFacets * sizeof(m_facets[0]));
   std::memcpy(m_nbr, cell.m_nbr, cell.m_numFacets * sizeof(m_nbr[0]));
+  std::memcpy(m_planeVec, cell.m_planeVec, cell.m_numFacets * sizeof(m_planeVec[0]));
+  std::memcpy(m_planeOffset, cell.m_planeOffset, cell.m_numFacets * sizeof(m_planeOffset[0]));
   computeAllRsq();
   resetDist();
   const std::numeric_limits<real_t> lim;
@@ -1938,6 +2055,8 @@ void CellMaker<real_t, Weighted>::init(const CellView<real_t>& cell) {
   for (uint1 i = 0; i < facetCount; ++i) {
     m_facets[i] = cell.getFacet(i);
     m_nbr[i] = cell.getNbr(i);
+    m_planeVec[i] = cell.getFacetPlane(i);
+    m_planeOffset[i] = cell.getFacetOffset(i);
   }
   computeAllRsq();
   resetDist();
@@ -2064,6 +2183,8 @@ void CellMaker<real_t, Weighted>::renumber() {
       if (i != m_numFacets) {
         m_facets[m_numFacets] = m_facets[i];
         m_nbr[m_numFacets] = m_nbr[i];
+        m_planeVec[m_numFacets] = m_planeVec[i];
+        m_planeOffset[m_numFacets] = m_planeOffset[i];
       }
       ++m_numFacets;
     }
@@ -2232,7 +2353,8 @@ void CellMaker<real_t, Weighted>::getAllDistGCVerb() {
 }
 
 template <typename real_t, bool Weighted>
-bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
+bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> planeVec,
+                                           real_t planeOffset, uint2 nbr) {
   //    printf("entering cutCell\n");
   resetDist();
   if (m_slotsV.empty())
@@ -2247,12 +2369,13 @@ bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> p, real_t
   bool found(false);
   uint1 edgeStart(0);
   //    printf("computeDist(%u, p, rSqHalf): %f\n", v1, computeDist(v1, p, rSqHalf));
-  if (computeDist(v1, p, rSqHalf) > 0) {
+  if (computeDist(v1, planeVec, planeOffset) > 0) {
     // find the first negative vertex by going down
     uint0 k(0);
     while (m_dist[v1] > 0 && k < 3) {
       k = 0;
-      while (k < 3 && computeDist(getVertex(m_vertices[v1][k]), p, rSqHalf) >= m_dist[v1])
+      while (k < 3 &&
+             computeDist(getVertex(m_vertices[v1][k]), planeVec, planeOffset) >= m_dist[v1])
         ++k;
       if (k < 3) {
         // smaller value found
@@ -2266,7 +2389,7 @@ bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> p, real_t
       // all found distances larger than zero
       // for Voronoi construction this can only occur due to round-off errors...
       // lets do an exhaustive search to find a possible negative distance
-      computeAllDist(p, rSqHalf);
+      computeAllDist(planeVec, planeOffset);
       real_t distMax = 0;
       for (uint1 i = 0; i < m_slotsV.numAllocated(); ++i) {
         if (m_slotsV.isFree(i))
@@ -2275,7 +2398,7 @@ bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> p, real_t
           for (uint1 k(0); k < 3; ++k) {
             uint1 nbrVertex(getVertex(m_vertices[i][k]));
             bool isKnown = (m_knownDistGen[nbrVertex] == m_distGen);
-            real_t nbrDist = computeDist(nbrVertex, p, rSqHalf);
+            real_t nbrDist = computeDist(nbrVertex, planeVec, planeOffset);
             if (nbrDist > 0) {
               found = true;
               real_t newDist(nbrDist - m_dist[i]);
@@ -2298,7 +2421,8 @@ bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> p, real_t
     uint0 k(0);
     while (m_dist[v1] <= 0 && k < 3) {
       k = 0;
-      while (k < 3 && computeDist(getVertex(m_vertices[v1][k]), p, rSqHalf) <= m_dist[v1])
+      while (k < 3 &&
+             computeDist(getVertex(m_vertices[v1][k]), planeVec, planeOffset) <= m_dist[v1])
         ++k;
       if (k < 3) {
         // larger value found
@@ -2339,8 +2463,9 @@ bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> p, real_t
     m_newVerticesWrk.push_back(vNew);
     // compute new positions
     {
-      real_t lambda(computeDist(vRev, p, rSqHalf) /
-                    (computeDist(vRev, p, rSqHalf) - computeDist(v, p, rSqHalf)));
+      real_t lambda(computeDist(vRev, planeVec, planeOffset) /
+                    (computeDist(vRev, planeVec, planeOffset) -
+                     computeDist(v, planeVec, planeOffset)));
       for (uint0 k(0); k < 3; ++k)
         m_vertexPos[vNew][k] = lambda * m_vertexPos[v][k] + (1.0 - lambda) * m_vertexPos[vRev][k];
     }
@@ -2361,7 +2486,7 @@ bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> p, real_t
       // printf("label: %u %u %u\n", getFacet(m_vertices[vRev][eRev]),
       // getVertex(m_vertices[vRev][eRev]), getEdge(m_vertices[vRev][eRev]));
       m_vertices[vRev][eRev] = (fDummyShifted | (m_vertices[vRev][eRev] & (~maskFacet)));
-    } while (computeDist(vRev, p, rSqHalf) > 0);
+    } while (computeDist(vRev, planeVec, planeOffset) > 0);
     // printf("test: vRev %u\n", vRev);
     uint1 vSwap = vRev;
     uint1 eSwap = eRev;
@@ -2389,6 +2514,8 @@ bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> p, real_t
     }
     m_facets[facetNew] = makeLabel(facetNew, m_newVerticesWrk[0], 1);
     m_nbr[facetNew] = nbr;
+    m_planeVec[facetNew] = planeVec;
+    m_planeOffset[facetNew] = planeOffset;
   }
   for (uint i(0); i < m_newVerticesWrk.size(); ++i) {
     computeRsq(m_newVerticesWrk[i]);
@@ -2442,9 +2569,10 @@ bool CellMaker<real_t, Weighted>::cutCell2(const std::array<real_t, 3> p, real_t
 }
 
 template <typename real_t, bool Weighted>
-bool CellMaker<real_t, Weighted>::cutCell(const std::array<real_t, 3> p, real_t rSqHalf, uint2 nbr) {
+bool CellMaker<real_t, Weighted>::cutCell(const std::array<real_t, 3> planeVec,
+                                          real_t planeOffset, uint2 nbr) {
   //    printf("entering cutCell\n");
-  computeAllDist(p, rSqHalf);
+  computeAllDist(planeVec, planeOffset);
   if (m_distMax <= 0)
     return false;  // no cell cut
   // Find an edge for which the vertices change sign
@@ -2500,8 +2628,9 @@ bool CellMaker<real_t, Weighted>::cutCell(const std::array<real_t, 3> p, real_t 
     m_newVerticesWrk.push_back(vNew);
     // compute new positions
     {
-      real_t lambda(computeDist(vRev, p, rSqHalf) /
-                    (computeDist(vRev, p, rSqHalf) - computeDist(v, p, rSqHalf)));
+      real_t lambda(computeDist(vRev, planeVec, planeOffset) /
+                    (computeDist(vRev, planeVec, planeOffset) -
+                     computeDist(v, planeVec, planeOffset)));
       for (uint0 k(0); k < 3; ++k)
         m_vertexPos[vNew][k] = lambda * m_vertexPos[v][k] + (1.0 - lambda) * m_vertexPos[vRev][k];
     }
@@ -2522,7 +2651,7 @@ bool CellMaker<real_t, Weighted>::cutCell(const std::array<real_t, 3> p, real_t 
       // printf("label: %u %u %u\n", getFacet(m_vertices[vRev][eRev]),
       // getVertex(m_vertices[vRev][eRev]), getEdge(m_vertices[vRev][eRev]));
       m_vertices[vRev][eRev] = (fDummyShifted | (m_vertices[vRev][eRev] & (~maskFacet)));
-    } while (computeDist(vRev, p, rSqHalf) > 0);
+    } while (computeDist(vRev, planeVec, planeOffset) > 0);
     // printf("test: vRev %u\n", vRev);
     uint1 vSwap = vRev;
     uint1 eSwap = eRev;
@@ -2550,6 +2679,8 @@ bool CellMaker<real_t, Weighted>::cutCell(const std::array<real_t, 3> p, real_t 
     }
     m_facets[facetNew] = makeLabel(facetNew, m_newVerticesWrk[0], 1);
     m_nbr[facetNew] = nbr;
+    m_planeVec[facetNew] = planeVec;
+    m_planeOffset[facetNew] = planeOffset;
   }
   for (uint i(0); i < m_newVerticesWrk.size(); ++i) {
     computeRsq(m_newVerticesWrk[i]);
@@ -2880,15 +3011,24 @@ CellGeometry<real_t>& CellGeometry<real_t>::operator=(const CellGeometry<real_t>
 
 template <typename real_t>
 void CellGeometry<real_t>::computeConnectingVectors(const std::vector<std::array<real_t, 3> >& pos,
-                                                    const Box<real_t>& box) {
+                                                    const Box<real_t>& box,
+                                                    const std::vector<real_t>* weights) {
   m_connV.resize(p_cell->m_numFacets);
   m_rSq.resize(p_cell->m_numFacets);
   for (uint1 i(0); i < p_cell->m_numFacets; ++i) {
+    const uint2 nbrId = p_cell->m_nbr[i];
+    if (nbrId == boundaryNbr || nbrId == noNbr || nbrId >= pos.size()) {
+      m_connV[i] = p_cell->m_planeVec[i];
+      m_rSq[i] = p_cell->m_planeOffset[i];
+      continue;
+    }
     for (uint0 k(0); k < 3; ++k)
-      m_connV[i][k] = pos[p_cell->m_nbr[i]][k] - pos[(p_cell->m_id)][k];
+      m_connV[i][k] = pos[nbrId][k] - pos[p_cell->m_id][k];
     box.makeShortestDistance(m_connV[i]);
     m_rSq[i] = 0.5 * (m_connV[i][0] * m_connV[i][0] + m_connV[i][1] * m_connV[i][1] +
                       m_connV[i][2] * m_connV[i][2]);
+    if (weights != NULL && p_cell->m_id < weights->size() && nbrId < weights->size())
+      m_rSq[i] += real_t(0.5) * ((*weights)[p_cell->m_id] - (*weights)[nbrId]);
   }
 }
 
@@ -2996,30 +3136,46 @@ real_t CellGeometry<real_t>::maxConvexViolation() const {
 
 template <typename real_t>
 void CellGeometry<real_t>::computeVolume() {
-  m_vol = 0;
+  std::vector<std::array<real_t, 3> > area(p_cell->m_numFacets);
+  for (uint1 i = 0; i < p_cell->m_numFacets; ++i)
+    for (uint0 k = 0; k < 3; ++k)
+      area[i][k] = real_t(0);
+
+  std::array<real_t, 3> dA;
   for (uint1 i(0); i < p_cell->m_numVertices; ++i)
     for (uint0 k(0); k < 3; ++k) {
       uint1 label0(p_cell->m_vertices[i][k]);
       uint1 label1(p_cell->getReverseLabel(label0));
       if (label0 > label1)
         continue;
-      uint1 e0(getEdge(label0));
       uint1 v0(getVertex(label0));
       uint1 f0(getFacet(label0));
-      uint1 e1(getEdge(label1));
       uint1 v1(getVertex(label1));
       uint1 f1(getFacet(label1));
-      m_vol += (m_connV[f0][0] - m_connV[f1][0]) *
-               (p_cell->m_vertexPos[v0][1] * p_cell->m_vertexPos[v1][2] -
-                p_cell->m_vertexPos[v0][2] * p_cell->m_vertexPos[v1][1]);
-      m_vol += (m_connV[f0][1] - m_connV[f1][1]) *
-               (p_cell->m_vertexPos[v0][2] * p_cell->m_vertexPos[v1][0] -
-                p_cell->m_vertexPos[v0][0] * p_cell->m_vertexPos[v1][2]);
-      m_vol += (m_connV[f0][2] - m_connV[f1][2]) *
-               (p_cell->m_vertexPos[v0][0] * p_cell->m_vertexPos[v1][1] -
-                p_cell->m_vertexPos[v0][1] * p_cell->m_vertexPos[v1][0]);
+      dA[0] = p_cell->m_vertexPos[v0][1] * p_cell->m_vertexPos[v1][2] -
+              p_cell->m_vertexPos[v0][2] * p_cell->m_vertexPos[v1][1];
+      dA[1] = p_cell->m_vertexPos[v0][2] * p_cell->m_vertexPos[v1][0] -
+              p_cell->m_vertexPos[v0][0] * p_cell->m_vertexPos[v1][2];
+      dA[2] = p_cell->m_vertexPos[v0][0] * p_cell->m_vertexPos[v1][1] -
+              p_cell->m_vertexPos[v0][1] * p_cell->m_vertexPos[v1][0];
+      for (uint0 m = 0; m < 3; ++m) {
+        area[f0][m] += dA[m];
+        area[f1][m] -= dA[m];
+      }
     }
-  m_vol /= 12.0;
+
+  m_vol = 0;
+  for (uint1 i = 0; i < p_cell->m_numFacets; ++i) {
+    real_t planeNormSq = real_t(0);
+    real_t areaDotPlane = real_t(0);
+    for (uint0 k = 0; k < 3; ++k) {
+      area[i][k] *= real_t(0.5);
+      planeNormSq += m_connV[i][k] * m_connV[i][k];
+      areaDotPlane += area[i][k] * m_connV[i][k];
+    }
+    if (planeNormSq > real_t(0))
+      m_vol += areaDotPlane * (m_rSq[i] / planeNormSq) / real_t(3);
+  }
 }
 
 template <typename real_t>
@@ -3055,12 +3211,16 @@ void CellGeometry<real_t>::computeAreas() {
       }
     }
   for (uint1 i(0); i < m_areas.size(); ++i) {
+    real_t planeNormSq = real_t(0);
+    real_t areaDotPlane = real_t(0);
     for (uint0 k(0); k < 3; ++k) {
       m_areas[i][k] *= 0.5;
-      m_vol += m_areas[i][k] * m_connV[i][k];
+      planeNormSq += m_connV[i][k] * m_connV[i][k];
+      areaDotPlane += m_areas[i][k] * m_connV[i][k];
     }
+    if (planeNormSq > real_t(0))
+      m_vol += areaDotPlane * (m_rSq[i] / planeNormSq) / real_t(3);
   }
-  m_vol /= 6.0;
   printf("volume: %f\n", m_vol);
 }
 
@@ -3125,10 +3285,16 @@ void CellGeometry<real_t>::diffVolume() {
     }
   }
   for (uint1 i(0); i < p_cell->m_numFacets; ++i)
-    for (uint0 k(0); k < 3; ++k) {
-      m_vol += m_areas[i][k] * m_connV[i][k];
+    {
+      real_t planeNormSq = real_t(0);
+      real_t areaDotPlane = real_t(0);
+      for (uint0 k(0); k < 3; ++k) {
+        planeNormSq += m_connV[i][k] * m_connV[i][k];
+        areaDotPlane += m_areas[i][k] * m_connV[i][k];
+      }
+      if (planeNormSq > real_t(0))
+        m_vol += areaDotPlane * (m_rSq[i] / planeNormSq) / real_t(3);
     }
-  m_vol /= 6.0;
   //    printf("connecting vector: %f %f %f\n", m_connV[0][0], m_connV[0][1], m_connV[0][2]);
   // printf("volume: %f %f\n", m_vol, vol);
   //    printf("nbr: %u\n",p_cell->m_nbr[0]);
@@ -3275,6 +3441,8 @@ std::array<std::array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradient(
     for (int k(0); k < 3; ++k)
       gradV[l][k] = 0.0;
   for (int i(0); i < m_areas.size(); ++i) {
+    if (p_cell->m_nbr[i] >= velocities.size())
+      continue;
     std::array<real_t, 3> v = velocities[p_cell->m_nbr[i]];
     for (int j(0); j < 3; ++j)
       for (int k(0); k < 3; ++k)
@@ -3309,6 +3477,8 @@ std::array<std::array<real_t, 3>, 3> CellGeometry<real_t>::velocityGradientDelau
       gradV[l][k] = 0.0;
   std::array<real_t, 3> v0 = velocities[p_cell->getID()];
   for (uint0 m(0); m < 3; ++m) {
+    if (nbrs[m] >= velocities.size())
+      continue;
     std::array<real_t, 3> v = velocities[nbrs[m]];
     std::array<real_t, 3> dv;
     for (uint0 k(0); k < 3; ++k)
@@ -3337,13 +3507,15 @@ template <typename real_t>
 std::array<real_t, 3> CellGeometry<real_t>::force(
     const std::vector<std::array<std::array<real_t, 3>, 3> >& stresses) const {
   std::array<real_t, 3> f;  // gradV[i][j] = dv[i]/dx[j]
-  std::array<std::array<real_t, 3>, 3> stressCenter = stresses[p_cell->id];
+  std::array<std::array<real_t, 3>, 3> stressCenter = stresses[p_cell->getID()];
   // omega[i][j][l][k]
   // neighbor corresponding to facet i differentiated into j-direction
   // l: displacement direction, k: normal direction
   for (int j(0); j < 3; ++j)
     f[j] = 0.0;
   for (int i(0); i < m_omega.size(); ++i) {
+    if (p_cell->m_nbr[i] >= stresses.size())
+      continue;
     std::array<std::array<real_t, 3>, 3> stress = stresses[p_cell->m_nbr[i]];
     std::array<std::array<real_t, 3>, 3> dStress;
     for (int l(0); l < 3; ++l)
@@ -3446,7 +3618,8 @@ CellComplex<real_t, Weighted>::CellComplex(Box<real_t>* box)
 
 template <typename real_t, bool Weighted>
 CellComplex<real_t, Weighted>::CellComplex(Box<real_t>* box, size_t workerCount)
-    : m_nbrList(box), m_isBuild(false) {
+    : m_nbrList(box), m_boundary(NULL), m_boundaryMaxCuts(8u), m_boundaryTol(real_t(1e-8)),
+      m_isBuild(false) {
   m_team.start(workerCount);
   ensureWorkerContexts(std::max<size_t>(workerCount, 1));
 }
@@ -3721,6 +3894,114 @@ void CellComplex<real_t, Weighted>::initNbrList(const std::vector<std::array<rea
 }
 
 template <typename real_t, bool Weighted>
+bool CellComplex<real_t, Weighted>::cellHasOpenFacet(const Cell<real_t>& cell) const {
+  for (uint1 facet = 0; facet < cell.numFacets(); ++facet)
+    if (cell.getNbr(facet) == noNbr)
+      return true;
+  return false;
+}
+
+template <typename real_t, bool Weighted>
+bool CellComplex<real_t, Weighted>::clipCellAgainstBoundary(
+    CellMaker<real_t, Weighted>& maker, uint2 particleId, const std::vector<std::array<real_t, 3> >& p,
+    bool* touchedBoundary) const {
+  if (touchedBoundary != NULL)
+    *touchedBoundary = false;
+  if (m_boundary == NULL || particleId >= p.size() || maker.numVertices() == 0 || maker.numFacets() == 0)
+    return false;
+
+  Cell<real_t> cell;
+  cell = maker;
+
+  real_t maxRsq = real_t(0);
+  for (uint1 i = 0; i < cell.m_numVertices; ++i) {
+    real_t rSq = real_t(0);
+    for (uint0 k = 0; k < 3; ++k)
+      rSq += cell.m_vertexPos[i][k] * cell.m_vertexPos[i][k];
+    if (rSq > maxRsq)
+      maxRsq = rSq;
+  }
+
+  const std::array<real_t, 3>& center = p[particleId];
+  const real_t phiCenter = m_boundary->value(center);
+  if (phiCenter <= real_t(0)) {
+    Cell<real_t> empty;
+    empty.reset(0, 0);
+    maker = empty;
+    if (touchedBoundary != NULL)
+      *touchedBoundary = true;
+    return true;
+  }
+  const real_t radius = std::sqrt(std::max(real_t(0), maxRsq));
+  if (phiCenter > radius + m_boundaryTol)
+    return false;
+
+  bool anyCut = false;
+  bool seedPlaneApplied = false;
+  for (uint1 iter = 0; iter < m_boundaryMaxCuts; ++iter) {
+    std::array<real_t, 3> probe = center;
+    real_t probePhi = phiCenter;
+    if (seedPlaneApplied) {
+      bool foundViolation = false;
+      for (uint1 i = 0; i < cell.m_numVertices; ++i) {
+        std::array<real_t, 3> x = center;
+        for (uint0 k = 0; k < 3; ++k)
+          x[k] += cell.m_vertexPos[i][k];
+        const real_t phi = m_boundary->value(x);
+        if (!foundViolation || phi < probePhi) {
+          probe = x;
+          probePhi = phi;
+          foundViolation = true;
+        }
+      }
+      if (!foundViolation || probePhi >= -m_boundaryTol)
+        break;
+    }
+
+    std::array<real_t, 3> surfacePoint;
+    std::array<real_t, 3> normal;
+    if (!m_boundary->closestPoint(probe, surfacePoint, normal)) {
+      if (phiCenter <= real_t(0)) {
+        Cell<real_t> empty;
+        empty.reset(0, 0);
+        maker = empty;
+        return true;
+      }
+      break;
+    }
+
+    std::array<real_t, 3> insideTest = surfacePoint;
+    const real_t eps = std::max(real_t(1e-6), real_t(1e-3) * (radius + real_t(1)));
+    for (uint0 k = 0; k < 3; ++k)
+      insideTest[k] += eps * normal[k];
+    if (m_boundary->value(insideTest) <= real_t(0))
+      for (uint0 k = 0; k < 3; ++k)
+        normal[k] = -normal[k];
+
+    std::array<real_t, 3> planeVec;
+    real_t planeOffset = real_t(0);
+    for (uint0 k = 0; k < 3; ++k) {
+      planeVec[k] = -normal[k];
+      planeOffset += planeVec[k] * (surfacePoint[k] - center[k]);
+    }
+
+    const bool cut = maker.clipByPlane(planeVec, planeOffset, boundaryNbr);
+    if (touchedBoundary != NULL)
+      *touchedBoundary = true;
+    seedPlaneApplied = true;
+    if (cut) {
+      anyCut = true;
+      maker.renumber();
+      if (maker.numVertices() == 0 || maker.numFacets() == 0)
+        break;
+      cell = maker;
+    }
+  }
+
+  return anyCut;
+}
+
+template <typename real_t, bool Weighted>
 void CellComplex<real_t, Weighted>::ensureWorkerContexts(size_t count) {
   while (m_workers.size() < count)
     m_workers.emplace_back(new WorkerContext());
@@ -3746,6 +4027,8 @@ void CellComplex<real_t, Weighted>::buildFromCurrentActivity(
       else
         maker.setWeights(NULL);
       maker.build(activeParticleIds[i], p, m_nbrList, cub);
+      maker.renumber();
+      clipCellAgainstBoundary(maker, activeParticleIds[i], p);
       m_cellArena.insertFromMaker(static_cast<uint2>(i), maker);
       m_connectivity.overwriteFromMaker(static_cast<uint2>(i), maker);
     });
@@ -3822,16 +4105,13 @@ void CellComplex<real_t, Weighted>::buildWeighted(const std::vector<std::array<r
     maker.setWeights(&this->m_weights);
     maker.build(static_cast<uint2>(i), p, m_nbrList, cub);
     maker.renumber();
+    clipCellAgainstBoundary(maker, static_cast<uint2>(i), p);
+    maker.renumber();
     if (maker.numVertices() == 0 || maker.numFacets() == 0)
       return;
-    bool hasNoNbr = false;
-    for (uint1 facet = 0; facet < maker.numFacets(); ++facet) {
-      if (maker.getNbrs()[facet] == noNbr) {
-        hasNoNbr = true;
-        break;
-      }
-    }
-    if (hasNoNbr)
+    Cell<real_t> builtCell;
+    builtCell = maker;
+    if (cellHasOpenFacet(builtCell))
       return;
     builtCells[i] = maker;
     nonEmpty[i] = 1u;
@@ -3852,15 +4132,15 @@ void CellComplex<real_t, Weighted>::buildWeighted(const std::vector<std::array<r
   m_cellArena.rebuildFromCells(packedCells);
   m_connectivity.resize(static_cast<uint2>(packedCells.size()));
   for (size_t i = 0; i < packedCells.size(); ++i) {
-    std::vector<uint2> directNbrs;
-    directNbrs.reserve(packedCells[i].numFacets());
-    for (uint1 facet = 0; facet < packedCells[i].numFacets(); ++facet) {
-      const uint2 nbrId = packedCells[i].getNbr(facet);
-      if (nbrId != noNbr)
-        directNbrs.push_back(nbrId);
-    }
-    m_connectivity.overwrite(static_cast<uint2>(i), directNbrs, std::vector<uint2>());
-  }
+        std::vector<uint2> directNbrs;
+        directNbrs.reserve(packedCells[i].numFacets());
+        for (uint1 facet = 0; facet < packedCells[i].numFacets(); ++facet) {
+          const uint2 nbrId = packedCells[i].getNbr(facet);
+          if (nbrId != noNbr && nbrId != boundaryNbr)
+            directNbrs.push_back(nbrId);
+        }
+        m_connectivity.overwrite(static_cast<uint2>(i), directNbrs, std::vector<uint2>());
+      }
 
   if (computeGeometry)
     buildGeometry(p);
@@ -3910,7 +4190,10 @@ void CellComplex<real_t, Weighted>::commitCellGeometry(uint2 cellId, const Topol
                           const std::vector<std::array<real_t, 3> >& p) {
   CellGeometry<real_t> geom;
   geom = cellArena.getView(cellId);
-  geom.computeConnectingVectors(p, m_nbrList.getBox());
+  if constexpr (Weighted)
+    geom.computeConnectingVectors(p, m_nbrList.getBox(), &this->m_weights);
+  else
+    geom.computeConnectingVectors(p, m_nbrList.getBox(), NULL);
   geom.computeEdgeInv();
   geom.diffVolume();
   geomCache[cellId] = geom;
@@ -4012,6 +4295,8 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
         hasNoNbr = true;
         continue;
       }
+      if (nbrId == boundaryNbr)
+        continue;
       if (std::find(out.begin(), out.end(), nbrId) == out.end())
         out.push_back(nbrId);
     }
@@ -4020,7 +4305,10 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
 
   parallelForPersistent(m_cellArena.numCells(), [&](size_t i, size_t workerId) {
     CellGeometry<real_t> geom = m_geom[i];
-    geom.computeConnectingVectors(p, box);
+    if constexpr (Weighted)
+      geom.computeConnectingVectors(p, box, &this->m_weights);
+    else
+      geom.computeConnectingVectors(p, box, NULL);
     geom.computeEdgeInv();
     geom.updateVertexPos();
     if (!geom.isConvex()) {
@@ -4078,11 +4366,25 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
         ++initialQueued;
       }
     }
+    for (size_t i = 0; i < desiredActiveIds.size(); ++i) {
+      const uint2 particleId = desiredActiveIds[i];
+      if (this->m_particleHasCell[particleId] != 0u)
+        continue;
+      if (taskState[particleId].load(std::memory_order_relaxed) != kTaskUnseen)
+        continue;
+      taskState[particleId].store(kTaskQueued, std::memory_order_relaxed);
+      forceFullState[particleId].store(1u, std::memory_order_relaxed);
+      workQueues[i % workerCount].push_back(AsyncTask{particleId, 1u});
+      ++initialQueued;
+    }
   }
   if (initialQueued == 0) {
     for (size_t i = 0; i < m_geom.size(); ++i) {
       CellGeometry<real_t> geom = m_geom[i];
-      geom.computeConnectingVectors(p, box);
+      if constexpr (Weighted)
+        geom.computeConnectingVectors(p, box, &this->m_weights);
+      else
+        geom.computeConnectingVectors(p, box, NULL);
       geom.computeEdgeInv();
       geom.updateVertexPos();
       if (geom.isConvex())
@@ -4161,14 +4463,13 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
           continue;
         maker.build(candidateId, p, m_nbrList, cub);
         maker.renumber();
-        bool hasNoNbr = false;
-        for (uint1 facet = 0; facet < maker.numFacets(); ++facet) {
-          if (maker.getNbrs()[facet] == noNbr) {
-            hasNoNbr = true;
-            break;
-          }
-        }
-        if (maker.numVertices() == 0 || maker.numFacets() == 0 || hasNoNbr)
+        clipCellAgainstBoundary(maker, candidateId, p);
+        maker.renumber();
+        if (maker.numVertices() == 0 || maker.numFacets() == 0)
+          continue;
+        Cell<real_t> candidateCell;
+        candidateCell = maker;
+        if (cellHasOpenFacet(candidateCell))
           continue;
         insertedCells[candidateId] = maker;
         insertedState[candidateId].store(1u, std::memory_order_release);
@@ -4249,7 +4550,10 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
       if constexpr (Weighted) {
         if (cellId != noNbr) {
           geom = m_geom[cellId];
-          geom.computeConnectingVectors(p, box);
+          if constexpr (Weighted)
+            geom.computeConnectingVectors(p, box, &this->m_weights);
+          else
+            geom.computeConnectingVectors(p, box, NULL);
           geom.computeEdgeInv();
           geom.updateVertexPos();
           isConvex = geom.isConvex();
@@ -4263,7 +4567,10 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
         }
       } else {
         geom = m_geom[cellId];
-        geom.computeConnectingVectors(p, box);
+        if constexpr (Weighted)
+          geom.computeConnectingVectors(p, box, &this->m_weights);
+        else
+          geom.computeConnectingVectors(p, box, NULL);
         geom.computeEdgeInv();
         geom.updateVertexPos();
         isConvex = geom.isConvex();
@@ -4280,15 +4587,18 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
       bool hasNoNbr = false;
       bool usedLocal = false;
       bool localCutChanged = false;
+      bool boundaryChanged = false;
 
       if (!forceFull && isConvex) {
         usedLocal = true;
         ++localByWorker[tid];
         localCutChanged = maker.build(particleId, p, m_nbrList, *pBaseCell, oldDirect);
         maker.renumber();
+        boundaryChanged = clipCellAgainstBoundary(maker, particleId, p);
+        maker.renumber();
         collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
 
-        if (!localCutChanged && newDirect == oldDirect && !hasNoNbr) {
+        if (!localCutChanged && !boundaryChanged && newDirect == oldDirect && !hasNoNbr) {
           geom.diffVolume();
           m_geom[cellId] = geom;
           m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), geom);
@@ -4303,7 +4613,10 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
           Cell<real_t> checkedCell;
           checkedCell = maker;
           CellGeometry<real_t> checkedGeom(checkedCell);
-          checkedGeom.computeConnectingVectors(p, box);
+          if constexpr (Weighted)
+            checkedGeom.computeConnectingVectors(p, box, &this->m_weights);
+          else
+            checkedGeom.computeConnectingVectors(p, box, NULL);
           checkedGeom.computeEdgeInv();
           checkedGeom.updateVertexPos();
           checkedGeom.computeVolume();
@@ -4317,6 +4630,8 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
 
       if (!isConvex || !usedLocal) {
         maker.build(particleId, p, m_nbrList, cub);
+        maker.renumber();
+        boundaryChanged = clipCellAgainstBoundary(maker, particleId, p) || boundaryChanged;
         maker.renumber();
         collectDirectNbrs(maker.getNbrs(), maker.numFacets(), newDirect, hasNoNbr);
         ++fullByWorker[tid];
@@ -4334,7 +4649,8 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
         }
       }
 
-      if (!usedLocal && !forceFull && isConvex && newDirect == oldDirect && !hasNoNbr) {
+      if (!usedLocal && !forceFull && isConvex && !boundaryChanged && newDirect == oldDirect &&
+          !hasNoNbr) {
         geom.diffVolume();
         m_geom[cellId] = geom;
         m_geometry.overwriteFromLegacy(cellId, m_cellArena.cellId(cellId), geom);
@@ -4454,7 +4770,7 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
         directNbrs.reserve(packedCells[i].numFacets());
         for (uint1 facet = 0; facet < packedCells[i].numFacets(); ++facet) {
           const uint2 nbrId = packedCells[i].getNbr(facet);
-          if (nbrId != noNbr && nbrId < this->m_particleHasCell.size() &&
+          if (nbrId != noNbr && nbrId != boundaryNbr && nbrId < this->m_particleHasCell.size() &&
               this->m_particleHasCell[nbrId] != 0u)
             directNbrs.push_back(nbrId);
         }
@@ -4479,7 +4795,7 @@ void CellComplex<real_t, Weighted>::update(const std::vector<std::array<real_t, 
     std::abort();
   }
   setParticleActivity(active);
-  update(p);
+  this->update(p);
 }
 
 template <typename real_t, bool Weighted>
