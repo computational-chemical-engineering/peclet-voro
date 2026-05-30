@@ -3618,7 +3618,7 @@ CellComplex<real_t, Weighted>::CellComplex(Box<real_t>* box)
 
 template <typename real_t, bool Weighted>
 CellComplex<real_t, Weighted>::CellComplex(Box<real_t>* box, size_t workerCount)
-    : m_nbrList(box), m_boundary(NULL), m_boundaryMaxCuts(8u), m_boundaryTol(real_t(1e-8)),
+    : m_nbrList(box), m_boundary(NULL), m_boundaryMaxCuts(24u), m_boundaryTol(real_t(1e-8)),
       m_isBuild(false) {
   m_team.start(workerCount);
   ensureWorkerContexts(std::max<size_t>(workerCount, 1));

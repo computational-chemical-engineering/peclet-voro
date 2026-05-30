@@ -19,6 +19,8 @@ using vor::uint2;
 
 namespace {
 
+const double kPi = 3.141592653589793238462643383279502884;
+
 class SlabBoundary : public SignedDistanceBoundary<double> {
  public:
   SlabBoundary(double xmin, double xmax) : m_xmin(xmin), m_xmax(xmax) {}
@@ -79,6 +81,50 @@ class SphereHoleBoundary : public SignedDistanceBoundary<double> {
   double m_radius;
 };
 
+class CylinderBoundary : public SignedDistanceBoundary<double> {
+ public:
+  CylinderBoundary(const array<double, 3>& center, double radius)
+      : m_center(center), m_radius(radius) {}
+
+  double value(const array<double, 3>& x) const override {
+    const double dx = x[0] - m_center[0];
+    const double dy = x[1] - m_center[1];
+    return m_radius - std::sqrt(dx * dx + dy * dy);
+  }
+
+  array<double, 3> gradient(const array<double, 3>& x) const override {
+    const double dx = x[0] - m_center[0];
+    const double dy = x[1] - m_center[1];
+    const double rho = std::sqrt(dx * dx + dy * dy);
+    if (rho <= 1.0e-14)
+      return array<double, 3>{1.0, 0.0, 0.0};
+    return array<double, 3>{-dx / rho, -dy / rho, 0.0};
+  }
+
+  bool closestPoint(const array<double, 3>& x, array<double, 3>& c,
+                    array<double, 3>& normal) const override {
+    const double dx = x[0] - m_center[0];
+    const double dy = x[1] - m_center[1];
+    const double rho = std::sqrt(dx * dx + dy * dy);
+    c = x;
+    if (rho <= 1.0e-14) {
+      c[0] = m_center[0] + m_radius;
+      c[1] = m_center[1];
+      normal = array<double, 3>{-1.0, 0.0, 0.0};
+      return true;
+    }
+    const double scale = m_radius / rho;
+    c[0] = m_center[0] + dx * scale;
+    c[1] = m_center[1] + dy * scale;
+    normal = array<double, 3>{-dx / rho, -dy / rho, 0.0};
+    return true;
+  }
+
+ private:
+  array<double, 3> m_center;
+  double m_radius;
+};
+
 template <typename Complex>
 double sumVolumes(const Complex& complex) {
   double sum = 0.0;
@@ -102,6 +148,25 @@ bool allVerticesInsideBoundary(const Complex& complex, const vector<array<double
     }
   }
   return true;
+}
+
+template <typename Complex>
+double maxOutsideViolation(const Complex& complex, const vector<array<double, 3> >& pos,
+                           const SignedDistanceBoundary<double>& boundary) {
+  double minPhi = 0.0;
+  for (size_t cellId = 0; cellId < complex.numCells(); ++cellId) {
+    const auto cell = complex.getCellView(cellId);
+    const array<double, 3>& center = pos[cell.getID()];
+    for (uint1 i = 0; i < cell.numVertices(); ++i) {
+      array<double, 3> x = center;
+      for (uint1 k = 0; k < 3; ++k)
+        x[k] += cell.getVertexPos(i)[k];
+      const double phi = boundary.value(x);
+      if (phi < minPhi)
+        minPhi = phi;
+    }
+  }
+  return -minPhi;
 }
 
 template <typename Complex>
@@ -261,10 +326,60 @@ bool testSphereBoundaryPowerCellReactivation() {
   return true;
 }
 
+bool testCylinderBoundaryVoronoiBuild() {
+  std::mt19937_64 rng(123);
+  std::uniform_real_distribution<double> ur(0.0, 1.0);
+  std::uniform_real_distribution<double> utheta(0.0, 2.0 * kPi);
+  std::uniform_real_distribution<double> uz(0.0, 1.0);
+
+  const array<double, 3> center = {0.5, 0.5, 0.5};
+  const double radius = 0.3;
+  CylinderBoundary boundary(center, radius);
+
+  Box<double> box(array<double, 3>{1.0, 1.0, 1.0});
+  CellComplex<double> complex(&box);
+  complex.setBoundary(&boundary);
+
+  vector<array<double, 3> > pos(128);
+  for (size_t i = 0; i < pos.size(); ++i) {
+    const double rho = radius * std::sqrt(ur(rng));
+    const double theta = utheta(rng);
+    pos[i][0] = center[0] + rho * std::cos(theta);
+    pos[i][1] = center[1] + rho * std::sin(theta);
+    pos[i][2] = uz(rng);
+  }
+
+  complex.build(pos);
+
+  const double fluidVolume = kPi * radius * radius;
+  const double tol = 1.0e-3;
+  const double volume = sumVolumes(complex);
+  if (std::abs(volume - fluidVolume) > tol) {
+    std::fprintf(stderr, "cylinder boundary build volume mismatch: %.16e vs %.16e\n", volume,
+                 fluidVolume);
+    return false;
+  }
+  if (countBoundaryFacets(complex) == 0u) {
+    std::fprintf(stderr, "cylinder boundary build produced no boundary facets\n");
+    return false;
+  }
+  if (!allVerticesInsideBoundary(complex, pos, boundary, 3.0e-4)) {
+    std::fprintf(stderr,
+                 "cylinder boundary build leaked vertices outside the admissible domain "
+                 "(max violation %.16e)\n",
+                 maxOutsideViolation(complex, pos, boundary));
+    return false;
+  }
+
+  return true;
+}
+
 }  // namespace
 
 int main() {
   if (!testPlanarBoundaryVoronoiBuild())
+    return 1;
+  if (!testCylinderBoundaryVoronoiBuild())
     return 1;
   if (!testSphereBoundaryPowerCellReactivation())
     return 1;
