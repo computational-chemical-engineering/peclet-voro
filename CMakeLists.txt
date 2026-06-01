@@ -66,6 +66,12 @@ if(VORONOI_BUILD_BENCHMARKS)
   add_subdirectory(benchmarks)
 endif()
 
+# ── Python bindings ───────────────────────────────────────────────────────────
+option(VORONOI_BUILD_PYTHON "Build the pybind11 Python module (vordyn)" OFF)
+if(VORONOI_BUILD_PYTHON)
+  add_subdirectory(python)
+endif()
+
 # ── Documentation ─────────────────────────────────────────────────────────────
 option(VORONOI_BUILD_DOCS "Build Doxygen documentation" OFF)
 if(VORONOI_BUILD_DOCS)
