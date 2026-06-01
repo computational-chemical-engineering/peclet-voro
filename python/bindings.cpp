@@ -52,6 +52,32 @@ static std::vector<T> to_vec1(py::array_t<T, py::array::c_style | py::array::for
   return v;
 }
 
+template <class T>
+static py::array_t<T> from_vec1(const std::vector<T>& v) {
+  py::array_t<T> a(static_cast<py::ssize_t>(v.size()));
+  auto r = a.template mutable_unchecked<1>();
+  for (std::size_t i = 0; i < v.size(); ++i)
+    r(i) = v[i];
+  return a;
+}
+
+// Per-particle tessellation output (cells are stored by cell index; scatter to particle order via
+// the cell's id). `volume` true -> per-cell Voronoi volume; false -> per-cell neighbour (facet) count.
+static py::array_t<real_t> cell_scalar(vor::Simulation<real_t>& s, bool volume) {
+  auto& cc = s.getCellComplex();
+  const std::size_t np = s.getPositions().size();
+  const std::size_t nc = cc.getGeometryArena().numCells();
+  std::vector<real_t> out(np, real_t(0));
+  for (std::size_t i = 0; i < nc; ++i) {
+    const auto id = cc.getCellView(i).getID();
+    if (static_cast<std::size_t>(id) >= np)
+      continue;
+    out[id] = volume ? cc.getGeometryView(i).getVolume()
+                     : static_cast<real_t>(cc.getCellView(i).numFacets());
+  }
+  return from_vec1(out);
+}
+
 PYBIND11_MODULE(vordyn, m) {
   m.doc() = "voronoi_dynamics: dynamic 3D Voronoi tessellation of moving particles (Python surface)";
 
@@ -75,7 +101,11 @@ PYBIND11_MODULE(vordyn, m) {
       .def("put_in_box", &Sim::putInBox, "Wrap particle positions back into the periodic box")
       .def("init", &Sim::init, "Build the initial tessellation; returns False on failure")
       .def("step", &Sim::step, py::arg("num_steps"), py::arg("dt"),
-           "Advance the dynamics by num_steps timesteps of size dt");
+           "Advance the dynamics by num_steps timesteps of size dt")
+      .def("get_volumes", [](Sim& s) { return cell_scalar(s, true); },
+           "Per-particle Voronoi cell volume, (N,) in particle order (0 if no cell)")
+      .def("get_num_neighbors", [](Sim& s) { return cell_scalar(s, false); },
+           "Per-particle Voronoi neighbour (facet) count, (N,) in particle order");
 
   py::class_<vor::ExplicitEuler<real_t>, Sim>(m, "ExplicitEuler")
       .def(py::init<>())

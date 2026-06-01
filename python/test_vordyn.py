@@ -52,8 +52,13 @@ p1 = np.array(s.get_positions())
 check("positions finite after step", np.isfinite(p1).all())
 check("particle count preserved", p1.shape == (N, 3))
 check("particles moved", float(np.abs(p1 - pos).max()) > 0)
+vol = np.array(s.get_volumes())
+nbrs = np.array(s.get_num_neighbors())
+check("cell volumes tile the box (sum == L^3)", abs(vol.sum() - L ** 3) < 1e-6 * L ** 3)
+check("every particle has a cell", (vol > 0).all())
+check("neighbour counts are sane (>=4)", (nbrs >= 4).all())
 print(f"    KE {ke0:.4g} -> {s.get_kinetic_energy():.4g}, U={s.get_internal_energy():.4g}, "
-      f"t={s.get_time():.4g}, max move={np.abs(p1 - pos).max():.3g}")
+      f"sum(vol)={vol.sum():.4f}(box {L ** 3:.0f}), mean nbrs={nbrs.mean():.2f}")
 
 # ---- NavierStokes (adds viscosity) ----
 print("NavierStokes:")
