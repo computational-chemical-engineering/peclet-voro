@@ -138,7 +138,15 @@ PYBIND11_MODULE(vordyn, m) {
       .def("set_types", [](vor::ExplicitEuler<real_t>& s,
                            py::array_t<std::uint8_t> a) { s.setTypes(to_vec1<std::uint8_t>(a)); },
            py::arg("types"), "Per-particle phase/type label (uint8)")
-      .def("set_pressure", &vor::ExplicitEuler<real_t>::setPressure, py::arg("pressure"));
+      .def("set_pressure", &vor::ExplicitEuler<real_t>::setPressure, py::arg("pressure"))
+      // force/integrate split (for distributed scheme-C drivers): the caller does the Verlet
+      // kick/drift and inserts a halo force exchange between recompute_forces() and the kick.
+      .def("get_forces", [](vor::ExplicitEuler<real_t>& s) { return from_vec3(s.getForces()); },
+           "Per-particle force, (N,3)")
+      .def("set_forces", [](vor::ExplicitEuler<real_t>& s, py::array_t<real_t> a) { s.getForces() = to_vec3(a); },
+           py::arg("forces"))
+      .def("recompute_forces", &vor::ExplicitEuler<real_t>::recomputeForces,
+           "Incrementally update the tessellation from current positions and recompute forces");
 
   py::class_<vor::NavierStokes<real_t>, vor::ExplicitEuler<real_t>>(m, "NavierStokes")
       .def(py::init<>())

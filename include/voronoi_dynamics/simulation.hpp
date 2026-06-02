@@ -72,6 +72,15 @@ class ExplicitEuler : public Simulation<real_t> {
   virtual real_t getInternalEnergy() const;
   void setTypes(const std::vector<uint0>& types) { this->m_complex.getTypes() = types; }
   void setPressure(real_t press) { m_pressEq = press; }
+  // Force/integrate split for externally-driven (e.g. distributed) time stepping: read/replace the
+  // per-particle force, and recompute it from the current positions (incremental tessellation update
+  // + computeForces). The Verlet kick/drift can then be done by the caller, inserting a halo force
+  // exchange between recomputeForces() and the kick. See mpi/validate_voronoi_scheme_c.py.
+  std::vector<std::array<real_t, 3> >& getForces() { return m_forces; }
+  void recomputeForces() {
+    this->m_complex.update(this->m_pos);
+    this->computeForces();
+  }
 
  protected:
   virtual void computeForces();
