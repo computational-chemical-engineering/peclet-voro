@@ -33,14 +33,20 @@ press = 1.0
 mass = dens * L ** 3 / (n ** 3)
 
 
+SOLVER = os.environ.get("SOLVER", "euler")  # "euler" or "ns" (NavierStokes, viscous)
+
+
 def make_sim(pos, vel):
-    s = vordyn.ExplicitEuler()
+    s = vordyn.NavierStokes() if SOLVER == "ns" else vordyn.ExplicitEuler()
     s.set_l([L, L, L])
     s.set_mass_density(dens)
     s.set_positions(np.ascontiguousarray(pos % L))
     s.set_velocities(np.ascontiguousarray(vel))
     s.set_masses(np.full(pos.shape[0], mass))
     s.set_pressure(press)
+    if SOLVER == "ns":
+        s.set_viscosity(0.05)
+        s.set_bulk_viscosity(0.05)
     return s
 
 
