@@ -46,9 +46,9 @@ N = g_pos.shape[0]
 ids = np.arange(N)
 
 # serial reference (rank 0): full periodic tessellation
-vfull = None
+vfull = nfull = None
 if rank == 0:
-    vfull, _ = tessellate(g_pos)
+    vfull, nfull = tessellate(g_pos)
 
 # distributed: own a block, gather ghosts, tessellate owned+ghost, keep owned cells
 mig = tpx_mpi.Migrator(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
@@ -64,22 +64,26 @@ gpos, gpay = mig.gather_ghosts(pos, pay, rcut)    # ghost copies (periodic image
 # combine owned + ghosts; the periodic box wraps the ghost images back to canonical positions.
 combined = np.vstack([pos, gpos]) if gpos.shape[0] else pos
 combined = combined % L                            # put_in_box equivalent
-vol, _ = tessellate(combined)
-vol_owned = vol[:n_owned]                           # owned cells are the first n_owned
+vol, nbr = tessellate(combined)
+vol_owned, nbr_owned = vol[:n_owned], nbr[:n_owned]  # owned cells are the first n_owned
 
-# gather owned (global id, volume) to rank 0 and compare to the serial tessellation
+# gather owned (global id, volume, neighbour count) to rank 0 and compare to the serial tessellation
 allv = comm.gather(vol_owned, 0)
+alln = comm.gather(nbr_owned, 0)
 alli = comm.gather(oid, 0)
 n_ghost_tot = comm.reduce(gpos.shape[0], op=MPI.SUM, root=0)
 if rank == 0:
     D = np.full(N, np.nan)
-    for v, i in zip(allv, alli):
+    Dn = np.full(N, -1.0)
+    for v, nn, i in zip(allv, alln, alli):
         D[i] = v
+        Dn[i] = nn
     assert np.isfinite(D).all(), "some owned ids missing"
     err = np.abs(D - vfull)
     maxe, meane = float(err.max()), float(err.mean())
-    ok = maxe < 1e-9 and abs(D.sum() - L ** 3) < 1e-6 * L ** 3
+    nbr_mismatch = int((Dn != nfull).sum())
+    ok = maxe < 1e-9 and nbr_mismatch == 0 and abs(D.sum() - L ** 3) < 1e-6 * L ** 3
     print(f"np={size}: N={N}, ghosts(total)={n_ghost_tot}, sum(owned vol)={D.sum():.5f} (box {L**3:.0f})")
-    print(f"np={size}: owned-cell volume vs serial  max|d|={maxe:.3e} mean={meane:.3e}  "
-          f"({'OK' if ok else 'FAIL'})")
+    print(f"np={size}: owned cells vs serial  vol max|d|={maxe:.3e} mean={meane:.3e}  "
+          f"neighbour-count mismatches={nbr_mismatch}  ({'OK' if ok else 'FAIL'})")
     sys.exit(0 if ok else 1)

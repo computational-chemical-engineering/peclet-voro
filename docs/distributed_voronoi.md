@@ -7,9 +7,19 @@ ghost particles) is reused from `transport-core` via its `tpx_mpi` Python shim, 
 `packing-gpu`. The per-cell observables (`vordyn.get_volumes()` / `get_num_neighbors()`) give the
 serial-vs-distributed comparison.
 
-**Status: implemented and validated** — `mpi/validate_voronoi.py`. Owned-cell volumes match the serial
-full-box tessellation to **machine precision** (max ~1e-15) at np=1/2/4, and owned volumes sum exactly
-to the box (perfect partition).
+**Status: implemented and validated.**
+- *Tessellation* (`mpi/validate_voronoi.py`): owned-cell **volumes and neighbour counts** match the
+  serial full-box tessellation to **machine precision** (max ~1e-15, 0 neighbour mismatches) at
+  np=1/2/4; owned volumes sum exactly to the box (perfect partition).
+- *Dynamics* (`mpi/validate_voronoi_dynamics.py`): 6 steps of compressible-Euler dynamics distributed
+  vs serial match to **machine precision** (~4e-15) at np=1/2/4.
+
+### Halo depth: 1 ring for the tessellation, 2 rings for the dynamics
+The owned cells *close* with a **1-ring** halo (`rcut ≳ max owned-cell circumradius`). But the **force**
+on an owned cell uses its neighbours' cell *pressures* (EOS of their volumes), so each neighbour cell
+must itself be correct → *its* neighbours (the 2nd ring) must be present. So the **dynamics needs a
+2-ring halo** (≈ 2× the tessellation `rcut`): `rcut=2.0` gives exact owned dynamics here, `rcut=1.2`
+(~1.5 rings) leaves a ~5e-6 force error that grows with steps.
 
 ## The algorithm (per rank)
 
