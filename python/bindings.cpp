@@ -13,6 +13,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "voronoi_dynamics/simulation.hpp"
@@ -105,7 +106,32 @@ PYBIND11_MODULE(vordyn, m) {
       .def("get_volumes", [](Sim& s) { return cell_scalar(s, true); },
            "Per-particle Voronoi cell volume, (N,) in particle order (0 if no cell)")
       .def("get_num_neighbors", [](Sim& s) { return cell_scalar(s, false); },
-           "Per-particle Voronoi neighbour (facet) count, (N,) in particle order");
+           "Per-particle Voronoi neighbour (facet) count, (N,) in particle order")
+      .def("get_neighbor_pairs", [](Sim& s) {
+             auto& cc = s.getCellComplex();
+             const std::size_t np = s.getPositions().size();
+             const std::size_t nc = cc.getGeometryArena().numCells();
+             std::vector<int> flat;  // (M,2) row-major: each owned face (cell_id, neighbour_id)
+             for (std::size_t i = 0; i < nc; ++i) {
+               const auto cv = cc.getCellView(i);
+               const auto id = cv.getID();
+               if (static_cast<std::size_t>(id) >= np)
+                 continue;
+               const unsigned nf = cv.numFacets();
+               for (unsigned j = 0; j < nf; ++j) {
+                 const auto nb = cv.getNbr(j);
+                 if (static_cast<std::size_t>(nb) < np) {  // skip boundary/sentinel markers
+                   flat.push_back(static_cast<int>(id));
+                   flat.push_back(static_cast<int>(nb));
+                 }
+               }
+             }
+             const py::ssize_t m = static_cast<py::ssize_t>(flat.size() / 2);
+             py::array_t<int> a({m, py::ssize_t(2)});
+             std::memcpy(a.mutable_data(), flat.data(), flat.size() * sizeof(int));
+             return a;
+           },
+           "Voronoi connectivity as an (M,2) edge list (particle_id, neighbour_particle_id) over faces");
 
   py::class_<vor::ExplicitEuler<real_t>, Sim>(m, "ExplicitEuler")
       .def(py::init<>())

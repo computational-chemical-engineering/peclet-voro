@@ -57,6 +57,10 @@ nbrs = np.array(s.get_num_neighbors())
 check("cell volumes tile the box (sum == L^3)", abs(vol.sum() - L ** 3) < 1e-6 * L ** 3)
 check("every particle has a cell", (vol > 0).all())
 check("neighbour counts are sane (>=4)", (nbrs >= 4).all())
+edges = np.array(s.get_neighbor_pairs())
+eset = set(map(tuple, edges))
+check("connectivity matches neighbour counts", len(edges) == int(nbrs.sum()))
+check("Voronoi adjacency is symmetric", all((j, i) in eset for i, j in edges))
 print(f"    KE {ke0:.4g} -> {s.get_kinetic_energy():.4g}, U={s.get_internal_energy():.4g}, "
       f"sum(vol)={vol.sum():.4f}(box {L ** 3:.0f}), mean nbrs={nbrs.mean():.2f}")
 
