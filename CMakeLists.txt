@@ -127,9 +127,13 @@ if(VORONOI_BUILD_DOCS)
     set(DOXYGEN_EXTRACT_ALL YES)
     set(DOXYGEN_RECURSIVE YES)
     set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "README.md")
+    # power_cell_solver_spec.md uses LaTeX \dot{...}, which collides with Doxygen's
+    # \dot graph command; exclude that design note from the API docs.
+    set(DOXYGEN_EXCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/docs/power_cell_solver_spec.md")
     doxygen_add_docs(
       docs
       "${CMAKE_CURRENT_SOURCE_DIR}/include"
+      "${CMAKE_CURRENT_SOURCE_DIR}/python"
       "${CMAKE_CURRENT_SOURCE_DIR}/docs"
       "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
       COMMENT "Generating Doxygen documentation"
