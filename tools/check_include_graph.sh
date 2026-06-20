@@ -34,4 +34,23 @@ done
 if [ "$status" -eq 0 ]; then
   echo "include-graph OK: no physics header is included by a core header"
 fi
+
+# Reference physics modules must compile against the published view ONLY — they
+# must not reach into the legacy engine (voronoi.hpp) or other physics
+# (simulation.hpp). This is the plan §4 "compiles against TessellationView only".
+VIEW_ONLY=(physics/euler_pressure.hpp)
+FORBIDDEN=(voronoi.hpp simulation.hpp)
+for mod in "${VIEW_ONLY[@]}"; do
+  f="$INC_DIR/$mod"
+  [ -f "$f" ] || continue
+  for bad in "${FORBIDDEN[@]}"; do
+    if grep -Eq "^[[:space:]]*#[[:space:]]*include[[:space:]]*[<\"][^>\"]*${bad}" "$f"; then
+      echo "VIOLATION: view-only physics '$mod' includes engine header '$bad'"
+      status=1
+    fi
+  done
+done
+if [ "$status" -eq 0 ]; then
+  echo "include-graph OK: view-only physics modules depend on the view alone"
+fi
 exit "$status"

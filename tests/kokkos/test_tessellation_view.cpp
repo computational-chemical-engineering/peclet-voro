@@ -20,6 +20,7 @@
 #include <random>
 #include <vector>
 
+#include "vorflow/tessellation_build.hpp"
 #include "vorflow/tessellation_view.hpp"
 #include "vorflow/voronoi.hpp"
 

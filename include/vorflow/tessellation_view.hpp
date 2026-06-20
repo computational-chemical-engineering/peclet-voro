@@ -7,11 +7,13 @@
  * data-oriented CSR view of per-cell / per-facet quantities and never touch the
  * half-edge internals — which is what keeps the engine reusable (plan §1).
  *
- * Three pieces:
+ * Pieces:
  *   - HostTessellation : plain std::vector CSR buffers (the legacy<->View seam).
- *   - buildHostTessellation() : extract that CSR from a legacy CellComplex.
+ *   - buildReciprocalMap() : the NbrsToFacets transpose for atomic-free gather.
  *   - TessellationView : device-resident Kokkos Views + KOKKOS_INLINE_FUNCTION
  *                        accessors; built by upload().
+ * The legacy CellComplex -> HostTessellation converter (buildHostTessellation)
+ * lives in tessellation_build.hpp so view consumers need not include the engine.
  *
  * Storage matches docs/update_to_kokkos_plan.md §3: an exclusive-scan facet
  * offset (mean cell ~15 facets, so CSR, not the 128 cap) plus packed facet
@@ -24,12 +26,14 @@
 #ifndef VORFLOW_TESSELLATION_VIEW_HPP
 #define VORFLOW_TESSELLATION_VIEW_HPP
 
+#include <cmath>
 #include <cstdint>
 #include <Kokkos_Core.hpp>
+#include <map>
 #include <vector>
 
 #include "tpx/common/view.hpp"
-#include "vorflow/voronoi.hpp"
+#include "vorflow/vor_types.hpp"  // uint1/uint2 only; the legacy engine is NOT pulled in here
 
 namespace vor {
 
@@ -56,52 +60,51 @@ struct HostTessellation {
   std::vector<Real> facetConnVec;    ///< size 3*nFacets, connecting vector to neighbour seed
 };
 
-/// Extract the CSR from a built legacy CellComplex (computeGeometry must have run).
-template <class Real, bool Weighted>
-HostTessellation<Real> buildHostTessellation(const CellComplex<Real, Weighted>& complex) {
-  HostTessellation<Real> t;
-  std::vector<Cell<Real> > cells;
-  complex.materializeCells(cells);
-  const std::vector<CellGeometry<Real> >& geom = complex.getGeoms();
-
-  t.nCells = static_cast<int>(cells.size());
-  t.cellFacetOffset.resize(t.nCells + 1, 0);
-  t.cellSeedId.resize(t.nCells);
-  t.cellVolume.resize(t.nCells);
-
-  // Pass 1: facet counts -> exclusive scan.
+/**
+ * Reciprocal-facet transpose (NbrsToFacets, plan §2.5). For each packed facet g
+ * (cell i -> seed j) returns the packed index of the facet in cell j that points
+ * back to seed i, or -1 for a boundary facet or if no reciprocal exists. This is
+ * the map the atomic-free gather force reads through: a cell fetches its
+ * neighbour's reciprocal-facet quantities without scattering (no atomics).
+ *
+ * Periodic multi-image facets (several g in i -> same j) are disambiguated by
+ * area-vector negation (the reciprocal has the most opposite area vector).
+ */
+template <class Real>
+std::vector<int> buildReciprocalMap(const HostTessellation<Real>& t) {
+  std::map<gid_t, int> seedToCell;
   for (int i = 0; i < t.nCells; ++i)
-    t.cellFacetOffset[i + 1] = t.cellFacetOffset[i] + cells[i].numFacets();
-  t.nFacets = t.cellFacetOffset[t.nCells];
-
-  t.facetNeighbor.resize(t.nFacets);
-  t.facetArea.assign(3 * t.nFacets, Real(0));
-  t.facetConnect.assign(3 * t.nFacets, Real(0));
-  t.facetConnVec.assign(3 * t.nFacets, Real(0));
-
-  // Pass 2: pack per-cell scalars and per-facet vectors.
+    seedToCell[t.cellSeedId[i]] = i;
+  std::vector<int> recip(t.nFacets, -1);
   for (int i = 0; i < t.nCells; ++i) {
-    t.cellSeedId[i] = toGid(cells[i].getID());
-    t.cellVolume[i] = geom[i].getVolume();
-    const std::vector<std::array<Real, 3> >& areas = geom[i].getAreas();
-    const std::vector<std::array<Real, 3> >& dV = geom[i].getdV();
-    const std::vector<std::array<Real, 3> >& cv = geom[i].getConnVect();
-    const int base = t.cellFacetOffset[i];
-    const int nf = cells[i].numFacets();
-    for (int f = 0; f < nf; ++f) {
-      const int g = base + f;
-      t.facetNeighbor[g] = toGid(cells[i].getNbr(static_cast<uint1>(f)));
-      for (int c = 0; c < 3; ++c) {
-        if (f < static_cast<int>(areas.size()))
-          t.facetArea[3 * g + c] = areas[f][c];
-        if (f < static_cast<int>(dV.size()))
-          t.facetConnect[3 * g + c] = dV[f][c];
-        if (f < static_cast<int>(cv.size()))
-          t.facetConnVec[3 * g + c] = cv[f][c];
+    const gid_t idi = t.cellSeedId[i];
+    for (int g = t.cellFacetOffset[i]; g < t.cellFacetOffset[i + 1]; ++g) {
+      const gid_t j = t.facetNeighbor[g];
+      if (j < 0)
+        continue;  // boundary
+      auto it = seedToCell.find(j);
+      if (it == seedToCell.end())
+        continue;
+      const int cj = it->second;
+      int best = -1;
+      Real bestErr = Real(1e300);
+      for (int h = t.cellFacetOffset[cj]; h < t.cellFacetOffset[cj + 1]; ++h) {
+        if (t.facetNeighbor[h] != idi)
+          continue;
+        Real e = 0;  // prefer the facet whose area best negates g's (same interface)
+        for (int c = 0; c < 3; ++c) {
+          Real s = t.facetArea[3 * g + c] + t.facetArea[3 * h + c];
+          e += s * s;
+        }
+        if (e < bestErr) {
+          bestErr = e;
+          best = h;
+        }
       }
+      recip[g] = best;
     }
   }
-  return t;
+  return recip;
 }
 
 /// Device-resident published view. Trivially copyable into kernels (Views are

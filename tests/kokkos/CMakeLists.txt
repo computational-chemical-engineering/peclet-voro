@@ -26,3 +26,6 @@ add_vorflow_kokkos_test(test_cell_cutter)
 
 # Phase 3: full-system device tessellation (grid + cutter + CSR) vs legacy.
 add_vorflow_kokkos_test(test_tessellator)
+
+# Phase 4: atomic-free pressure force over TessellationView vs legacy Euler.
+add_vorflow_kokkos_test(test_euler_pressure)
