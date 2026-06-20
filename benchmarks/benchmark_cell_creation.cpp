@@ -3,7 +3,7 @@
  * @brief Benchmark Voronoi cell creation cost without extra geometry stages.
  *
  * Comparison modes:
- *  - default: voronoi_dynamics tessellation (vd_tess) vs Voro++ cell creation
+ *  - default: vorflow tessellation (vd_tess) vs Voro++ cell creation
  *             (voro++ compute_cell)
  *  - --vd-only: only vd_tess, useful for OpenMP thread-scaling sweeps
  *
@@ -28,8 +28,8 @@
 #include <omp.h>
 #endif
 
-#include <voronoi_dynamics/nbrlist.hpp>
-#include <voronoi_dynamics/voronoi.hpp>
+#include <vorflow/nbrlist.hpp>
+#include <vorflow/voronoi.hpp>
 #include <voro++.hh>
 
 using Clock = std::chrono::high_resolution_clock;
@@ -176,7 +176,7 @@ static void run_case(FILE *out,
   fflush(stderr);
 
   fprintf(out,
-          "voronoi_dynamics_tess,%s,%d,%d,%d,%.5f,%.5f\n",
+          "vorflow_tess,%s,%d,%d,%d,%.5f,%.5f\n",
           point_set,
           N,
           nthreads,

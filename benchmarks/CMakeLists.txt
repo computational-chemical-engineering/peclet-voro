@@ -1,4 +1,4 @@
-# Benchmarks for voronoi_dynamics
+# Benchmarks for vorflow
 #
 # Active benchmark workflow:
 #   - benchmark_cell_creation.cpp
@@ -53,43 +53,43 @@ add_executable(benchmark_update_thread_scaling benchmark_update_thread_scaling.c
 
 target_link_libraries(benchmark_cell_creation
   PRIVATE
-    voronoi_dynamics::voronoi_dynamics
+    vorflow::vorflow
     voro++
 )
 
 target_link_libraries(benchmark_full_build
   PRIVATE
-    voronoi_dynamics::voronoi_dynamics
+    vorflow::vorflow
     voro++
 )
 
 target_link_libraries(benchmark_cell_creation_targeted
   PRIVATE
-    voronoi_dynamics::voronoi_dynamics
+    vorflow::vorflow
     voro++
 )
 
 target_link_libraries(benchmark_nbrlist_setup_diagnostic
   PRIVATE
-    voronoi_dynamics::voronoi_dynamics
+    vorflow::vorflow
     voro++
 )
 
 target_link_libraries(benchmark_update_fast_study
   PRIVATE
-    voronoi_dynamics::voronoi_dynamics
+    vorflow::vorflow
     voro++
 )
 
 target_link_libraries(benchmark_update_strategy_study
   PRIVATE
-    voronoi_dynamics::voronoi_dynamics
+    vorflow::vorflow
     voro++
 )
 
 target_link_libraries(benchmark_update_thread_scaling
   PRIVATE
-    voronoi_dynamics::voronoi_dynamics
+    vorflow::vorflow
     voro++
 )
 

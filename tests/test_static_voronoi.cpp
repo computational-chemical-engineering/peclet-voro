@@ -9,7 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
-#include <voronoi_dynamics/voronoi.hpp>
+#include <vorflow/voronoi.hpp>
 
 using std::vector;
 using vor::Box;

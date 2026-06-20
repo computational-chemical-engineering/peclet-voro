@@ -36,8 +36,8 @@
 #include <omp.h>
 #endif
 
-#include <voronoi_dynamics/nbrlist.hpp>
-#include <voronoi_dynamics/voronoi.hpp>
+#include <vorflow/nbrlist.hpp>
+#include <vorflow/voronoi.hpp>
 #include <voro++.hh>
 
 using Clock = std::chrono::high_resolution_clock;

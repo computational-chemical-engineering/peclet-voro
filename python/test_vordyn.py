@@ -1,4 +1,4 @@
-"""Smoke test / demo for the vordyn Python module (the first Python surface for voronoi_dynamics).
+"""Smoke test / demo for the vordyn Python module (the first Python surface for vorflow).
 
 Exercises the three solver classes on a jittered periodic grid: build the tessellation (init),
 advance the dynamics (step), and round-trip particle state through numpy. Run:

@@ -12,7 +12,7 @@
 #include <cstdio>
 #include <ctime>
 #include <vector>
-#include <voronoi_dynamics/voronoi.hpp>
+#include <vorflow/voronoi.hpp>
 
 using std::clock;
 using std::clock_t;

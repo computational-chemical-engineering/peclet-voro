@@ -22,7 +22,7 @@ def read_csv(path: Path) -> pd.DataFrame:
 
 
 def make_fair_single_thread_plot(df_noomp: pd.DataFrame, out_file: Path) -> pd.DataFrame:
-    vd = df_noomp[df_noomp["library"] == "voronoi_dynamics_tess"].copy()
+    vd = df_noomp[df_noomp["library"] == "vorflow_tess"].copy()
     vp = df_noomp[df_noomp["library"] == "voropp_compute_cell"].copy()
     merged = vd.merge(vp, on=["point_set", "N"], suffixes=("_vd", "_vpp")).sort_values(["point_set", "N"])
     merged["ratio_vd_over_vpp"] = merged["time_ms_mean_vd"] / merged["time_ms_mean_vpp"]
@@ -55,10 +55,10 @@ def make_fair_single_thread_plot(df_noomp: pd.DataFrame, out_file: Path) -> pd.D
 
 
 def make_vd_scaling_plot(df_threads: pd.DataFrame, df_noomp: pd.DataFrame, out_file: Path) -> pd.DataFrame:
-    vd = df_threads[df_threads["library"] == "voronoi_dynamics_tess"].copy()
+    vd = df_threads[df_threads["library"] == "vorflow_tess"].copy()
 
     # Speedup relative to no-OpenMP single-thread baseline.
-    base = df_noomp[df_noomp["library"] == "voronoi_dynamics_tess"][
+    base = df_noomp[df_noomp["library"] == "vorflow_tess"][
         ["point_set", "N", "time_ms_mean"]
     ].rename(columns={"time_ms_mean": "t_noomp"})
     merged = vd.merge(base, on=["point_set", "N"])
@@ -94,7 +94,7 @@ def make_vd_scaling_plot(df_threads: pd.DataFrame, df_noomp: pd.DataFrame, out_f
         ax.legend(fontsize=8)
 
     axes[0].set_ylabel("Speedup vs no-OpenMP single-thread")
-    fig.suptitle("voronoi_dynamics thread scaling (vd_tess only)")
+    fig.suptitle("vorflow thread scaling (vd_tess only)")
     fig.tight_layout()
     fig.savefig(out_file, dpi=170)
     plt.close(fig)

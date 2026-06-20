@@ -5,7 +5,7 @@
  *
  * Defines integer type aliases, bit-mask constants, static array helpers,
  * comparison functors, and index-management utilities used throughout the
- * voronoi_dynamics library.
+ * vorflow library.
  */
 
 #pragma once

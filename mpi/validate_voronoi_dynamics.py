@@ -6,7 +6,7 @@ interaction radius deep, tessellate owned+ghost and advance one step, keep the o
 The force on an owned cell uses its full neighbourhood (owned or ghost), so the owned trajectory
 matches the serial run. Voronoi analogue of packing-gpu/mpi/validate_exact.py.
 
-Run: PYTHONPATH=<vordyn>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_voronoi_dynamics.py
+Run: PYTHONPATH=<vordyn>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_vorflow.py
 """
 import os
 import sys

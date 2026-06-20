@@ -26,7 +26,7 @@
 #include <string>
 #include <vector>
 
-#include <voronoi_dynamics/voronoi.hpp>
+#include <vorflow/voronoi.hpp>
 
 namespace {
 

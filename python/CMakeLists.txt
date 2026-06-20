@@ -1,4 +1,4 @@
-# pybind11 Python module `vordyn` -- the first Python surface for voronoi_dynamics.
+# pybind11 Python module `vordyn` -- the first Python surface for vorflow.
 # Configure the project with -DVORONOI_BUILD_PYTHON=ON (pybind11 is fetched automatically).
 
 include(FetchContent)
@@ -10,7 +10,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(pybind11)
 
 pybind11_add_module(vordyn bindings.cpp)
-target_link_libraries(vordyn PRIVATE voronoi_dynamics::voronoi_dynamics)
+target_link_libraries(vordyn PRIVATE vorflow::vorflow)
 target_compile_features(vordyn PRIVATE cxx_std_17)
 
 # Smoke test (needs numpy in the interpreter). Runs the demo with PYTHONPATH pointed at the module.

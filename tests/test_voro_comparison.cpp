@@ -1,12 +1,12 @@
 /**
  * @file test_voro_comparison.cpp
- * @brief Tests that compare voronoi_dynamics against Voro++ for a periodic box.
+ * @brief Tests that compare vorflow against Voro++ for a periodic box.
  *
  * Two test scenarios are covered:
  *   1. Static tessellation: build a Voronoi diagram for a fixed random point
  *      set and verify that per-particle volumes agree between the two libraries.
  *   2. Moving points: build an initial tessellation, displace the particles,
- *      rebuild with voronoi_dynamics (via CellComplex::build) and compare the
+ *      rebuild with vorflow (via CellComplex::build) and compare the
  *      resulting volumes against a fresh Voro++ tessellation of the same
  *      final positions.
  *
@@ -20,7 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
-#include <voronoi_dynamics/voronoi.hpp>
+#include <vorflow/voronoi.hpp>
 
 // voro++ headers
 #include <voro++.hh>
@@ -60,7 +60,7 @@ static vector<double> voropp_volumes(const vector<std::array<double, 3> >& pos, 
 }
 
 // ---------------------------------------------------------------------------
-// Helper: build a voronoi_dynamics tessellation and return per-particle volumes.
+// Helper: build a vorflow tessellation and return per-particle volumes.
 // ---------------------------------------------------------------------------
 static vector<double> vordyn_volumes(const vector<std::array<double, 3> >& pos, double Lx,
                                      double Ly, double Lz) {
@@ -130,7 +130,7 @@ static int testStaticComparison(int n, double Lx, double Ly, double Lz, unsigned
 
 // ---------------------------------------------------------------------------
 // Test 2: moving-points comparison
-// Displace particles by small random amounts, rebuild with voronoi_dynamics
+// Displace particles by small random amounts, rebuild with vorflow
 // and compare against a fresh voro++ tessellation of the final positions.
 // ---------------------------------------------------------------------------
 static int testMovingComparison(int n, double Lx, double Ly, double Lz, unsigned int seed,
@@ -173,7 +173,7 @@ static int testMovingComparison(int n, double Lx, double Ly, double Lz, unsigned
   // Wrap back into periodic box
   box.putInBox(pos);
 
-  // Rebuild with voronoi_dynamics
+  // Rebuild with vorflow
   cx.build(pos);
 
   vector<CellGeometry<real_t> >& geoms = cx.getGeoms();
@@ -216,7 +216,7 @@ int main() {
   // ------------------------------------------------------------------
   // Static tessellation tests
   // ------------------------------------------------------------------
-  printf("=== Test group 1: static tessellation (voronoi_dynamics vs voro++) ===\n");
+  printf("=== Test group 1: static tessellation (vorflow vs voro++) ===\n");
 
   printf("Test 1a: 200 particles, unit cube\n");
   failures += testStaticComparison(200, 1.0, 1.0, 1.0, 42, 1e-8);
@@ -236,7 +236,7 @@ int main() {
   // ------------------------------------------------------------------
   // Moving-points tests
   // ------------------------------------------------------------------
-  printf("\n=== Test group 2: moving points (voronoi_dynamics rebuild vs voro++) ===\n");
+  printf("\n=== Test group 2: moving points (vorflow rebuild vs voro++) ===\n");
 
   printf("Test 2a: 200 particles moved, unit cube\n");
   failures += testMovingComparison(200, 1.0, 1.0, 1.0, 42, 1e-8);

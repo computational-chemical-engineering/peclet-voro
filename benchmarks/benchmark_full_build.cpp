@@ -3,8 +3,8 @@
  * @brief Benchmark basic static Voronoi build: vd CellComplex::build(false) vs Voro++ compute_cell.
  *
  * Comparison modes:
- *  - default: voronoi_dynamics basic build vs Voro++ compute_cell
- *  - --vd-only: only voronoi_dynamics basic build, useful for thread-scaling sweeps
+ *  - default: vorflow basic build vs Voro++ compute_cell
+ *  - --vd-only: only vorflow basic build, useful for thread-scaling sweeps
  *
  * Datasets:
  *  - random_uniform
@@ -26,7 +26,7 @@
 #include <omp.h>
 #endif
 
-#include <voronoi_dynamics/voronoi.hpp>
+#include <vorflow/voronoi.hpp>
 #include <voro++.hh>
 
 using Clock = std::chrono::high_resolution_clock;
@@ -149,7 +149,7 @@ static void run_case(FILE* out,
   std::fflush(stderr);
 
   std::fprintf(out,
-               "voronoi_dynamics_build_basic,%s,%d,%d,%d,%.5f,%.5f\n",
+               "vorflow_build_basic,%s,%d,%d,%d,%.5f,%.5f\n",
                point_set,
                N,
                nthreads,

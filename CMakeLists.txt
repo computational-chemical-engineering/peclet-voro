@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(
-  voronoi_dynamics
+  vorflow
   VERSION 1.0.0
   DESCRIPTION "Header-only Voronoi-dynamics simulation library for moving-particle methods"
   LANGUAGES CXX
@@ -34,23 +34,23 @@ find_package(Boost 1.65 REQUIRED)
 find_package(OpenMP)
 
 # ── Header-only interface library ────────────────────────────────────────────
-add_library(voronoi_dynamics INTERFACE)
-add_library(voronoi_dynamics::voronoi_dynamics ALIAS voronoi_dynamics)
+add_library(vorflow INTERFACE)
+add_library(vorflow::vorflow ALIAS vorflow)
 
-target_include_directories(voronoi_dynamics
+target_include_directories(vorflow
   INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(voronoi_dynamics
+target_link_libraries(vorflow
   INTERFACE
     Boost::boost
 )
 
 if(OpenMP_CXX_FOUND)
-  target_link_libraries(voronoi_dynamics INTERFACE OpenMP::OpenMP_CXX)
-  target_compile_definitions(voronoi_dynamics INTERFACE VORONOI_USE_OPENMP)
+  target_link_libraries(vorflow INTERFACE OpenMP::OpenMP_CXX)
+  target_compile_definitions(vorflow INTERFACE VORONOI_USE_OPENMP)
 endif()
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -77,7 +77,7 @@ option(VORONOI_BUILD_DOCS "Build Doxygen documentation" OFF)
 if(VORONOI_BUILD_DOCS)
   find_package(Doxygen)
   if(DOXYGEN_FOUND)
-    set(DOXYGEN_PROJECT_NAME "voronoi_dynamics")
+    set(DOXYGEN_PROJECT_NAME "vorflow")
     set(DOXYGEN_PROJECT_BRIEF "Voronoi-dynamics simulation library")
     set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/docs")
     set(DOXYGEN_EXTRACT_ALL YES)
@@ -98,8 +98,8 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 install(
-  TARGETS voronoi_dynamics
-  EXPORT voronoi_dynamicsTargets
+  TARGETS vorflow
+  EXPORT vorflowTargets
 )
 
 install(
@@ -108,27 +108,27 @@ install(
 )
 
 install(
-  EXPORT voronoi_dynamicsTargets
-  FILE voronoi_dynamicsTargets.cmake
-  NAMESPACE voronoi_dynamics::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/voronoi_dynamics
+  EXPORT vorflowTargets
+  FILE vorflowTargets.cmake
+  NAMESPACE vorflow::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vorflow
 )
 
 configure_package_config_file(
-  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/voronoi_dynamicsConfig.cmake.in"
-  "${CMAKE_CURRENT_BINARY_DIR}/voronoi_dynamicsConfig.cmake"
-  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/voronoi_dynamics"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vorflowConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/vorflowConfig.cmake"
+  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/vorflow"
 )
 
 write_basic_package_version_file(
-  "${CMAKE_CURRENT_BINARY_DIR}/voronoi_dynamicsConfigVersion.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/vorflowConfigVersion.cmake"
   VERSION ${PROJECT_VERSION}
   COMPATIBILITY SameMajorVersion
 )
 
 install(
   FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/voronoi_dynamicsConfig.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/voronoi_dynamicsConfigVersion.cmake"
-  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/voronoi_dynamics"
+    "${CMAKE_CURRENT_BINARY_DIR}/vorflowConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/vorflowConfigVersion.cmake"
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/vorflow"
 )

@@ -1,4 +1,4 @@
-# Test executables for voronoi_dynamics
+# Test executables for vorflow
 # Each test is a standalone program that exercises a specific subsystem.
 
 # ── Helper function ───────────────────────────────────────────────────────────
@@ -7,7 +7,7 @@
 # tests can locate the sample data files regardless of where they are run from.
 function(add_voronoi_test name source)
   add_executable(${name} ${source})
-  target_link_libraries(${name} PRIVATE voronoi_dynamics::voronoi_dynamics)
+  target_link_libraries(${name} PRIVATE vorflow::vorflow)
   target_compile_definitions(${name}
     PRIVATE
       VORONOI_DATA_DIR="${CMAKE_SOURCE_DIR}/data"

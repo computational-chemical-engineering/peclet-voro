@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <random>
 #include <vector>
-#include <voronoi_dynamics/voronoi.hpp>
+#include <vorflow/voronoi.hpp>
 
 using std::array;
 using std::sort;

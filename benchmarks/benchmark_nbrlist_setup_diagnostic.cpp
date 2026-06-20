@@ -29,7 +29,7 @@
 #include <omp.h>
 #endif
 
-#include <voronoi_dynamics/nbrlist.hpp>
+#include <vorflow/nbrlist.hpp>
 
 using Clock = std::chrono::high_resolution_clock;
 using Millis = std::chrono::duration<double, std::milli>;

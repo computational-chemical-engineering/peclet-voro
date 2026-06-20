@@ -1,4 +1,4 @@
-// vordyn -- pybind11 bindings for voronoi_dynamics (the first Python surface for the library).
+// vordyn -- pybind11 bindings for vorflow (the first Python surface for the library).
 //
 // Exposes the moving-particle Voronoi simulation hierarchy (Simulation -> ExplicitEuler ->
 // NavierStokes -> {Incompressible, IntfDyn}) for real_t = double, driven from Python like the suite's
@@ -16,8 +16,8 @@
 #include <cstring>
 #include <vector>
 
-#include "voronoi_dynamics/simulation.hpp"
-#include "voronoi_dynamics/voronoi.hpp"
+#include "vorflow/simulation.hpp"
+#include "vorflow/voronoi.hpp"
 
 namespace py = pybind11;
 using real_t = double;
@@ -80,7 +80,7 @@ static py::array_t<real_t> cell_scalar(vor::Simulation<real_t>& s, bool volume) 
 }
 
 PYBIND11_MODULE(vordyn, m) {
-  m.doc() = "voronoi_dynamics: dynamic 3D Voronoi tessellation of moving particles (Python surface)";
+  m.doc() = "vorflow: dynamic 3D Voronoi tessellation of moving particles (Python surface)";
 
   using Sim = vor::Simulation<real_t>;
   py::class_<Sim>(m, "Simulation")

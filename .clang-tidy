@@ -1,4 +1,4 @@
-# clang-tidy configuration for voronoi_dynamics
+# clang-tidy configuration for vorflow
 # https://clang.llvm.org/extra/clang-tidy/
 #
 # Enable a curated set of checks aligned with the Google C++ Style Guide and
@@ -87,7 +87,7 @@ Checks: >
 
 WarningsAsErrors: ''
 
-HeaderFilterRegex: 'include/voronoi_dynamics/.*'
+HeaderFilterRegex: 'include/vorflow/.*'
 
 FormatStyle: file
 

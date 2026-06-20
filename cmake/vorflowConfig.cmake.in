@@ -1,0 +1,7 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/vorflowTargets.cmake")
+
+find_dependency(Boost 1.65 REQUIRED)
+
+check_required_components(vorflow)

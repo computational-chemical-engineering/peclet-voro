@@ -8,7 +8,7 @@
 #include <cstdio>
 #include <random>
 #include <vector>
-#include <voronoi_dynamics/simulation.hpp>
+#include <vorflow/simulation.hpp>
 
 using std::array;
 using std::vector;

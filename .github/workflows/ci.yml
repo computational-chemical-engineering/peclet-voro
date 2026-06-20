@@ -116,7 +116,7 @@ jobs:
         run: |
           clang-tidy \
             -p build \
-            $(find include/voronoi_dynamics -name '*.hpp') \
+            $(find include/vorflow -name '*.hpp') \
             -- \
             -std=c++17 \
             -I include \

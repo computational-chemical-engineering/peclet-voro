@@ -7,8 +7,8 @@
 #include <boost/random.hpp>
 #include <cstdio>
 #include <vector>
-#include <voronoi_dynamics/simulation.hpp>
-#include <voronoi_dynamics/voronoi.hpp>
+#include <vorflow/simulation.hpp>
+#include <vorflow/voronoi.hpp>
 using std::vector;
 using vor::uint0;
 using vor::uint1;

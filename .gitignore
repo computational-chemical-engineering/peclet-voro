@@ -12,7 +12,7 @@ _CPack_Packages/
 
 # ── Generated CMake / package files (keep the .cmake.in template) ─────────────
 *.cmake
-!cmake/voronoi_dynamicsConfig.cmake.in
+!cmake/vorflowConfig.cmake.in
 
 # ── Compiled objects and binaries ─────────────────────────────────────────────
 *.o

@@ -1,6 +1,6 @@
-# voronoi_dynamics
+# vorflow
 
-[![CI](https://github.com/computational-chemical-engineering/voronoi_dynamics/actions/workflows/ci.yml/badge.svg)](https://github.com/computational-chemical-engineering/voronoi_dynamics/actions/workflows/ci.yml)
+[![CI](https://github.com/computational-chemical-engineering/vorflow/actions/workflows/ci.yml/badge.svg)](https://github.com/computational-chemical-engineering/vorflow/actions/workflows/ci.yml)
 
 A header-only C++17 library for dynamic Voronoi tessellation of moving
 particles in three dimensions with support for:
@@ -16,9 +16,9 @@ particles in three dimensions with support for:
 ## Repository layout
 
 ```
-voronoi_dynamics/
+vorflow/
 ├── include/
-│   └── voronoi_dynamics/       # Public headers (header-only library)
+│   └── vorflow/       # Public headers (header-only library)
 │       ├── vor_types.hpp       # Integer type aliases and utility classes
 │       ├── nbrlist.hpp         # Neighbour-list / cell-linked-list grid
 │       ├── voronoi.hpp         # Voronoi cell construction and geometry
@@ -102,14 +102,14 @@ to your compiler's include path:
 
 ```cmake
 # CMakeLists.txt
-find_package(voronoi_dynamics REQUIRED)
-target_link_libraries(my_app PRIVATE voronoi_dynamics::voronoi_dynamics)
+find_package(vorflow REQUIRED)
+target_link_libraries(my_app PRIVATE vorflow::vorflow)
 ```
 
 Or without CMake:
 
 ```bash
-g++ -std=c++17 -Ipath/to/voronoi_dynamics/include my_app.cpp -o my_app
+g++ -std=c++17 -Ipath/to/vorflow/include my_app.cpp -o my_app
 ```
 
 ---
@@ -117,7 +117,7 @@ g++ -std=c++17 -Ipath/to/voronoi_dynamics/include my_app.cpp -o my_app
 ## Quick example
 
 ```cpp
-#include <voronoi_dynamics/simulation.hpp>
+#include <vorflow/simulation.hpp>
 #include <vector>
 
 int main() {
@@ -152,14 +152,14 @@ int main() {
 The codebase follows the Google C++ Style Guide enforced by `clang-format`:
 
 ```bash
-clang-format --dry-run --Werror include/voronoi_dynamics/*.hpp tests/*.cpp
+clang-format --dry-run --Werror include/vorflow/*.hpp tests/*.cpp
 ```
 
 ### Static analysis
 
 ```bash
 cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-clang-tidy -p build include/voronoi_dynamics/*.hpp
+clang-tidy -p build include/vorflow/*.hpp
 ```
 
 ### Documentation

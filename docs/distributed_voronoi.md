@@ -11,7 +11,7 @@ serial-vs-distributed comparison.
 - *Tessellation* (`mpi/validate_voronoi.py`): owned-cell **volumes and neighbour counts** match the
   serial full-box tessellation to **machine precision** (max ~1e-15, 0 neighbour mismatches) at
   np=1/2/4; owned volumes sum exactly to the box (perfect partition).
-- *Dynamics* (`mpi/validate_voronoi_dynamics.py`): 6 steps of compressible-Euler dynamics distributed
+- *Dynamics* (`mpi/validate_vorflow.py`): 6 steps of compressible-Euler dynamics distributed
   vs serial match to **machine precision** (~4e-15) at np=1/2/4.
 
 ### Halo depth: 1 ring for the tessellation, 2 rings for the dynamics

@@ -1,7 +1,0 @@
-@PACKAGE_INIT@
-
-include("${CMAKE_CURRENT_LIST_DIR}/voronoi_dynamicsTargets.cmake")
-
-find_dependency(Boost 1.65 REQUIRED)
-
-check_required_components(voronoi_dynamics)
