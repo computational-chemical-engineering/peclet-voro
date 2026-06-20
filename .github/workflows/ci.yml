@@ -59,7 +59,7 @@ jobs:
         # test_include_graph the one-way core/physics dependency rule.
         run: |
           ctest --test-dir build \
-            -R "test_static_voronoi|test_voro_comparison|test_invariants|test_golden|test_include_graph" \
+            -R "test_static_voronoi|test_voro_comparison|test_invariants|test_golden|test_include_graph|test_incremental_skin" \
             --output-on-failure \
             --timeout 180
 

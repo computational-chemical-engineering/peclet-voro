@@ -44,6 +44,10 @@ add_test(NAME test_include_graph
 # Incremental update under periodic random displacements, validated against a rebuild
 add_voronoi_test(test_build_rebuild        test_build_rebuild.cpp)
 
+# Migration Phase 5: incremental update tracks full rebuild over a moving-seed
+# trajectory + the Verlet skin-refresh hook used by the distributed driver.
+add_voronoi_test(test_incremental_skin     test_incremental_skin.cpp)
+
 # Particle insertion/deletion/renumbering against sparse and dense rebuilds
 add_voronoi_test(test_particle_lifecycle   test_particle_lifecycle.cpp)
 
