@@ -5,10 +5,18 @@
 # round-trip, and that vorflow's C++17 core types coexist under the C++20 Kokkos
 # build. Device kernels and their parity tests are added in later phases.
 
-add_executable(test_kokkos_smoke test_kokkos_smoke.cpp)
-target_link_libraries(test_kokkos_smoke PRIVATE Kokkos::kokkos)
-target_include_directories(test_kokkos_smoke PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
-  "${VORFLOW_TPX_INCLUDE}")
-target_compile_features(test_kokkos_smoke PRIVATE cxx_std_20)
-add_test(NAME test_kokkos_smoke COMMAND test_kokkos_smoke)
+function(add_vorflow_kokkos_test name)
+  add_executable(${name} ${name}.cpp)
+  target_link_libraries(${name} PRIVATE Kokkos::kokkos)
+  target_include_directories(${name} PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
+    "${VORFLOW_TPX_INCLUDE}")
+  target_compile_features(${name} PRIVATE cxx_std_20)
+  add_test(NAME ${name} COMMAND ${name})
+  set_tests_properties(${name} PROPERTIES ENVIRONMENT "OMP_PROC_BIND=false")
+endfunction()
+
+add_vorflow_kokkos_test(test_kokkos_smoke)
+
+# Phase 1: published data-layer round-trip (legacy <-> CSR <-> device view).
+add_vorflow_kokkos_test(test_tessellation_view)
