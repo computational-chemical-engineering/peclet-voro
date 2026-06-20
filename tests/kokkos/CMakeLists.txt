@@ -23,3 +23,6 @@ add_vorflow_kokkos_test(test_tessellation_view)
 
 # Phase 2: device-callable cutter vs legacy topology (per-cell parallel_for).
 add_vorflow_kokkos_test(test_cell_cutter)
+
+# Phase 3: full-system device tessellation (grid + cutter + CSR) vs legacy.
+add_vorflow_kokkos_test(test_tessellator)

@@ -463,6 +463,25 @@ struct ScratchCell {
     return vol * (Real(1) / Real(3));
   }
 
+  /// Outward area vector of facet f (½ Σ pi × p{i+1} over its polygon loop).
+  KOKKOS_INLINE_FUNCTION void facetAreaVec(int f, Real out[3]) {
+    Real ax = 0, ay = 0, az = 0;
+    lbl_t start = flab[f];
+    lbl_t cur = start;
+    do {
+      lbl_t nxt = getNextLabelCCW(cur);
+      int a = getVertex(cur);
+      int b = getVertex(nxt);
+      ax += vpos[a][1] * vpos[b][2] - vpos[a][2] * vpos[b][1];
+      ay += vpos[a][2] * vpos[b][0] - vpos[a][0] * vpos[b][2];
+      az += vpos[a][0] * vpos[b][1] - vpos[a][1] * vpos[b][0];
+      cur = nxt;
+    } while (cur != start);
+    out[0] = Real(0.5) * ax;
+    out[1] = Real(0.5) * ay;
+    out[2] = Real(0.5) * az;
+  }
+
   KOKKOS_INLINE_FUNCTION int countFacets() const {
     int n = 0;
     for (int i = 0; i < numAllocF; ++i)
