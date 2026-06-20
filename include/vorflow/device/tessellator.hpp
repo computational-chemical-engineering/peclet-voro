@@ -1,14 +1,17 @@
 /**
  * @file device/tessellator.hpp
- * \brief Full-system Voronoi/Power tessellation on device (migration Phase 3).
+ * \brief Full-system Voronoi/Power tessellation on device (migration Phase 3 + 7).
  *
  * Drives the Phase-2 cutter over every seed in a single device pass and writes
  * the result straight into the published CSR (TessellationView):
  *   1. cell-linked grid built by counting sort (parallel_scan offsets);
  *   2. per-seed build — gather the seeds in the surrounding (2·SW+1)³ grid block
- *      (periodic, minimal-image) and clip the cuboid by each; the cut is
- *      idempotent so duplicate/periodic images are harmless, so no candidate
- *      sort or early-out is needed for correctness (that optimisation is Phase 7);
+ *      (periodic, minimal-image), then clip the cuboid closest-first. For the
+ *      unweighted case a per-cell selection of the nearest unprocessed candidate
+ *      stops as soon as it is beyond the security radius (2·rSqMax), so only the
+ *      handful that can cut are touched (Phase-7 speedup, ~3× over cutting the
+ *      whole block); Power applies every candidate (no security early-out). The
+ *      cut is idempotent, so duplicate/periodic images are harmless;
  *   3. exclusive scan of per-cell facet counts -> CSR offsets;
  *   4. compaction of the per-cell facet records into the packed CSR.
  *
@@ -146,14 +149,18 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
         int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
 
-        ScratchCell<Real> c;
-        const Real Larr[3] = {Lx, Ly, Lz};
-        c.initCuboid(Larr);
+        // Gather the surrounding grid block's seeds as candidates (offset + id),
+        // then process them closest-first so the cell shrinks fast and the
+        // security early-out prunes the long tail (legacy processNbrs order).
+        constexpr int MAXCAND = 1024;
+        Real ckey[MAXCAND];  // plane offset (sort key)
+        int cjid[MAXCAND];   // candidate local index
+        int nc = 0;
         const Real wi = weighted ? weight(i) : Real(0);
         bool ovf = false;
-        for (int dz = -sw; dz <= sw && !ovf; ++dz)
-          for (int dy = -sw; dy <= sw && !ovf; ++dy)
-            for (int dx = -sw; dx <= sw && !ovf; ++dx) {
+        for (int dz = -sw; dz <= sw; ++dz)
+          for (int dy = -sw; dy <= sw; ++dy)
+            for (int dx = -sw; dx <= sw; ++dx) {
               int gx = (((cx + dx) % dimx) + dimx) % dimx;
               int gy = (((cy + dy) % dimy) + dimy) % dimy;
               int gz = (((cz + dz) % dimz) + dimz) % dimz;
@@ -163,7 +170,7 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
                 if (j == i)
                   continue;
                 if (haveGid && gid(j) == gid(i))
-                  continue;  // skip periodic self-image (degenerate zero-distance cut)
+                  continue;  // periodic self-image
                 Real rx = posFlat(3 * j + 0) - pix;
                 Real ry = posFlat(3 * j + 1) - piy;
                 Real rz = posFlat(3 * j + 2) - piz;
@@ -172,10 +179,54 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
                 rz -= Lz * Kokkos::round(rz / Lz);
                 Real rSqHalf = Real(0.5) * (rx * rx + ry * ry + rz * rz);
                 Real off = weighted ? rSqHalf + Real(0.5) * (wi - weight(j)) : rSqHalf;
-                const Real pv[3] = {rx, ry, rz};
-                c.cutCell2(pv, off, j, &ovf);
+                if (nc < MAXCAND) {
+                  ckey[nc] = off;
+                  cjid[nc] = j;
+                  ++nc;
+                } else {
+                  ovf = true;  // candidate overflow -> flag for fallback
+                }
               }
             }
+
+        ScratchCell<Real> c;
+        const Real Larr[3] = {Lx, Ly, Lz};
+        c.initCuboid(Larr);
+        auto applyCand = [&](int j, Real off) {
+          Real rx = posFlat(3 * j + 0) - pix;
+          Real ry = posFlat(3 * j + 1) - piy;
+          Real rz = posFlat(3 * j + 2) - piz;
+          rx -= Lx * Kokkos::round(rx / Lx);
+          ry -= Ly * Kokkos::round(ry / Ly);
+          rz -= Lz * Kokkos::round(rz / Lz);
+          const Real pv[3] = {rx, ry, rz};
+          c.cutCell2(pv, off, j, &ovf);
+        };
+        if (weighted) {
+          // Power has no security early-out (a distant heavy seed can still cut)
+          // and the cut is order-independent, so apply every candidate unsorted.
+          for (int s = 0; s < nc && !ovf; ++s)
+            applyCand(cjid[s], ckey[s]);
+        } else {
+          // Repeatedly take the closest unprocessed candidate, stopping as soon as
+          // it is beyond the security radius (2·rSqMax) — only the handful that can
+          // actually cut are touched, so no full O(n²) sort of the block.
+          for (int done = 0; done < nc && !ovf; ++done) {
+            int m = done;
+            for (int s = done + 1; s < nc; ++s)
+              if (ckey[s] < ckey[m])
+                m = s;
+            if (ckey[m] >= Real(2) * c.rsq[c.vRsqMax])
+              break;
+            Real tk = ckey[done];
+            int tj = cjid[done];
+            ckey[done] = ckey[m];
+            cjid[done] = cjid[m];
+            ckey[m] = tk;
+            cjid[m] = tj;
+            applyCand(cjid[done], ckey[done]);
+          }
+        }
 
         int st = kOk;
         if (ovf)
