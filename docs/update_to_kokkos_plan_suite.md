@@ -1,5 +1,14 @@
 # Kokkos+MPI migration — suite-aligned revision
 
+> **Status (2026-06-21): all 8 phases (0–7) implemented on branch `suite-integration`.**
+> Device cutter + full tessellator reproduce the legacy Voronoi *and* Power diagrams
+> bit-exactly (volume/neighbour-set/Euler), the atomic-free physics force matches
+> legacy to ~3e-16, the incremental path tracks rebuild to ~1e-15, and the
+> transport-core distributed path matches serial owned-cells at np=1,2,4. The
+> Kokkos work runs on the OpenMP backend (CI builds Kokkos 4.5 from source); CUDA/HIP
+> backends and at-scale GPU granularity tuning are the remaining hardware-gated work.
+> Submodule commits are on `suite-integration` (not pushed; umbrella pointer not bumped).
+
 This document **overlays** [`update_to_kokkos_plan.md`](update_to_kokkos_plan.md), which remains
 the detailed reference for the engine port (layered architecture, `TessellationView`, the
 `Weighting` policy, the invariant oracle, the cutter/scratch design). That plan was written as
