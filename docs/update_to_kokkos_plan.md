@@ -1,5 +1,11 @@
 # Implementation Plan — Kokkos + MPI Voronoi/Power Tessellation Core
 
+> **Suite note:** this plan predates vorflow joining the `peclet` suite. Read it together with
+> [`update_to_kokkos_plan_suite.md`](update_to_kokkos_plan_suite.md), which reuses
+> `transport-core` for decomposition/halo/transport (replacing the from-scratch §4/§6 here) and
+> aligns the build/test on the suite conventions. That overlay wins on infrastructure/MPI/build;
+> this document remains the reference for the engine internals.
+
 **Scope of this plan.** Migrate the tessellation engine (cell creation + maintenance) to a performance-portable Kokkos + MPI design that scales to very large systems. The tessellation is treated as a **standalone, reusable library**; physics is a downstream consumer behind a stable interface. First milestone is a correct, fast, scalable Voronoi/Power-cell builder — not the physics.
 
 **Working assumptions** (correct me where wrong): seeds may be polydisperse and the **power (Laguerre) diagram is a first-class case**, not an afterthought; targets are LUMI-G (MI250X) and NVIDIA, plus multicore CPU; the CPU keeps the incremental update, the GPU does full rebuild each step; double precision is used for the cut predicate, storage precision is configurable.

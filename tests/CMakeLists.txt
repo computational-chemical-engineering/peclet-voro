@@ -23,6 +23,24 @@ endfunction()
 # sets; does NOT need the sample data file.
 add_voronoi_test(test_static_voronoi       test_static_voronoi.cpp)
 
+# Geometric-invariant oracle (suite migration §5): space-filling, positive
+# volumes, min facets, facet reciprocity, area negation, area closure, Euler.
+# The cross-platform/cross-rank truth the device port is validated against.
+add_voronoi_test(test_invariants           test_invariants.cpp)
+
+# Golden-master capture (suite migration §5.6): order-invariant summaries on a
+# frozen seed set, committed under tests/golden/. Device ports diff against this.
+add_voronoi_test(test_golden               test_golden.cpp)
+target_compile_definitions(test_golden
+  PRIVATE VORONOI_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
+
+# Include-graph dependency check (suite migration §1): the tessellation core must
+# never include a physics header. Pure-script ctest, no build needed.
+add_test(NAME test_include_graph
+  COMMAND ${CMAKE_COMMAND} -E env bash
+          "${CMAKE_CURRENT_SOURCE_DIR}/../tools/check_include_graph.sh"
+          "${CMAKE_CURRENT_SOURCE_DIR}/../include/vorflow")
+
 # Incremental update under periodic random displacements, validated against a rebuild
 add_voronoi_test(test_build_rebuild        test_build_rebuild.cpp)
 

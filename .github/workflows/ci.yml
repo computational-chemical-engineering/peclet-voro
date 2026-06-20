@@ -54,12 +54,64 @@ jobs:
 
       - name: Run fast tests (CTest)
         # Run the quick self-contained tests plus the Voro++ comparison to
-        # verify the two libraries agree on cell volumes.
+        # verify the two libraries agree on cell volumes. test_invariants is the
+        # §5 geometric-invariant oracle; test_golden the frozen-seed master;
+        # test_include_graph the one-way core/physics dependency rule.
         run: |
           ctest --test-dir build \
-            -R "test_static_voronoi|test_voro_comparison" \
+            -R "test_static_voronoi|test_voro_comparison|test_invariants|test_golden|test_include_graph" \
             --output-on-failure \
-            --timeout 120
+            --timeout 180
+
+  # ── Kokkos device build (suite migration) ────────────────────────────────────
+  # Builds the Kokkos OpenMP backend from source (vorflow's CI is standalone, so
+  # the suite's bootstrap_deps.sh prefix is not present) and exercises the
+  # Phase-0 device toolchain: the smoke test plus the invariant/golden oracle.
+  # Kernels are still host/legacy at this phase; this proves the toolchain wiring.
+  kokkos-openmp:
+    name: Kokkos build (OpenMP backend)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y cmake ninja-build libboost-dev libomp-dev g++
+
+      - name: Build & install Kokkos (OpenMP)
+        run: |
+          git clone --depth 1 --branch 4.5.00 https://github.com/kokkos/kokkos.git /tmp/kokkos
+          cmake -S /tmp/kokkos -B /tmp/kokkos/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=$HOME/kokkos-install \
+            -DKokkos_ENABLE_OPENMP=ON \
+            -DKokkos_ENABLE_SERIAL=ON
+          cmake --build /tmp/kokkos/build --parallel
+          cmake --install /tmp/kokkos/build
+
+      - name: Configure (VORFLOW_KOKKOS=ON)
+        run: |
+          cmake -B build-kokkos -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVORFLOW_KOKKOS=ON \
+            -DVORONOI_BUILD_TESTS=ON \
+            -DCMAKE_PREFIX_PATH=$HOME/kokkos-install
+
+      - name: Build smoke + oracle tests
+        run: |
+          cmake --build build-kokkos --target test_kokkos_smoke test_invariants test_golden --parallel
+
+      - name: Run device + oracle tests
+        run: |
+          export OMP_PROC_BIND=false
+          ctest --test-dir build-kokkos \
+            -R "test_kokkos_smoke|test_invariants|test_golden|test_include_graph" \
+            --output-on-failure --timeout 180
 
   # ── Format Check ─────────────────────────────────────────────────────────────
   clang-format:

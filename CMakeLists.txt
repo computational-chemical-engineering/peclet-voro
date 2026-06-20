@@ -72,6 +72,50 @@ if(VORONOI_BUILD_PYTHON)
   add_subdirectory(python)
 endif()
 
+# ── Kokkos / suite device build (migration) ───────────────────────────────────
+# Suite-aligned build: find_package(Kokkos/ArborX) against the bootstrapped prefix
+# (../extern/install/<backend>, built by ../tools/bootstrap_deps.sh), mirroring
+# dem/sdflow. Device kernels are added across the migration phases; Phase 0 wires
+# the toolchain and a smoke test. The legacy header-only path above is untouched.
+#
+#   cmake -S . -B build/host-openmp -DVORFLOW_KOKKOS=ON \
+#     -DCMAKE_PREFIX_PATH="$PWD/../extern/install/host-openmp"
+#   cmake --build build/host-openmp -j
+#
+# Add -DVORFLOW_MPI=ON to link MPI + transport-core for the distributed path.
+option(VORFLOW_KOKKOS "Build the Kokkos device path (find_package(Kokkos))" OFF)
+option(VORFLOW_MPI "Build the distributed path against MPI + transport-core" OFF)
+
+if(VORFLOW_KOKKOS)
+  find_package(Kokkos CONFIG REQUIRED)
+  # ArborX is the strongly-polydisperse / Power neighbour-search policy; it is not
+  # needed until Phase 3 (the cell-linked grid covers near-monodisperse seeds), so
+  # it is optional here to keep the Phase 0-2 toolchain (and standalone CI) lean.
+  find_package(ArborX CONFIG QUIET)
+  if(ArborX_FOUND)
+    message(STATUS "vorflow: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES}), ArborX ${ArborX_VERSION}")
+  else()
+    message(STATUS "vorflow: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES}); ArborX not found "
+                   "(required from Phase 3 onward)")
+  endif()
+
+  set(VORFLOW_TPX_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../transport-core/include"
+      CACHE PATH "transport-core include dir")
+
+  if(VORFLOW_MPI)
+    find_package(MPI REQUIRED COMPONENTS CXX)
+    if(NOT EXISTS "${VORFLOW_TPX_INCLUDE}/tpx/halo/particle_halo_kokkos.hpp")
+      message(FATAL_ERROR
+        "transport-core not found at ${VORFLOW_TPX_INCLUDE} (clone it as a sibling repo)")
+    endif()
+    message(STATUS "vorflow: distributed path ENABLED (MPI + transport-core)")
+  endif()
+
+  if(VORONOI_BUILD_TESTS)
+    add_subdirectory(tests/kokkos)
+  endif()
+endif()
+
 # ── Documentation ─────────────────────────────────────────────────────────────
 option(VORONOI_BUILD_DOCS "Build Doxygen documentation" OFF)
 if(VORONOI_BUILD_DOCS)
