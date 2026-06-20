@@ -20,3 +20,6 @@ add_vorflow_kokkos_test(test_kokkos_smoke)
 
 # Phase 1: published data-layer round-trip (legacy <-> CSR <-> device view).
 add_vorflow_kokkos_test(test_tessellation_view)
+
+# Phase 2: device-callable cutter vs legacy topology (per-cell parallel_for).
+add_vorflow_kokkos_test(test_cell_cutter)
