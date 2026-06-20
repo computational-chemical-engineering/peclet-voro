@@ -52,18 +52,29 @@ struct TessellatorResult {
  * @param N        number of seeds.
  * @param L        periodic box extent.
  * @param sw       grid-block half-width (default 4; coverage = sw·cellSize).
+ * @param densityCount  seed count to derive the grid spacing from (cellSize ~
+ *                 mean spacing). Defaults to N. In the distributed case the seeds
+ *                 are a clustered owned+ghost subset, so pass the GLOBAL count to
+ *                 keep the grid at the true local density.
  */
 template <class Real, bool Weighted>
 TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
                                           const Kokkos::View<Real*, tpx::MemSpace>& weight, int N,
-                                          const Real L[3], int sw = 4) {
+                                          const Real L[3], int sw = 4, int densityCount = -1,
+                                          Kokkos::View<long*, tpx::MemSpace> gid = {}) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
   constexpr int MAXF = ScratchCell<Real>::CAP;
+  // Optional global ids: skip a candidate sharing the cell's own id (its periodic
+  // self-image, which can wrap exactly onto the seed -> a degenerate zero-distance
+  // cut). Mirrors the legacy processNbrs `itr->id == m_id` guard. In the
+  // single-domain case (gid empty) only the same local index is skipped.
+  const bool haveGid = gid.extent(0) == static_cast<size_t>(N);
 
   // --- grid dimensions: ~1 seed per cell (cellSize ~ mean spacing) ---
+  const int dens = densityCount > 0 ? densityCount : N;
   const Real vol = L[0] * L[1] * L[2];
-  const Real spacing = std::cbrt(vol / Real(N > 0 ? N : 1));
+  const Real spacing = std::cbrt(vol / Real(dens > 0 ? dens : 1));
   int dim[3];
   Real csz[3], invcsz[3];
   for (int k = 0; k < 3; ++k) {
@@ -151,6 +162,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
                 int j = binned(p);
                 if (j == i)
                   continue;
+                if (haveGid && gid(j) == gid(i))
+                  continue;  // skip periodic self-image (degenerate zero-distance cut)
                 Real rx = posFlat(3 * j + 0) - pix;
                 Real ry = posFlat(3 * j + 1) - piy;
                 Real rz = posFlat(3 * j + 2) - piz;
