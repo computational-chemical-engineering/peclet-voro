@@ -22,6 +22,23 @@
 #include "vorflow/device/tessellator.hpp"
 #include "vorflow/voronoi.hpp"
 
+#ifdef VORFLOW_HAVE_VOROPP
+#include "voro++.hh"
+// Serial voro++ reference: build every cell once (compute_cell over all seeds).
+static void voropp_build(const std::vector<std::array<double, 3>>& pos, double L) {
+  const int n = static_cast<int>(pos.size());
+  const int nbl = std::max(1, static_cast<int>(std::cbrt(n / 8.0)));
+  voro::container_periodic con(L, 0, L, 0, 0, L, nbl, nbl, nbl, 8);
+  for (int i = 0; i < n; ++i) con.put(i, pos[i][0], pos[i][1], pos[i][2]);
+  voro::voronoicell_neighbor c(con);
+  voro::c_loop_all_periodic vl(con);
+  if (vl.start())
+    do {
+      con.compute_cell(c, vl);
+    } while (vl.inc());
+}
+#endif
+
 using real_t = double;
 using Vec3 = std::array<real_t, 3>;
 using clk = std::chrono::high_resolution_clock;
@@ -38,16 +55,20 @@ static void run(int N) {
   for (int i = 0; i < N; ++i)
     for (int d = 0; d < 3; ++d) pos[i][d] = L[d] * U(rng);
 
-  // Legacy (CPU, OpenMP) — best of 2.
+  // Legacy (CPU, OpenMP) — best of 2. VORFLOW_LEGACY_NOGEOM=1 builds topology only
+  // (build(pos,false)) to compare against the historical build(false) scaling.
+  // VORFLOW_DEVONLY=1 skips the (slow at large N) legacy + voro++ reference builds.
+  const bool legacyGeom = std::getenv("VORFLOW_LEGACY_NOGEOM") == nullptr;
+  const bool devOnly = std::getenv("VORFLOW_DEVONLY") != nullptr;
   vor::Box<real_t> box(L);
   double legacyBest = 1e30, legacyVol = 0;
-  for (int rep = 0; rep < 2; ++rep) {
+  for (int rep = 0; rep < 2 && !devOnly; ++rep) {
     vor::CellComplex<real_t> c(&box);
     auto t0 = clk::now();
-    c.build(pos);
+    c.build(pos, legacyGeom);
     auto t1 = clk::now();
     legacyBest = std::min(legacyBest, secs(t0, t1));
-    if (rep == 0) {
+    if (rep == 0 && legacyGeom) {
       const auto& g = c.getGeoms();
       for (size_t i = 0; i < g.size(); ++i) legacyVol += g[i].getVolume();
     }
@@ -85,11 +106,24 @@ static void run(int N) {
     (void)res;
   }
 
-  const double volErr = std::fabs(devVol - legacyVol) / legacyVol;
+  double voroBest = 0;
+#ifdef VORFLOW_HAVE_VOROPP
+  voroBest = 1e30;
+  for (int rep = 0; rep < 2 && !devOnly; ++rep) {
+    auto t0 = clk::now();
+    voropp_build(pos, L[0]);
+    auto t1 = clk::now();
+    voroBest = std::min(voroBest, secs(t0, t1));
+  }
+#endif
+
+  const double volErr = legacyVol > 0 ? std::fabs(devVol - legacyVol) / legacyVol : 0.0;
+  const double legKs = devOnly ? 0.0 : N / legacyBest / 1e3;
   std::printf(
-      "N=%-8d  legacy %7.1f kcells/s (%.3fs)  device %7.1f kcells/s (%.3fs)  speedup %5.2fx  "
-      "volErr=%.1e\n",
-      N, N / legacyBest / 1e3, legacyBest, N / devBest / 1e3, devBest, legacyBest / devBest, volErr);
+      "N=%-8d  voro++ %7.1f k/s  legacy %7.1f k/s  device %7.1f k/s  | dev/voro %4.2fx  "
+      "dev/legacy %4.2fx  volErr=%.1e\n",
+      N, voroBest > 0 ? N / voroBest / 1e3 : 0.0, legKs, N / devBest / 1e3,
+      voroBest > 0 ? voroBest / devBest : 0.0, devOnly ? 0.0 : legacyBest / devBest, volErr);
 }
 
 int main(int argc, char** argv) {

@@ -172,10 +172,22 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   Kokkos::View<Real*, MemSpace> cellVol("cellVol", N);
   Kokkos::View<int*, MemSpace> facetCount("facetCount", N);
   Kokkos::View<int*, MemSpace> status("status", N);
-  Kokkos::View<int*, MemSpace> tmpNbr("tmpNbr", (size_t)N * MAXF);
-  Kokkos::View<Real*, MemSpace> tmpArea("tmpArea", (size_t)N * MAXF * 3);
-  Kokkos::View<Real*, MemSpace> tmpDV("tmpDV", (size_t)N * MAXF * 3);
-  Kokkos::View<Real*, MemSpace> tmpConn("tmpConn", (size_t)N * MAXF * 3);
+  // Per-cell facet scratch (compacted into the CSR below). Sized by a tight facet
+  // cap (Voronoi mean ~15, this comfortably covers the tail); cells that exceed it
+  // are flagged kOverflow. Allocated WithoutInitializing — every slot the compaction
+  // reads is written first, so the default zero-fill (here ~hundreds of MB/build,
+  // pure memory-bandwidth that also throttles thread scaling) is wasted work. The
+  // connecting vector is NOT stored — it is recomputed from the neighbour position
+  // in the compaction (cheap, and saves a third of this traffic).
+  constexpr int MAXF_TMP = 50;
+  using Kokkos::view_alloc;
+  using Kokkos::WithoutInitializing;
+  Kokkos::View<int*, MemSpace> tmpNbr(view_alloc(std::string("tmpNbr"), WithoutInitializing),
+                                      (size_t)N * MAXF_TMP);
+  Kokkos::View<Real*, MemSpace> tmpArea(view_alloc(std::string("tmpArea"), WithoutInitializing),
+                                        (size_t)N * MAXF_TMP * 3);
+  Kokkos::View<Real*, MemSpace> tmpDV(view_alloc(std::string("tmpDV"), WithoutInitializing),
+                                      (size_t)N * MAXF_TMP * 3);
 
   const bool weighted = Weighted;
   Kokkos::parallel_for(
@@ -336,14 +348,17 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           c.computeGeometry();
         int nf = 0;
         for (int f = 0; f < c.numAllocF; ++f) {
-          if (!c.aliveF[f] || nf >= MAXF)
+          if (!c.aliveF[f])
             continue;
-          const size_t o = ((size_t)i * MAXF + nf) * 3;
-          tmpNbr((size_t)i * MAXF + nf) = c.fnbr[f];
+          if (nf >= MAXF_TMP) {  // more facets than the compaction scratch holds
+            status(i) |= kOverflow;
+            break;
+          }
+          const size_t o = ((size_t)i * MAXF_TMP + nf) * 3;
+          tmpNbr((size_t)i * MAXF_TMP + nf) = c.fnbr[f];
           for (int cc = 0; cc < 3; ++cc) {
             tmpArea(o + cc) = c.fArea[f][cc];
             tmpDV(o + cc) = c.fdV[f][cc];
-            tmpConn(o + cc) = c.pvec[f][cc];
           }
           ++nf;
         }
@@ -373,11 +388,16 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   TessellationView<Real> view;
   view.cellFacetOffset = offset;
   view.cellVolume = cellVol;
-  view.cellSeedId = Kokkos::View<gid_t*, MemSpace>("cellSeedId", N);
-  view.facetNeighbor = Kokkos::View<gid_t*, MemSpace>("facetNeighbor", nFacets);
-  view.facetArea = Kokkos::View<Real*, MemSpace>("facetArea", (size_t)nFacets * 3);
-  view.facetConnect = Kokkos::View<Real*, MemSpace>("facetConnect", (size_t)nFacets * 3);
-  view.facetConnVec = Kokkos::View<Real*, MemSpace>("facetConnVec", (size_t)nFacets * 3);
+  view.cellSeedId = Kokkos::View<gid_t*, MemSpace>(view_alloc(std::string("cellSeedId"),
+                                                              WithoutInitializing), N);
+  view.facetNeighbor = Kokkos::View<gid_t*, MemSpace>(
+      view_alloc(std::string("facetNeighbor"), WithoutInitializing), nFacets);
+  view.facetArea = Kokkos::View<Real*, MemSpace>(
+      view_alloc(std::string("facetArea"), WithoutInitializing), (size_t)nFacets * 3);
+  view.facetConnect = Kokkos::View<Real*, MemSpace>(
+      view_alloc(std::string("facetConnect"), WithoutInitializing), (size_t)nFacets * 3);
+  view.facetConnVec = Kokkos::View<Real*, MemSpace>(
+      view_alloc(std::string("facetConnVec"), WithoutInitializing), (size_t)nFacets * 3);
   auto vSeed = view.cellSeedId;
   auto vNbr = view.facetNeighbor;
   auto vArea = view.facetArea;
@@ -388,14 +408,25 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         vSeed(i) = (gid_t)i;
         int base = offset(i);
         int nf = facetCount(i);
+        const Real pix = posFlat(3 * i + 0), piy = posFlat(3 * i + 1), piz = posFlat(3 * i + 2);
         for (int k = 0; k < nf; ++k) {
-          vNbr(base + k) = (gid_t)tmpNbr((size_t)i * MAXF + k);
+          int j = tmpNbr((size_t)i * MAXF_TMP + k);
+          vNbr(base + k) = (gid_t)j;
+          // Recompute the connecting vector (minimal image of pos[j]-pos[i]); bit-
+          // identical to the pvec the cutter used, so it need not be stored.
+          Real rx = posFlat(3 * j + 0) - pix;
+          Real ry = posFlat(3 * j + 1) - piy;
+          Real rz = posFlat(3 * j + 2) - piz;
+          rx -= Lx * Kokkos::round(rx / Lx);
+          ry -= Ly * Kokkos::round(ry / Ly);
+          rz -= Lz * Kokkos::round(rz / Lz);
+          const Real conn[3] = {rx, ry, rz};
           for (int cc = 0; cc < 3; ++cc) {
-            const size_t src = ((size_t)i * MAXF + k) * 3 + cc;
+            const size_t src = ((size_t)i * MAXF_TMP + k) * 3 + cc;
             const size_t dst = (size_t)(base + k) * 3 + cc;
             vArea(dst) = tmpArea(src);
             vDV(dst) = tmpDV(src);
-            vConn(dst) = tmpConn(src);
+            vConn(dst) = conn[cc];
           }
         }
       });

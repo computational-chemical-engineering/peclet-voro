@@ -52,8 +52,28 @@ add_vorflow_kokkos_test(test_device_step)
 add_vorflow_kokkos_test(test_incremental_device)
 
 # Throughput benchmark (device vs legacy) — a plain executable, not a ctest.
+# The legacy side MUST be compiled with VORONOI_USE_OPENMP so its per-thread
+# CellMaker parallel build is exercised; without it the legacy comparison runs
+# serial and the device "wins" unfairly.
+find_package(OpenMP REQUIRED)
 add_executable(bench_device bench_device.cpp)
-target_link_libraries(bench_device PRIVATE Kokkos::kokkos)
+target_link_libraries(bench_device PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+target_compile_definitions(bench_device PRIVATE VORONOI_USE_OPENMP)
 target_include_directories(bench_device PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}")
 target_compile_features(bench_device PRIVATE cxx_std_20)
+
+# Optional voro++ reference (the serial throughput target). FetchContent reuses the
+# already-downloaded source; if it resolves, bench_device adds a voro++ column.
+include(FetchContent)
+FetchContent_Declare(voropp
+  GIT_REPOSITORY https://github.com/chr1shr/voro.git
+  GIT_TAG master)
+set(VORO_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(VORO_BUILD_CMD_LINE OFF CACHE BOOL "" FORCE)
+set(VORO_ENABLE_DOXYGEN OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(voropp)
+if(TARGET voro++)
+  target_link_libraries(bench_device PRIVATE voro++)
+  target_compile_definitions(bench_device PRIVATE VORFLOW_HAVE_VOROPP)
+endif()
