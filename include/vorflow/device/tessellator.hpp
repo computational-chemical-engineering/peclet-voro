@@ -28,6 +28,8 @@
 
 #include <cmath>
 #include <Kokkos_Core.hpp>
+#include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <type_traits>
 
@@ -41,6 +43,26 @@ namespace device {
 
 /// Per-cell status bits written by the build pass.
 enum StatusBit { kOk = 0, kOverflow = 1, kEmpty = 2, kIncomplete = 4 };
+
+/// Sift element i down a binary min-heap of size n keyed on key[], moving id[] in
+/// lockstep. Used to process candidate neighbours closest-first in O(applied·log n)
+/// instead of an O(applied·n) selection scan.
+template <class Real>
+KOKKOS_INLINE_FUNCTION void heapSiftDown(Real* key, int* id, int i, int n) {
+  for (;;) {
+    int l = 2 * i + 1, r = l + 1, m = i;
+    if (l < n && key[l] < key[m]) m = l;
+    if (r < n && key[r] < key[m]) m = r;
+    if (m == i) break;
+    Real tk = key[i];
+    key[i] = key[m];
+    key[m] = tk;
+    int ti = id[i];
+    id[i] = id[m];
+    id[m] = ti;
+    i = m;
+  }
+}
 
 template <class Real>
 struct TessellatorResult {
@@ -96,7 +118,10 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   const Real icx = invcsz[0], icy = invcsz[1], icz = invcsz[2];
   Real minCsz = csz[0] < csz[1] ? csz[0] : csz[1];
   minCsz = minCsz < csz[2] ? minCsz : csz[2];
-  const Real coverageSq = Real(sw) * minCsz * Real(sw) * minCsz;
+
+  const bool prof = std::getenv("VORFLOW_PROFILE") != nullptr;
+  Kokkos::Timer ptimer;
+  double tGrid = 0, tBuild = 0, tCsr = 0;
 
   // --- counting sort: bin seeds into grid cells ---
   Kokkos::View<int*, MemSpace> cellOf("cellOf", N);
@@ -136,6 +161,12 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         binned(slot) = i;
       });
 
+  if (prof) {
+    Kokkos::fence();
+    tGrid = ptimer.seconds();
+    ptimer.reset();
+  }
+
   // --- pass 1: build each cell, record volume / facet count / status and the
   //     per-cell facet records (neighbour id + area vector) into a temp slab ---
   Kokkos::View<Real*, MemSpace> cellVol("cellVol", N);
@@ -154,49 +185,43 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
         int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
 
-        // Gather the surrounding grid block's seeds as candidates (offset + id),
-        // then process them closest-first so the cell shrinks fast and the
-        // security early-out prunes the long tail (legacy processNbrs order).
+        // Candidate neighbours are seeds of the surrounding grid cells, gathered
+        // (minimal-imaged) into ckey/cjid and the cell cut closest-first.
         constexpr int MAXCAND = 1024;
         Real ckey[MAXCAND];  // plane offset (sort key)
         int cjid[MAXCAND];   // candidate local index
         int nc = 0;
         const Real wi = weighted ? weight(i) : Real(0);
         bool ovf = false;
-        for (int dz = -sw; dz <= sw; ++dz)
-          for (int dy = -sw; dy <= sw; ++dy)
-            for (int dx = -sw; dx <= sw; ++dx) {
-              int gx = (((cx + dx) % dimx) + dimx) % dimx;
-              int gy = (((cy + dy) % dimy) + dimy) % dimy;
-              int gz = (((cz + dz) % dimz) + dimz) % dimz;
-              int gc = gx + gy * dimx + gz * dimx * dimy;
-              for (int p = cellStart(gc); p < cellStart(gc + 1); ++p) {
-                int j = binned(p);
-                if (j == i)
-                  continue;
-                if (haveGid && gid(j) == gid(i))
-                  continue;  // periodic self-image
-                Real rx = posFlat(3 * j + 0) - pix;
-                Real ry = posFlat(3 * j + 1) - piy;
-                Real rz = posFlat(3 * j + 2) - piz;
-                rx -= Lx * Kokkos::round(rx / Lx);
-                ry -= Ly * Kokkos::round(ry / Ly);
-                rz -= Lz * Kokkos::round(rz / Lz);
-                Real rSqHalf = Real(0.5) * (rx * rx + ry * ry + rz * rz);
-                Real off = weighted ? rSqHalf + Real(0.5) * (wi - weight(j)) : rSqHalf;
-                if (nc < MAXCAND) {
-                  ckey[nc] = off;
-                  cjid[nc] = j;
-                  ++nc;
-                } else {
-                  ovf = true;  // candidate overflow -> flag for fallback
-                }
-              }
-            }
 
         ScratchCell<Real> c;
         const Real Larr[3] = {Lx, Ly, Lz};
         c.initCuboid(Larr);
+
+        // Append the seeds of grid cell (gx,gy,gz) as minimal-imaged candidates.
+        auto gatherGrid = [&](int gx, int gy, int gz) {
+          int gc = gx + gy * dimx + gz * dimx * dimy;
+          for (int p = cellStart(gc); p < cellStart(gc + 1); ++p) {
+            int j = binned(p);
+            if (j == i) continue;
+            if (haveGid && gid(j) == gid(i)) continue;  // periodic self-image
+            Real rx = posFlat(3 * j + 0) - pix;
+            Real ry = posFlat(3 * j + 1) - piy;
+            Real rz = posFlat(3 * j + 2) - piz;
+            rx -= Lx * Kokkos::round(rx / Lx);
+            ry -= Ly * Kokkos::round(ry / Ly);
+            rz -= Lz * Kokkos::round(rz / Lz);
+            Real rSqHalf = Real(0.5) * (rx * rx + ry * ry + rz * rz);
+            Real off = weighted ? rSqHalf + Real(0.5) * (wi - weight(j)) : rSqHalf;
+            if (nc < MAXCAND) {
+              ckey[nc] = off;
+              cjid[nc] = j;
+              ++nc;
+            } else {
+              ovf = true;  // candidate overflow -> flag for fallback
+            }
+          }
+        };
         auto applyCand = [&](int j, Real off) {
           Real rx = posFlat(3 * j + 0) - pix;
           Real ry = posFlat(3 * j + 1) - piy;
@@ -207,35 +232,84 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           const Real pv[3] = {rx, ry, rz};
           c.cutCell2(pv, off, j, &ovf);
         };
+
+        // Coverage² actually attained for this cell (drives the security check). A
+        // grid cell at offset (dx,dy,dz) has nearest-corner distance max(0,|·|-1)
+        // cells, so cells with e²>sw² lie outside the coverage sphere of radius
+        // sw·h and never matter.
+        Real covSq;
         if (weighted) {
-          // Power has no security early-out (a distant heavy seed can still cut)
-          // and the cut is order-independent, so apply every candidate unsorted.
-          for (int s = 0; s < nc && !ovf; ++s)
-            applyCand(cjid[s], ckey[s]);
-        } else {
-          // Repeatedly take the closest unprocessed candidate, stopping as soon as
-          // it is beyond the security radius (2·rSqMax) — only the handful that can
-          // actually cut are touched, so no full O(n²) sort of the block.
-          for (int done = 0; done < nc && !ovf; ++done) {
-            int m = done;
-            for (int s = done + 1; s < nc; ++s)
-              if (ckey[s] < ckey[m])
-                m = s;
-            if (ckey[m] >= Real(2) * c.rsq[c.vRsqMax])
-              break;
-            Real tk = ckey[done];
-            int tj = cjid[done];
-            ckey[done] = ckey[m];
-            cjid[done] = cjid[m];
-            ckey[m] = tk;
-            cjid[m] = tj;
-            applyCand(cjid[done], ckey[done]);
+          // Power has no security early-out (a distant heavy seed can still cut), so
+          // gather the whole coverage sphere and apply every candidate unsorted.
+          const int sw2 = sw * sw;
+          for (int dz = -(sw + 1); dz <= sw + 1; ++dz) {
+            const int ez = dz < -1 ? -dz - 1 : (dz > 1 ? dz - 1 : 0);
+            if (ez * ez > sw2) continue;
+            for (int dy = -(sw + 1); dy <= sw + 1; ++dy) {
+              const int ey = dy < -1 ? -dy - 1 : (dy > 1 ? dy - 1 : 0);
+              if (ez * ez + ey * ey > sw2) continue;
+              for (int dx = -(sw + 1); dx <= sw + 1; ++dx) {
+                const int ex = dx < -1 ? -dx - 1 : (dx > 1 ? dx - 1 : 0);
+                if (ex * ex + ey * ey + ez * ez > sw2) continue;
+                gatherGrid((((cx + dx) % dimx) + dimx) % dimx, (((cy + dy) % dimy) + dimy) % dimy,
+                           (((cz + dz) % dimz) + dimz) % dimz);
+              }
+            }
           }
+          for (int s = 0; s < nc && !ovf; ++s) applyCand(cjid[s], ckey[s]);
+          covSq = Real(sw) * minCsz * Real(sw) * minCsz;
+        } else {
+          // Adaptive expanding search (legacy's tight per-cell coverage): grow the
+          // gathered sphere one grid-shell at a time, process each new shell
+          // closest-first via a min-heap, and stop the moment the security radius is
+          // met (coverage² > 4·rSqMax). Most cells close at the innermost level, so
+          // we never pay the full sw-block gather/cut a fixed radius would force.
+          const int swInit = sw < 2 ? sw : 2;
+          int swUsed = swInit;
+          for (int swl = swInit; swl <= sw && !ovf; ++swl) {
+            const int lo2 = (swl == swInit) ? -1 : (swl - 1) * (swl - 1);
+            const int hi2 = swl * swl;
+            const int shellStart = nc;
+            for (int dz = -(swl + 1); dz <= swl + 1; ++dz) {
+              const int ez = dz < -1 ? -dz - 1 : (dz > 1 ? dz - 1 : 0);
+              if (ez * ez > hi2) continue;
+              for (int dy = -(swl + 1); dy <= swl + 1; ++dy) {
+                const int ey = dy < -1 ? -dy - 1 : (dy > 1 ? dy - 1 : 0);
+                if (ez * ez + ey * ey > hi2) continue;
+                for (int dx = -(swl + 1); dx <= swl + 1; ++dx) {
+                  const int ex = dx < -1 ? -dx - 1 : (dx > 1 ? dx - 1 : 0);
+                  const int d2 = ex * ex + ey * ey + ez * ez;
+                  if (d2 <= lo2 || d2 > hi2) continue;  // not in this shell
+                  gatherGrid((((cx + dx) % dimx) + dimx) % dimx, (((cy + dy) % dimy) + dimy) % dimy,
+                             (((cz + dz) % dimz) + dimz) % dimz);
+                }
+              }
+            }
+            // Process this shell's new candidates closest-first, stopping once the
+            // nearest unprocessed one is beyond the security radius (2·rSqMax).
+            Real* k = ckey + shellStart;
+            int* idp = cjid + shellStart;
+            int hn = nc - shellStart;
+            for (int s = hn / 2 - 1; s >= 0; --s) heapSiftDown(k, idp, s, hn);
+            while (hn > 0 && !ovf) {
+              if (k[0] >= Real(2) * c.rsq[c.vRsqMax]) break;
+              const Real topKey = k[0];
+              const int topId = idp[0];
+              --hn;
+              k[0] = k[hn];
+              idp[0] = idp[hn];
+              heapSiftDown(k, idp, 0, hn);
+              applyCand(topId, topKey);
+            }
+            swUsed = swl;
+            if (Real(swl) * minCsz * Real(swl) * minCsz > Real(4) * c.rsq[c.vRsqMax]) break;
+          }
+          covSq = Real(swUsed) * minCsz * Real(swUsed) * minCsz;
         }
 
         // Voronoi completeness is judged on the un-clipped cell (the SDF clip only
         // shrinks it, which would mask an incomplete neighbour search).
-        const bool incomplete = !(coverageSq > Real(4) * c.rsq[c.vRsqMax]);
+        const bool incomplete = !(covSq > Real(4) * c.rsq[c.vRsqMax]);
 
         // Optional SDF boundary clip: clip the cell to the fluid region (sdf > 0),
         // emptying it if the seed is in the solid.
@@ -275,6 +349,12 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         }
         facetCount(i) = nf;
       });
+
+  if (prof) {
+    Kokkos::fence();
+    tBuild = ptimer.seconds();
+    ptimer.reset();
+  }
 
   // --- exclusive scan of facet counts -> CSR offsets ---
   Kokkos::View<int*, MemSpace> offset("cellFacetOffset", N + 1);
@@ -320,6 +400,12 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         }
       });
   Kokkos::fence();
+
+  if (prof) {
+    tCsr = ptimer.seconds();
+    std::fprintf(stderr, "[tess N=%d] grid=%.4fs build=%.4fs csr=%.4fs (build %.0f%%)\n", N, tGrid,
+                 tBuild, tCsr, 100.0 * tBuild / (tGrid + tBuild + tCsr));
+  }
 
   TessellatorResult<Real> res;
   res.view = view;

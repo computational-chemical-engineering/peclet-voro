@@ -64,7 +64,8 @@ static void run(int N) {
   }
   Kokkos::View<real_t*, tpx::MemSpace> dW("w", N);
   const real_t Larr[3] = {L[0], L[1], L[2]};
-  auto warm = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr);
+  const int sw = std::getenv("VORFLOW_SW") ? std::atoi(std::getenv("VORFLOW_SW")) : 4;
+  auto warm = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw);
   Kokkos::fence();
   // device volume sum (correctness)
   double devVol = 0;
@@ -77,7 +78,7 @@ static void run(int N) {
   for (int rep = 0; rep < 3; ++rep) {
     Kokkos::fence();
     auto t0 = clk::now();
-    auto res = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr);
+    auto res = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw);
     Kokkos::fence();
     auto t1 = clk::now();
     devBest = std::min(devBest, secs(t0, t1));
