@@ -42,3 +42,4 @@ benchmarks/archive_pending/
 *~
 .DS_Store
 Thumbs.db
+.codex
