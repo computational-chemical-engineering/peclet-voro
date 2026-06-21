@@ -55,12 +55,16 @@ tessellate → publish → force → integrate. *Accept:* a full trajectory matc
 legacy `Simulation::step` to machine precision (the `mpi/validate_voronoi_dynamics`
 scenarios, run against the device path).
 
-**5. Incompressible projection (the hard one).** Assemble the Voronoi-graph
-Laplacian from `TessellationView` (facet areas / connecting vectors) and solve the
-elliptic pressure system on device with **CG / AMG** (Kokkos-Kernels SpMV; reuse
-`sdflow`'s MG-PCG experience — but on an *unstructured* graph, so algebraic, not
-geometric, multigrid). *Accept:* divergence-free result matches legacy
-`Incompressible` within solver tol; weak/strong scaling reported.
+**5. Incompressible projection — DEFERRED (no faithful port possible).** The legacy
+`Incompressible` is an **incomplete stub**: `buildConstraintMatrix()` only assembles
+the pressure-Poisson operator `A = D M⁻¹ Dᵀ` and prints timings — it never solves the
+system, there is no projection, and no `Incompressible::step()` (it falls through to the
+explicit Euler step). So there is nothing functional to faithfully port. A real
+device elliptic solver (assemble the Voronoi-graph Laplacian from `TessellationView`
++ CG/AMG via Kokkos-Kernels, reusing `sdflow`'s MG-PCG experience) is **new-method
+work** and belongs to the later methodological-improvement effort, not this
+faithful-port pass. The reusable foundation — assembling `A` from the view — can be
+ported when that solver is written.
 
 **6. CPU incremental update on the new cutter.** A host (OpenMP/Threads) worklist
 driver that, each step, uses `SkinRefresh` to find cells whose neighbourhood moved

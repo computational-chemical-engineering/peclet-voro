@@ -556,6 +556,60 @@ struct ScratchCell {
     }
   }
 
+  /// Gradient of facet f's area² w.r.t. the plane positions of f and its
+  /// edge-adjacent facets (faithful port of CellGeometry::gradFacetAreaSq), for
+  /// the interface-tension force. Requires computeGeometry() first. outF[m] are
+  /// cell-local facet slots (outF[0]==f), outG[m] the gradient; numF entries.
+  KOKKOS_INLINE_FUNCTION void gradFacetAreaSq(int indxFacet, int outF[], Real outG[][3],
+                                              int& numF) {
+    lbl_t labels[40];
+    int numV = 0;
+    lbl_t lstart = flab[indxFacet];
+    labels[numV++] = lstart;
+    lbl_t lnext = static_cast<lbl_t>(getNextLabelCCW(lstart));
+    while (lnext != lstart && numV < 40) {
+      labels[numV++] = lnext;
+      lnext = static_cast<lbl_t>(getNextLabelCCW(lnext));
+    }
+    numF = numV + 1;
+    outF[0] = indxFacet;
+    for (int i = 0; i < numV; ++i)
+      outF[i + 1] = getFacet(getReverse(labels[i]));
+    for (int i = 0; i < numF; ++i)
+      for (int c = 0; c < 3; ++c)
+        outG[i][c] = 0;
+    const Real* A = fArea[indxFacet];
+    int nbrPrev = numV, nbrNext = 1;
+    for (int i = 0; i < numV; ++i) {
+      int vc = getVertex(labels[i]);
+      int e0 = getEdge(labels[i]);
+      int e1 = (e0 == 2 ? 0 : e0 + 1);
+      int e2 = (e0 == 0 ? 2 : e0 - 1);
+      int f0 = getFacet(vlab[vc][e1]);
+      int f1 = getFacet(vlab[vc][e2]);
+      int f2 = getFacet(vlab[vc][e0]);
+      int v0 = getVertex(vlab[vc][e0]);
+      int v1 = getVertex(vlab[vc][e1]);
+      Real dv[3];
+      for (int c = 0; c < 3; ++c)
+        dv[c] = vpos[v0][c] - vpos[v1][c];
+      Real dvA[3] = {dv[1] * A[2] - dv[2] * A[1], dv[2] * A[0] - dv[0] * A[2],
+                     dv[0] * A[1] - dv[1] * A[0]};
+      Real s =
+          edgeInv[vc][e0][0] * dvA[0] + edgeInv[vc][e0][1] * dvA[1] + edgeInv[vc][e0][2] * dvA[2];
+      for (int c = 0; c < 3; ++c)
+        outG[nbrPrev][c] += (pvec[f1][c] - vpos[vc][c]) * s;
+      s = edgeInv[vc][e1][0] * dvA[0] + edgeInv[vc][e1][1] * dvA[1] + edgeInv[vc][e1][2] * dvA[2];
+      for (int c = 0; c < 3; ++c)
+        outG[nbrNext][c] += (pvec[f2][c] - vpos[vc][c]) * s;
+      s = edgeInv[vc][e2][0] * dvA[0] + edgeInv[vc][e2][1] * dvA[1] + edgeInv[vc][e2][2] * dvA[2];
+      for (int c = 0; c < 3; ++c)
+        outG[0][c] += (pvec[f0][c] - vpos[vc][c]) * s;
+      nbrPrev = nbrNext;
+      ++nbrNext;
+    }
+  }
+
   /// Outward area vector of facet f (½ Σ pi × p{i+1} over its polygon loop).
   KOKKOS_INLINE_FUNCTION void facetAreaVec(int f, Real out[3]) {
     Real ax = 0, ay = 0, az = 0;
