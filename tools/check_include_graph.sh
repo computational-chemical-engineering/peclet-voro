@@ -16,7 +16,7 @@ INC_DIR="${1:-$(cd "$(dirname "$0")/.." && pwd)/include/vorflow}"
 PHYSICS_HEADERS=(simulation.hpp)
 
 # Core/engine headers — everything else under include/vorflow that is not physics.
-CORE_HEADERS=(vor_types.hpp nbrlist.hpp voronoi.hpp tessellation_view.hpp device/cell_cutter.hpp)
+CORE_HEADERS=(vor_types.hpp nbrlist.hpp voronoi.hpp tessellation_view.hpp device/cell_cutter.hpp device/sdf.hpp device/tessellator.hpp)
 
 status=0
 for core in "${CORE_HEADERS[@]}"; do

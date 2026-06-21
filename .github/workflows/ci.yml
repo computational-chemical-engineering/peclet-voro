@@ -105,14 +105,14 @@ jobs:
       - name: Build device + oracle tests
         run: |
           cmake --build build-kokkos --target \
-            test_kokkos_smoke test_tessellation_view test_cell_cutter test_tessellator \
+            test_kokkos_smoke test_tessellation_view test_cell_cutter test_tessellator test_sdf_boundary_device \
             test_euler_pressure test_invariants test_golden --parallel
 
       - name: Run device + oracle tests
         run: |
           export OMP_PROC_BIND=false
           ctest --test-dir build-kokkos \
-            -R "test_kokkos_smoke|test_tessellation_view|test_cell_cutter|test_tessellator|test_euler_pressure|test_invariants|test_golden|test_include_graph" \
+            -R "test_kokkos_smoke|test_tessellation_view|test_cell_cutter|test_tessellator|test_sdf_boundary_device|test_euler_pressure|test_invariants|test_golden|test_include_graph" \
             --output-on-failure --timeout 600
 
   # ── Format Check ─────────────────────────────────────────────────────────────

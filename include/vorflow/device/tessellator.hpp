@@ -29,9 +29,11 @@
 #include <cmath>
 #include <Kokkos_Core.hpp>
 #include <string>
+#include <type_traits>
 
 #include "tpx/common/view.hpp"
 #include "vorflow/device/cell_cutter.hpp"
+#include "vorflow/device/sdf.hpp"
 #include "vorflow/tessellation_view.hpp"
 
 namespace vor {
@@ -60,11 +62,12 @@ struct TessellatorResult {
  *                 are a clustered owned+ghost subset, so pass the GLOBAL count to
  *                 keep the grid at the true local density.
  */
-template <class Real, bool Weighted>
+template <class Real, bool Weighted, class Sdf = NoSdf>
 TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
                                           const Kokkos::View<Real*, tpx::MemSpace>& weight, int N,
                                           const Real L[3], int sw = 4, int densityCount = -1,
-                                          Kokkos::View<long*, tpx::MemSpace> gid = {}) {
+                                          Kokkos::View<long*, tpx::MemSpace> gid = {},
+                                          Sdf sdf = {}) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
   constexpr int MAXF = ScratchCell<Real>::CAP;
@@ -228,12 +231,23 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           }
         }
 
+        // Voronoi completeness is judged on the un-clipped cell (the SDF clip only
+        // shrinks it, which would mask an incomplete neighbour search).
+        const bool incomplete = !(coverageSq > Real(4) * c.rsq[c.vRsqMax]);
+
+        // Optional SDF boundary clip: clip the cell to the fluid region (sdf > 0),
+        // emptying it if the seed is in the solid.
+        if constexpr (!std::is_same_v<Sdf, NoSdf>) {
+          const Real seedW[3] = {pix, piy, piz};
+          clipCellAgainstSdf<Real>(c, seedW, sdf, &ovf);
+        }
+
         int st = kOk;
         if (ovf)
           st |= kOverflow;
         if (c.emptyV())
           st |= kEmpty;
-        if (!(coverageSq > Real(4) * c.rsq[c.vRsqMax]))
+        if (incomplete)
           st |= kIncomplete;
         status(i) = st;
         cellVol(i) = c.volume();

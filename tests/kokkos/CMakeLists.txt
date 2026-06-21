@@ -27,5 +27,9 @@ add_vorflow_kokkos_test(test_cell_cutter)
 # Phase 3: full-system device tessellation (grid + cutter + CSR) vs legacy.
 add_vorflow_kokkos_test(test_tessellator)
 
+# SDF geometry: device boundary clip (cut planes at sdf=0, normal from grad) vs
+# the legacy SignedDistanceBoundary build over the same geometry.
+add_vorflow_kokkos_test(test_sdf_boundary_device)
+
 # Phase 4: atomic-free pressure force over TessellationView vs legacy Euler.
 add_vorflow_kokkos_test(test_euler_pressure)
