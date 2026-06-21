@@ -239,6 +239,9 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
 
         // Optional SDF boundary clip: clip the cell to the fluid region (sdf > 0),
         // emptying it if the seed is in the solid.
+        // (CUDA extended lambdas cannot first-capture a variable inside an
+        // if-constexpr, so reference sdf once in normal context first.)
+        (void)sdf;
         if constexpr (!std::is_same_v<Sdf, NoSdf>) {
           const Real seedW[3] = {pix, piy, piz};
           clipCellAgainstSdf<Real>(c, seedW, sdf, &ovf);

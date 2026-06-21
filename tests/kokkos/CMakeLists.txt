@@ -50,3 +50,10 @@ add_vorflow_kokkos_test(test_device_step)
 
 # De-legacy Phase 6: CPU incremental update on the new cutter vs full rebuild.
 add_vorflow_kokkos_test(test_incremental_device)
+
+# Throughput benchmark (device vs legacy) — a plain executable, not a ctest.
+add_executable(bench_device bench_device.cpp)
+target_link_libraries(bench_device PRIVATE Kokkos::kokkos)
+target_include_directories(bench_device PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}")
+target_compile_features(bench_device PRIVATE cxx_std_20)
