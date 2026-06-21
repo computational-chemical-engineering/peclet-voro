@@ -41,6 +41,9 @@ add_vorflow_kokkos_test(test_euler_pressure)
 # De-legacy Phase 2: atomic-free viscous force vs legacy NavierStokes.
 add_vorflow_kokkos_test(test_viscous_device)
 
+# De-legacy Phase 3: device interface-tension energy vs legacy IntfDyn.
+add_vorflow_kokkos_test(test_interface_energy)
+
 # De-legacy Phase 4: device-native Euler trajectory vs legacy ExplicitEuler.
 add_vorflow_kokkos_test(test_device_step)
 
