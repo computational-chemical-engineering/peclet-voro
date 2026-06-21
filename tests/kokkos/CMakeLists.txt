@@ -43,3 +43,6 @@ add_vorflow_kokkos_test(test_viscous_device)
 
 # De-legacy Phase 4: device-native Euler trajectory vs legacy ExplicitEuler.
 add_vorflow_kokkos_test(test_device_step)
+
+# De-legacy Phase 6: CPU incremental update on the new cutter vs full rebuild.
+add_vorflow_kokkos_test(test_incremental_device)

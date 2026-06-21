@@ -112,7 +112,7 @@ jobs:
         run: |
           export OMP_PROC_BIND=false
           ctest --test-dir build-kokkos \
-            -R "test_kokkos_smoke|test_tessellation_view|test_cell_cutter|test_tessellator|test_device_geometry|test_sdf_boundary_device|test_device_step|test_viscous_device|test_euler_pressure|test_invariants|test_golden|test_include_graph" \
+            -R "test_kokkos_smoke|test_tessellation_view|test_cell_cutter|test_tessellator|test_device_geometry|test_sdf_boundary_device|test_incremental_device|test_device_step|test_viscous_device|test_euler_pressure|test_invariants|test_golden|test_include_graph" \
             --output-on-failure --timeout 600
 
   # ── Format Check ─────────────────────────────────────────────────────────────
