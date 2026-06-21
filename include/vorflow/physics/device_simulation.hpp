@@ -118,6 +118,8 @@ class ExplicitEulerDevice {
   const DView& positions() const { return pos_; }
   const DView& velocities() const { return vel_; }
   const DView& force() const { return force_; }
+  const TessellationView<Real>& view() const { return view_; }
+  int numParticles() const { return N_; }
   Real time() const { return time_; }
 
  private:

@@ -114,6 +114,23 @@ if(VORFLOW_KOKKOS)
   if(VORONOI_BUILD_TESTS)
     add_subdirectory(tests/kokkos)
   endif()
+
+  # Device-native Python module `vorflow` (the de-legacy surface over the device
+  # tessellator + ExplicitEulerDevice). Opt-in; shares the name with the legacy
+  # python/ module (build only one). pybind11 is fetched, no install needed.
+  option(VORFLOW_BUILD_PYTHON "Build the device-native vorflow Python module" OFF)
+  if(VORFLOW_BUILD_PYTHON)
+    include(FetchContent)
+    FetchContent_Declare(pybind11
+      GIT_REPOSITORY https://github.com/pybind/pybind11.git GIT_TAG v2.13.6)
+    FetchContent_MakeAvailable(pybind11)
+    pybind11_add_module(vorflow_device NO_EXTRAS src/vorflow_bindings.cpp)
+    set_target_properties(vorflow_device PROPERTIES OUTPUT_NAME vorflow)
+    target_include_directories(vorflow_device PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include" "${VORFLOW_TPX_INCLUDE}")
+    target_link_libraries(vorflow_device PRIVATE Kokkos::kokkos)
+    target_compile_features(vorflow_device PRIVATE cxx_std_20)
+  endif()
 endif()
 
 # ── Documentation ─────────────────────────────────────────────────────────────
