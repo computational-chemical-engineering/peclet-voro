@@ -463,6 +463,99 @@ struct ScratchCell {
     return vol * (Real(1) / Real(3));
   }
 
+  // Per-facet published geometry (filled by computeGeometry from the half-edge
+  // mesh) — the connecting vector to the neighbour seed (= the plane vector), the
+  // facet area vector, and the volume gradient dV the physics forces consume.
+  Real edgeInv[CAP][3][3];  // dual edge tensor per vertex (connV[f0] x connV[f1])
+  Real fArea[CAP][3];       // facet area vector
+  Real fdV[CAP][3];         // facet volume gradient (legacy m_dV)
+
+  /// Faithful port of CellGeometry::computeEdgeInv + diffVolume: fills fArea, fdV
+  /// from the in-scratch half-edge mesh. connV[f] is the plane vector pvec[f]
+  /// (= pos[nbr]-pos[seed] for both Voronoi and Power); m_rSq[f] is poff[f].
+  KOKKOS_INLINE_FUNCTION void computeGeometry() {
+    // edgeInv[v][e] = connV[f0] x connV[f1] over the edge (processed once).
+    for (int v = 0; v < numAllocV; ++v) {
+      if (!aliveV[v])
+        continue;
+      for (int k = 0; k < 3; ++k) {
+        lbl_t l0 = vlab[v][k];
+        lbl_t l1 = getReverse(l0);
+        if (l0 > l1)
+          continue;
+        int e0 = getEdge(l0), v0 = getVertex(l0), f0 = getFacet(l0);
+        int e1 = getEdge(l1), v1 = getVertex(l1), f1 = getFacet(l1);
+        const Real* a = pvec[f0];
+        const Real* b = pvec[f1];
+        edgeInv[v0][e0][0] = a[1] * b[2] - a[2] * b[1];
+        edgeInv[v0][e0][1] = a[2] * b[0] - a[0] * b[2];
+        edgeInv[v0][e0][2] = a[0] * b[1] - a[1] * b[0];
+        for (int c = 0; c < 3; ++c)
+          edgeInv[v1][e1][c] = -edgeInv[v0][e0][c];
+      }
+    }
+    // Normalise each vertex's edgeInv by its (signed) triple product so it is the
+    // true dual basis (legacy computeEdgeInv tail).
+    for (int v = 0; v < numAllocV; ++v) {
+      if (!aliveV[v])
+        continue;
+      int indxF = getFacet(vlab[v][2]);
+      Real vol = pvec[indxF][0] * edgeInv[v][0][0] + pvec[indxF][1] * edgeInv[v][0][1] +
+                 pvec[indxF][2] * edgeInv[v][0][2];
+      for (int m = 0; m < 3; ++m)
+        for (int c = 0; c < 3; ++c)
+          edgeInv[v][m][c] /= vol;
+    }
+    for (int f = 0; f < numAllocF; ++f)
+      if (aliveF[f])
+        for (int c = 0; c < 3; ++c) {
+          fArea[f][c] = 0;
+          fdV[f][c] = 0;
+        }
+    const int eOpp[3] = {2, 0, 1};
+    for (int vc = 0; vc < numAllocV; ++vc) {
+      if (!aliveV[vc])
+        continue;
+      int vN[3], ff[3];
+      vN[0] = getVertex(vlab[vc][0]);
+      ff[2] = getFacet(vlab[vc][0]);
+      vN[1] = getVertex(vlab[vc][1]);
+      ff[0] = getFacet(vlab[vc][1]);
+      vN[2] = getVertex(vlab[vc][2]);
+      ff[1] = getFacet(vlab[vc][2]);
+      Real dv[3][3];
+      for (int c = 0; c < 3; ++c) {
+        dv[0][c] = vpos[vN[0]][c] - vpos[vN[1]][c];
+        dv[1][c] = vpos[vN[1]][c] - vpos[vN[2]][c];
+        dv[2][c] = vpos[vN[2]][c] - vpos[vN[0]][c];
+      }
+      Real dVertex[3][3][3];
+      for (int j = 0; j < 3; ++j)
+        for (int ii = 0; ii < 3; ++ii)
+          for (int l = 0; l < 3; ++l)
+            dVertex[j][ii][l] = edgeInv[vc][eOpp[ii]][l] * (pvec[ff[ii]][j] - vpos[vc][j]);
+      for (int m = 0; m < 3; ++m) {
+        Real dA[3];
+        dA[0] = vpos[vc][1] * dv[m][2] - vpos[vc][2] * dv[m][1];
+        dA[1] = vpos[vc][2] * dv[m][0] - vpos[vc][0] * dv[m][2];
+        dA[2] = vpos[vc][0] * dv[m][1] - vpos[vc][1] * dv[m][0];
+        for (int c = 0; c < 3; ++c)
+          fArea[ff[m]][c] += Real(0.25) * dA[c];
+        for (int j = 0; j < 3; ++j) {
+          for (int ii = 0; ii < 3; ++ii) {
+            Real ddA[3];
+            ddA[0] = dVertex[j][ii][1] * dv[m][2] - dVertex[j][ii][2] * dv[m][1];
+            ddA[1] = dVertex[j][ii][2] * dv[m][0] - dVertex[j][ii][0] * dv[m][2];
+            ddA[2] = dVertex[j][ii][0] * dv[m][1] - dVertex[j][ii][1] * dv[m][0];
+            for (int c = 0; c < 3; ++c)
+              fdV[ff[ii]][j] += pvec[ff[m]][c] * ddA[c] / Real(12);
+          }
+          fdV[ff[m]][j] += dA[j] / Real(24);
+        }
+      }
+    }
+  }
+
   /// Outward area vector of facet f (½ Σ pi × p{i+1} over its polygon loop).
   KOKKOS_INLINE_FUNCTION void facetAreaVec(int f, Real out[3]) {
     Real ax = 0, ay = 0, az = 0;

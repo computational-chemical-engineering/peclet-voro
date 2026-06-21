@@ -27,6 +27,10 @@ add_vorflow_kokkos_test(test_cell_cutter)
 # Phase 3: full-system device tessellation (grid + cutter + CSR) vs legacy.
 add_vorflow_kokkos_test(test_tessellator)
 
+# De-legacy Phase 3: device tessellator publishes full per-facet geometry (dV,
+# area, connVec) ported from CellGeometry::computeEdgeInv + diffVolume.
+add_vorflow_kokkos_test(test_device_geometry)
+
 # SDF geometry: device boundary clip (cut planes at sdf=0, normal from grad) vs
 # the legacy SignedDistanceBoundary build over the same geometry.
 add_vorflow_kokkos_test(test_sdf_boundary_device)

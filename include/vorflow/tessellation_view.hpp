@@ -118,8 +118,17 @@ struct TessellationView {
   Kokkos::View<Real*, tpx::MemSpace> facetArea;       // 3*nFacets
   Kokkos::View<Real*, tpx::MemSpace> facetConnect;    // 3*nFacets (dV)
   Kokkos::View<Real*, tpx::MemSpace> facetConnVec;    // 3*nFacets
+  // Vertex CSR (seed-relative positions) — published when a consumer needs cell
+  // geometry (rendering, the interface-tension force, future Hamiltonian solver);
+  // empty otherwise.
+  Kokkos::View<int*, tpx::MemSpace> cellVertexOffset;  // nCells+1 (empty if unused)
+  Kokkos::View<Real*, tpx::MemSpace> vertexPos;        // 3*nVerts
 
   KOKKOS_INLINE_FUNCTION int numCells() const { return static_cast<int>(cellSeedId.extent(0)); }
+  KOKKOS_INLINE_FUNCTION bool hasVertices() const { return cellVertexOffset.extent(0) > 0; }
+  KOKKOS_INLINE_FUNCTION int vertexBegin(int i) const { return cellVertexOffset(i); }
+  KOKKOS_INLINE_FUNCTION int vertexEnd(int i) const { return cellVertexOffset(i + 1); }
+  KOKKOS_INLINE_FUNCTION Real vertex(int v, int c) const { return vertexPos(3 * v + c); }
   KOKKOS_INLINE_FUNCTION int numFacets() const { return static_cast<int>(facetNeighbor.extent(0)); }
   KOKKOS_INLINE_FUNCTION gid_t cellSeed(int i) const { return cellSeedId(i); }
   KOKKOS_INLINE_FUNCTION Real volume(int i) const { return cellVolume(i); }

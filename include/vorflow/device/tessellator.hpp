@@ -143,6 +143,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   Kokkos::View<int*, MemSpace> status("status", N);
   Kokkos::View<int*, MemSpace> tmpNbr("tmpNbr", (size_t)N * MAXF);
   Kokkos::View<Real*, MemSpace> tmpArea("tmpArea", (size_t)N * MAXF * 3);
+  Kokkos::View<Real*, MemSpace> tmpDV("tmpDV", (size_t)N * MAXF * 3);
+  Kokkos::View<Real*, MemSpace> tmpConn("tmpConn", (size_t)N * MAXF * 3);
 
   const bool weighted = Weighted;
   Kokkos::parallel_for(
@@ -251,16 +253,21 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           st |= kIncomplete;
         status(i) = st;
         cellVol(i) = c.volume();
+        // Per-facet geometry (area vector, dV volume gradient, connecting vector)
+        // from the half-edge mesh — what the physics forces consume.
+        if (!c.emptyV())
+          c.computeGeometry();
         int nf = 0;
         for (int f = 0; f < c.numAllocF; ++f) {
           if (!c.aliveF[f] || nf >= MAXF)
             continue;
-          Real a[3];
-          c.facetAreaVec(f, a);
+          const size_t o = ((size_t)i * MAXF + nf) * 3;
           tmpNbr((size_t)i * MAXF + nf) = c.fnbr[f];
-          tmpArea(((size_t)i * MAXF + nf) * 3 + 0) = a[0];
-          tmpArea(((size_t)i * MAXF + nf) * 3 + 1) = a[1];
-          tmpArea(((size_t)i * MAXF + nf) * 3 + 2) = a[2];
+          for (int cc = 0; cc < 3; ++cc) {
+            tmpArea(o + cc) = c.fArea[f][cc];
+            tmpDV(o + cc) = c.fdV[f][cc];
+            tmpConn(o + cc) = c.pvec[f][cc];
+          }
           ++nf;
         }
         facetCount(i) = nf;
@@ -291,6 +298,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   auto vSeed = view.cellSeedId;
   auto vNbr = view.facetNeighbor;
   auto vArea = view.facetArea;
+  auto vDV = view.facetConnect;
+  auto vConn = view.facetConnVec;
   Kokkos::parallel_for(
       "tess.compact", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         vSeed(i) = (gid_t)i;
@@ -298,9 +307,13 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         int nf = facetCount(i);
         for (int k = 0; k < nf; ++k) {
           vNbr(base + k) = (gid_t)tmpNbr((size_t)i * MAXF + k);
-          vArea((size_t)(base + k) * 3 + 0) = tmpArea(((size_t)i * MAXF + k) * 3 + 0);
-          vArea((size_t)(base + k) * 3 + 1) = tmpArea(((size_t)i * MAXF + k) * 3 + 1);
-          vArea((size_t)(base + k) * 3 + 2) = tmpArea(((size_t)i * MAXF + k) * 3 + 2);
+          for (int cc = 0; cc < 3; ++cc) {
+            const size_t src = ((size_t)i * MAXF + k) * 3 + cc;
+            const size_t dst = (size_t)(base + k) * 3 + cc;
+            vArea(dst) = tmpArea(src);
+            vDV(dst) = tmpDV(src);
+            vConn(dst) = tmpConn(src);
+          }
         }
       });
   Kokkos::fence();
