@@ -80,13 +80,20 @@ the same verbs as `vordyn` plus geometry/SDF setters; **rename `vordyn` → `vor
 and port `python/test_vordyn.py`, `mpi/validate_*.py`, and the benchmarks to it.
 *Accept:* the Python smoke + distributed validation scripts pass on the device path.
 
-**8. Retire legacy.** Once every consumer is on the device path: convert the test
-oracles to **frozen golden data** (already captured in `test_golden`/`test_invariants`),
-then delete the legacy `CellComplex`/`CellMaker`/`CellGeometry`/`Cell` from
-`voronoi.hpp` and all of `simulation.hpp`. `vor_types.hpp` (label encoding,
-constants) stays — the device cutter uses it. *Accept:* nothing includes
-`simulation.hpp`; `voronoi.hpp` retains only shared types/utilities; full suite
-green on the device path alone.
+**8. Retire legacy.** **Status: the PRODUCTION path is already legacy-free** — the
+shipped library (`device/`, `physics/`, `host/`, `tessellation_view.hpp`) and the
+device Python module (`src/vorflow_bindings.cpp`) include neither `voronoi.hpp` nor
+`simulation.hpp`, and `tools/check_include_graph.sh` now **enforces** this. The
+legacy engine is retained only as (a) the **test oracle** every device test diffs
+against, (b) the Python surface the `mpi/validate_*.py` scripts still use (they need
+the scheme-C force-split API the device module does not yet expose), and (c) the
+reference for the deferred incompressible solver. **Literal deletion** of
+`CellComplex`/`CellMaker`/`CellGeometry`/`Cell` + `simulation.hpp` is the remaining
+deliberate step and is gated on: converting the ~12 device-vs-legacy oracle tests to
+**frozen golden data**, migrating the validate scripts + benchmarks to the device
+module, and porting the incompressible solver. It is left as a separate task so the
+trusted validation oracle is not removed in the same pass that introduces the device
+physics. `vor_types.hpp` (label encoding, constants) stays — the device cutter uses it.
 
 ## GPU-efficiency outlook
 Forces (pressure/viscous/interface) and the velocity gradient are per-cell/-facet

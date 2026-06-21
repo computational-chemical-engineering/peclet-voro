@@ -53,4 +53,24 @@ done
 if [ "$status" -eq 0 ]; then
   echo "include-graph OK: view-only physics modules depend on the view alone"
 fi
+
+# De-legacy invariant: the PRODUCTION device path (shipped library + device Python
+# bindings) must not include the legacy engine (voronoi.hpp / simulation.hpp). The
+# legacy engine is retained only as a TEST ORACLE and as the legacy<->view bridge
+# tessellation_build.hpp, until the oracle is converted to golden data and deleted.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+for g in "$INC_DIR/device" "$INC_DIR/physics" "$INC_DIR/host" \
+         "$INC_DIR/tessellation_view.hpp" "$ROOT/src"; do
+  [ -e "$g" ] || continue
+  while IFS= read -r f; do
+    # Anchor to the exact legacy paths so device_simulation.hpp is not a false hit.
+    if grep -Eq "^[[:space:]]*#[[:space:]]*include[[:space:]]*[<\"]vorflow/(voronoi|simulation)\.hpp" "$f"; then
+      echo "VIOLATION: production file '${f#"$ROOT"/}' includes the legacy engine"
+      status=1
+    fi
+  done < <(find "$g" -type f \( -name '*.hpp' -o -name '*.cpp' \) 2>/dev/null)
+done
+if [ "$status" -eq 0 ]; then
+  echo "include-graph OK: the production device path is legacy-free"
+fi
 exit "$status"
