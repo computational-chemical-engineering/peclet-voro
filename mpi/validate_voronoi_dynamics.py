@@ -6,13 +6,13 @@ interaction radius deep, tessellate owned+ghost and advance one step, keep the o
 The force on an owned cell uses its full neighbourhood (owned or ghost), so the owned trajectory
 matches the serial run. Voronoi analogue of packing-gpu/mpi/validate_exact.py.
 
-Run: PYTHONPATH=<vordyn>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_vorflow.py
+Run: PYTHONPATH=<vorflow>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_vorflow.py
 """
 import os
 import sys
 import numpy as np
 from mpi4py import MPI
-import vordyn
+import vorflow
 import tpx_mpi
 
 comm = MPI.COMM_WORLD
@@ -37,7 +37,7 @@ SOLVER = os.environ.get("SOLVER", "euler")  # "euler" or "ns" (NavierStokes, vis
 
 
 def make_sim(pos, vel):
-    s = vordyn.NavierStokes() if SOLVER == "ns" else vordyn.ExplicitEuler()
+    s = vorflow.NavierStokes() if SOLVER == "ns" else vorflow.ExplicitEuler()
     s.set_l([L, L, L])
     s.set_mass_density(dens)
     s.set_positions(np.ascontiguousarray(pos % L))

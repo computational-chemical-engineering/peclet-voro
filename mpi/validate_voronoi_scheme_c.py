@@ -15,13 +15,13 @@ Two distributed schemes for the same compressible-Euler dynamics, both compared 
 
 Reports, for each scheme: max owned-position error vs serial, and the MPI/communication time and total
 wall time per step. Run:
-  PYTHONPATH=<vordyn>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_voronoi_scheme_c.py
+  PYTHONPATH=<vorflow>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_voronoi_scheme_c.py
 """
 import os
 import sys
 import numpy as np
 from mpi4py import MPI
-import vordyn
+import vorflow
 import tpx_mpi
 
 comm = MPI.COMM_WORLD
@@ -48,7 +48,7 @@ ids = np.arange(N)
 
 
 def make_sim(pos, vel):
-    s = vordyn.ExplicitEuler()
+    s = vorflow.ExplicitEuler()
     s.set_l([L, L, L])
     s.set_mass_density(dens)
     s.set_positions(np.ascontiguousarray(pos % L))

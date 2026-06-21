@@ -4,7 +4,7 @@ Suite roadmap Phase 5: decompose the periodic domain into blocks across MPI rank
 **ghost particles** one interaction radius deep so the Voronoi cells touching its block boundary close
 correctly; validate the owned cells against the serial tessellation. The Lagrangian halo (migration +
 ghost particles) is reused from `transport-core` via its `tpx_mpi` Python shim, exactly as in
-`packing-gpu`. The per-cell observables (`vordyn.get_volumes()` / `get_num_neighbors()`) give the
+`packing-gpu`. The per-cell observables (`vorflow.get_volumes()` / `get_num_neighbors()`) give the
 serial-vs-distributed comparison.
 
 **Status: implemented and validated.**
@@ -26,7 +26,7 @@ must itself be correct → *its* neighbours (the 2nd ring) must be present. So t
 1. **Migrate** particles to their owning block (`tpx_mpi.Migrator.migrate`, periodic-aware).
 2. **Gather ghosts** within `rcut` of the block (`gather_ghosts`); `rcut` must exceed the largest
    owned-cell circumradius (a perturbed lattice of spacing 1 needs `rcut ≈ 1`).
-3. **Tessellate owned + ghost in the full periodic `[0,L]` box** (`vordyn`), `put_in_box` first.
+3. **Tessellate owned + ghost in the full periodic `[0,L]` box** (`vorflow`), `put_in_box` first.
 4. **Keep the owned cells** (the first `n_owned`); discard ghost cells.
 5. **Validate**: owned-cell volumes/neighbours equal the serial tessellation.
 
@@ -68,7 +68,7 @@ The dynamics above re-gathers full ghost **state** every step. A leaner alternat
   ghosts locally with them — so ghosts track their owners with no per-step state re-gather, and the
   tessellation is updated incrementally instead of rebuilt. (For Voronoi the owned-cell force is
   already complete from the local closure, so the *reverse* contributes zero; only the *forward* is
-  needed. The `vordyn` force/integrate split — `recompute_forces`/`get_forces`/`set_forces` — lets the
+  needed. The `vorflow` force/integrate split — `recompute_forces`/`get_forces`/`set_forces` — lets the
   Python driver insert the exchange between force computation and the Verlet kick.)
 
 Both match the serial trajectory to **machine precision**. Profiling (np=2, N=512, 40 steps; single
@@ -95,5 +95,5 @@ between rebuilds (the usual neighbour-list-rebuild trade-off).
   `Cell::clipByPlane`. The periodic case (above) needs none of it.
 - Lees–Edwards (sheared) boxes: the migrator/halo would need the LE image shift (deferred; see the
   suite `docs/ROADMAP.md` Phase 1 note).
-- Perf: each rank currently rebuilds a `vordyn.Simulation` per validation; a persistent tessellation
+- Perf: each rank currently rebuilds a `vorflow.Simulation` per validation; a persistent tessellation
   with incremental `update()` is the natural next step for a running distributed simulation.

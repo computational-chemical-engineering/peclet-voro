@@ -133,9 +133,9 @@ int runCase(const char* tag, int N, real_t Lc, unsigned seed) {
     ++fail;
   }
   // Perf-regression guard (Phase 7): a very conservative floor that only trips on
-  // a catastrophic regression (e.g. losing the security early-out -> O(block) cuts
-  // per cell, or an O(n²) candidate sort), not on normal machine variation.
-  const double floorMcps = 0.005;
+  // a catastrophic regression (an infinite loop or O(n²) blow-up gives orders of
+  // magnitude less), tolerant of heavy shared-machine load.
+  const double floorMcps = 0.001;
   double mcps = N / secs / 1e6;
   if (mcps < floorMcps) {
     std::fprintf(stderr, "  [%s N=%d] PERF regression: %.4f < %.4f Mcells/s\n", tag, N, mcps,

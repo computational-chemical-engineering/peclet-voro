@@ -67,7 +67,7 @@ if(VORONOI_BUILD_BENCHMARKS)
 endif()
 
 # ── Python bindings ───────────────────────────────────────────────────────────
-option(VORONOI_BUILD_PYTHON "Build the pybind11 Python module (vordyn)" OFF)
+option(VORONOI_BUILD_PYTHON "Build the pybind11 Python module (vorflow)" OFF)
 if(VORONOI_BUILD_PYTHON)
   add_subdirectory(python)
 endif()

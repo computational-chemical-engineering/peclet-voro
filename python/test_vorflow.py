@@ -1,14 +1,14 @@
-"""Smoke test / demo for the vordyn Python module (the first Python surface for vorflow).
+"""Smoke test / demo for the vorflow Python module (the first Python surface for vorflow).
 
 Exercises the three solver classes on a jittered periodic grid: build the tessellation (init),
 advance the dynamics (step), and round-trip particle state through numpy. Run:
 
-    cmake -B build_suite -DVORONOI_BUILD_PYTHON=ON && cmake --build build_suite --target vordyn -j
-    PYTHONPATH=build_suite/python python3 python/test_vordyn.py
+    cmake -B build_suite -DVORONOI_BUILD_PYTHON=ON && cmake --build build_suite --target vorflow -j
+    PYTHONPATH=build_suite/python python3 python/test_vorflow.py
 """
 import sys
 import numpy as np
-import vordyn
+import vorflow
 
 L = 6.0
 n = 6  # 6^3 = 216 particles
@@ -37,7 +37,7 @@ def check(name, cond):
 
 # ---- ExplicitEuler ----
 print("ExplicitEuler:")
-s = vordyn.ExplicitEuler()
+s = vorflow.ExplicitEuler()
 s.set_l([L, L, L])
 s.set_mass_density(1.0)
 s.set_positions(pos)
@@ -66,7 +66,7 @@ print(f"    KE {ke0:.4g} -> {s.get_kinetic_energy():.4g}, U={s.get_internal_ener
 
 # ---- NavierStokes (adds viscosity) ----
 print("NavierStokes:")
-ns = vordyn.NavierStokes()
+ns = vorflow.NavierStokes()
 ns.set_l([L, L, L])
 ns.set_mass_density(1.0)
 ns.set_positions(pos)
@@ -82,7 +82,7 @@ print(f"    KE -> {ns.get_kinetic_energy():.4g}")
 
 # ---- IntfDyn (two-phase interface tension) ----
 print("IntfDyn:")
-ifd = vordyn.IntfDyn()
+ifd = vorflow.IntfDyn()
 ifd.set_l([L, L, L])
 ifd.set_mass_density(1.0)
 types = (pos[:, 0] > L / 2).astype(np.uint8)  # split the box into two phases
@@ -100,5 +100,5 @@ check("interface energy finite", np.isfinite(e_intf))
 check("KE finite after step", np.isfinite(ifd.get_kinetic_energy()))
 print(f"    interface energy={e_intf:.4g}, KE -> {ifd.get_kinetic_energy():.4g}")
 
-print(f"\n{'OK' if fails == 0 else 'FAIL'}: vordyn smoke test ({fails} failures)")
+print(f"\n{'OK' if fails == 0 else 'FAIL'}: vorflow smoke test ({fails} failures)")
 sys.exit(0 if fails == 0 else 1)

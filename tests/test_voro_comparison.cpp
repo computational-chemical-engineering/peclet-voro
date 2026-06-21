@@ -62,7 +62,7 @@ static vector<double> voropp_volumes(const vector<std::array<double, 3> >& pos, 
 // ---------------------------------------------------------------------------
 // Helper: build a vorflow tessellation and return per-particle volumes.
 // ---------------------------------------------------------------------------
-static vector<double> vordyn_volumes(const vector<std::array<double, 3> >& pos, double Lx,
+static vector<double> vorflow_volumes(const vector<std::array<double, 3> >& pos, double Lx,
                                      double Ly, double Lz) {
   typedef double real_t;
   const int n = static_cast<int>(pos.size());
@@ -104,7 +104,7 @@ static int testStaticComparison(int n, double Lx, double Ly, double Lz, unsigned
     pos[i][2] = Lz * gen();
   }
 
-  vector<double> vd = vordyn_volumes(pos, Lx, Ly, Lz);
+  vector<double> vd = vorflow_volumes(pos, Lx, Ly, Lz);
   vector<double> vp = voropp_volumes(pos, Lx, Ly, Lz);
 
   double maxAbsErr = 0.0;

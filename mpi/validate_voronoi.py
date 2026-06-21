@@ -1,19 +1,19 @@
 """Distributed Voronoi tessellation validated against the serial tessellation.
 
 Block-decompose a periodic particle set across ranks (transport-core `tpx_mpi`), gather ghost
-particles one interaction radius deep, and have each rank tessellate its owned+ghost set with vordyn,
+particles one interaction radius deep, and have each rank tessellate its owned+ghost set with vorflow,
 keeping the OWNED cells. Because the domain is periodic, the ghosts need no special imaging: each rank
 tessellates in the full periodic [0,L] box (`put_in_box` wraps the gathered images back to canonical
 positions), and the far particles it omits are never neighbours of its owned cells -- so the owned
 cells are identical to the serial full-box tessellation (down to machine precision).
 
 This is the Voronoi analogue of packing-gpu/mpi/validate_exact.py. Run:
-    PYTHONPATH=<vordyn build>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_voronoi.py
+    PYTHONPATH=<vorflow build>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_voronoi.py
 """
 import sys
 import numpy as np
 from mpi4py import MPI
-import vordyn
+import vorflow
 import tpx_mpi
 
 comm = MPI.COMM_WORLD
@@ -26,7 +26,7 @@ gs = [16, 16, 16]
 
 
 def tessellate(pos, box=L):
-    s = vordyn.ExplicitEuler()
+    s = vorflow.ExplicitEuler()
     s.set_l([box, box, box])
     s.set_mass_density(1.0)
     s.set_positions(np.ascontiguousarray(pos))

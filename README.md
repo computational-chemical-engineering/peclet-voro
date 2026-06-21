@@ -64,25 +64,25 @@ ctest --test-dir build -R "test_static_voronoi|test_voro_comparison" --output-on
 | Option | Default | Description |
 |--------|---------|-------------|
 | `VORONOI_BUILD_TESTS` | `ON` | Build the test executables |
-| `VORONOI_BUILD_PYTHON` | `OFF` | Build the `vordyn` pybind11 Python module |
+| `VORONOI_BUILD_PYTHON` | `OFF` | Build the `vorflow` pybind11 Python module |
 | `VORONOI_BUILD_DOCS` | `OFF` | Build Doxygen HTML documentation |
 
 ---
 
-## Python bindings (`vordyn`)
+## Python bindings (`vorflow`)
 
 A pybind11 module gives a Python surface for the moving-particle Voronoi solvers — the same
 drive-from-Python pattern as the rest of the suite (cfd-gpu `pnm_backend`, packing-gpu `demgpu`).
 pybind11 is fetched automatically.
 
 ```bash
-cmake -B build -DVORONOI_BUILD_PYTHON=ON && cmake --build build --target vordyn -j
-PYTHONPATH=build/python python3 python/test_vordyn.py     # smoke test (needs numpy)
+cmake -B build -DVORONOI_BUILD_PYTHON=ON && cmake --build build --target vorflow -j
+PYTHONPATH=build/python python3 python/test_vorflow.py     # smoke test (needs numpy)
 ```
 
 ```python
-import numpy as np, vordyn
-s = vordyn.NavierStokes()          # or ExplicitEuler / Incompressible / IntfDyn
+import numpy as np, vorflow
+s = vorflow.NavierStokes()          # or ExplicitEuler / Incompressible / IntfDyn
 s.set_l([6.0, 6.0, 6.0]); s.set_mass_density(1.0)
 s.set_positions(pos)               # (N,3) float64; set_velocities/set_masses likewise
 s.set_viscosity(0.05); s.init()
