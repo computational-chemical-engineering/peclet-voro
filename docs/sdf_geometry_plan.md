@@ -1,5 +1,13 @@
 # Plan — SDF-defined geometry for the tessellation (device + suite SDF)
 
+> **Status (2026-06-21): implemented on `suite-integration`** (Phases 1–2 + distributed).
+> Device providers `SdfSphere`/`SdfBox`/`SdfHollowCylinder` (analytic) and `SdfGrid`
+> (VTI / sampled) + `clipCellAgainstSdf` reproduce the legacy `SignedDistanceBoundary`
+> build to **machine precision** (`tests/kokkos/test_sdf_boundary_device`), and the
+> distributed clip matches serial owned-cells at np=1,2,4 (`tests/kokkos_mpi/test_sdf_mpi`).
+> Python exposure (Phase 3) is **deferred** — the device tessellator has no Python
+> surface yet, so it is a separate device-binding effort.
+
 **Goal.** Embed a solid geometry defined by a signed-distance field into the Voronoi/power
 tessellation: a cell that would extend into the solid is clipped by a plane located at the
 **sdf = 0** surface, with the plane **normal taken from the SDF gradient** ∇sdf. Seeds inside the
