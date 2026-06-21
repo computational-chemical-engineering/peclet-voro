@@ -25,7 +25,7 @@ if(NOT MPIEXEC_EXECUTABLE)
 endif()
 
 enable_testing()
-foreach(t voronoi_mpi)
+foreach(t voronoi_mpi sdf_mpi)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include)
