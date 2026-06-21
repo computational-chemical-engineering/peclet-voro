@@ -33,3 +33,6 @@ add_vorflow_kokkos_test(test_sdf_boundary_device)
 
 # Phase 4: atomic-free pressure force over TessellationView vs legacy Euler.
 add_vorflow_kokkos_test(test_euler_pressure)
+
+# De-legacy Phase 2: atomic-free viscous force vs legacy NavierStokes.
+add_vorflow_kokkos_test(test_viscous_device)
