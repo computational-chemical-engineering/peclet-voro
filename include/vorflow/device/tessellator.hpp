@@ -88,6 +88,196 @@ struct TessellatorResult {
 };
 
 /**
+ * Per-cell build, factored out of the build pass so the host (one thread per cell,
+ * RangePolicy) and device (one team per cell, TeamPolicy, cell in shared scratch)
+ * paths run the *same* numerics — bit-exact, no second copy to drift. Holds the
+ * grid-sorted inputs, the published outputs, and the grid scalars as members; the
+ * scratch cell + candidate arrays (their storage differs per backend: per-thread
+ * stack on host, team shared memory on device) are passed in to `buildCell`.
+ */
+template <class Real, bool Weighted, class Sdf>
+struct CellBuilder {
+  using MemSpace = tpx::MemSpace;
+  static constexpr int MAXCAND = 1024;  // full-sphere candidate cap (see docs/performance.md)
+  static constexpr int MAXF_TMP = 50;   // max facets one cell may publish
+
+  // Grid-sorted inputs (read).
+  Kokkos::View<int*, MemSpace> binned;
+  Kokkos::View<Real*, MemSpace> posSorted;
+  Kokkos::View<Real*, MemSpace> wSorted;
+  Kokkos::View<gid_t*, MemSpace> gidSorted;
+  Kokkos::View<int*, MemSpace> cellStart;
+  Kokkos::View<int*, MemSpace> offX, offY, offZ, shellStart;
+  // Published outputs (write).
+  Kokkos::View<int*, MemSpace> status;
+  Kokkos::View<Real*, MemSpace> cellVol;
+  Kokkos::View<int*, MemSpace> facetCount;
+  Kokkos::View<int*, MemSpace> cellFacetBase;
+  Kokkos::View<int*, MemSpace> oNbr;
+  Kokkos::View<Real*, MemSpace> oArea, oDV, oConn;
+  Kokkos::View<int*, MemSpace> facetCursor;
+  // Grid scalars.
+  Real icx, icy, icz, Lx, Ly, Lz, minCsz;
+  int dimx, dimy, dimz, sw, swInit, nOff;
+  bool useMorton, haveGid, withForceGeom;
+  size_t facetCap;
+  Sdf sdf;
+
+  /// Build the cell owning grid-sorted slot `pi` into scratch `c` (+ candidate
+  /// arrays `ckey`/`cjid`, each of length MAXCAND), writing the published outputs
+  /// at the original seed index binned(pi). Verbatim port of the former in-line
+  /// build lambda; the only change is where `c`/`ckey`/`cjid` live.
+  KOKKOS_INLINE_FUNCTION
+  void buildCell(ScratchCell<Real>& c, Real* ckey, int* cjid, int pi) const {
+    // pi is the grid-sorted slot; i = binned(pi) the original seed index that owns
+    // this cell. Positions/weights/ids are read from the reordered arrays
+    // (cache-local), outputs are written back at the original index i.
+    const int i = binned(pi);
+    const Real pix = posSorted(3 * pi + 0), piy = posSorted(3 * pi + 1), piz = posSorted(3 * pi + 2);
+    int cx = ((((int)Kokkos::floor(pix * icx)) % dimx) + dimx) % dimx;
+    int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
+    int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
+
+    // Half-box extents for the single-image minimal-image wrap below.
+    const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
+
+    int nc = 0;
+    const Real wi = Weighted ? wSorted(pi) : Real(0);
+    bool ovf = false;
+
+    const Real Larr[3] = {Lx, Ly, Lz};
+    c.initCuboid(Larr);
+
+    // Append the seeds of grid cell at raw offset (rgx,rgy,rgz) as candidates.
+    auto gatherGrid = [&](int rgx, int rgy, int rgz) {
+      int gx = rgx < 0 ? rgx + dimx : (rgx >= dimx ? rgx - dimx : rgx);
+      int gy = rgy < 0 ? rgy + dimy : (rgy >= dimy ? rgy - dimy : rgy);
+      int gz = rgz < 0 ? rgz + dimz : (rgz >= dimz ? rgz - dimz : rgz);
+      int gc = useMorton ? morton3(gx, gy, gz) : (gx + gy * dimx + gz * dimx * dimy);
+      for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
+        if (q == pi) continue;
+        if (haveGid && gidSorted(q) == gidSorted(pi)) continue;  // periodic self-image
+        Real rx = posSorted(3 * q + 0) - pix;
+        Real ry = posSorted(3 * q + 1) - piy;
+        Real rz = posSorted(3 * q + 2) - piz;
+        rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
+        ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
+        rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
+        Real rSqHalf = Real(0.5) * (rx * rx + ry * ry + rz * rz);
+        Real off = Weighted ? rSqHalf + Real(0.5) * (wi - wSorted(q)) : rSqHalf;
+        if (nc < MAXCAND) {
+          ckey[nc] = off;
+          cjid[nc] = q;
+          ++nc;
+        } else {
+          ovf = true;  // candidate overflow -> flag for fallback
+        }
+      }
+    };
+    auto applyCand = [&](int q, Real off) {
+      Real rx = posSorted(3 * q + 0) - pix;
+      Real ry = posSorted(3 * q + 1) - piy;
+      Real rz = posSorted(3 * q + 2) - piz;
+      rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
+      ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
+      rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
+      const Real pv[3] = {rx, ry, rz};
+      c.cutCell2(pv, off, binned(q), &ovf);  // store the ORIGINAL neighbour id
+    };
+
+    // Coverage² actually attained for this cell (drives the security check).
+    Real covSq;
+    if (Weighted) {
+      // Power has no security early-out (a distant heavy seed can still cut), so
+      // gather the whole coverage sphere (every worklist offset) and apply each
+      // candidate unsorted.
+      for (int o = 0; o < nOff; ++o) gatherGrid(cx + offX(o), cy + offY(o), cz + offZ(o));
+      for (int s = 0; s < nc && !ovf; ++s) applyCand(cjid[s], ckey[s]);
+      covSq = Real(sw) * minCsz * Real(sw) * minCsz;
+    } else {
+      // Adaptive expanding search: grow the gathered sphere one shell at a time,
+      // process each new shell closest-first via a min-heap, stop once the security
+      // radius is met (coverage² > 4·rSqMax).
+      int swUsed = swInit;
+      for (int swl = swInit; swl <= sw && !ovf; ++swl) {
+        const int shellBase = nc;
+        const int o0 = shellStart(swl), o1 = shellStart(swl + 1);
+        for (int o = o0; o < o1; ++o) gatherGrid(cx + offX(o), cy + offY(o), cz + offZ(o));
+        Real* k = ckey + shellBase;
+        int* idp = cjid + shellBase;
+        int hn = nc - shellBase;
+        for (int s = hn / 2 - 1; s >= 0; --s) heapSiftDown(k, idp, s, hn);
+        while (hn > 0 && !ovf) {
+          if (k[0] >= Real(2) * c.rsq[c.vRsqMax]) break;
+          const Real topKey = k[0];
+          const int topId = idp[0];
+          --hn;
+          k[0] = k[hn];
+          idp[0] = idp[hn];
+          heapSiftDown(k, idp, 0, hn);
+          applyCand(topId, topKey);
+        }
+        swUsed = swl;
+        if (Real(swl) * minCsz * Real(swl) * minCsz > Real(4) * c.rsq[c.vRsqMax]) break;
+      }
+      covSq = Real(swUsed) * minCsz * Real(swUsed) * minCsz;
+    }
+
+    // Voronoi completeness is judged on the un-clipped cell.
+    const bool incomplete = !(covSq > Real(4) * c.rsq[c.vRsqMax]);
+
+    // Optional SDF boundary clip. (CUDA extended lambdas cannot first-capture a
+    // variable inside an if-constexpr, so reference sdf once in normal context first.)
+    (void)sdf;
+    if constexpr (!std::is_same_v<Sdf, NoSdf>) {
+      const Real seedW[3] = {pix, piy, piz};
+      clipCellAgainstSdf<Real>(c, seedW, sdf, &ovf);
+    }
+
+    int st = kOk;
+    if (ovf) st |= kOverflow;
+    if (c.emptyV()) st |= kEmpty;
+    if (incomplete) st |= kIncomplete;
+    status(i) = st;
+    cellVol(i) = c.volume();
+    // Per-facet geometry (area vector + dV volume gradient); skipped for pure tess.
+    if (!c.emptyV() && withForceGeom) c.computeGeometry();
+    // Collect this cell's live facets, then reserve a contiguous CSR range with one
+    // atomic and write straight into the over-buffer.
+    int faces[MAXF_TMP];
+    int nf = 0;
+    for (int f = 0; f < c.numAllocF; ++f) {
+      if (!c.aliveF[f]) continue;
+      if (nf >= MAXF_TMP) {
+        status(i) |= kOverflow;
+        break;
+      }
+      faces[nf++] = f;
+    }
+    const int base = Kokkos::atomic_fetch_add(&facetCursor(0), nf);
+    // Overflow guard: skip the write rather than clobbering past the over-buffer end.
+    if ((size_t)base + (size_t)nf > facetCap) {
+      status(i) |= kOverflow;
+      facetCount(i) = 0;
+      cellFacetBase(i) = 0;
+    } else {
+      facetCount(i) = nf;
+      cellFacetBase(i) = base;
+      for (int k = 0; k < nf; ++k) {
+        const int f = faces[k];
+        oNbr((size_t)base + k) = c.fnbr[f];
+        const size_t o = ((size_t)base + k) * 3;
+        for (int cc = 0; cc < 3; ++cc) {
+          oArea(o + cc) = withForceGeom ? c.fArea[f][cc] : Real(0);
+          oDV(o + cc) = withForceGeom ? c.fdV[f][cc] : Real(0);
+          oConn(o + cc) = c.pvec[f][cc];  // plane vector == the connecting vector (exact)
+        }
+      }
+    }
+  }
+};
+
+/**
  * Build the full tessellation on device.
  *
  * @param posFlat  device positions, x-fastest per seed (3*i + k), in [0,L).
@@ -329,190 +519,66 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
     Kokkos::deep_copy(shellStart, hS);
   }
 
-  const bool weighted = Weighted;
-  Kokkos::parallel_for(
-      "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int pi) {
-        // pi is the grid-sorted slot; i = binned(pi) the original seed index that
-        // owns this cell. Positions/weights/ids are read from the reordered arrays
-        // (cache-local), outputs are written back at the original index i.
-        const int i = binned(pi);
-        const Real pix = posSorted(3 * pi + 0), piy = posSorted(3 * pi + 1),
-                   piz = posSorted(3 * pi + 2);
-        int cx = ((((int)Kokkos::floor(pix * icx)) % dimx) + dimx) % dimx;
-        int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
-        int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
-
-        // Half-box extents for the single-image minimal-image wrap below.
-        const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
-
-        // Candidate neighbours are seeds of the surrounding grid cells, gathered
-        // (minimal-imaged) into ckey/cjid (sorted indices) and the cell cut closest-first.
-        // Sized for the full-sphere gather: any cell that expands to sw, and every Power
-        // cell (no early-out), gathers ~nOff candidates (667 at sw=4, plus Poisson
-        // fluctuation), so the cap cannot be meaningfully reduced — see docs/performance.md.
-        constexpr int MAXCAND = 1024;
-        Real ckey[MAXCAND];  // plane offset (sort key)
-        int cjid[MAXCAND];   // candidate sorted index
-        int nc = 0;
-        const Real wi = weighted ? wSorted(pi) : Real(0);
-        bool ovf = false;
-
-        ScratchCell<Real> c;
-        const Real Larr[3] = {Lx, Ly, Lz};
-        c.initCuboid(Larr);
-
-        // Append the seeds of grid cell at raw offset (rgx,rgy,rgz) as candidates.
-        // The grid index and the minimal image both wrap with a single add/sub (offsets
-        // are << dim and candidates are within one box image) — branchy compares instead
-        // of the %dim modulo and round(r/L), bit-identical but far cheaper, and (unlike a
-        // per-cell "interior" flag) independent of sw, so a large safety sw stays fast.
-        auto gatherGrid = [&](int rgx, int rgy, int rgz) {
-          int gx = rgx < 0 ? rgx + dimx : (rgx >= dimx ? rgx - dimx : rgx);
-          int gy = rgy < 0 ? rgy + dimy : (rgy >= dimy ? rgy - dimy : rgy);
-          int gz = rgz < 0 ? rgz + dimz : (rgz >= dimz ? rgz - dimz : rgz);
-          int gc = useMorton ? morton3(gx, gy, gz) : (gx + gy * dimx + gz * dimx * dimy);
-          for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
-            if (q == pi) continue;
-            if (haveGid && gidSorted(q) == gidSorted(pi)) continue;  // periodic self-image
-            Real rx = posSorted(3 * q + 0) - pix;
-            Real ry = posSorted(3 * q + 1) - piy;
-            Real rz = posSorted(3 * q + 2) - piz;
-            rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
-            ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
-            rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
-            Real rSqHalf = Real(0.5) * (rx * rx + ry * ry + rz * rz);
-            Real off = weighted ? rSqHalf + Real(0.5) * (wi - wSorted(q)) : rSqHalf;
-            if (nc < MAXCAND) {
-              ckey[nc] = off;
-              cjid[nc] = q;
-              ++nc;
-            } else {
-              ovf = true;  // candidate overflow -> flag for fallback
-            }
-          }
-        };
-        auto applyCand = [&](int q, Real off) {
-          Real rx = posSorted(3 * q + 0) - pix;
-          Real ry = posSorted(3 * q + 1) - piy;
-          Real rz = posSorted(3 * q + 2) - piz;
-          rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
-          ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
-          rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
-          const Real pv[3] = {rx, ry, rz};
-          c.cutCell2(pv, off, binned(q), &ovf);  // store the ORIGINAL neighbour id
-        };
-
-        // Coverage² actually attained for this cell (drives the security check). A
-        // grid cell at offset (dx,dy,dz) has nearest-corner distance max(0,|·|-1)
-        // cells, so cells with e²>sw² lie outside the coverage sphere of radius
-        // sw·h and never matter.
-        Real covSq;
-        if (weighted) {
-          // Power has no security early-out (a distant heavy seed can still cut), so
-          // gather the whole coverage sphere (every worklist offset) and apply each
-          // candidate unsorted.
-          for (int o = 0; o < nOff; ++o) gatherGrid(cx + offX(o), cy + offY(o), cz + offZ(o));
-          for (int s = 0; s < nc && !ovf; ++s) applyCand(cjid[s], ckey[s]);
-          covSq = Real(sw) * minCsz * Real(sw) * minCsz;
-        } else {
-          // Adaptive expanding search (legacy's tight per-cell coverage): grow the
-          // gathered sphere one shell of the worklist at a time, process each new
-          // shell closest-first via a min-heap, and stop the moment the security
-          // radius is met (coverage² > 4·rSqMax). Most cells close at the innermost
-          // shell, so the full sw-block is never gathered.
-          int swUsed = swInit;
-          for (int swl = swInit; swl <= sw && !ovf; ++swl) {
-            const int shellBase = nc;
-            const int o0 = shellStart(swl), o1 = shellStart(swl + 1);
-            for (int o = o0; o < o1; ++o) gatherGrid(cx + offX(o), cy + offY(o), cz + offZ(o));
-            // Process this shell's new candidates closest-first, stopping once the
-            // nearest unprocessed one is beyond the security radius (2·rSqMax).
-            Real* k = ckey + shellBase;
-            int* idp = cjid + shellBase;
-            int hn = nc - shellBase;
-            for (int s = hn / 2 - 1; s >= 0; --s) heapSiftDown(k, idp, s, hn);
-            while (hn > 0 && !ovf) {
-              if (k[0] >= Real(2) * c.rsq[c.vRsqMax]) break;
-              const Real topKey = k[0];
-              const int topId = idp[0];
-              --hn;
-              k[0] = k[hn];
-              idp[0] = idp[hn];
-              heapSiftDown(k, idp, 0, hn);
-              applyCand(topId, topKey);
-            }
-            swUsed = swl;
-            if (Real(swl) * minCsz * Real(swl) * minCsz > Real(4) * c.rsq[c.vRsqMax]) break;
-          }
-          covSq = Real(swUsed) * minCsz * Real(swUsed) * minCsz;
-        }
-
-        // Voronoi completeness is judged on the un-clipped cell (the SDF clip only
-        // shrinks it, which would mask an incomplete neighbour search).
-        const bool incomplete = !(covSq > Real(4) * c.rsq[c.vRsqMax]);
-
-        // Optional SDF boundary clip: clip the cell to the fluid region (sdf > 0),
-        // emptying it if the seed is in the solid.
-        // (CUDA extended lambdas cannot first-capture a variable inside an
-        // if-constexpr, so reference sdf once in normal context first.)
-        (void)sdf;
-        if constexpr (!std::is_same_v<Sdf, NoSdf>) {
-          const Real seedW[3] = {pix, piy, piz};
-          clipCellAgainstSdf<Real>(c, seedW, sdf, &ovf);
-        }
-
-        int st = kOk;
-        if (ovf)
-          st |= kOverflow;
-        if (c.emptyV())
-          st |= kEmpty;
-        if (incomplete)
-          st |= kIncomplete;
-        status(i) = st;
-        cellVol(i) = c.volume();
-        // Per-facet geometry (area vector + dV volume gradient) from the half-edge
-        // mesh — what the physics forces consume. The O(27·V) gradient is ~37% of the
-        // per-cell build; skip it (and publish zero area/dV) when forces aren't needed
-        // (pure tessellation), the apples-to-apples comparison with voro++.
-        if (!c.emptyV() && withForceGeom)
-          c.computeGeometry();
-        // Collect this cell's live facets, then reserve a contiguous CSR range with one
-        // atomic and write straight into the over-buffer (no temp slab / scan / compaction).
-        int faces[MAXF_TMP];
-        int nf = 0;
-        for (int f = 0; f < c.numAllocF; ++f) {
-          if (!c.aliveF[f])
-            continue;
-          if (nf >= MAXF_TMP) {
-            status(i) |= kOverflow;
-            break;
-          }
-          faces[nf++] = f;
-        }
-        const int base = Kokkos::atomic_fetch_add(&facetCursor(0), nf);
-        // Overflow guard: if this cell's reserved range would run past the over-buffer
-        // (sized from the mean-facet estimate, not the worst case), flag it and skip
-        // the write rather than clobbering memory past the end. The atomic still
-        // advanced, so the final cursor may read beyond capacity; the pack clamps to it.
-        if ((size_t)base + (size_t)nf > facetCap) {
-          status(i) |= kOverflow;
-          facetCount(i) = 0;
-          cellFacetBase(i) = 0;
-        } else {
-          facetCount(i) = nf;
-          cellFacetBase(i) = base;
-          for (int k = 0; k < nf; ++k) {
-            const int f = faces[k];
-            oNbr((size_t)base + k) = c.fnbr[f];
-            const size_t o = ((size_t)base + k) * 3;
-            for (int cc = 0; cc < 3; ++cc) {
-              oArea(o + cc) = withForceGeom ? c.fArea[f][cc] : Real(0);
-              oDV(o + cc) = withForceGeom ? c.fdV[f][cc] : Real(0);
-              oConn(o + cc) = c.pvec[f][cc];  // plane vector == the connecting vector (exact)
-            }
-          }
-        }
-      });
+  // Build each cell with the CellBuilder functor. Two device parallelisations exist;
+  // the per-cell numerics are identical (same functor) so they are bit-exact:
+  //
+  //   * default (host always; device default): one thread per cell, RangePolicy, the
+  //     scratch cell + candidate arrays on the thread stack / local frame. This is the
+  //     production GPU path (~2.4 Mcells/s) and is unchanged.
+  //   * team-per-cell (device only, opt-in via VORFLOW_TEAM=<teamSize>): one *team* per
+  //     cell with the scratch cell + candidate arrays in team shared memory, so the
+  //     per-cell state lives on-chip rather than in a 32 KB/thread local frame. The
+  //     occupancy is then shared-memory-limited (the cell is large), which only pays off
+  //     once the gather and geometry are parallelised across the team; this is the
+  //     in-progress redesign and stays behind the env flag until it beats the default.
+  CellBuilder<Real, Weighted, Sdf> op{
+      binned, posSorted, wSorted, gidSorted, cellStart, offX, offY, offZ, shellStart,
+      status, cellVol, facetCount, cellFacetBase, oNbr, oArea, oDV, oConn, facetCursor,
+      icx, icy, icz, Lx, Ly, Lz, minCsz, dimx, dimy, dimz, sw, swInit, nOff,
+      useMorton, haveGid, withForceGeom, facetCap, sdf};
+  using Builder = CellBuilder<Real, Weighted, Sdf>;
+  auto rangeBuild = [&]() {
+    Kokkos::parallel_for(
+        "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int pi) {
+          ScratchCell<Real> c;
+          Real ckey[Builder::MAXCAND];
+          int cjid[Builder::MAXCAND];
+          op.buildCell(c, ckey, cjid, pi);
+        });
+  };
+  if constexpr (kHostBackend) {
+    rangeBuild();
+  } else {
+    const char* teamEnv = std::getenv("VORFLOW_TEAM");
+    if (!teamEnv) {
+      rangeBuild();
+    } else {
+      // Team-per-cell: cell + candidate arrays in level-0 (shared) team scratch.
+      // get_shmem_aligned carves the three sub-buffers out (the cell's doubles need
+      // 8-byte alignment). The build currently runs on the team leader; later steps
+      // parallelise the gather and geometry across the team.
+      using TeamPol = Kokkos::TeamPolicy<Exec>;
+      using Member = typename TeamPol::member_type;
+      const int teamSize = std::atoi(teamEnv) > 0 ? std::atoi(teamEnv) : 32;
+      const size_t shBytes = sizeof(ScratchCell<Real>) +
+                             (size_t)Builder::MAXCAND * sizeof(Real) +
+                             (size_t)Builder::MAXCAND * sizeof(int) + 64;  // +pad for alignment
+      TeamPol policy(N, teamSize);
+      policy.set_scratch_size(0, Kokkos::PerTeam((int)shBytes));
+      Kokkos::parallel_for(
+          "tess.build", policy, KOKKOS_LAMBDA(const Member& team) {
+            auto sc = team.team_scratch(0);
+            auto* cp = (ScratchCell<Real>*)sc.get_shmem_aligned(sizeof(ScratchCell<Real>),
+                                                                alignof(ScratchCell<Real>));
+            Real* ckey = (Real*)sc.get_shmem_aligned((size_t)Builder::MAXCAND * sizeof(Real),
+                                                     alignof(Real));
+            int* cjid = (int*)sc.get_shmem_aligned((size_t)Builder::MAXCAND * sizeof(int),
+                                                   alignof(int));
+            Kokkos::single(Kokkos::PerTeam(team),
+                           [&]() { op.buildCell(*cp, ckey, cjid, team.league_rank()); });
+          });
+    }
+  }
 
   if (prof) {
     Kokkos::fence();
