@@ -50,6 +50,9 @@ was therefore shelved (1.5× on 21% ≈ 7% overall).
 6. **Force geometry opt-in** — `buildTessellation(..., withForceGeom)`; pure tessellation
    skips the `fdV` gradient (the apples-to-apples comparison with voro++, which never
    computes it).
+7. **Morton (Z-order) grid indexing on GPU** — clusters the gather's spatial neighbourhood
+   for better memory coalescing (+18% with forces). GPU-only; it regresses the CPU (see
+   below). Backend-gated, with a linear fallback for pathological grids.
 
 ## Current standing vs voro++
 
@@ -59,9 +62,10 @@ was therefore shelved (1.5× on 21% ≈ 7% overall).
 | CPU serial, pure tessellation, N=100k | 71.0 k/s | 75.4 k/s | **0.94×** |
 | CPU serial, **with** force gradients | 52 k/s | 75 k/s | 0.74× (device does strictly more) |
 | **CPU 24-core**, with forces, N=1M | **892 k/s** | 75 k/s (serial) | **11.9×** |
-| **GPU (RTX 5080)**, pure tess, N=1M | **2258 k/s** | 75 k/s (serial) | **30×** |
+| **GPU (RTX 5080)**, pure tess, N=1M | **2316 k/s** | 75 k/s (serial) | **31×** |
+| **GPU (RTX 5080)**, with forces, N=1M | **1876 k/s** | 75 k/s (serial) | **25×** |
 
-So in the regimes that matter for production — multicore and GPU — the device is **12–30×
+So in the regimes that matter for production — multicore and GPU — the device is **12–31×
 voro++**. The only place voro++ still leads is **single-thread CPU pure tessellation, by
 ~10%**, and that gap is memory layout / cache misses, not arithmetic.
 
@@ -82,16 +86,33 @@ index, so physics consumers (which read the published CSR: `cellVolume`, `facetA
 `facetConnect`=dV, `facetConnVec`, `facetNeighbor`) and the parallel structure are
 untouched. Memory-layout work and physics extensions are orthogonal.
 
-In expected-impact order:
+### Morton / Z-order the grid — DONE, and it split by backend (measured)
 
-1. **Morton / Z-order the grid (highest impact, low risk).** Replace the linear cell
-   index with a Morton code so spatially-near cells are near in memory; the gather
-   sphere's `cellStart`/position reads become near-contiguous instead of scattered.
-   We already pay for a counting-sort reorder — switching the sort key to Morton is
-   essentially free, and the suite already ships a fast BMI2/AVX-512 encoder in
-   **`morton/`** (a sibling repo). Morton ordering helps **both** backends: CPU cache
-   locality *and* GPU memory coalescing (it is the standard layout for GPU spatial codes),
-   so it does not trade one for the other. This alone should close most of the ~10%.
+Replacing the linear cell index with a 3D Morton (Z-order) code clusters a cell's
+spatial neighbourhood in memory. We tried it (device-portable magic-bits `morton3`;
+the `morton/` library's fast encoders are CPU-BMI2 and not callable from a GPU kernel,
+and the encode is a tiny O(N) cost anyway). **Measured, it does NOT help both backends —
+it splits them** (RTX 5080 / Threadripper 5965WX, N=1M):
+
+| | linear | Morton |
+|---|---:|---:|
+| GPU pure-tess | 2258 k/s (30×) | **2316 k/s (31×)** |
+| GPU with forces | 1584 k/s (21×) | **1876 k/s (25×, +18%)** |
+| CPU serial pure-tess | **0.91×** | 0.87× (regresses) |
+
+On the **GPU** the spatial order improves the gather's **memory coalescing** (the large
+with-forces gain is the geometry reads + facet writes), and the per-cell encode is hidden
+by spare ALU. On the **CPU** it is a net loss: Morton codes are **not additive**, so the
+gather must re-encode every neighbour cell in the hot loop (~18 ops vs ~5 for the linear
+index) and that cost is not hidden, while the ~2-seeds/cell density already supplies the
+cache locality. So it shipped **GPU-only** (`useMorton = !kHostBackend && …`, with a
+linear fallback when the power-of-two padding would inflate the cell array), mirroring the
+seeds-per-cell density knob. **Lesson: the CPU serial gap is not closed by reordering the
+*grid* — that locality is already captured by the density; the remaining cost is the
+per-cell working set and the temp round-trip (below).**
+
+The CPU levers that remain:
+
 2. **Shrink the per-cell scratch.** `ScratchCell` is ~30 KB, dominated by
    `edgeInv[128][3][3]` (~9 KB). A smaller scratch stays L1-resident across cells (voro++'s
    real advantage) and stops evicting the gather's working set. Compute `edgeInv`
@@ -102,12 +123,14 @@ In expected-impact order:
    CSR directly (atomic facet allocation, or count-then-fill) removes that traffic. Bigger
    change; the lever most likely to push **past** voro++ rather than just match it.
 
-**Feasibility verdict:** reaching voro++ parity on serial CPU is feasible and low-risk
-(Morton + smaller scratch, both internal, both validated bit-exact against the legacy
-oracle); exceeding it is plausible but needs the temp-slab fusion too. None of it
-conflicts with CPU/GPU parallelism (Morton and a smaller scratch *help* both) or with
-physics extensions (they sit above the CSR). An optional Morton-ordered *output* could
-additionally speed the physics force gather's neighbour access, at the cost of the
+**Feasibility verdict (updated after measuring Morton):** the Morton lever turned out to
+be a **GPU** win (now shipped, +18% with forces), not the CPU lever it was expected to be —
+on CPU the ~2-seeds/cell density already captured the grid locality. Closing the last ~10%
+on serial CPU therefore rests on the per-cell working set (smaller `ScratchCell`) and
+removing the temp-slab round-trip; both are internal, bit-exact-validatable, and compatible
+with CPU/GPU parallelism and physics (they sit below the CSR). Parity is still plausible
+that way but is no longer a single easy change. An optional Morton-ordered *output* could
+additionally speed the physics force gather's neighbour access on GPU, at the cost of the
 `cell i == particle i` contract — so it would be opt-in.
 
 **Caveat worth stating:** single-thread CPU is the least important regime — real runs use
