@@ -26,12 +26,14 @@
 #ifndef VORFLOW_DEVICE_TESSELLATOR_HPP
 #define VORFLOW_DEVICE_TESSELLATOR_HPP
 
+#include <array>
 #include <cmath>
 #include <Kokkos_Core.hpp>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 #include "tpx/common/view.hpp"
 #include "vorflow/device/cell_cutter.hpp"
@@ -213,6 +215,61 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   Kokkos::View<Real*, MemSpace> tmpDV(view_alloc(std::string("tmpDV"), WithoutInitializing),
                                       (size_t)N * MAXF_TMP * 3);
 
+  // --- gather offset worklist (computed once) ---
+  // The (dx,dy,dz) grid offsets inside the coverage sphere (nearest-corner distance²
+  // = max(0,|·|-1)² summed ≤ sw²), grouped by expanding shell. The per-cell build
+  // iterates this flat list instead of re-running the dz/dy/dx cube triple-loop with
+  // the d² filter every cell — that loop control (≈ hundreds–thousands of branchy
+  // integer ops/cell) was the bulk of the gather cost (Phase 0).
+  const int swInit = sw < 2 ? sw : 2;
+  std::vector<int> offHx, offHy, offHz;
+  std::vector<int> shellStartH(sw + 2, 0);
+  {
+    const int sw2 = sw * sw;
+    for (int swl = swInit; swl <= sw; ++swl) {
+      shellStartH[swl] = (int)offHx.size();
+      const int lo2 = (swl == swInit) ? -1 : (swl - 1) * (swl - 1);
+      const int hi2 = swl * swl;
+      for (int dz = -(swl + 1); dz <= swl + 1; ++dz) {
+        const int ez = dz < -1 ? -dz - 1 : (dz > 1 ? dz - 1 : 0);
+        for (int dy = -(swl + 1); dy <= swl + 1; ++dy) {
+          const int ey = dy < -1 ? -dy - 1 : (dy > 1 ? dy - 1 : 0);
+          for (int dx = -(swl + 1); dx <= swl + 1; ++dx) {
+            const int ex = dx < -1 ? -dx - 1 : (dx > 1 ? dx - 1 : 0);
+            const int d2 = ex * ex + ey * ey + ez * ez;
+            if (d2 <= lo2 || d2 > hi2 || d2 > sw2) continue;
+            offHx.push_back(dx);
+            offHy.push_back(dy);
+            offHz.push_back(dz);
+          }
+        }
+      }
+    }
+    shellStartH[sw + 1] = (int)offHx.size();
+  }
+  const int nOff = (int)offHx.size();
+  Kokkos::View<int*, MemSpace> offX(view_alloc(std::string("offX"), WithoutInitializing), nOff);
+  Kokkos::View<int*, MemSpace> offY(view_alloc(std::string("offY"), WithoutInitializing), nOff);
+  Kokkos::View<int*, MemSpace> offZ(view_alloc(std::string("offZ"), WithoutInitializing), nOff);
+  Kokkos::View<int*, MemSpace> shellStart(
+      view_alloc(std::string("shellStart"), WithoutInitializing), sw + 2);
+  {
+    auto hX = Kokkos::create_mirror_view(offX);
+    auto hY = Kokkos::create_mirror_view(offY);
+    auto hZ = Kokkos::create_mirror_view(offZ);
+    auto hS = Kokkos::create_mirror_view(shellStart);
+    for (int i = 0; i < nOff; ++i) {
+      hX(i) = offHx[i];
+      hY(i) = offHy[i];
+      hZ(i) = offHz[i];
+    }
+    for (int s = 0; s < sw + 2; ++s) hS(s) = shellStartH[s];
+    Kokkos::deep_copy(offX, hX);
+    Kokkos::deep_copy(offY, hY);
+    Kokkos::deep_copy(offZ, hZ);
+    Kokkos::deep_copy(shellStart, hS);
+  }
+
   const bool weighted = Weighted;
   Kokkos::parallel_for(
       "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int pi) {
@@ -299,54 +356,27 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         Real covSq;
         if (weighted) {
           // Power has no security early-out (a distant heavy seed can still cut), so
-          // gather the whole coverage sphere and apply every candidate unsorted.
-          const int sw2 = sw * sw;
-          for (int dz = -(sw + 1); dz <= sw + 1; ++dz) {
-            const int ez = dz < -1 ? -dz - 1 : (dz > 1 ? dz - 1 : 0);
-            if (ez * ez > sw2) continue;
-            for (int dy = -(sw + 1); dy <= sw + 1; ++dy) {
-              const int ey = dy < -1 ? -dy - 1 : (dy > 1 ? dy - 1 : 0);
-              if (ez * ez + ey * ey > sw2) continue;
-              for (int dx = -(sw + 1); dx <= sw + 1; ++dx) {
-                const int ex = dx < -1 ? -dx - 1 : (dx > 1 ? dx - 1 : 0);
-                if (ex * ex + ey * ey + ez * ez > sw2) continue;
-                gatherGrid(cx + dx, cy + dy, cz + dz);
-              }
-            }
-          }
+          // gather the whole coverage sphere (every worklist offset) and apply each
+          // candidate unsorted.
+          for (int o = 0; o < nOff; ++o) gatherGrid(cx + offX(o), cy + offY(o), cz + offZ(o));
           for (int s = 0; s < nc && !ovf; ++s) applyCand(cjid[s], ckey[s]);
           covSq = Real(sw) * minCsz * Real(sw) * minCsz;
         } else {
           // Adaptive expanding search (legacy's tight per-cell coverage): grow the
-          // gathered sphere one grid-shell at a time, process each new shell
-          // closest-first via a min-heap, and stop the moment the security radius is
-          // met (coverage² > 4·rSqMax). Most cells close at the innermost level, so
-          // we never pay the full sw-block gather/cut a fixed radius would force.
-          const int swInit = sw < 2 ? sw : 2;
+          // gathered sphere one shell of the worklist at a time, process each new
+          // shell closest-first via a min-heap, and stop the moment the security
+          // radius is met (coverage² > 4·rSqMax). Most cells close at the innermost
+          // shell, so the full sw-block is never gathered.
           int swUsed = swInit;
           for (int swl = swInit; swl <= sw && !ovf; ++swl) {
-            const int lo2 = (swl == swInit) ? -1 : (swl - 1) * (swl - 1);
-            const int hi2 = swl * swl;
-            const int shellStart = nc;
-            for (int dz = -(swl + 1); dz <= swl + 1; ++dz) {
-              const int ez = dz < -1 ? -dz - 1 : (dz > 1 ? dz - 1 : 0);
-              if (ez * ez > hi2) continue;
-              for (int dy = -(swl + 1); dy <= swl + 1; ++dy) {
-                const int ey = dy < -1 ? -dy - 1 : (dy > 1 ? dy - 1 : 0);
-                if (ez * ez + ey * ey > hi2) continue;
-                for (int dx = -(swl + 1); dx <= swl + 1; ++dx) {
-                  const int ex = dx < -1 ? -dx - 1 : (dx > 1 ? dx - 1 : 0);
-                  const int d2 = ex * ex + ey * ey + ez * ez;
-                  if (d2 <= lo2 || d2 > hi2) continue;  // not in this shell
-                  gatherGrid(cx + dx, cy + dy, cz + dz);
-                }
-              }
-            }
+            const int shellBase = nc;
+            const int o0 = shellStart(swl), o1 = shellStart(swl + 1);
+            for (int o = o0; o < o1; ++o) gatherGrid(cx + offX(o), cy + offY(o), cz + offZ(o));
             // Process this shell's new candidates closest-first, stopping once the
             // nearest unprocessed one is beyond the security radius (2·rSqMax).
-            Real* k = ckey + shellStart;
-            int* idp = cjid + shellStart;
-            int hn = nc - shellStart;
+            Real* k = ckey + shellBase;
+            int* idp = cjid + shellBase;
+            int hn = nc - shellBase;
             for (int s = hn / 2 - 1; s >= 0; --s) heapSiftDown(k, idp, s, hn);
             while (hn > 0 && !ovf) {
               if (k[0] >= Real(2) * c.rsq[c.vRsqMax]) break;
