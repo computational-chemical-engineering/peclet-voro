@@ -299,6 +299,7 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
     shellStartH[sw + 1] = (int)offHx.size();
   }
   const int nOff = (int)offHx.size();
+  if (prof) std::fprintf(stderr, "[worklist] sw=%d nOff=%d (full-sphere candidate cap)\n", sw, nOff);
   Kokkos::View<int*, MemSpace> offX(view_alloc(std::string("offX"), WithoutInitializing), nOff);
   Kokkos::View<int*, MemSpace> offY(view_alloc(std::string("offY"), WithoutInitializing), nOff);
   Kokkos::View<int*, MemSpace> offZ(view_alloc(std::string("offZ"), WithoutInitializing), nOff);
@@ -339,6 +340,9 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
 
         // Candidate neighbours are seeds of the surrounding grid cells, gathered
         // (minimal-imaged) into ckey/cjid (sorted indices) and the cell cut closest-first.
+        // Sized for the full-sphere gather: any cell that expands to sw, and every Power
+        // cell (no early-out), gathers ~nOff candidates (667 at sw=4, plus Poisson
+        // fluctuation), so the cap cannot be meaningfully reduced — see docs/performance.md.
         constexpr int MAXCAND = 1024;
         Real ckey[MAXCAND];  // plane offset (sort key)
         int cjid[MAXCAND];   // candidate sorted index
