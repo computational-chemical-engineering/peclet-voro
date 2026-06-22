@@ -161,6 +161,30 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         binned(slot) = i;
       });
 
+  // Reorder seed data into grid (binned) order. The build then gathers neighbours
+  // from contiguous memory instead of chasing scattered original indices through
+  // posFlat — the large-N cache-locality win (voro++ processes points block-by-block
+  // for the same reason). Outputs are still written back to the original cell index
+  // (= binned(p)), so the cell i == particle i contract is unchanged.
+  Kokkos::View<Real*, MemSpace> posSorted(
+      Kokkos::view_alloc(std::string("posSorted"), Kokkos::WithoutInitializing), (size_t)N * 3);
+  Kokkos::View<gid_t*, MemSpace> gidSorted(
+      Kokkos::view_alloc(std::string("gidSorted"), Kokkos::WithoutInitializing), haveGid ? N : 0);
+  Kokkos::View<Real*, MemSpace> wSorted(
+      Kokkos::view_alloc(std::string("wSorted"), Kokkos::WithoutInitializing), Weighted ? N : 0);
+  {
+    const bool haveGidL = haveGid;
+    Kokkos::parallel_for(
+        "tess.reorder", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int p) {
+          int o = binned(p);
+          posSorted(3 * p + 0) = posFlat(3 * o + 0);
+          posSorted(3 * p + 1) = posFlat(3 * o + 1);
+          posSorted(3 * p + 2) = posFlat(3 * o + 2);
+          if (haveGidL) gidSorted(p) = gid(o);
+          if (Weighted) wSorted(p) = weight(o);
+        });
+  }
+
   if (prof) {
     Kokkos::fence();
     tGrid = ptimer.seconds();
@@ -191,19 +215,24 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
 
   const bool weighted = Weighted;
   Kokkos::parallel_for(
-      "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
-        const Real pix = posFlat(3 * i + 0), piy = posFlat(3 * i + 1), piz = posFlat(3 * i + 2);
+      "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int pi) {
+        // pi is the grid-sorted slot; i = binned(pi) the original seed index that
+        // owns this cell. Positions/weights/ids are read from the reordered arrays
+        // (cache-local), outputs are written back at the original index i.
+        const int i = binned(pi);
+        const Real pix = posSorted(3 * pi + 0), piy = posSorted(3 * pi + 1),
+                   piz = posSorted(3 * pi + 2);
         int cx = ((((int)Kokkos::floor(pix * icx)) % dimx) + dimx) % dimx;
         int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
         int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
 
         // Candidate neighbours are seeds of the surrounding grid cells, gathered
-        // (minimal-imaged) into ckey/cjid and the cell cut closest-first.
+        // (minimal-imaged) into ckey/cjid (sorted indices) and the cell cut closest-first.
         constexpr int MAXCAND = 1024;
         Real ckey[MAXCAND];  // plane offset (sort key)
-        int cjid[MAXCAND];   // candidate local index
+        int cjid[MAXCAND];   // candidate sorted index
         int nc = 0;
-        const Real wi = weighted ? weight(i) : Real(0);
+        const Real wi = weighted ? wSorted(pi) : Real(0);
         bool ovf = false;
 
         ScratchCell<Real> c;
@@ -213,36 +242,35 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         // Append the seeds of grid cell (gx,gy,gz) as minimal-imaged candidates.
         auto gatherGrid = [&](int gx, int gy, int gz) {
           int gc = gx + gy * dimx + gz * dimx * dimy;
-          for (int p = cellStart(gc); p < cellStart(gc + 1); ++p) {
-            int j = binned(p);
-            if (j == i) continue;
-            if (haveGid && gid(j) == gid(i)) continue;  // periodic self-image
-            Real rx = posFlat(3 * j + 0) - pix;
-            Real ry = posFlat(3 * j + 1) - piy;
-            Real rz = posFlat(3 * j + 2) - piz;
+          for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
+            if (q == pi) continue;
+            if (haveGid && gidSorted(q) == gidSorted(pi)) continue;  // periodic self-image
+            Real rx = posSorted(3 * q + 0) - pix;
+            Real ry = posSorted(3 * q + 1) - piy;
+            Real rz = posSorted(3 * q + 2) - piz;
             rx -= Lx * Kokkos::round(rx / Lx);
             ry -= Ly * Kokkos::round(ry / Ly);
             rz -= Lz * Kokkos::round(rz / Lz);
             Real rSqHalf = Real(0.5) * (rx * rx + ry * ry + rz * rz);
-            Real off = weighted ? rSqHalf + Real(0.5) * (wi - weight(j)) : rSqHalf;
+            Real off = weighted ? rSqHalf + Real(0.5) * (wi - wSorted(q)) : rSqHalf;
             if (nc < MAXCAND) {
               ckey[nc] = off;
-              cjid[nc] = j;
+              cjid[nc] = q;
               ++nc;
             } else {
               ovf = true;  // candidate overflow -> flag for fallback
             }
           }
         };
-        auto applyCand = [&](int j, Real off) {
-          Real rx = posFlat(3 * j + 0) - pix;
-          Real ry = posFlat(3 * j + 1) - piy;
-          Real rz = posFlat(3 * j + 2) - piz;
+        auto applyCand = [&](int q, Real off) {
+          Real rx = posSorted(3 * q + 0) - pix;
+          Real ry = posSorted(3 * q + 1) - piy;
+          Real rz = posSorted(3 * q + 2) - piz;
           rx -= Lx * Kokkos::round(rx / Lx);
           ry -= Ly * Kokkos::round(ry / Ly);
           rz -= Lz * Kokkos::round(rz / Lz);
           const Real pv[3] = {rx, ry, rz};
-          c.cutCell2(pv, off, j, &ovf);
+          c.cutCell2(pv, off, binned(q), &ovf);  // store the ORIGINAL neighbour id
         };
 
         // Coverage² actually attained for this cell (drives the security check). A

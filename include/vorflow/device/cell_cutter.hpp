@@ -98,15 +98,19 @@ struct ScratchCell {
   int vStack[CAP];
 
   // ---- slot allocator ----
+  // Only the n live slots need initialising: a slot past the high-water mark is
+  // never read until getFreeV/getFreeF first allocates it (which sets aliveV/aliveF),
+  // and all iteration is bounded by numAllocV/numAllocF — so the old O(CAP) clear was
+  // ~120 wasted writes per axis per cell.
   KOKKOS_INLINE_FUNCTION void resetV(int n) {
-    for (int i = 0; i < CAP; ++i)
-      aliveV[i] = (i < n);
+    for (int i = 0; i < n; ++i)
+      aliveV[i] = true;
     numAllocV = n;
     freeTopV = 0;
   }
   KOKKOS_INLINE_FUNCTION void resetF(int n) {
-    for (int i = 0; i < CAP; ++i)
-      aliveF[i] = (i < n);
+    for (int i = 0; i < n; ++i)
+      aliveF[i] = true;
     numAllocF = n;
     freeTopF = 0;
   }
