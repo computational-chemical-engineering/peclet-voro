@@ -28,6 +28,7 @@
 
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <Kokkos_Core.hpp>
 #include <cstdio>
 #include <cstdlib>
@@ -45,6 +46,25 @@ namespace device {
 
 /// Per-cell status bits written by the build pass.
 enum StatusBit { kOk = 0, kOverflow = 1, kEmpty = 2, kIncomplete = 4 };
+
+/// Spread the low 21 bits of v so they occupy every third bit (magic-bits 3D Morton).
+KOKKOS_INLINE_FUNCTION uint64_t mortonSpread3(uint64_t v) {
+  v &= 0x1fffffULL;
+  v = (v | (v << 32)) & 0x1f00000000ffffULL;
+  v = (v | (v << 16)) & 0x1f0000ff0000ffULL;
+  v = (v | (v << 8)) & 0x100f00f00f00f00fULL;
+  v = (v | (v << 4)) & 0x10c30c30c30c30c3ULL;
+  v = (v | (v << 2)) & 0x1249249249249249ULL;
+  return v;
+}
+/// 3D Morton (Z-order) code of a grid cell. Device-portable (no BMI2), good to 21
+/// bits/axis. Used to order the cell grid so a cell's spatial neighbourhood is
+/// near it in memory — the gather then reads near-contiguous cellStart/posSorted
+/// instead of chasing z-neighbours dimx*dimy entries apart.
+KOKKOS_INLINE_FUNCTION int morton3(int x, int y, int z) {
+  return (int)(mortonSpread3((uint64_t)x) | (mortonSpread3((uint64_t)y) << 1) |
+               (mortonSpread3((uint64_t)z) << 2));
+}
 
 /// Sift element i down a binary min-heap of size n keyed on key[], moving id[] in
 /// lockstep. Used to process candidate neighbours closest-first in O(applied·log n)
@@ -128,6 +148,25 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   }
   const int dimx = dim[0], dimy = dim[1], dimz = dim[2];
   const int ncell = dimx * dimy * dimz;
+
+  // Morton (Z-order) cell indexing clusters each cell's spatial neighbourhood in memory.
+  // GPU ONLY: the spatial order improves the gather's memory coalescing (measured +2.5%
+  // pure / +18% with force geometry on an RTX 5080), and the per-cell encode is hidden by
+  // spare ALU. On the CPU it is a net loss — the encode in the hot gather loop is not
+  // hidden and the ~2-seeds/cell density already supplies the cache locality — so the CPU
+  // keeps the compact linear index. Morton needs a power-of-two-padded range (2^mbits per
+  // axis); also fall back to linear if that padding would inflate the cell array too much
+  // (very rectangular boxes / huge grids).
+  int mbits = 1;
+  {
+    int md = dimx > dimy ? dimx : dimy;
+    md = md > dimz ? md : dimz;
+    while ((1 << mbits) < md) ++mbits;
+  }
+  const size_t mortonNcell = (size_t)1 << (3 * mbits);
+  const bool useMorton = !kHostBackend && mortonNcell <= (size_t)8 * (size_t)ncell;
+  const int ncellEff = useMorton ? (int)mortonNcell : ncell;
+
   const Real Lx = L[0], Ly = L[1], Lz = L[2];
   const Real icx = invcsz[0], icy = invcsz[1], icz = invcsz[2];
   Real minCsz = csz[0] < csz[1] ? csz[0] : csz[1];
@@ -137,9 +176,9 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   Kokkos::Timer ptimer;
   double tGrid = 0, tBuild = 0, tCsr = 0;
 
-  // --- counting sort: bin seeds into grid cells ---
+  // --- counting sort: bin seeds into grid cells (Morton- or linear-indexed) ---
   Kokkos::View<int*, MemSpace> cellOf("cellOf", N);
-  Kokkos::View<int*, MemSpace> counts("counts", ncell + 1);
+  Kokkos::View<int*, MemSpace> counts("counts", ncellEff + 1);
   Kokkos::deep_copy(counts, 0);
   Kokkos::parallel_for(
       "tess.bin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
@@ -149,24 +188,24 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         gx = ((gx % dimx) + dimx) % dimx;
         gy = ((gy % dimy) + dimy) % dimy;
         gz = ((gz % dimz) + dimz) % dimz;
-        int c = gx + gy * dimx + gz * dimx * dimy;
+        int c = useMorton ? morton3(gx, gy, gz) : (gx + gy * dimx + gz * dimx * dimy);
         cellOf(i) = c;
         Kokkos::atomic_inc(&counts(c));
       });
 
-  Kokkos::View<int*, MemSpace> cellStart("cellStart", ncell + 1);
+  Kokkos::View<int*, MemSpace> cellStart("cellStart", ncellEff + 1);
   Kokkos::parallel_scan(
-      "tess.scan", Kokkos::RangePolicy<Exec>(0, ncell + 1),
+      "tess.scan", Kokkos::RangePolicy<Exec>(0, ncellEff + 1),
       KOKKOS_LAMBDA(const int c, int& acc, const bool fin) {
-        int v = (c < ncell) ? counts(c) : 0;
+        int v = (c < ncellEff) ? counts(c) : 0;
         if (fin)
           cellStart(c) = acc;
         acc += v;
       });
 
-  Kokkos::View<int*, MemSpace> cursor("cursor", ncell);
+  Kokkos::View<int*, MemSpace> cursor("cursor", ncellEff);
   Kokkos::parallel_for(
-      "tess.cursor", Kokkos::RangePolicy<Exec>(0, ncell),
+      "tess.cursor", Kokkos::RangePolicy<Exec>(0, ncellEff),
       KOKKOS_LAMBDA(const int c) { cursor(c) = cellStart(c); });
   Kokkos::View<int*, MemSpace> binned("binned", N);
   Kokkos::parallel_for(
@@ -320,7 +359,7 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           int gx = rgx < 0 ? rgx + dimx : (rgx >= dimx ? rgx - dimx : rgx);
           int gy = rgy < 0 ? rgy + dimy : (rgy >= dimy ? rgy - dimy : rgy);
           int gz = rgz < 0 ? rgz + dimz : (rgz >= dimz ? rgz - dimz : rgz);
-          int gc = gx + gy * dimx + gz * dimx * dimy;
+          int gc = useMorton ? morton3(gx, gy, gz) : (gx + gy * dimx + gz * dimx * dimy);
           for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
             if (q == pi) continue;
             if (haveGid && gidSorted(q) == gidSorted(pi)) continue;  // periodic self-image
