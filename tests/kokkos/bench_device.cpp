@@ -97,8 +97,12 @@ static void run(int N) {
   // VORFLOW_NOFORCEGEOM=1 skips the force-gradient geometry (pure tessellation) — the
   // apples-to-apples comparison with voro++ compute_cell.
   const bool withGeom = std::getenv("VORFLOW_NOFORCEGEOM") == nullptr;
+  // VORFLOW_DENS = target seeds per grid cell (voro++ uses ~8/block). densityCount =
+  // N/dens makes the grid cell ~cbrt(dens)x the mean spacing.
+  const int densPerCell = std::getenv("VORFLOW_DENS") ? std::atoi(std::getenv("VORFLOW_DENS")) : 1;
+  const int densCount = densPerCell > 1 ? N / densPerCell : -1;
   Kokkos::View<long*, tpx::MemSpace> noGid;
-  auto warm = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw, -1, noGid,
+  auto warm = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw, densCount, noGid,
                                                             vor::device::NoSdf{}, withGeom);
   Kokkos::fence();
   // device volume sum (correctness)
@@ -112,7 +116,7 @@ static void run(int N) {
   for (int rep = 0; rep < 3; ++rep) {
     Kokkos::fence();
     auto t0 = clk::now();
-    auto res = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw, -1, noGid,
+    auto res = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw, densCount, noGid,
                                                              vor::device::NoSdf{}, withGeom);
     Kokkos::fence();
     auto t1 = clk::now();
@@ -134,7 +138,7 @@ static void run(int N) {
 #ifdef VORFLOW_CUTTER_PROFILE
   {
     vor::device::g_cc = vor::device::CutterCounters{};
-    auto r = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw, -1, noGid,
+    auto r = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw, densCount, noGid,
                                                            vor::device::NoSdf{}, withGeom);
     Kokkos::fence();
     (void)r;
