@@ -101,10 +101,22 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   // single-domain case (gid empty) only the same local index is skipped.
   const bool haveGid = gid.extent(0) == static_cast<size_t>(N);
 
-  // --- grid dimensions: ~1 seed per cell (cellSize ~ mean spacing) ---
+  // --- grid dimensions: ~kSeedsPerCell seeds per cell ---
+  // A coarser grid than 1 seed/cell makes the neighbour gather touch fewer, denser
+  // grid cells whose seeds are contiguous in the grid-sorted arrays — far fewer
+  // scattered cellStart/posSorted lookups (the gather is memory-latency bound, the
+  // dominant serial cost; voro++ packs ~8 particles/block for the same reason). ~2/cell
+  // measured the best correct trade-off (coarser over-gathers per cell). The expanding
+  // search + the `sw` cap keep cells complete regardless. This is a HOST (CPU) win
+  // only: on a GPU the gather is bandwidth/latency-hidden, not cache-bound, so a coarser
+  // grid just adds per-thread candidate work — GPUs keep 1/cell. Power also keeps 1/cell
+  // (its no-early-out full-sphere gather would blow past MAXCAND at 2/cell).
+  constexpr bool kHostBackend =
+      Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible;
+  constexpr Real kSeedsPerCell = (!Weighted && kHostBackend) ? Real(2) : Real(1);
   const int dens = densityCount > 0 ? densityCount : N;
   const Real vol = L[0] * L[1] * L[2];
-  const Real spacing = std::cbrt(vol / Real(dens > 0 ? dens : 1));
+  const Real spacing = std::cbrt(kSeedsPerCell * vol / Real(dens > 0 ? dens : 1));
   int dim[3];
   Real csz[3], invcsz[3];
   for (int k = 0; k < 3; ++k) {
@@ -283,14 +295,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
         int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
 
-        // Interior cells (>= sw+1 grid cells from every face) never wrap: the gather
-        // touches grid indices in range and every candidate is within sw+2 cells, i.e.
-        // < L/2, so round(r/L)==0. Skipping the %dim modulo and the minimal-image
-        // round() on this fast path is bit-identical (the gather is ~60% of the build,
-        // and those wraps are its dominant cost). Boundary cells keep the wrapped path.
-        const int swEdge = sw + 1;
-        const bool interior = (cx >= swEdge && cx <= dimx - 1 - swEdge && cy >= swEdge &&
-                               cy <= dimy - 1 - swEdge && cz >= swEdge && cz <= dimz - 1 - swEdge);
+        // Half-box extents for the single-image minimal-image wrap below.
+        const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
 
         // Candidate neighbours are seeds of the surrounding grid cells, gathered
         // (minimal-imaged) into ckey/cjid (sorted indices) and the cell cut closest-first.
@@ -306,13 +312,14 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         c.initCuboid(Larr);
 
         // Append the seeds of grid cell at raw offset (rgx,rgy,rgz) as candidates.
+        // The grid index and the minimal image both wrap with a single add/sub (offsets
+        // are << dim and candidates are within one box image) — branchy compares instead
+        // of the %dim modulo and round(r/L), bit-identical but far cheaper, and (unlike a
+        // per-cell "interior" flag) independent of sw, so a large safety sw stays fast.
         auto gatherGrid = [&](int rgx, int rgy, int rgz) {
-          int gx = rgx, gy = rgy, gz = rgz;
-          if (!interior) {
-            gx = ((rgx % dimx) + dimx) % dimx;
-            gy = ((rgy % dimy) + dimy) % dimy;
-            gz = ((rgz % dimz) + dimz) % dimz;
-          }
+          int gx = rgx < 0 ? rgx + dimx : (rgx >= dimx ? rgx - dimx : rgx);
+          int gy = rgy < 0 ? rgy + dimy : (rgy >= dimy ? rgy - dimy : rgy);
+          int gz = rgz < 0 ? rgz + dimz : (rgz >= dimz ? rgz - dimz : rgz);
           int gc = gx + gy * dimx + gz * dimx * dimy;
           for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
             if (q == pi) continue;
@@ -320,11 +327,9 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
             Real rx = posSorted(3 * q + 0) - pix;
             Real ry = posSorted(3 * q + 1) - piy;
             Real rz = posSorted(3 * q + 2) - piz;
-            if (!interior) {
-              rx -= Lx * Kokkos::round(rx / Lx);
-              ry -= Ly * Kokkos::round(ry / Ly);
-              rz -= Lz * Kokkos::round(rz / Lz);
-            }
+            rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
+            ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
+            rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
             Real rSqHalf = Real(0.5) * (rx * rx + ry * ry + rz * rz);
             Real off = weighted ? rSqHalf + Real(0.5) * (wi - wSorted(q)) : rSqHalf;
             if (nc < MAXCAND) {
@@ -340,11 +345,9 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           Real rx = posSorted(3 * q + 0) - pix;
           Real ry = posSorted(3 * q + 1) - piy;
           Real rz = posSorted(3 * q + 2) - piz;
-          if (!interior) {
-            rx -= Lx * Kokkos::round(rx / Lx);
-            ry -= Ly * Kokkos::round(ry / Ly);
-            rz -= Lz * Kokkos::round(rz / Lz);
-          }
+          rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
+          ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
+          rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
           const Real pv[3] = {rx, ry, rz};
           c.cutCell2(pv, off, binned(q), &ovf);  // store the ORIGINAL neighbour id
         };
