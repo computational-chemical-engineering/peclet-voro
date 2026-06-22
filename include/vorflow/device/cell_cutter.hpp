@@ -489,48 +489,38 @@ struct ScratchCell {
   }
 
   // Per-facet published geometry (filled by computeGeometry from the half-edge
-  // mesh) — the connecting vector to the neighbour seed (= the plane vector), the
-  // facet area vector, and the volume gradient dV the physics forces consume.
-  Real edgeInv[CAP][3][3];  // dual edge tensor per vertex (connV[f0] x connV[f1])
-  Real fArea[CAP][3];       // facet area vector
-  Real fdV[CAP][3];         // facet volume gradient (legacy m_dV)
+  // mesh) — the facet area vector and the volume gradient dV the physics forces
+  // consume. (The dual edge tensor "edgeInv" is no longer stored per cell — it was a
+  // 9 KB CAP×3×3 member that is purely transient; vertexEdgeInv recomputes a vertex's
+  // 3×3 block on demand, shrinking the scratch cell ~9 KB. The result is bit-identical:
+  // edgeInv[vc][e] = pvec[facet(L)] × pvec[facet(reverse(L))] holds in both the direct
+  // and the antisymmetric case since −(b×a)=a×b and FP multiply is commutative.)
+  Real fArea[CAP][3];  // facet area vector
+  Real fdV[CAP][3];    // facet volume gradient (legacy m_dV)
+
+  /// Normalised dual edge tensor of vertex vc (its 3 edges × 3 components). Recomputed
+  /// on demand instead of stored; see the note above.
+  KOKKOS_INLINE_FUNCTION void vertexEdgeInv(int vc, Real eInv[3][3]) const {
+    for (int e = 0; e < 3; ++e) {
+      lbl_t L = vlab[vc][e];
+      const Real* a = pvec[getFacet(L)];
+      const Real* b = pvec[getFacet(getReverse(L))];
+      eInv[e][0] = a[1] * b[2] - a[2] * b[1];
+      eInv[e][1] = a[2] * b[0] - a[0] * b[2];
+      eInv[e][2] = a[0] * b[1] - a[1] * b[0];
+    }
+    int indxF = getFacet(vlab[vc][2]);
+    Real vol = pvec[indxF][0] * eInv[0][0] + pvec[indxF][1] * eInv[0][1] +
+               pvec[indxF][2] * eInv[0][2];
+    for (int m = 0; m < 3; ++m)
+      for (int c = 0; c < 3; ++c)
+        eInv[m][c] /= vol;
+  }
 
   /// Faithful port of CellGeometry::computeEdgeInv + diffVolume: fills fArea, fdV
   /// from the in-scratch half-edge mesh. connV[f] is the plane vector pvec[f]
   /// (= pos[nbr]-pos[seed] for both Voronoi and Power); m_rSq[f] is poff[f].
   KOKKOS_INLINE_FUNCTION void computeGeometry() {
-    // edgeInv[v][e] = connV[f0] x connV[f1] over the edge (processed once).
-    for (int v = 0; v < numAllocV; ++v) {
-      if (!aliveV[v])
-        continue;
-      for (int k = 0; k < 3; ++k) {
-        lbl_t l0 = vlab[v][k];
-        lbl_t l1 = getReverse(l0);
-        if (l0 > l1)
-          continue;
-        int e0 = getEdge(l0), v0 = getVertex(l0), f0 = getFacet(l0);
-        int e1 = getEdge(l1), v1 = getVertex(l1), f1 = getFacet(l1);
-        const Real* a = pvec[f0];
-        const Real* b = pvec[f1];
-        edgeInv[v0][e0][0] = a[1] * b[2] - a[2] * b[1];
-        edgeInv[v0][e0][1] = a[2] * b[0] - a[0] * b[2];
-        edgeInv[v0][e0][2] = a[0] * b[1] - a[1] * b[0];
-        for (int c = 0; c < 3; ++c)
-          edgeInv[v1][e1][c] = -edgeInv[v0][e0][c];
-      }
-    }
-    // Normalise each vertex's edgeInv by its (signed) triple product so it is the
-    // true dual basis (legacy computeEdgeInv tail).
-    for (int v = 0; v < numAllocV; ++v) {
-      if (!aliveV[v])
-        continue;
-      int indxF = getFacet(vlab[v][2]);
-      Real vol = pvec[indxF][0] * edgeInv[v][0][0] + pvec[indxF][1] * edgeInv[v][0][1] +
-                 pvec[indxF][2] * edgeInv[v][0][2];
-      for (int m = 0; m < 3; ++m)
-        for (int c = 0; c < 3; ++c)
-          edgeInv[v][m][c] /= vol;
-    }
     for (int f = 0; f < numAllocF; ++f)
       if (aliveF[f])
         for (int c = 0; c < 3; ++c) {
@@ -554,11 +544,13 @@ struct ScratchCell {
         dv[1][c] = vpos[vN[1]][c] - vpos[vN[2]][c];
         dv[2][c] = vpos[vN[2]][c] - vpos[vN[0]][c];
       }
+      Real eInv[3][3];
+      vertexEdgeInv(vc, eInv);
       Real dVertex[3][3][3];
       for (int j = 0; j < 3; ++j)
         for (int ii = 0; ii < 3; ++ii)
           for (int l = 0; l < 3; ++l)
-            dVertex[j][ii][l] = edgeInv[vc][eOpp[ii]][l] * (pvec[ff[ii]][j] - vpos[vc][j]);
+            dVertex[j][ii][l] = eInv[eOpp[ii]][l] * (pvec[ff[ii]][j] - vpos[vc][j]);
       for (int m = 0; m < 3; ++m) {
         Real dA[3];
         dA[0] = vpos[vc][1] * dv[m][2] - vpos[vc][2] * dv[m][1];
@@ -620,14 +612,15 @@ struct ScratchCell {
         dv[c] = vpos[v0][c] - vpos[v1][c];
       Real dvA[3] = {dv[1] * A[2] - dv[2] * A[1], dv[2] * A[0] - dv[0] * A[2],
                      dv[0] * A[1] - dv[1] * A[0]};
-      Real s =
-          edgeInv[vc][e0][0] * dvA[0] + edgeInv[vc][e0][1] * dvA[1] + edgeInv[vc][e0][2] * dvA[2];
+      Real eInv[3][3];
+      vertexEdgeInv(vc, eInv);
+      Real s = eInv[e0][0] * dvA[0] + eInv[e0][1] * dvA[1] + eInv[e0][2] * dvA[2];
       for (int c = 0; c < 3; ++c)
         outG[nbrPrev][c] += (pvec[f1][c] - vpos[vc][c]) * s;
-      s = edgeInv[vc][e1][0] * dvA[0] + edgeInv[vc][e1][1] * dvA[1] + edgeInv[vc][e1][2] * dvA[2];
+      s = eInv[e1][0] * dvA[0] + eInv[e1][1] * dvA[1] + eInv[e1][2] * dvA[2];
       for (int c = 0; c < 3; ++c)
         outG[nbrNext][c] += (pvec[f2][c] - vpos[vc][c]) * s;
-      s = edgeInv[vc][e2][0] * dvA[0] + edgeInv[vc][e2][1] * dvA[1] + edgeInv[vc][e2][2] * dvA[2];
+      s = eInv[e2][0] * dvA[0] + eInv[e2][1] * dvA[1] + eInv[e2][2] * dvA[2];
       for (int c = 0; c < 3; ++c)
         outG[0][c] += (pvec[f0][c] - vpos[vc][c]) * s;
       nbrPrev = nbrNext;
