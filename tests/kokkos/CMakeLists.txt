@@ -58,6 +58,8 @@ add_vorflow_kokkos_test(test_incremental_device)
 find_package(OpenMP REQUIRED)
 add_executable(bench_device bench_device.cpp)
 target_link_libraries(bench_device PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+# Add VORFLOW_CUTTER_PROFILE here to print the tessellator's per-cell cutCell2/cdist
+# counts (serial); off by default so normal benchmarking has no extra work.
 target_compile_definitions(bench_device PRIVATE VORONOI_USE_OPENMP)
 target_include_directories(bench_device PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}")
@@ -77,3 +79,12 @@ if(TARGET voro++)
   target_link_libraries(bench_device PRIVATE voro++)
   target_compile_definitions(bench_device PRIVATE VORFLOW_HAVE_VOROPP)
 endif()
+
+# Per-cell cutter profiler (Phase 0): attributes cutCell2 time to its sub-phases.
+# Built with VORFLOW_CUTTER_PROFILE so cell_cutter.hpp bumps the host-only counters.
+add_executable(bench_cutter bench_cutter.cpp)
+target_link_libraries(bench_cutter PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+target_compile_definitions(bench_cutter PRIVATE VORFLOW_CUTTER_PROFILE)
+target_include_directories(bench_cutter PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}")
+target_compile_features(bench_cutter PRIVATE cxx_std_20)

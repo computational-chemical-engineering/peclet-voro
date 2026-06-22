@@ -32,6 +32,19 @@
 namespace vor {
 namespace device {
 
+#ifdef VORFLOW_CUTTER_PROFILE
+// Host-only per-cell profiling counters (Phase 0 cutter profiler). Defined in
+// bench_cutter.cpp; fully absent unless the profiler target sets the macro.
+struct CutterCounters {
+  long cuts = 0, cdistCalls = 0, traceSteps = 0, dfsSteps = 0;
+  long findRsqMaxCalls = 0, findRsqMaxScans = 0, exhaustiveCalls = 0, exhaustiveScans = 0;
+};
+extern CutterCounters g_cc;
+#define VF_CC(stmt) stmt
+#else
+#define VF_CC(stmt)
+#endif
+
 using lbl_t = std::uint16_t;  ///< half-edge label (facet:7 | vertex:7 | edge:2)
 
 // Bit layout identical to vor::makeLabel/getFacet/getVertex/getEdge, but
@@ -174,6 +187,8 @@ struct ScratchCell {
         computeRsq(i);
   }
   KOKKOS_INLINE_FUNCTION void findRsqMax() {
+    VF_CC(++g_cc.findRsqMaxCalls);
+    VF_CC(g_cc.findRsqMaxScans += numAllocV);
     Real m = 0;
     for (int i = 0; i < numAllocV; ++i)
       if (aliveV[i] && rsq[i] > m) {
@@ -184,6 +199,7 @@ struct ScratchCell {
   KOKKOS_INLINE_FUNCTION void resetDist() { ++gen; }
   // Cached signed distance of vertex i to the current plane (pv, off).
   KOKKOS_INLINE_FUNCTION Real cdist(int i, const Real pv[3], Real off) {
+    VF_CC(++g_cc.cdistCalls);
     if (knownGen[i] != gen) {
       dist[i] = vpos[i][0] * pv[0] + vpos[i][1] * pv[1] + vpos[i][2] * pv[2] - off;
       knownGen[i] = gen;
@@ -191,6 +207,8 @@ struct ScratchCell {
     return dist[i];
   }
   KOKKOS_INLINE_FUNCTION void computeAllDist(const Real pv[3], Real off) {
+    VF_CC(++g_cc.exhaustiveCalls);
+    VF_CC(g_cc.exhaustiveScans += numAllocV);
     for (int i = 0; i < numAllocV; ++i)
       if (aliveV[i]) {
         dist[i] = vpos[i][0] * pv[0] + vpos[i][1] * pv[1] + vpos[i][2] * pv[2] - off;
@@ -266,6 +284,7 @@ struct ScratchCell {
   /// {x : x·pv - off <= 0}, attaching the new facet to neighbour `nbr`.
   /// Returns true if the cell was modified. On allocation overflow sets *ovf.
   KOKKOS_INLINE_FUNCTION bool cutCell2(const Real pv[3], Real off, int nbr, bool* ovf) {
+    VF_CC(++g_cc.cuts);
     resetDist();
     if (emptyV())
       return false;
@@ -360,6 +379,7 @@ struct ScratchCell {
       vlab[v][e] = makeLabel(fPrev, vNew, 0);
       flab[fPrev] = vlab[v][e];
       do {
+        VF_CC(++g_cc.traceSteps);
         v = vRev;
         e = (eRev == 0 ? 2 : eRev - 1);
         label = labelRev;
@@ -414,6 +434,7 @@ struct ScratchCell {
       int top = 0;
       vStack[top++] = sv;
       while (top > 0) {
+        VF_CC(++g_cc.dfsSteps);
         int vv = vStack[--top];
         for (int k = 0; k < 3; ++k) {
           int vNxt = getVertex(vlab[vv][k]);

@@ -22,6 +22,14 @@
 #include "vorflow/device/tessellator.hpp"
 #include "vorflow/voronoi.hpp"
 
+#ifdef VORFLOW_CUTTER_PROFILE
+namespace vor {
+namespace device {
+CutterCounters g_cc{};  // count device cutCell2 calls inside the tessellator (serial)
+}
+}  // namespace vor
+#endif
+
 #ifdef VORFLOW_HAVE_VOROPP
 #include "voro++.hh"
 // Serial voro++ reference: build every cell once (compute_cell over all seeds).
@@ -114,6 +122,20 @@ static void run(int N) {
     voropp_build(pos, L[0]);
     auto t1 = clk::now();
     voroBest = std::min(voroBest, secs(t0, t1));
+  }
+#endif
+
+#ifdef VORFLOW_CUTTER_PROFILE
+  {
+    vor::device::g_cc = vor::device::CutterCounters{};
+    auto r = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw);
+    Kokkos::fence();
+    (void)r;
+    const auto& g = vor::device::g_cc;
+    std::printf("  [cutprofile N=%d] cutCell2/cell=%.1f cdist/cell=%.1f trace/cell=%.1f "
+                "findRsqMax/cell=%.1f(scan %.1f)\n",
+                N, (double)g.cuts / N, (double)g.cdistCalls / N, (double)g.traceSteps / N,
+                (double)g.findRsqMaxCalls / N, (double)g.findRsqMaxScans / N);
   }
 #endif
 
