@@ -102,6 +102,16 @@ if(VORFLOW_KOKKOS)
   set(VORFLOW_TPX_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../transport-core/include"
       CACHE PATH "transport-core include dir")
 
+  # The morton spatial-index primitive: the device tessellator's Z-order grid
+  # ordering uses morton::Morton<3,21> (MORTON_ENABLE_KOKKOS -> MORTON_HD is
+  # KOKKOS_FUNCTION, so it is callable from the device kernels on any backend).
+  set(VORFLOW_MORTON_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../morton/include"
+      CACHE PATH "morton include dir")
+  if(NOT EXISTS "${VORFLOW_MORTON_INCLUDE}/morton/morton.hpp")
+    message(FATAL_ERROR
+      "vorflow: morton not found at ${VORFLOW_MORTON_INCLUDE} (clone it as a sibling repo)")
+  endif()
+
   if(VORFLOW_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
     if(NOT EXISTS "${VORFLOW_TPX_INCLUDE}/tpx/halo/particle_halo_kokkos.hpp")
@@ -127,7 +137,8 @@ if(VORFLOW_KOKKOS)
     pybind11_add_module(vorflow_device NO_EXTRAS src/vorflow_bindings.cpp)
     set_target_properties(vorflow_device PROPERTIES OUTPUT_NAME vorflow)
     target_include_directories(vorflow_device PRIVATE
-      "${CMAKE_CURRENT_SOURCE_DIR}/include" "${VORFLOW_TPX_INCLUDE}")
+      "${CMAKE_CURRENT_SOURCE_DIR}/include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+    target_compile_definitions(vorflow_device PRIVATE MORTON_ENABLE_KOKKOS=1)
     target_link_libraries(vorflow_device PRIVATE Kokkos::kokkos)
     target_compile_features(vorflow_device PRIVATE cxx_std_20)
   endif()

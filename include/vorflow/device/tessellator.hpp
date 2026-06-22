@@ -36,6 +36,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "morton/morton.hpp"  // suite spatial-index primitive (after Kokkos_Core: MORTON_HD->KOKKOS_FUNCTION)
 #include "tpx/common/view.hpp"
 #include "vorflow/device/cell_cutter.hpp"
 #include "vorflow/device/sdf.hpp"
@@ -47,23 +48,17 @@ namespace device {
 /// Per-cell status bits written by the build pass.
 enum StatusBit { kOk = 0, kOverflow = 1, kEmpty = 2, kIncomplete = 4 };
 
-/// Spread the low 21 bits of v so they occupy every third bit (magic-bits 3D Morton).
-KOKKOS_INLINE_FUNCTION uint64_t mortonSpread3(uint64_t v) {
-  v &= 0x1fffffULL;
-  v = (v | (v << 32)) & 0x1f00000000ffffULL;
-  v = (v | (v << 16)) & 0x1f0000ff0000ffULL;
-  v = (v | (v << 8)) & 0x100f00f00f00f00fULL;
-  v = (v | (v << 4)) & 0x10c30c30c30c30c3ULL;
-  v = (v | (v << 2)) & 0x1249249249249249ULL;
-  return v;
-}
-/// 3D Morton (Z-order) code of a grid cell. Device-portable (no BMI2), good to 21
-/// bits/axis. Used to order the cell grid so a cell's spatial neighbourhood is
-/// near it in memory — the gather then reads near-contiguous cellStart/posSorted
-/// instead of chasing z-neighbours dimx*dimy entries apart.
+/// 3D Morton (Z-order) code of a grid cell, via the suite's morton library
+/// (`Morton<3,21>`, software bit path on device — no BMI2; bit-identical to the
+/// former hand-rolled magic-bits spread). Used to order the cell grid so a cell's
+/// spatial neighbourhood is near it in memory — the gather then reads
+/// near-contiguous cellStart/posSorted instead of chasing z-neighbours dimx*dimy
+/// entries apart. Good to 21 bits/axis (grid indices are far below that).
 KOKKOS_INLINE_FUNCTION int morton3(int x, int y, int z) {
-  return (int)(mortonSpread3((uint64_t)x) | (mortonSpread3((uint64_t)y) << 1) |
-               (mortonSpread3((uint64_t)z) << 2));
+  return static_cast<int>(morton::Morton<3, 21>::encode(static_cast<std::uint32_t>(x),
+                                                        static_cast<std::uint32_t>(y),
+                                                        static_cast<std::uint32_t>(z))
+                              .code());
 }
 
 /// Sift element i down a binary min-heap of size n keyed on key[], moving id[] in

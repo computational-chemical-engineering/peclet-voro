@@ -10,7 +10,9 @@ function(add_vorflow_kokkos_test name)
   target_link_libraries(${name} PRIVATE Kokkos::kokkos)
   target_include_directories(${name} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
-    "${VORFLOW_TPX_INCLUDE}")
+    "${VORFLOW_TPX_INCLUDE}"
+    "${VORFLOW_MORTON_INCLUDE}")
+  target_compile_definitions(${name} PRIVATE MORTON_ENABLE_KOKKOS=1)
   target_compile_features(${name} PRIVATE cxx_std_20)
   add_test(NAME ${name} COMMAND ${name})
   set_tests_properties(${name} PROPERTIES ENVIRONMENT "OMP_PROC_BIND=false")
@@ -60,9 +62,9 @@ add_executable(bench_device bench_device.cpp)
 target_link_libraries(bench_device PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
 # Add VORFLOW_CUTTER_PROFILE here to print the tessellator's per-cell cutCell2/cdist
 # counts (serial); off by default so normal benchmarking has no extra work.
-target_compile_definitions(bench_device PRIVATE VORONOI_USE_OPENMP)
+target_compile_definitions(bench_device PRIVATE VORONOI_USE_OPENMP MORTON_ENABLE_KOKKOS=1)
 target_include_directories(bench_device PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}")
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
 target_compile_features(bench_device PRIVATE cxx_std_20)
 
 # Optional voro++ reference (the serial throughput target). FetchContent reuses the
@@ -84,7 +86,7 @@ endif()
 # Built with VORFLOW_CUTTER_PROFILE so cell_cutter.hpp bumps the host-only counters.
 add_executable(bench_cutter bench_cutter.cpp)
 target_link_libraries(bench_cutter PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
-target_compile_definitions(bench_cutter PRIVATE VORFLOW_CUTTER_PROFILE)
+target_compile_definitions(bench_cutter PRIVATE VORFLOW_CUTTER_PROFILE MORTON_ENABLE_KOKKOS=1)
 target_include_directories(bench_cutter PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}")
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
 target_compile_features(bench_cutter PRIVATE cxx_std_20)
