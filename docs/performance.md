@@ -180,12 +180,15 @@ The GPU (RTX 5080, ~960 GB/s, ~10⁴ cores) does **~2435 kcells/s pure-tess — 
 24-core CPU** (982 kcells/s). That ratio is low for this hardware and the cause is **not**
 compute or bandwidth: it is **occupancy**.
 
-Evidence:
-- **Per-thread state ≈ 32 KB**: the cutter is one Voronoi cell per GPU thread, and each
-  thread holds a `ScratchCell<double>` (~20 KB: `vpos`/`vlab`/`rsq`/`dist`/`pvec`/`fArea`/
-  `fdV`/… at CAP=128) plus the build kernel's candidate arrays `ckey`/`cjid` (~12 KB). At
-  ~32 KB/thread this spills entirely to **local memory** (global, L1/L2-cached) and starves
-  occupancy — GPU threads want ≪1 KB of state.
+Evidence — `cuobjdump --dump-resource-usage` on the build kernel (RTX 5080, sm_120):
+**142 registers/thread and a 32 736-byte (32 KB) stack frame/thread.**
+- The **142 registers** alone cap it to ~14 of 48 warps/SM → **~29% theoretical occupancy**
+  (register-limited). (Achieved occupancy via Nsight Compute needs GPU perf-counter
+  permission — `ERR_NVGPUCTRPERM` without root — but the static ceiling is the point.)
+- The **32 KB stack/thread** is the per-cell state: `ScratchCell<double>` (~20 KB:
+  `vpos`/`vlab`/`rsq`/`dist`/`pvec`/`fArea`/`fdV`/… at CAP=128) plus the build kernel's
+  candidate arrays `ckey`/`cjid` (~12 KB). At 32 KB/thread it lives entirely in **local
+  memory** (global, L1/L2-cached) and starves occupancy — GPU threads want ≪1 KB of state.
 - **Throughput rises with N** (2.0 → 2.2 → 2.4 Mcells/s at N = 50k → 200k → 1M, still
   climbing) — the signature of an under-occupied kernel that needs more cells to hide
   local-memory latency, rather than a saturated one.
