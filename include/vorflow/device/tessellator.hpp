@@ -123,6 +123,83 @@ struct CellBuilder {
   size_t facetCap;
   Sdf sdf;
 
+  /// Minimal-image relative vector from the seed at (pix,piy,piz) to sorted seed q
+  /// (single-image wrap; bit-identical to round(r/L) in range). Shared by the serial
+  /// and team paths so both compute candidates identically.
+  KOKKOS_INLINE_FUNCTION void relVec(int q, Real pix, Real piy, Real piz, Real pv[3]) const {
+    Real rx = posSorted(3 * q + 0) - pix, ry = posSorted(3 * q + 1) - piy,
+         rz = posSorted(3 * q + 2) - piz;
+    const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
+    pv[0] = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
+    pv[1] = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
+    pv[2] = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
+  }
+
+  /// Linear/Morton index of the grid cell at raw (periodic-unwrapped) offset.
+  KOKKOS_INLINE_FUNCTION int gridCell(int rgx, int rgy, int rgz) const {
+    int gx = rgx < 0 ? rgx + dimx : (rgx >= dimx ? rgx - dimx : rgx);
+    int gy = rgy < 0 ? rgy + dimy : (rgy >= dimy ? rgy - dimy : rgy);
+    int gz = rgz < 0 ? rgz + dimz : (rgz >= dimz ? rgz - dimz : rgz);
+    return useMorton ? morton3(gx, gy, gz) : (gx + gy * dimx + gz * dimx * dimy);
+  }
+
+  /// Finish a built cell: completeness flag, optional SDF clip, status/volume,
+  /// per-facet geometry, and the atomic-packed facet write into the over-buffer.
+  /// `covSq` is the attained coverage² and `ovf` the running overflow flag. Shared by
+  /// the serial buildCell and the team-per-cell leader so the published outputs match.
+  KOKKOS_INLINE_FUNCTION void finishCell(ScratchCell<Real>& c, int i, Real pix, Real piy, Real piz,
+                                         Real covSq, bool ovf) const {
+    // Voronoi completeness is judged on the un-clipped cell.
+    const bool incomplete = !(covSq > Real(4) * c.rsq[c.vRsqMax]);
+    // Optional SDF boundary clip. (CUDA extended lambdas cannot first-capture a
+    // variable inside an if-constexpr, so reference sdf once in normal context first.)
+    (void)sdf;
+    if constexpr (!std::is_same_v<Sdf, NoSdf>) {
+      const Real seedW[3] = {pix, piy, piz};
+      clipCellAgainstSdf<Real>(c, seedW, sdf, &ovf);
+    }
+    int st = kOk;
+    if (ovf) st |= kOverflow;
+    if (c.emptyV()) st |= kEmpty;
+    if (incomplete) st |= kIncomplete;
+    status(i) = st;
+    cellVol(i) = c.volume();
+    // Per-facet geometry (area vector + dV volume gradient); skipped for pure tess.
+    if (!c.emptyV() && withForceGeom) c.computeGeometry();
+    // Collect this cell's live facets, then reserve a contiguous CSR range with one
+    // atomic and write straight into the over-buffer.
+    int faces[MAXF_TMP];
+    int nf = 0;
+    for (int f = 0; f < c.numAllocF; ++f) {
+      if (!c.aliveF[f]) continue;
+      if (nf >= MAXF_TMP) {
+        status(i) |= kOverflow;
+        break;
+      }
+      faces[nf++] = f;
+    }
+    const int base = Kokkos::atomic_fetch_add(&facetCursor(0), nf);
+    // Overflow guard: skip the write rather than clobbering past the over-buffer end.
+    if ((size_t)base + (size_t)nf > facetCap) {
+      status(i) |= kOverflow;
+      facetCount(i) = 0;
+      cellFacetBase(i) = 0;
+    } else {
+      facetCount(i) = nf;
+      cellFacetBase(i) = base;
+      for (int k = 0; k < nf; ++k) {
+        const int f = faces[k];
+        oNbr((size_t)base + k) = c.fnbr[f];
+        const size_t o = ((size_t)base + k) * 3;
+        for (int cc = 0; cc < 3; ++cc) {
+          oArea(o + cc) = withForceGeom ? c.fArea[f][cc] : Real(0);
+          oDV(o + cc) = withForceGeom ? c.fdV[f][cc] : Real(0);
+          oConn(o + cc) = c.pvec[f][cc];  // plane vector == the connecting vector (exact)
+        }
+      }
+    }
+  }
+
   /// Build the cell owning grid-sorted slot `pi` into scratch `c` (+ candidate
   /// arrays `ckey`/`cjid`, each of length MAXCAND), writing the published outputs
   /// at the original seed index binned(pi). Verbatim port of the former in-line
@@ -138,9 +215,6 @@ struct CellBuilder {
     int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
     int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
 
-    // Half-box extents for the single-image minimal-image wrap below.
-    const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
-
     int nc = 0;
     const Real wi = Weighted ? wSorted(pi) : Real(0);
     bool ovf = false;
@@ -150,20 +224,13 @@ struct CellBuilder {
 
     // Append the seeds of grid cell at raw offset (rgx,rgy,rgz) as candidates.
     auto gatherGrid = [&](int rgx, int rgy, int rgz) {
-      int gx = rgx < 0 ? rgx + dimx : (rgx >= dimx ? rgx - dimx : rgx);
-      int gy = rgy < 0 ? rgy + dimy : (rgy >= dimy ? rgy - dimy : rgy);
-      int gz = rgz < 0 ? rgz + dimz : (rgz >= dimz ? rgz - dimz : rgz);
-      int gc = useMorton ? morton3(gx, gy, gz) : (gx + gy * dimx + gz * dimx * dimy);
+      int gc = gridCell(rgx, rgy, rgz);
       for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
         if (q == pi) continue;
         if (haveGid && gidSorted(q) == gidSorted(pi)) continue;  // periodic self-image
-        Real rx = posSorted(3 * q + 0) - pix;
-        Real ry = posSorted(3 * q + 1) - piy;
-        Real rz = posSorted(3 * q + 2) - piz;
-        rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
-        ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
-        rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
-        Real rSqHalf = Real(0.5) * (rx * rx + ry * ry + rz * rz);
+        Real pv[3];
+        relVec(q, pix, piy, piz, pv);
+        Real rSqHalf = Real(0.5) * (pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2]);
         Real off = Weighted ? rSqHalf + Real(0.5) * (wi - wSorted(q)) : rSqHalf;
         if (nc < MAXCAND) {
           ckey[nc] = off;
@@ -175,13 +242,8 @@ struct CellBuilder {
       }
     };
     auto applyCand = [&](int q, Real off) {
-      Real rx = posSorted(3 * q + 0) - pix;
-      Real ry = posSorted(3 * q + 1) - piy;
-      Real rz = posSorted(3 * q + 2) - piz;
-      rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
-      ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
-      rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
-      const Real pv[3] = {rx, ry, rz};
+      Real pv[3];
+      relVec(q, pix, piy, piz, pv);
       c.cutCell2(pv, off, binned(q), &ovf);  // store the ORIGINAL neighbour id
     };
 
@@ -223,57 +285,140 @@ struct CellBuilder {
       covSq = Real(swUsed) * minCsz * Real(swUsed) * minCsz;
     }
 
-    // Voronoi completeness is judged on the un-clipped cell.
-    const bool incomplete = !(covSq > Real(4) * c.rsq[c.vRsqMax]);
+    finishCell(c, i, pix, piy, piz, covSq, ovf);
+  }
 
-    // Optional SDF boundary clip. (CUDA extended lambdas cannot first-capture a
-    // variable inside an if-constexpr, so reference sdf once in normal context first.)
-    (void)sdf;
-    if constexpr (!std::is_same_v<Sdf, NoSdf>) {
-      const Real seedW[3] = {pix, piy, piz};
-      clipCellAgainstSdf<Real>(c, seedW, sdf, &ovf);
-    }
+  /// Team-per-cell build: one team cooperates on the cell owning grid-sorted slot
+  /// `pi`. The scratch cell + candidate arrays live in shared memory (passed in);
+  /// `sh` is a small shared int scratch (>=4 ints) for the team's counters.
+  ///
+  /// The neighbour gather is parallelised across the team (Voronoi only); the cut and
+  /// geometry stay on the leader for now. Bit-exactness is preserved because the
+  /// Voronoi per-shell min-heap re-sorts each shell's candidates by key, so the cut
+  /// order is independent of the (now parallel, racy) gather order. Power keeps the
+  /// serial leader gather — it applies candidates in array order with no re-sort, so
+  /// parallelising its gather would reorder the cuts; left for a later deterministic
+  /// sort. Either way the cut is closest-first / radical-plane identical to buildCell.
+  template <class Member>
+  KOKKOS_INLINE_FUNCTION void buildCellTeam(const Member& team, ScratchCell<Real>& c, Real* ckey,
+                                            int* cjid, int* sh, int pi) const {
+    const int i = binned(pi);
+    const Real pix = posSorted(3 * pi + 0), piy = posSorted(3 * pi + 1), piz = posSorted(3 * pi + 2);
+    const int cx = ((((int)Kokkos::floor(pix * icx)) % dimx) + dimx) % dimx;
+    const int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
+    const int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
+    const Real wi = Weighted ? wSorted(pi) : Real(0);
 
-    int st = kOk;
-    if (ovf) st |= kOverflow;
-    if (c.emptyV()) st |= kEmpty;
-    if (incomplete) st |= kIncomplete;
-    status(i) = st;
-    cellVol(i) = c.volume();
-    // Per-facet geometry (area vector + dV volume gradient); skipped for pure tess.
-    if (!c.emptyV() && withForceGeom) c.computeGeometry();
-    // Collect this cell's live facets, then reserve a contiguous CSR range with one
-    // atomic and write straight into the over-buffer.
-    int faces[MAXF_TMP];
-    int nf = 0;
-    for (int f = 0; f < c.numAllocF; ++f) {
-      if (!c.aliveF[f]) continue;
-      if (nf >= MAXF_TMP) {
-        status(i) |= kOverflow;
-        break;
-      }
-      faces[nf++] = f;
-    }
-    const int base = Kokkos::atomic_fetch_add(&facetCursor(0), nf);
-    // Overflow guard: skip the write rather than clobbering past the over-buffer end.
-    if ((size_t)base + (size_t)nf > facetCap) {
-      status(i) |= kOverflow;
-      facetCount(i) = 0;
-      cellFacetBase(i) = 0;
-    } else {
-      facetCount(i) = nf;
-      cellFacetBase(i) = base;
-      for (int k = 0; k < nf; ++k) {
-        const int f = faces[k];
-        oNbr((size_t)base + k) = c.fnbr[f];
-        const size_t o = ((size_t)base + k) * 3;
-        for (int cc = 0; cc < 3; ++cc) {
-          oArea(o + cc) = withForceGeom ? c.fArea[f][cc] : Real(0);
-          oDV(o + cc) = withForceGeom ? c.fdV[f][cc] : Real(0);
-          oConn(o + cc) = c.pvec[f][cc];  // plane vector == the connecting vector (exact)
+    // sh[0]=nc, sh[1]=ovf, sh[2]=stop, sh[3]=swUsed. Leader seeds the cuboid + counters.
+    Kokkos::single(Kokkos::PerTeam(team), [&]() {
+      const Real Larr[3] = {Lx, Ly, Lz};
+      c.initCuboid(Larr);
+      sh[0] = 0;
+      sh[1] = 0;
+      sh[2] = 0;
+      sh[3] = swInit;
+    });
+    team.team_barrier();
+
+    // Parallel gather of worklist offsets [a,b): each lane scans its grid cells and
+    // atomically appends candidates to the shared ckey/cjid (slot from sh[0]).
+    auto gatherRange = [&](int a, int b) {
+      Kokkos::parallel_for(Kokkos::TeamThreadRange(team, a, b), [&](const int o) {
+        const int gc = gridCell(cx + offX(o), cy + offY(o), cz + offZ(o));
+        for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
+          if (q == pi) continue;
+          if (haveGid && gidSorted(q) == gidSorted(pi)) continue;
+          Real pv[3];
+          relVec(q, pix, piy, piz, pv);
+          const Real rSqHalf = Real(0.5) * (pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2]);
+          const Real off = Weighted ? rSqHalf + Real(0.5) * (wi - wSorted(q)) : rSqHalf;
+          const int slot = Kokkos::atomic_fetch_add(&sh[0], 1);
+          if (slot < MAXCAND) {
+            ckey[slot] = off;
+            cjid[slot] = q;
+          } else {
+            Kokkos::atomic_fetch_add(&sh[1], 1);  // candidate overflow -> ovf
+          }
         }
+      });
+    };
+
+    Real covSq;
+    if constexpr (Weighted) {
+      // Power: gather + apply on the leader, in array order (bit-identical to buildCell).
+      Kokkos::single(Kokkos::PerTeam(team), [&]() {
+        int nc = 0;
+        bool ovf = false;
+        for (int o = 0; o < nOff; ++o) {
+          const int gc = gridCell(cx + offX(o), cy + offY(o), cz + offZ(o));
+          for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
+            if (q == pi) continue;
+            if (haveGid && gidSorted(q) == gidSorted(pi)) continue;
+            Real pv[3];
+            relVec(q, pix, piy, piz, pv);
+            const Real rSqHalf = Real(0.5) * (pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2]);
+            const Real off = rSqHalf + Real(0.5) * (wi - wSorted(q));
+            if (nc < MAXCAND) {
+              ckey[nc] = off;
+              cjid[nc] = q;
+              ++nc;
+            } else {
+              ovf = true;
+            }
+          }
+        }
+        for (int s = 0; s < nc && !ovf; ++s) {
+          Real pv[3];
+          relVec(cjid[s], pix, piy, piz, pv);
+          c.cutCell2(pv, ckey[s], binned(cjid[s]), &ovf);
+        }
+        sh[1] = ovf ? 1 : 0;
+      });
+      team.team_barrier();
+      covSq = Real(sw) * minCsz * Real(sw) * minCsz;
+    } else {
+      // Voronoi: per shell, gather in parallel then the leader heap-sorts the new
+      // shell and cuts closest-first with the security early-out. All lanes iterate the
+      // same shell range and break together on the leader's ovf/stop flags.
+      for (int swl = swInit; swl <= sw; ++swl) {
+        const int shellBase = sh[0];  // stable after the previous barrier
+        gatherRange(shellStart(swl), shellStart(swl + 1));
+        team.team_barrier();
+        Kokkos::single(Kokkos::PerTeam(team), [&]() {
+          int nc = sh[0];
+          if (nc > MAXCAND) nc = MAXCAND;
+          bool ovf = sh[1] != 0;
+          Real* k = ckey + shellBase;
+          int* idp = cjid + shellBase;
+          int hn = nc - shellBase;
+          if (hn < 0) hn = 0;
+          for (int s = hn / 2 - 1; s >= 0; --s) heapSiftDown(k, idp, s, hn);
+          while (hn > 0 && !ovf) {
+            if (k[0] >= Real(2) * c.rsq[c.vRsqMax]) break;
+            const Real topKey = k[0];
+            const int topId = idp[0];
+            --hn;
+            k[0] = k[hn];
+            idp[0] = idp[hn];
+            heapSiftDown(k, idp, 0, hn);
+            Real pv[3];
+            relVec(topId, pix, piy, piz, pv);
+            c.cutCell2(pv, topKey, binned(topId), &ovf);
+          }
+          sh[1] = ovf ? 1 : 0;
+          sh[3] = swl;  // swUsed
+          if (Real(swl) * minCsz * Real(swl) * minCsz > Real(4) * c.rsq[c.vRsqMax]) sh[2] = 1;
+        });
+        team.team_barrier();
+        if (sh[1] || sh[2]) break;  // overflow or security met -> all lanes stop
       }
+      const int swUsed = sh[3];
+      covSq = Real(swUsed) * minCsz * Real(swUsed) * minCsz;
     }
+
+    // Leader finishes the cell (geometry parallelised in a later step).
+    Kokkos::single(Kokkos::PerTeam(team),
+                   [&]() { finishCell(c, i, pix, piy, piz, covSq, sh[1] != 0); });
   }
 };
 
@@ -562,7 +707,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
       const int teamSize = std::atoi(teamEnv) > 0 ? std::atoi(teamEnv) : 32;
       const size_t shBytes = sizeof(ScratchCell<Real>) +
                              (size_t)Builder::MAXCAND * sizeof(Real) +
-                             (size_t)Builder::MAXCAND * sizeof(int) + 64;  // +pad for alignment
+                             (size_t)Builder::MAXCAND * sizeof(int) + 8 * sizeof(int) +
+                             128;  // + team counters + alignment pad
       TeamPol policy(N, teamSize);
       policy.set_scratch_size(0, Kokkos::PerTeam((int)shBytes));
       Kokkos::parallel_for(
@@ -574,8 +720,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
                                                      alignof(Real));
             int* cjid = (int*)sc.get_shmem_aligned((size_t)Builder::MAXCAND * sizeof(int),
                                                    alignof(int));
-            Kokkos::single(Kokkos::PerTeam(team),
-                           [&]() { op.buildCell(*cp, ckey, cjid, team.league_rank()); });
+            int* sh = (int*)sc.get_shmem_aligned(8 * sizeof(int), alignof(int));
+            op.buildCellTeam(team, *cp, ckey, cjid, sh, team.league_rank());
           });
     }
   }
