@@ -90,8 +90,8 @@ template <class Real, bool Weighted, class Sdf = NoSdf>
 TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
                                           const Kokkos::View<Real*, tpx::MemSpace>& weight, int N,
                                           const Real L[3], int sw = 4, int densityCount = -1,
-                                          Kokkos::View<long*, tpx::MemSpace> gid = {},
-                                          Sdf sdf = {}) {
+                                          Kokkos::View<long*, tpx::MemSpace> gid = {}, Sdf sdf = {},
+                                          bool withForceGeom = true) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
   constexpr int MAXF = ScratchCell<Real>::CAP;
@@ -417,9 +417,11 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           st |= kIncomplete;
         status(i) = st;
         cellVol(i) = c.volume();
-        // Per-facet geometry (area vector, dV volume gradient, connecting vector)
-        // from the half-edge mesh — what the physics forces consume.
-        if (!c.emptyV())
+        // Per-facet geometry (area vector + dV volume gradient) from the half-edge
+        // mesh — what the physics forces consume. The O(27·V) gradient is ~37% of the
+        // per-cell build; skip it (and publish zero area/dV) when forces aren't needed
+        // (pure tessellation), the apples-to-apples comparison with voro++.
+        if (!c.emptyV() && withForceGeom)
           c.computeGeometry();
         int nf = 0;
         for (int f = 0; f < c.numAllocF; ++f) {
@@ -432,8 +434,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           const size_t o = ((size_t)i * MAXF_TMP + nf) * 3;
           tmpNbr((size_t)i * MAXF_TMP + nf) = c.fnbr[f];
           for (int cc = 0; cc < 3; ++cc) {
-            tmpArea(o + cc) = c.fArea[f][cc];
-            tmpDV(o + cc) = c.fdV[f][cc];
+            tmpArea(o + cc) = withForceGeom ? c.fArea[f][cc] : Real(0);
+            tmpDV(o + cc) = withForceGeom ? c.fdV[f][cc] : Real(0);
           }
           ++nf;
         }

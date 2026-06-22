@@ -94,7 +94,12 @@ static void run(int N) {
   Kokkos::View<real_t*, tpx::MemSpace> dW("w", N);
   const real_t Larr[3] = {L[0], L[1], L[2]};
   const int sw = std::getenv("VORFLOW_SW") ? std::atoi(std::getenv("VORFLOW_SW")) : 4;
-  auto warm = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw);
+  // VORFLOW_NOFORCEGEOM=1 skips the force-gradient geometry (pure tessellation) — the
+  // apples-to-apples comparison with voro++ compute_cell.
+  const bool withGeom = std::getenv("VORFLOW_NOFORCEGEOM") == nullptr;
+  Kokkos::View<long*, tpx::MemSpace> noGid;
+  auto warm = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw, -1, noGid,
+                                                            vor::device::NoSdf{}, withGeom);
   Kokkos::fence();
   // device volume sum (correctness)
   double devVol = 0;
@@ -107,7 +112,8 @@ static void run(int N) {
   for (int rep = 0; rep < 3; ++rep) {
     Kokkos::fence();
     auto t0 = clk::now();
-    auto res = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw);
+    auto res = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw, -1, noGid,
+                                                             vor::device::NoSdf{}, withGeom);
     Kokkos::fence();
     auto t1 = clk::now();
     devBest = std::min(devBest, secs(t0, t1));
@@ -128,7 +134,8 @@ static void run(int N) {
 #ifdef VORFLOW_CUTTER_PROFILE
   {
     vor::device::g_cc = vor::device::CutterCounters{};
-    auto r = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw);
+    auto r = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr, sw, -1, noGid,
+                                                           vor::device::NoSdf{}, withGeom);
     Kokkos::fence();
     (void)r;
     const auto& g = vor::device::g_cc;
