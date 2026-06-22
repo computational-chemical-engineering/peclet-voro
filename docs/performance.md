@@ -171,13 +171,47 @@ or GPU team-per-cell.
 
 **Feasibility verdict (updated after measuring Morton):** the Morton lever turned out to
 be a **GPU** win (now shipped, +18% with forces), not the CPU lever it was expected to be —
-on CPU the ~2-seeds/cell density already captured the grid locality. Closing the last ~10%
-on serial CPU therefore rests on the per-cell working set (smaller `ScratchCell`) and
-removing the temp-slab round-trip; both are internal, bit-exact-validatable, and compatible
-with CPU/GPU parallelism and physics (they sit below the CSR). Parity is still plausible
-that way but is no longer a single easy change. An optional Morton-ordered *output* could
-additionally speed the physics force gather's neighbour access on GPU, at the cost of the
-`cell i == particle i` contract — so it would be opt-in.
+on CPU the ~2-seeds/cell density already captured the grid locality. The serial CPU gap was
+ultimately closed by the **CSR fusion** above (now ≥ voro++).
+
+## GPU is occupancy-limited — the next big lever (a separate, major effort)
+
+The GPU (RTX 5080, ~960 GB/s, ~10⁴ cores) does **~2435 kcells/s pure-tess — only ~2.5× the
+24-core CPU** (982 kcells/s). That ratio is low for this hardware and the cause is **not**
+compute or bandwidth: it is **occupancy**.
+
+Evidence:
+- **Per-thread state ≈ 32 KB**: the cutter is one Voronoi cell per GPU thread, and each
+  thread holds a `ScratchCell<double>` (~20 KB: `vpos`/`vlab`/`rsq`/`dist`/`pvec`/`fArea`/
+  `fdV`/… at CAP=128) plus the build kernel's candidate arrays `ckey`/`cjid` (~12 KB). At
+  ~32 KB/thread this spills entirely to **local memory** (global, L1/L2-cached) and starves
+  occupancy — GPU threads want ≪1 KB of state.
+- **Throughput rises with N** (2.0 → 2.2 → 2.4 Mcells/s at N = 50k → 200k → 1M, still
+  climbing) — the signature of an under-occupied kernel that needs more cells to hide
+  local-memory latency, rather than a saturated one.
+- The earlier small shrinks confirm the regime: removing `edgeInv` (−9 KB) gave only +1.6%
+  and the candidate cap can't shrink (full-sphere bound) — incremental per-thread trims
+  don't cross the occupancy threshold.
+
+**The fix is a different GPU parallelisation: team/warp-per-cell.** Build one cell per warp
+(or team), keep the cell in **shared memory** (on-chip, fast), and make the per-thread state
+tiny → high occupancy. The neighbour gather and the per-facet geometry parallelise cleanly
+across a warp; the half-edge cut (`cutCell2`) is inherently sequential, so it stays on the
+warp leader (or needs a genuinely parallel cut) — Amdahl on the cut bounds the win, so expect
+**a few-fold**, not 10×, unless the cut itself is parallelised. This is the roadmap's
+"at-scale GPU granularity" item and a major redesign of `cell_cutter.hpp` + the build kernel;
+it is **orthogonal to the CSR/physics layer** (still publishes the same `TessellationView`).
+
+Related GPU items to fold in:
+- **Over-buffer over-allocation caps N.** The CSR fusion's over-buffer is `N×MAXF_TMP` (~6 GB
+  at N=4M on the GPU → OOM). Size it from a mean-facet estimate (e.g. `N×24`) with an
+  overflow guard, or chunk the build, to allow large N on a single GPU.
+- **CAP/precision**: a smaller cell representation (lower CAP for facet-indexed arrays;
+  mixed-precision storage) directly buys occupancy and pairs naturally with shared-memory
+  cells.
+
+An optional Morton-ordered *output* could also speed the physics force gather's neighbour
+access on GPU, at the cost of the `cell i == particle i` contract (opt-in).
 
 **Caveat worth stating:** single-thread CPU is the least important regime — real runs use
 all cores or the GPU, where the device is already 12–30× voro++. So closing the last 10%
