@@ -206,12 +206,17 @@ warp leader (or needs a genuinely parallel cut) — Amdahl on the cut bounds the
 it is **orthogonal to the CSR/physics layer** (still publishes the same `TessellationView`).
 
 Related GPU items to fold in:
-- **Over-buffer over-allocation caps N.** The CSR fusion's over-buffer is `N×MAXF_TMP` (~6 GB
-  at N=4M on the GPU → OOM). Size it from a mean-facet estimate (e.g. `N×24`) with an
-  overflow guard, or chunk the build, to allow large N on a single GPU.
+- **Over-buffer over-allocation caps N — DONE.** The CSR fusion's over-buffer was
+  `N×MAXF_TMP` (50), ~3× the real need, and was held alive alongside the full compact CSR
+  during the pack (~2.5× the CSR) → OOM on a 16 GB GPU at N≈4M. Fixed: size from a mean-facet
+  estimate (`N×18`; mean faces/cell ~15.5, the *sum* has negligible relative variance) with an
+  atomic overflow guard, and pack each over-buffer component into its compact view then free it
+  immediately (peak ≈ over-buffer + one compact array, not over-buffer + full CSR). N=4M/5M/6M
+  now build on a 16 GB card (was OOM past ~3M); N=1M unchanged; bit-exact. See the team-per-cell
+  section below.
 - **CAP/precision**: a smaller cell representation (lower CAP for facet-indexed arrays;
   mixed-precision storage) directly buys occupancy and pairs naturally with shared-memory
-  cells.
+  cells. **This is now the binding lever** — see the measured team-per-cell results below.
 
 An optional Morton-ordered *output* could also speed the physics force gather's neighbour
 access on GPU, at the cost of the `cell i == particle i` contract (opt-in).
@@ -220,3 +225,45 @@ access on GPU, at the cost of the `cell i == particle i` contract (opt-in).
 all cores or the GPU, where the device is already 12–30× voro++. So closing the last 10%
 serial is a completeness goal, not a throughput necessity; the layout work is worth doing
 mainly because Morton ordering *also* benefits the multicore and GPU paths.
+
+## Team/warp-per-cell — implemented, measured: occupancy-bound by the shared cell
+
+The team-per-cell redesign above was implemented incrementally and gated behind
+`VORFLOW_TEAM=<teamSize>` (the default GPU path stays the per-thread RangePolicy build, so
+production throughput is unchanged). The per-cell numerics are factored into one
+`CellBuilder` functor used by both paths, so they are **bit-exact** (validated on the device
++ MPI ctests, Voronoi and Power, volErr 1e-15).
+
+What was done and measured (RTX 5080, sm_120, N=1M, `double`):
+
+| build path | pure-tess | with forces | note |
+|---|---:|---:|---:|
+| per-thread default | **2459 k/s** | **2024 k/s** | cell in 32 KB/thread local frame |
+| team, leader-only | 439 | 175 | cell in shared; cuobjdump stack 32 736 → **200 B** |
+| team, **parallel gather** | **753** | 208 | gather across the warp (Voronoi) |
+
+- **The 32 KB/thread local frame is eliminated** — cuobjdump confirms the team build kernel's
+  stack drops from 32 736 to 200 bytes (the `ScratchCell` + candidate arrays now live in team
+  shared memory). That was the stated goal of moving the cell on-chip.
+- **But occupancy is now shared-memory-limited.** The cell + candidate arrays are ~32 KB of
+  *shared* per team, so only ~3 teams/SM are resident (a ~100 KB shared SM). With the cut (and,
+  with forces, the geometry) still on the warp leader, that is far fewer concurrent cuts than
+  the per-thread path's many in-flight cells — so even a perfectly parallel gather cannot reach
+  the default. Team size 32 (one warp) is the measured sweet spot (8/16/64 are worse).
+- **Parallel gather is bit-exact for Voronoi** because the per-shell min-heap re-sorts each
+  shell's candidates by key — the cut order is independent of the (now racy, parallel) gather
+  order. Power keeps the serial leader gather (no re-sort; parallelising it would reorder the
+  cuts → needs a deterministic sort first).
+
+**Verdict (measured, not predicted):** warp-per-cell at `CAP=128` **cannot beat the per-thread
+path** — the binding constraint is the **shared-memory footprint of the cell**, which caps
+teams/SM at ~3. The gather parallelisation is a genuine 1.7× over leader-only but the path is
+~3× below the default. **The next lever is therefore cell-shrinking, not more parallelism**:
+a smaller cell representation (lower `CAP` for the facet/vertex-indexed arrays; mixed-precision
+storage for the geometry arrays) shrinks the shared footprint so many more teams fit per SM —
+*then* the team path's parallel gather/geometry can overtake the per-thread build. Remaining
+team-path work, all gated and lower-value until the cell shrinks: parallelise `computeGeometry`
+across the team with a **deterministic** (bit-exact) per-facet reduction — naïve vertex-parallel
+atomic accumulation reorders the FP sums and is *not* bit-exact — and a deterministic Power
+gather sort. The half-edge `cutCell2` stays leader-sequential (Amdahl) unless a cooperative cut
+is written.
