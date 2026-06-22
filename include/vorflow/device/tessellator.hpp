@@ -250,17 +250,27 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   // fixed-stride temp slab, no exclusive scan, and the connecting vector is the cut's own
   // plane vector (no minimal-image recompute). The buffer is over-allocated to a tight
   // facet cap; the used prefix [0,nFacets) is copied to a compact view at the end.
+  // Per-cell facet cap: the most facets one Voronoi/Power cell may publish (a single
+  // cell rarely exceeds ~40 faces); bounds the per-cell `faces[]` stack array.
   constexpr int MAXF_TMP = 50;
+  // Global over-buffer capacity: the published CSR holds the *sum* of all cells'
+  // facets ≈ N × mean-faces-per-cell (~15.5 for random Poisson–Voronoi). Sizing it at
+  // N × MAXF_TMP over-allocated ~3× and OOM'd the GPU at large N (≈15 GB at N=4M). A
+  // mean-facet estimate with headroom (N×18, ~16% over the aggregate mean) is ample —
+  // the *sum* has negligible relative variance — and the atomic overflow guard below
+  // flags the rare cell whose reservation would exceed it instead of writing past the
+  // end. (The interleaved copy-and-free in the pack keeps peak memory near this size.)
+  constexpr size_t kMeanFacets = 18;
+  const size_t facetCap = (size_t)N * kMeanFacets;
   using Kokkos::view_alloc;
   using Kokkos::WithoutInitializing;
-  Kokkos::View<int*, MemSpace> oNbr(view_alloc(std::string("oNbr"), WithoutInitializing),
-                                    (size_t)N * MAXF_TMP);
+  Kokkos::View<int*, MemSpace> oNbr(view_alloc(std::string("oNbr"), WithoutInitializing), facetCap);
   Kokkos::View<Real*, MemSpace> oArea(view_alloc(std::string("oArea"), WithoutInitializing),
-                                      (size_t)N * MAXF_TMP * 3);
+                                      facetCap * 3);
   Kokkos::View<Real*, MemSpace> oDV(view_alloc(std::string("oDV"), WithoutInitializing),
-                                    (size_t)N * MAXF_TMP * 3);
+                                    facetCap * 3);
   Kokkos::View<Real*, MemSpace> oConn(view_alloc(std::string("oConn"), WithoutInitializing),
-                                      (size_t)N * MAXF_TMP * 3);
+                                      facetCap * 3);
   Kokkos::View<int*, MemSpace> facetCursor("facetCursor", 1);  // zero-initialised
 
   // --- gather offset worklist (computed once) ---
@@ -479,17 +489,27 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           }
           faces[nf++] = f;
         }
-        facetCount(i) = nf;
         const int base = Kokkos::atomic_fetch_add(&facetCursor(0), nf);
-        cellFacetBase(i) = base;
-        for (int k = 0; k < nf; ++k) {
-          const int f = faces[k];
-          oNbr((size_t)base + k) = c.fnbr[f];
-          const size_t o = ((size_t)base + k) * 3;
-          for (int cc = 0; cc < 3; ++cc) {
-            oArea(o + cc) = withForceGeom ? c.fArea[f][cc] : Real(0);
-            oDV(o + cc) = withForceGeom ? c.fdV[f][cc] : Real(0);
-            oConn(o + cc) = c.pvec[f][cc];  // plane vector == the connecting vector (exact)
+        // Overflow guard: if this cell's reserved range would run past the over-buffer
+        // (sized from the mean-facet estimate, not the worst case), flag it and skip
+        // the write rather than clobbering memory past the end. The atomic still
+        // advanced, so the final cursor may read beyond capacity; the pack clamps to it.
+        if ((size_t)base + (size_t)nf > facetCap) {
+          status(i) |= kOverflow;
+          facetCount(i) = 0;
+          cellFacetBase(i) = 0;
+        } else {
+          facetCount(i) = nf;
+          cellFacetBase(i) = base;
+          for (int k = 0; k < nf; ++k) {
+            const int f = faces[k];
+            oNbr((size_t)base + k) = c.fnbr[f];
+            const size_t o = ((size_t)base + k) * 3;
+            for (int cc = 0; cc < 3; ++cc) {
+              oArea(o + cc) = withForceGeom ? c.fArea[f][cc] : Real(0);
+              oDV(o + cc) = withForceGeom ? c.fdV[f][cc] : Real(0);
+              oConn(o + cc) = c.pvec[f][cc];  // plane vector == the connecting vector (exact)
+            }
           }
         }
       });
@@ -505,8 +525,11 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   // cell's facets contiguous at cellFacetBase(i)); we only copy its used prefix into a
   // right-sized view (a contiguous read+write — no exclusive scan, no strided gather,
   // no minimal-image recompute that the old temp->CSR compaction paid).
-  int nFacets = 0;
-  Kokkos::deep_copy(nFacets, Kokkos::subview(facetCursor, 0));
+  int nFacetsRaw = 0;
+  Kokkos::deep_copy(nFacetsRaw, Kokkos::subview(facetCursor, 0));
+  // Clamp to capacity: if the over-buffer overflowed (rare; flagged per-cell above),
+  // the cursor ran past the end and only [0,facetCap) holds valid, indexable facets.
+  const int nFacets = (size_t)nFacetsRaw > facetCap ? (int)facetCap : nFacetsRaw;
 
   TessellationView<Real> view;
   view.cellFacetOffset = cellFacetBase;
@@ -514,34 +537,68 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   view.cellVolume = cellVol;
   view.cellSeedId = Kokkos::View<gid_t*, MemSpace>(view_alloc(std::string("cellSeedId"),
                                                               WithoutInitializing), N);
-  view.facetNeighbor = Kokkos::View<gid_t*, MemSpace>(
-      view_alloc(std::string("facetNeighbor"), WithoutInitializing), nFacets);
-  view.facetArea = Kokkos::View<Real*, MemSpace>(
-      view_alloc(std::string("facetArea"), WithoutInitializing), (size_t)nFacets * 3);
-  view.facetConnect = Kokkos::View<Real*, MemSpace>(
-      view_alloc(std::string("facetConnect"), WithoutInitializing), (size_t)nFacets * 3);
-  view.facetConnVec = Kokkos::View<Real*, MemSpace>(
-      view_alloc(std::string("facetConnVec"), WithoutInitializing), (size_t)nFacets * 3);
   {
     auto vSeed = view.cellSeedId;
     Kokkos::parallel_for(
         "tess.seedId", Kokkos::RangePolicy<Exec>(0, N),
         KOKKOS_LAMBDA(const int i) { vSeed(i) = (gid_t)i; });
-    auto vNbr = view.facetNeighbor;
-    auto vArea = view.facetArea;
-    auto vDV = view.facetConnect;
-    auto vConn = view.facetConnVec;
-    Kokkos::parallel_for(
-        "tess.packFacets", Kokkos::RangePolicy<Exec>(0, nFacets), KOKKOS_LAMBDA(const int g) {
-          vNbr(g) = (gid_t)oNbr(g);
-          for (int cc = 0; cc < 3; ++cc) {
-            vArea(3 * g + cc) = oArea(3 * (size_t)g + cc);
-            vDV(3 * g + cc) = oDV(3 * (size_t)g + cc);
-            vConn(3 * g + cc) = oConn(3 * (size_t)g + cc);
-          }
-        });
+  }
+
+  // Pack each over-buffer component into a right-sized published view, then free the
+  // source immediately. Copying-and-freeing one array at a time holds peak memory at
+  // ~(over-buffer + one compact array) instead of (over-buffer + full compact CSR) —
+  // the latter OOM'd the GPU at large N. numFacets() == nFacets, so the CSR contract is
+  // intact (consumers see correctly sized views). The fence before each free ensures the
+  // copy completed before the source is released.
+  view.facetNeighbor = Kokkos::View<gid_t*, MemSpace>(
+      view_alloc(std::string("facetNeighbor"), WithoutInitializing), nFacets);
+  {
+    auto v = view.facetNeighbor;
+    auto src = oNbr;
+    Kokkos::parallel_for("tess.packNbr", Kokkos::RangePolicy<Exec>(0, nFacets),
+                         KOKKOS_LAMBDA(const int g) { v(g) = (gid_t)src(g); });
   }
   Kokkos::fence();
+  oNbr = Kokkos::View<int*, MemSpace>();
+
+  view.facetArea = Kokkos::View<Real*, MemSpace>(
+      view_alloc(std::string("facetArea"), WithoutInitializing), (size_t)nFacets * 3);
+  {
+    auto v = view.facetArea;
+    auto src = oArea;
+    Kokkos::parallel_for("tess.packArea", Kokkos::RangePolicy<Exec>(0, nFacets),
+                         KOKKOS_LAMBDA(const int g) {
+                           for (int cc = 0; cc < 3; ++cc) v(3 * g + cc) = src(3 * (size_t)g + cc);
+                         });
+  }
+  Kokkos::fence();
+  oArea = Kokkos::View<Real*, MemSpace>();
+
+  view.facetConnect = Kokkos::View<Real*, MemSpace>(
+      view_alloc(std::string("facetConnect"), WithoutInitializing), (size_t)nFacets * 3);
+  {
+    auto v = view.facetConnect;
+    auto src = oDV;
+    Kokkos::parallel_for("tess.packDV", Kokkos::RangePolicy<Exec>(0, nFacets),
+                         KOKKOS_LAMBDA(const int g) {
+                           for (int cc = 0; cc < 3; ++cc) v(3 * g + cc) = src(3 * (size_t)g + cc);
+                         });
+  }
+  Kokkos::fence();
+  oDV = Kokkos::View<Real*, MemSpace>();
+
+  view.facetConnVec = Kokkos::View<Real*, MemSpace>(
+      view_alloc(std::string("facetConnVec"), WithoutInitializing), (size_t)nFacets * 3);
+  {
+    auto v = view.facetConnVec;
+    auto src = oConn;
+    Kokkos::parallel_for("tess.packConn", Kokkos::RangePolicy<Exec>(0, nFacets),
+                         KOKKOS_LAMBDA(const int g) {
+                           for (int cc = 0; cc < 3; ++cc) v(3 * g + cc) = src(3 * (size_t)g + cc);
+                         });
+  }
+  Kokkos::fence();
+  oConn = Kokkos::View<Real*, MemSpace>();
 
   if (prof) {
     tCsr = ptimer.seconds();

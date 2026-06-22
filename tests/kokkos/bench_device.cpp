@@ -112,6 +112,10 @@ static void run(int N) {
     Kokkos::deep_copy(v, warm.view.cellVolume);
     for (int i = 0; i < N; ++i) devVol += v(i);
   }
+  // Release the warm-up result before the timed runs: holding its full CSR alive while
+  // a timed build allocates its own would double the device footprint and OOM the GPU at
+  // large N for no reason (the warm run was only for correctness + cache warming).
+  warm = vor::device::TessellatorResult<real_t>{};
   double devBest = 1e30;
   for (int rep = 0; rep < 3; ++rep) {
     Kokkos::fence();

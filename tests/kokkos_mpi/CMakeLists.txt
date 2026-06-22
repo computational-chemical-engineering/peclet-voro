@@ -20,6 +20,15 @@ find_package(Kokkos CONFIG REQUIRED)
 find_package(MPI REQUIRED)
 
 set(TPX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../transport-core" CACHE PATH "transport-core repo")
+# The device tessellator's Z-order grid ordering uses morton::Morton<3,21> (a sibling
+# suite repo). Mirror the main build's include + MORTON_ENABLE_KOKKOS define so the
+# software bit path is device-callable (MORTON_HD -> KOKKOS_FUNCTION).
+set(MORTON_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../../morton/include"
+    CACHE PATH "morton repo include/")
+if(NOT EXISTS "${MORTON_INCLUDE}/morton/morton.hpp")
+  message(FATAL_ERROR
+    "vorflow_mpi_tests: morton not found at ${MORTON_INCLUDE} (clone it as a sibling repo)")
+endif()
 if(NOT MPIEXEC_EXECUTABLE)
   set(MPIEXEC_EXECUTABLE /usr/bin/mpirun)
 endif()
@@ -28,8 +37,8 @@ enable_testing()
 foreach(t voronoi_mpi sdf_mpi)
   add_executable(test_${t} test_${t}.cpp)
   target_include_directories(test_${t} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include)
-  target_compile_definitions(test_${t} PRIVATE VORFLOW_MPI)
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include ${MORTON_INCLUDE})
+  target_compile_definitions(test_${t} PRIVATE VORFLOW_MPI MORTON_ENABLE_KOKKOS=1)
   target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
   foreach(np 1 2 4)
     add_test(NAME ${t}_np${np}
