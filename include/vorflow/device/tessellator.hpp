@@ -226,6 +226,15 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
         int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
 
+        // Interior cells (>= sw+1 grid cells from every face) never wrap: the gather
+        // touches grid indices in range and every candidate is within sw+2 cells, i.e.
+        // < L/2, so round(r/L)==0. Skipping the %dim modulo and the minimal-image
+        // round() on this fast path is bit-identical (the gather is ~60% of the build,
+        // and those wraps are its dominant cost). Boundary cells keep the wrapped path.
+        const int swEdge = sw + 1;
+        const bool interior = (cx >= swEdge && cx <= dimx - 1 - swEdge && cy >= swEdge &&
+                               cy <= dimy - 1 - swEdge && cz >= swEdge && cz <= dimz - 1 - swEdge);
+
         // Candidate neighbours are seeds of the surrounding grid cells, gathered
         // (minimal-imaged) into ckey/cjid (sorted indices) and the cell cut closest-first.
         constexpr int MAXCAND = 1024;
@@ -239,8 +248,14 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         const Real Larr[3] = {Lx, Ly, Lz};
         c.initCuboid(Larr);
 
-        // Append the seeds of grid cell (gx,gy,gz) as minimal-imaged candidates.
-        auto gatherGrid = [&](int gx, int gy, int gz) {
+        // Append the seeds of grid cell at raw offset (rgx,rgy,rgz) as candidates.
+        auto gatherGrid = [&](int rgx, int rgy, int rgz) {
+          int gx = rgx, gy = rgy, gz = rgz;
+          if (!interior) {
+            gx = ((rgx % dimx) + dimx) % dimx;
+            gy = ((rgy % dimy) + dimy) % dimy;
+            gz = ((rgz % dimz) + dimz) % dimz;
+          }
           int gc = gx + gy * dimx + gz * dimx * dimy;
           for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
             if (q == pi) continue;
@@ -248,9 +263,11 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
             Real rx = posSorted(3 * q + 0) - pix;
             Real ry = posSorted(3 * q + 1) - piy;
             Real rz = posSorted(3 * q + 2) - piz;
-            rx -= Lx * Kokkos::round(rx / Lx);
-            ry -= Ly * Kokkos::round(ry / Ly);
-            rz -= Lz * Kokkos::round(rz / Lz);
+            if (!interior) {
+              rx -= Lx * Kokkos::round(rx / Lx);
+              ry -= Ly * Kokkos::round(ry / Ly);
+              rz -= Lz * Kokkos::round(rz / Lz);
+            }
             Real rSqHalf = Real(0.5) * (rx * rx + ry * ry + rz * rz);
             Real off = weighted ? rSqHalf + Real(0.5) * (wi - wSorted(q)) : rSqHalf;
             if (nc < MAXCAND) {
@@ -266,9 +283,11 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           Real rx = posSorted(3 * q + 0) - pix;
           Real ry = posSorted(3 * q + 1) - piy;
           Real rz = posSorted(3 * q + 2) - piz;
-          rx -= Lx * Kokkos::round(rx / Lx);
-          ry -= Ly * Kokkos::round(ry / Ly);
-          rz -= Lz * Kokkos::round(rz / Lz);
+          if (!interior) {
+            rx -= Lx * Kokkos::round(rx / Lx);
+            ry -= Ly * Kokkos::round(ry / Ly);
+            rz -= Lz * Kokkos::round(rz / Lz);
+          }
           const Real pv[3] = {rx, ry, rz};
           c.cutCell2(pv, off, binned(q), &ovf);  // store the ORIGINAL neighbour id
         };
@@ -291,8 +310,7 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
               for (int dx = -(sw + 1); dx <= sw + 1; ++dx) {
                 const int ex = dx < -1 ? -dx - 1 : (dx > 1 ? dx - 1 : 0);
                 if (ex * ex + ey * ey + ez * ez > sw2) continue;
-                gatherGrid((((cx + dx) % dimx) + dimx) % dimx, (((cy + dy) % dimy) + dimy) % dimy,
-                           (((cz + dz) % dimz) + dimz) % dimz);
+                gatherGrid(cx + dx, cy + dy, cz + dz);
               }
             }
           }
@@ -320,8 +338,7 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
                   const int ex = dx < -1 ? -dx - 1 : (dx > 1 ? dx - 1 : 0);
                   const int d2 = ex * ex + ey * ey + ez * ez;
                   if (d2 <= lo2 || d2 > hi2) continue;  // not in this shell
-                  gatherGrid((((cx + dx) % dimx) + dimx) % dimx, (((cy + dy) % dimy) + dimy) % dimy,
-                             (((cz + dz) % dimz) + dimz) % dimz);
+                  gatherGrid(cx + dx, cy + dy, cz + dz);
                 }
               }
             }
