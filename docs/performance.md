@@ -126,23 +126,29 @@ relieve the gather's cache; and on the GPU the binding local-memory item is the 
 kernel's **candidate arrays** (`ckey[1024]`/`cjid[1024]` ≈ 12 KB/thread), not the cell.
 Still a genuine 9 KB reduction with no downside, and it tidies the geometry.
 
-The levers that remain, in light of the above:
+### Shrink the candidate arrays — TRIED, doesn't pay off (measured)
 
-1. **Shrink the candidate arrays** (the bigger GPU local-memory item). `MAXCAND=1024` is
-   sized for Power's no-early-out full-sphere gather; Voronoi (early-out, 1/cell on GPU)
-   needs far fewer, so a `Weighted`-dependent cap (e.g. 256–384 Voronoi / 1024 Power) would
-   cut ~6 KB/thread and likely lift GPU occupancy more than the cell shrink did. Risk:
-   Voronoi cells that gather past the cap overflow (flagged → fallback), so the cap needs a
-   safe margin / measurement.
-2. **Fuse the temp-slab round-trip.** Facets are written to a temp slab then compacted to
+`ckey[1024]`/`cjid[1024]` (12 KB/thread) is the binding GPU local-memory item, so a
+smaller cap should raise occupancy. It can't be done: **the arrays must hold the
+full-sphere gather.** Any Voronoi cell that expands to `sw`, and *every* Power cell (no
+early-out), gathers ~`nOff` candidates — the worklist size, **667 at sw=4** plus Poisson
+fluctuation (~750–800). Measured on the GPU: a cap of 512 **overflows** (all Power cells +
+~1/4000 Voronoi → wrong cells); the safe minimum (~896) gives **no** gain (2300/1898 vs
+2324/1906 kcells/s, within noise) — 1.5 KB of ~33 KB doesn't move occupancy. Reverted to
+1024. (The typical Voronoi `nc` is ~60 thanks to the early-out, but the array must be sized
+for the rare full-expansion cell, so the *cap* can't shrink.)
+
+The lever that remains:
+
+1. **Fuse the temp-slab round-trip.** Facets are written to a temp slab then compacted to
    the CSR (a full read+write of facet data) — voro++ has no such round-trip. Emitting the
    CSR directly (atomic facet allocation, or count-then-fill) removes that traffic. The
    lever most likely to push **past** voro++ on CPU rather than just match it.
 
-**Net so far:** the grid-locality and per-cell-scratch levers are spent (Morton → GPU-only
-win; scratch shrink → marginal). The CPU serial gap to voro++ (~10%) now looks like it
-needs the temp-slab fusion to move meaningfully; the candidate-array shrink is the next
-GPU lever.
+**Net so far:** three of the four layout levers are now spent — grid Morton (GPU-only win),
+per-cell scratch (marginal), candidate-array cap (bounded by the full-sphere gather, no
+gain). The CPU serial gap to voro++ (~10%) and further GPU gains both now rest on the
+**temp-slab fusion**, the one structural change left.
 
 **Feasibility verdict (updated after measuring Morton):** the Morton lever turned out to
 be a **GPU** win (now shipped, +18% with forces), not the CPU lever it was expected to be —
