@@ -111,7 +111,13 @@ std::vector<int> buildReciprocalMap(const HostTessellation<Real>& t) {
 /// reference-counted handles); accessors are KOKKOS_INLINE_FUNCTION.
 template <class Real>
 struct TessellationView {
-  Kokkos::View<int*, tpx::MemSpace> cellFacetOffset;  // nCells+1
+  // facetBegin(i) = cellFacetOffset(i); facetEnd(i) = cellFacetOffset(i)+cellFacetCount(i).
+  // The device tessellator packs the CSR in finish-order via an atomic cursor (so
+  // cellFacetOffset is a per-cell base, not a prefix sum), hence the explicit count;
+  // the legacy upload path fills count from its prefix-sum offsets. Consumers use
+  // facetBegin/facetEnd and are agnostic to which.
+  Kokkos::View<int*, tpx::MemSpace> cellFacetOffset;  // nCells (per-cell facet base)
+  Kokkos::View<int*, tpx::MemSpace> cellFacetCount;   // nCells
   Kokkos::View<gid_t*, tpx::MemSpace> cellSeedId;     // nCells
   Kokkos::View<Real*, tpx::MemSpace> cellVolume;      // nCells
   Kokkos::View<gid_t*, tpx::MemSpace> facetNeighbor;  // nFacets
@@ -133,7 +139,9 @@ struct TessellationView {
   KOKKOS_INLINE_FUNCTION gid_t cellSeed(int i) const { return cellSeedId(i); }
   KOKKOS_INLINE_FUNCTION Real volume(int i) const { return cellVolume(i); }
   KOKKOS_INLINE_FUNCTION int facetBegin(int i) const { return cellFacetOffset(i); }
-  KOKKOS_INLINE_FUNCTION int facetEnd(int i) const { return cellFacetOffset(i + 1); }
+  KOKKOS_INLINE_FUNCTION int facetEnd(int i) const {
+    return cellFacetOffset(i) + cellFacetCount(i);
+  }
   KOKKOS_INLINE_FUNCTION gid_t facetNbr(int f) const { return facetNeighbor(f); }
   KOKKOS_INLINE_FUNCTION Real area(int f, int c) const { return facetArea(3 * f + c); }
   KOKKOS_INLINE_FUNCTION Real connect(int f, int c) const { return facetConnect(3 * f + c); }
@@ -161,7 +169,15 @@ Kokkos::View<T*, tpx::MemSpace> deviceFrom(const std::vector<T>& h, const std::s
 template <class Real>
 TessellationView<Real> upload(const HostTessellation<Real>& h) {
   TessellationView<Real> v;
+  // Legacy CSR is a prefix sum (nCells+1); derive the per-cell count so facetEnd
+  // works (the device path instead writes base + count directly).
   v.cellFacetOffset = detail::deviceFrom(h.cellFacetOffset, "tess.cellFacetOffset");
+  {
+    const int nC = static_cast<int>(h.cellSeedId.size());
+    std::vector<int> cnt(nC);
+    for (int i = 0; i < nC; ++i) cnt[i] = h.cellFacetOffset[i + 1] - h.cellFacetOffset[i];
+    v.cellFacetCount = detail::deviceFrom(cnt, "tess.cellFacetCount");
+  }
   v.cellSeedId = detail::deviceFrom(h.cellSeedId, "tess.cellSeedId");
   v.cellVolume = detail::deviceFrom(h.cellVolume, "tess.cellVolume");
   v.facetNeighbor = detail::deviceFrom(h.facetNeighbor, "tess.facetNeighbor");

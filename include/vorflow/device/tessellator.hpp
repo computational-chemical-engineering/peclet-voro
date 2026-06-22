@@ -249,22 +249,24 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   Kokkos::View<Real*, MemSpace> cellVol("cellVol", N);
   Kokkos::View<int*, MemSpace> facetCount("facetCount", N);
   Kokkos::View<int*, MemSpace> status("status", N);
-  // Per-cell facet scratch (compacted into the CSR below). Sized by a tight facet
-  // cap (Voronoi mean ~15, this comfortably covers the tail); cells that exceed it
-  // are flagged kOverflow. Allocated WithoutInitializing — every slot the compaction
-  // reads is written first, so the default zero-fill (here ~hundreds of MB/build,
-  // pure memory-bandwidth that also throttles thread scaling) is wasted work. The
-  // connecting vector is NOT stored — it is recomputed from the neighbour position
-  // in the compaction (cheap, and saves a third of this traffic).
+  Kokkos::View<int*, MemSpace> cellFacetBase("cellFacetBase", N);  // per-cell facet base
+  // Facet over-buffer + atomic cursor: the build packs each cell's facets directly into
+  // a single contiguous CSR-layout buffer via atomic_fetch_add (one-pass "fusion") — no
+  // fixed-stride temp slab, no exclusive scan, and the connecting vector is the cut's own
+  // plane vector (no minimal-image recompute). The buffer is over-allocated to a tight
+  // facet cap; the used prefix [0,nFacets) is copied to a compact view at the end.
   constexpr int MAXF_TMP = 50;
   using Kokkos::view_alloc;
   using Kokkos::WithoutInitializing;
-  Kokkos::View<int*, MemSpace> tmpNbr(view_alloc(std::string("tmpNbr"), WithoutInitializing),
-                                      (size_t)N * MAXF_TMP);
-  Kokkos::View<Real*, MemSpace> tmpArea(view_alloc(std::string("tmpArea"), WithoutInitializing),
-                                        (size_t)N * MAXF_TMP * 3);
-  Kokkos::View<Real*, MemSpace> tmpDV(view_alloc(std::string("tmpDV"), WithoutInitializing),
+  Kokkos::View<int*, MemSpace> oNbr(view_alloc(std::string("oNbr"), WithoutInitializing),
+                                    (size_t)N * MAXF_TMP);
+  Kokkos::View<Real*, MemSpace> oArea(view_alloc(std::string("oArea"), WithoutInitializing),
                                       (size_t)N * MAXF_TMP * 3);
+  Kokkos::View<Real*, MemSpace> oDV(view_alloc(std::string("oDV"), WithoutInitializing),
+                                    (size_t)N * MAXF_TMP * 3);
+  Kokkos::View<Real*, MemSpace> oConn(view_alloc(std::string("oConn"), WithoutInitializing),
+                                      (size_t)N * MAXF_TMP * 3);
+  Kokkos::View<int*, MemSpace> facetCursor("facetCursor", 1);  // zero-initialised
 
   // --- gather offset worklist (computed once) ---
   // The (dx,dy,dz) grid offsets inside the coverage sphere (nearest-corner distance²
@@ -469,23 +471,32 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
         // (pure tessellation), the apples-to-apples comparison with voro++.
         if (!c.emptyV() && withForceGeom)
           c.computeGeometry();
+        // Collect this cell's live facets, then reserve a contiguous CSR range with one
+        // atomic and write straight into the over-buffer (no temp slab / scan / compaction).
+        int faces[MAXF_TMP];
         int nf = 0;
         for (int f = 0; f < c.numAllocF; ++f) {
           if (!c.aliveF[f])
             continue;
-          if (nf >= MAXF_TMP) {  // more facets than the compaction scratch holds
+          if (nf >= MAXF_TMP) {
             status(i) |= kOverflow;
             break;
           }
-          const size_t o = ((size_t)i * MAXF_TMP + nf) * 3;
-          tmpNbr((size_t)i * MAXF_TMP + nf) = c.fnbr[f];
-          for (int cc = 0; cc < 3; ++cc) {
-            tmpArea(o + cc) = withForceGeom ? c.fArea[f][cc] : Real(0);
-            tmpDV(o + cc) = withForceGeom ? c.fdV[f][cc] : Real(0);
-          }
-          ++nf;
+          faces[nf++] = f;
         }
         facetCount(i) = nf;
+        const int base = Kokkos::atomic_fetch_add(&facetCursor(0), nf);
+        cellFacetBase(i) = base;
+        for (int k = 0; k < nf; ++k) {
+          const int f = faces[k];
+          oNbr((size_t)base + k) = c.fnbr[f];
+          const size_t o = ((size_t)base + k) * 3;
+          for (int cc = 0; cc < 3; ++cc) {
+            oArea(o + cc) = withForceGeom ? c.fArea[f][cc] : Real(0);
+            oDV(o + cc) = withForceGeom ? c.fdV[f][cc] : Real(0);
+            oConn(o + cc) = c.pvec[f][cc];  // plane vector == the connecting vector (exact)
+          }
+        }
       });
 
   if (prof) {
@@ -494,22 +505,17 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
     ptimer.reset();
   }
 
-  // --- exclusive scan of facet counts -> CSR offsets ---
-  Kokkos::View<int*, MemSpace> offset("cellFacetOffset", N + 1);
-  Kokkos::parallel_scan(
-      "tess.facetScan", Kokkos::RangePolicy<Exec>(0, N + 1),
-      KOKKOS_LAMBDA(const int i, int& acc, const bool fin) {
-        int v = (i < N) ? facetCount(i) : 0;
-        if (fin)
-          offset(i) = acc;
-        acc += v;
-      });
+  // --- pack the over-buffer prefix [0,nFacets) into a compact CSR ---
+  // The atomic packing already produced a gapless CSR (in cell-finish order, with each
+  // cell's facets contiguous at cellFacetBase(i)); we only copy its used prefix into a
+  // right-sized view (a contiguous read+write — no exclusive scan, no strided gather,
+  // no minimal-image recompute that the old temp->CSR compaction paid).
   int nFacets = 0;
-  Kokkos::deep_copy(nFacets, Kokkos::subview(offset, N));
+  Kokkos::deep_copy(nFacets, Kokkos::subview(facetCursor, 0));
 
-  // --- compaction: temp slab -> packed CSR ---
   TessellationView<Real> view;
-  view.cellFacetOffset = offset;
+  view.cellFacetOffset = cellFacetBase;
+  view.cellFacetCount = facetCount;
   view.cellVolume = cellVol;
   view.cellSeedId = Kokkos::View<gid_t*, MemSpace>(view_alloc(std::string("cellSeedId"),
                                                               WithoutInitializing), N);
@@ -521,38 +527,25 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
       view_alloc(std::string("facetConnect"), WithoutInitializing), (size_t)nFacets * 3);
   view.facetConnVec = Kokkos::View<Real*, MemSpace>(
       view_alloc(std::string("facetConnVec"), WithoutInitializing), (size_t)nFacets * 3);
-  auto vSeed = view.cellSeedId;
-  auto vNbr = view.facetNeighbor;
-  auto vArea = view.facetArea;
-  auto vDV = view.facetConnect;
-  auto vConn = view.facetConnVec;
-  Kokkos::parallel_for(
-      "tess.compact", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
-        vSeed(i) = (gid_t)i;
-        int base = offset(i);
-        int nf = facetCount(i);
-        const Real pix = posFlat(3 * i + 0), piy = posFlat(3 * i + 1), piz = posFlat(3 * i + 2);
-        for (int k = 0; k < nf; ++k) {
-          int j = tmpNbr((size_t)i * MAXF_TMP + k);
-          vNbr(base + k) = (gid_t)j;
-          // Recompute the connecting vector (minimal image of pos[j]-pos[i]); bit-
-          // identical to the pvec the cutter used, so it need not be stored.
-          Real rx = posFlat(3 * j + 0) - pix;
-          Real ry = posFlat(3 * j + 1) - piy;
-          Real rz = posFlat(3 * j + 2) - piz;
-          rx -= Lx * Kokkos::round(rx / Lx);
-          ry -= Ly * Kokkos::round(ry / Ly);
-          rz -= Lz * Kokkos::round(rz / Lz);
-          const Real conn[3] = {rx, ry, rz};
+  {
+    auto vSeed = view.cellSeedId;
+    Kokkos::parallel_for(
+        "tess.seedId", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(const int i) { vSeed(i) = (gid_t)i; });
+    auto vNbr = view.facetNeighbor;
+    auto vArea = view.facetArea;
+    auto vDV = view.facetConnect;
+    auto vConn = view.facetConnVec;
+    Kokkos::parallel_for(
+        "tess.packFacets", Kokkos::RangePolicy<Exec>(0, nFacets), KOKKOS_LAMBDA(const int g) {
+          vNbr(g) = (gid_t)oNbr(g);
           for (int cc = 0; cc < 3; ++cc) {
-            const size_t src = ((size_t)i * MAXF_TMP + k) * 3 + cc;
-            const size_t dst = (size_t)(base + k) * 3 + cc;
-            vArea(dst) = tmpArea(src);
-            vDV(dst) = tmpDV(src);
-            vConn(dst) = conn[cc];
+            vArea(3 * g + cc) = oArea(3 * (size_t)g + cc);
+            vDV(3 * g + cc) = oDV(3 * (size_t)g + cc);
+            vConn(3 * g + cc) = oConn(3 * (size_t)g + cc);
           }
-        }
-      });
+        });
+  }
   Kokkos::fence();
 
   if (prof) {

@@ -66,11 +66,13 @@ int main(int argc, char** argv) {
     const real_t Larr[3] = {L[0], L[1], L[2]};
     auto res = vor::device::buildTessellation<real_t, false>(dPos, dW, N, Larr);
     auto off = Kokkos::create_mirror_view(res.view.cellFacetOffset);
+    auto cnt = Kokkos::create_mirror_view(res.view.cellFacetCount);
     auto nbr = Kokkos::create_mirror_view(res.view.facetNeighbor);
     auto area = Kokkos::create_mirror_view(res.view.facetArea);
     auto dv = Kokkos::create_mirror_view(res.view.facetConnect);
     auto conn = Kokkos::create_mirror_view(res.view.facetConnVec);
     Kokkos::deep_copy(off, res.view.cellFacetOffset);
+    Kokkos::deep_copy(cnt, res.view.cellFacetCount);
     Kokkos::deep_copy(nbr, res.view.facetNeighbor);
     Kokkos::deep_copy(area, res.view.facetArea);
     Kokkos::deep_copy(dv, res.view.facetConnect);
@@ -79,7 +81,7 @@ int main(int argc, char** argv) {
     int dvMis = 0, areaMis = 0, connMis = 0, unmatched = 0, checked = 0;
     real_t maxDV = 0, maxArea = 0, maxConn = 0;
     for (int i = 0; i < N; ++i)
-      for (int f = off(i); f < off(i + 1); ++f) {
+      for (int f = off(i); f < off(i) + cnt(i); ++f) {
         const int nb = nbr(f);
         if (nb < 0)
           continue;

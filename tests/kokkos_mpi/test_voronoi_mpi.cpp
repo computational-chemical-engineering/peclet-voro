@@ -128,10 +128,12 @@ int main(int argc, char** argv) {
                                                              /*densityCount=*/N, dGid);
     auto vol = Kokkos::create_mirror_view(res.view.cellVolume);
     auto off = Kokkos::create_mirror_view(res.view.cellFacetOffset);
+    auto cnt = Kokkos::create_mirror_view(res.view.cellFacetCount);
     auto nbr = Kokkos::create_mirror_view(res.view.facetNeighbor);
     auto st = Kokkos::create_mirror_view(res.status);
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(off, res.view.cellFacetOffset);
+    Kokkos::deep_copy(cnt, res.view.cellFacetCount);
     Kokkos::deep_copy(nbr, res.view.facetNeighbor);
     Kokkos::deep_copy(st, res.status);
 
@@ -143,7 +145,7 @@ int main(int argc, char** argv) {
       if (std::fabs(vol(i) - refVol[gid]) / refVol[gid] > 1e-9)
         ++volMis;
       std::set<int> dn;
-      for (int k = off(i); k < off(i + 1); ++k) {
+      for (int k = off(i); k < off(i) + cnt(i); ++k) {
         int lj = nbr(k);
         if (lj >= 0)
           dn.insert((int)g.gid[lj]);  // local index -> global id

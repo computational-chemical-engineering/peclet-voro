@@ -86,10 +86,12 @@ int runCase(const char* tag, int N, real_t Lc, unsigned seed) {
   // Mirror results.
   auto vol = Kokkos::create_mirror_view(res.view.cellVolume);
   auto off = Kokkos::create_mirror_view(res.view.cellFacetOffset);
+  auto cnt = Kokkos::create_mirror_view(res.view.cellFacetCount);
   auto nbr = Kokkos::create_mirror_view(res.view.facetNeighbor);
   auto st = Kokkos::create_mirror_view(res.status);
   Kokkos::deep_copy(vol, res.view.cellVolume);
   Kokkos::deep_copy(off, res.view.cellFacetOffset);
+  Kokkos::deep_copy(cnt, res.view.cellFacetCount);
   Kokkos::deep_copy(nbr, res.view.facetNeighbor);
   Kokkos::deep_copy(st, res.status);
 
@@ -113,7 +115,7 @@ int runCase(const char* tag, int N, real_t Lc, unsigned seed) {
     if (std::fabs(vol(i) - geom[li].getVolume()) / geom[li].getVolume() > 1e-9)
       ++volMis;
     std::vector<int> dn, ln;
-    for (int k = off(i); k < off(i + 1); ++k)
+    for (int k = off(i); k < off(i) + cnt(i); ++k)
       if (nbr(k) >= 0)
         dn.push_back(nbr(k));
     for (vor::uint1 f = 0; f < legacy[li].numFacets(); ++f) {
