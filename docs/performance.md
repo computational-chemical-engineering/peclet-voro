@@ -111,17 +111,38 @@ seeds-per-cell density knob. **Lesson: the CPU serial gap is not closed by reord
 *grid* — that locality is already captured by the density; the remaining cost is the
 per-cell working set and the temp round-trip (below).**
 
-The CPU levers that remain:
+The remaining levers (and what shrinking the scratch actually bought):
 
-2. **Shrink the per-cell scratch.** `ScratchCell` is ~30 KB, dominated by
-   `edgeInv[128][3][3]` (~9 KB). A smaller scratch stays L1-resident across cells (voro++'s
-   real advantage) and stops evicting the gather's working set. Compute `edgeInv`
-   transiently / lower the cap. Helps the cut and reduces cache pollution; on GPU it cuts
-   local-memory/register pressure → better occupancy.
-3. **Fuse the temp-slab round-trip.** Facets are written to a temp slab then compacted to
+### Shrink the per-cell scratch — DONE, marginal (measured)
+
+`ScratchCell` was ~30 KB, dominated by the stored `edgeInv[128][3][3]` (~9 KB). That
+tensor is purely transient (filled and consumed inside `computeGeometry`/`gradFacetAreaSq`,
+never touched during the gather/cut), so it was replaced by a `vertexEdgeInv` helper that
+recomputes a vertex's 3×3 block on demand — bit-identical, no capacity change. **Measured
+N=1M: small and only where geometry runs** — CPU with-forces 0.74→0.75×, GPU with-forces
+1876→1906 kcells/s (+1.6%); pure tessellation flat on both. The reason it is *not* the
+hoped-for CPU lever: `edgeInv` was never on the gather's hot path, so removing it doesn't
+relieve the gather's cache; and on the GPU the binding local-memory item is the build
+kernel's **candidate arrays** (`ckey[1024]`/`cjid[1024]` ≈ 12 KB/thread), not the cell.
+Still a genuine 9 KB reduction with no downside, and it tidies the geometry.
+
+The levers that remain, in light of the above:
+
+1. **Shrink the candidate arrays** (the bigger GPU local-memory item). `MAXCAND=1024` is
+   sized for Power's no-early-out full-sphere gather; Voronoi (early-out, 1/cell on GPU)
+   needs far fewer, so a `Weighted`-dependent cap (e.g. 256–384 Voronoi / 1024 Power) would
+   cut ~6 KB/thread and likely lift GPU occupancy more than the cell shrink did. Risk:
+   Voronoi cells that gather past the cap overflow (flagged → fallback), so the cap needs a
+   safe margin / measurement.
+2. **Fuse the temp-slab round-trip.** Facets are written to a temp slab then compacted to
    the CSR (a full read+write of facet data) — voro++ has no such round-trip. Emitting the
-   CSR directly (atomic facet allocation, or count-then-fill) removes that traffic. Bigger
-   change; the lever most likely to push **past** voro++ rather than just match it.
+   CSR directly (atomic facet allocation, or count-then-fill) removes that traffic. The
+   lever most likely to push **past** voro++ on CPU rather than just match it.
+
+**Net so far:** the grid-locality and per-cell-scratch levers are spent (Morton → GPU-only
+win; scratch shrink → marginal). The CPU serial gap to voro++ (~10%) now looks like it
+needs the temp-slab fusion to move meaningfully; the candidate-array shrink is the next
+GPU lever.
 
 **Feasibility verdict (updated after measuring Morton):** the Morton lever turned out to
 be a **GPU** win (now shipped, +18% with forces), not the CPU lever it was expected to be —
