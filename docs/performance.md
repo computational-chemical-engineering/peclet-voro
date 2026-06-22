@@ -53,23 +53,26 @@ was therefore shelved (1.5× on 21% ≈ 7% overall).
 7. **Morton (Z-order) grid indexing on GPU** — clusters the gather's spatial neighbourhood
    for better memory coalescing (+18% with forces). GPU-only; it regresses the CPU (see
    below). Backend-gated, with a linear fallback for pathological grids.
+8. **One-pass CSR fusion** — atomic-packed CSR replaces the temp slab + scan + compaction
+   (see the dedicated section). The single biggest serial win (+18% pure-tess CPU); pushed
+   serial CPU past voro++.
 
 ## Current standing vs voro++
 
 | regime | device | voro++ | ratio |
 |---|---:|---:|---:|
-| CPU serial, pure tessellation, N=1M | 67.7 k/s | 74.7 k/s | **0.91×** |
-| CPU serial, pure tessellation, N=100k | 71.0 k/s | 75.4 k/s | **0.94×** |
-| CPU serial, **with** force gradients | 52 k/s | 75 k/s | 0.74× (device does strictly more) |
-| **CPU 24-core**, with forces, N=1M | **892 k/s** | 75 k/s (serial) | **11.9×** |
-| **GPU (RTX 5080)**, pure tess, N=1M | **2316 k/s** | 75 k/s (serial) | **31×** |
-| **GPU (RTX 5080)**, with forces, N=1M | **1876 k/s** | 75 k/s (serial) | **25×** |
+| CPU serial, pure tessellation, N=1M | 76.8 k/s | 74.7 k/s | **1.03×** |
+| CPU serial, **with** force gradients | 62.7 k/s | 75 k/s | 0.84× (device does strictly more) |
+| **CPU 24-core**, with forces, N=1M | **982 k/s** | 75 k/s (serial) | **13×** |
+| **GPU (RTX 5080)**, pure tess, N=1M | **2435 k/s** | 75 k/s (serial) | **32×** |
+| **GPU (RTX 5080)**, with forces, N=1M | **1994 k/s** | 75 k/s (serial) | **26×** |
 
-So in the regimes that matter for production — multicore and GPU — the device is **12–31×
-voro++**. The only place voro++ still leads is **single-thread CPU pure tessellation, by
-~10%**, and that gap is memory layout / cache misses, not arithmetic.
+After the one-pass CSR fusion (below), the device **matches/beats voro++ on serial CPU
+pure tessellation (1.03×)** and is **13–32×** in the production regimes (multicore, GPU).
+The "~10% serial gap" that the rest of this note analyses is now **closed** — it turned
+out not to be the gather/cache floor but the temp-slab→CSR staging.
 
-## Why voro++ is still ~10% faster serial
+## Why voro++ led on serial (the gap, now closed by the CSR fusion above)
 
 voro++ packs ~8 particles per **block** (contiguous in memory) and processes one cell at a
 time with a tiny, reused working set that stays hot in L1/L2. Our gather, even at 2
@@ -138,17 +141,33 @@ fluctuation (~750–800). Measured on the GPU: a cap of 512 **overflows** (all P
 1024. (The typical Voronoi `nc` is ~60 thanks to the early-out, but the array must be sized
 for the rare full-expansion cell, so the *cap* can't shrink.)
 
-The lever that remains:
+### Fuse the temp-slab round-trip — DONE, the big win (closed the gap)
 
-1. **Fuse the temp-slab round-trip.** Facets are written to a temp slab then compacted to
-   the CSR (a full read+write of facet data) — voro++ has no such round-trip. Emitting the
-   CSR directly (atomic facet allocation, or count-then-fill) removes that traffic. The
-   lever most likely to push **past** voro++ on CPU rather than just match it.
+The build wrote each cell's facets to a fixed-stride temp slab; a separate exclusive scan
+then a compaction copied the temp into the packed CSR, recomputing the connecting vector
+with `round()` per facet. This was replaced by a **one-pass fusion**: each cell reserves a
+contiguous CSR range with a single `atomic_fetch_add` and writes its facets straight into
+an over-buffer (the connecting vector is the cut's own plane vector — no minimal-image
+recompute); the used prefix is then copied into a right-sized view in one **contiguous**
+pass (no scan, no strided gather). The atomic was first verified **free** on both backends
+(a per-cell `atomic_fetch_add` probe left CPU scaling and GPU throughput unchanged), so
+there is no contention regression. Because the CSR is now packed in cell-finish order,
+`cellFacetOffset` is a per-cell base and the view carries an explicit `cellFacetCount`
+(`facetEnd(i)=base(i)+count(i)`); consumers use `facetBegin`/`facetEnd` and are unchanged.
 
-**Net so far:** three of the four layout levers are now spent — grid Morton (GPU-only win),
-per-cell scratch (marginal), candidate-array cap (bounded by the full-sphere gather, no
-gain). The CPU serial gap to voro++ (~10%) and further GPU gains both now rest on the
-**temp-slab fusion**, the one structural change left.
+**Measured (N=1M, bit-exact):** CPU serial pure tessellation **64.8 → 76.8 kcells/s
+(0.91 → 1.03× voro++ — now beats it)**, with forces 52 → 62.7 (0.74 → 0.84×); CPU 24-core
+**improved** 915 → 982 (no parallel regression); GPU pure 2316 → 2435 (31→32×), with forces
+1876 → 1994 (25→26×). The strided temp write + scan + strided compaction + per-facet
+`round()` cost **~18%** of serial pure-tess — far more than the `csr` phase timer showed,
+because it hid the temp's ~2.6 GB/build allocation + first-touch.
+
+**Net:** the "~10% serial gap" was **not** the gather/cache floor after all — it was the
+temp-slab→CSR staging. Of the layout sweep: density (CPU win), Morton (GPU-only win),
+per-cell scratch (marginal), candidate cap (bounded, dead), **temp-slab fusion (the win —
+serial now ≥ voro++)**. There is no obvious next layout lever; further gains would need the
+block-processing redesign (analysed and judged not worth it for a CPU+GPU-portable engine)
+or GPU team-per-cell.
 
 **Feasibility verdict (updated after measuring Morton):** the Morton lever turned out to
 be a **GPU** win (now shipped, +18% with forces), not the CPU lever it was expected to be —
