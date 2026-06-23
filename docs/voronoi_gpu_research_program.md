@@ -246,3 +246,65 @@ If forced to bet before the measurements:
 The non-negotiables that order everything: **derivatives + momentum conservation + robustness** (these
 are why the half-edge exists and must not regress), and **the per-step update — not the cold rebuild —
 is the number to minimise.**
+
+---
+
+## Phase 0 results (measured) — the workload, characterised
+
+`tests/kokkos/phase0_incremental.cpp` (half-edge device tessellator; build at P0, displace every
+point by a random vector of scale `frac·spacing` periodic, rebuild, compare each cell's sorted
+neighbour set). RTX 5080, random uniform seeds. **N-independent** (identical at N=2e5 and N=1e6):
+
+| rms displacement / spacing | topology-stable cells | mean faces flipped (changed cells) |
+|---:|---:|---:|
+| 0.002 | **94 %** | 1.04 |
+| 0.005 | **86 %** | 1.09 |
+| 0.010 | **73 %** | 1.18 |
+| 0.020 | 54 % | 1.37 |
+| 0.030 | 40 % | 1.57 |
+| 0.100 | 6 % | 3.2 |
+
+Mean faces/cell = 15.53; cold rebuild ≈ 2.4 M cells/s.
+
+**Two decisive findings:**
+
+1. **In the realistic regime the majority of cells are geometry-only.** Stable explicit dynamics keep
+   the per-step displacement to a small fraction of the spacing (~0.001–0.01), where **73–94 % of cells
+   keep their exact neighbour set** — they need only a *geometry+derivative re-evaluation*, no gather
+   and no clip. This **confirms the §1 reframe** and quantifies it: the geometry kernel + a cheap
+   needs-reclip test are the steady-state cost; the clip is the minority case (6–27 %).
+
+2. **Cells that *do* change topology change by ~one face** (symmetric-difference ≈ 1.0–1.2 in the
+   realistic regime — a single neighbour swap). So the unstable set does **not** need a full rebuild:
+   a **local incremental repair** (drop one face, insert one face) suffices — far cheaper than
+   re-clipping from the box. This is the GPU analogue of the legacy vorflow "incremental cell repair,"
+   and it adds a **third tier** to the per-step model.
+
+**Revised per-step cost model (and the speedup it implies).** Three tiers, not two:
+
+```
+per-step  =  (stable fraction)        × geometry-only update        [no gather, no clip]
+           + (1-face-flip fraction)   × local repair                [drop/insert ~1 face]
+           + (rare large change)      × full re-clip                [box clip + BVH gather]
+```
+
+With geometry-only ≈ 0.1× a full per-cell build (gather+clip dominate the build) and a single-face
+repair ≈ 0.2×, the per-step cost at disp/spacing = 0.01 (73 % stable) is ≈ `0.73·0.1 + 0.27·0.2 ≈
+0.13×` a full rebuild → **~8× speedup**, rising toward ~15–20× at disp/spacing = 0.002. This matches
+the "significant speedup vs full rebuild" seen for the OpenMP incremental path, and says the GPU
+target is the **geometry kernel and the repair**, not faster cold clipping.
+
+**Consequences for the program:**
+- **Phase 1 (geometry+derivative kernel) is now clearly the top priority** — it serves 73–94 % of
+  cells every step. Optimise it hard (warp-parallel over canonical faces; bandwidth-bound).
+- **Add a Phase 1.5: single-face local repair** on the resident topology (remove the lost face,
+  insert the gained one, fix the local connectivity). This likely dominates the *clip* budget,
+  demoting full re-clip (Phase 2) to a rare fallback — which in turn **lowers the stakes on matching
+  cold-rebuild SOTA**: if full clips are <5 % of steps, a 2× rather than 5× clip is acceptable.
+- **The needs-reclip test** is a per-cell skin criterion (cache each cell's security radius at last
+  build; flag when a neighbour move could cross a face) — cheap, parallel, stream-compactable.
+
+Net: Phase 0 inverts the priority list exactly as anticipated. The cold-rebuild contest (half-edge vs
+ConvexCell vs SOTA) matters far less than the **geometry/derivative re-evaluation + single-face repair
+on a resident, compact topology** — which also happens to be the part where the validated half-edge
+physics can be reused directly (Recommendation 1 in §6).

@@ -85,6 +85,15 @@ endif()
 # Option-A prototype: ConvexCell controlled unit tests (known cells, exact volumes).
 add_vorflow_kokkos_test(test_convexcell_unit)
 
+# Phase 0 of the GPU-Voronoi-for-physics program: characterise the moving-point workload
+# (topology-stable fraction vs per-step displacement). Uses the half-edge device tessellator.
+add_executable(phase0_incremental phase0_incremental.cpp)
+target_link_libraries(phase0_incremental PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+target_compile_definitions(phase0_incremental PRIVATE MORTON_ENABLE_KOKKOS=1)
+target_include_directories(phase0_incremental PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+target_compile_features(phase0_incremental PRIVATE cxx_std_20)
+
 # Option-A prototype: compact ConvexCell (dual-triangle) one-cell-per-thread benchmark.
 add_executable(bench_convexcell bench_convexcell.cpp)
 target_link_libraries(bench_convexcell PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
