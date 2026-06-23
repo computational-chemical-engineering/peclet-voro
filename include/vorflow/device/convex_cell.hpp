@@ -217,100 +217,164 @@ struct ConvexCell {
     return nf;
   }
 
-  /// Cell volume: V = (1/3) Σ_faces support_k · area_k. For each plane that still bounds
-  /// a face, gather its dual vertices, order them around the face normal (insertion sort
-  /// by in-plane angle), and sum the polygon area. Seed (origin) is interior so every
-  /// support distance is positive.
+  static constexpr int MAXFV = 28;  // max vertices on one face polygon
+
+  /// Gather face k's vertices (the alive dual triangles containing plane k) and order them
+  /// CCW around the face normal (insertion sort by in-plane angle). Returns the count, or
+  /// <3 if k is not a (≥triangle) face. Shared by volume() and facetGeometry() — the G0/G1/G2
+  /// geometry tiers all start here.
+  KOKKOS_INLINE_FUNCTION int faceOrdered(int k, Real fx[MAXFV], Real fy[MAXFV],
+                                         Real fz[MAXFV]) const {
+    int m = 0;
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      if (t0[t] != k && t1[t] != k && t2[t] != k) continue;
+      if (m < MAXFV) {
+        fx[m] = vx[t];
+        fy[m] = vy[t];
+        fz[m] = vz[t];
+        ++m;
+      }
+    }
+    if (m < 3) return m;
+    const Real nx = pn[k][0], ny = pn[k][1], nz = pn[k][2];
+    const Real nlen = Kokkos::sqrt(nx * nx + ny * ny + nz * nz);
+    if (nlen == Real(0)) return 0;
+    const Real un[3] = {nx / nlen, ny / nlen, nz / nlen};
+    Real e1[3];
+    if (Kokkos::fabs(un[0]) <= Kokkos::fabs(un[1]) && Kokkos::fabs(un[0]) <= Kokkos::fabs(un[2])) {
+      e1[0] = 0;
+      e1[1] = -un[2];
+      e1[2] = un[1];
+    } else if (Kokkos::fabs(un[1]) <= Kokkos::fabs(un[2])) {
+      e1[0] = -un[2];
+      e1[1] = 0;
+      e1[2] = un[0];
+    } else {
+      e1[0] = -un[1];
+      e1[1] = un[0];
+      e1[2] = 0;
+    }
+    const Real e1l = Kokkos::sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
+    e1[0] /= e1l;
+    e1[1] /= e1l;
+    e1[2] /= e1l;
+    const Real e2[3] = {un[1] * e1[2] - un[2] * e1[1], un[2] * e1[0] - un[0] * e1[2],
+                        un[0] * e1[1] - un[1] * e1[0]};
+    Real cx = 0, cy = 0, cz = 0;
+    for (int i = 0; i < m; ++i) {
+      cx += fx[i];
+      cy += fy[i];
+      cz += fz[i];
+    }
+    cx /= m;
+    cy /= m;
+    cz /= m;
+    Real ang[MAXFV];
+    for (int i = 0; i < m; ++i) {
+      const Real dx = fx[i] - cx, dy = fy[i] - cy, dz = fz[i] - cz;
+      ang[i] = Kokkos::atan2(dx * e2[0] + dy * e2[1] + dz * e2[2],
+                             dx * e1[0] + dy * e1[1] + dz * e1[2]);
+    }
+    for (int i = 1; i < m; ++i) {
+      Real ka = ang[i], kx = fx[i], ky = fy[i], kz = fz[i];
+      int j = i - 1;
+      while (j >= 0 && ang[j] > ka) {
+        ang[j + 1] = ang[j];
+        fx[j + 1] = fx[j];
+        fy[j + 1] = fy[j];
+        fz[j + 1] = fz[j];
+        --j;
+      }
+      ang[j + 1] = ka;
+      fx[j + 1] = kx;
+      fy[j + 1] = ky;
+      fz[j + 1] = kz;
+    }
+    return m;
+  }
+
+  /// Polygon area vector (0.5 Σ vi × v(i+1)) of an ordered face.
+  KOKKOS_INLINE_FUNCTION static void polyAreaVec(const Real fx[], const Real fy[], const Real fz[],
+                                                 int m, Real A[3]) {
+    Real ax = 0, ay = 0, az = 0;
+    for (int i = 0; i < m; ++i) {
+      const int j = (i + 1 == m) ? 0 : i + 1;
+      ax += fy[i] * fz[j] - fz[i] * fy[j];
+      ay += fz[i] * fx[j] - fx[i] * fz[j];
+      az += fx[i] * fy[j] - fy[i] * fx[j];
+    }
+    A[0] = Real(0.5) * ax;
+    A[1] = Real(0.5) * ay;
+    A[2] = Real(0.5) * az;
+  }
+
+  /// Cell volume (G1): V = (1/3) Σ_faces support_k · area_k. Seed (origin) is interior so
+  /// every support distance is positive.
   KOKKOS_INLINE_FUNCTION Real volume() const {
     Real vol = 0;
-    constexpr int MAXFV = 28;  // max vertices on one face polygon
+    Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
     for (int k = 0; k < np; ++k) {
-      // gather this face's vertices
-      Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
-      int m = 0;
-      for (int t = 0; t < nt; ++t) {
-        if (!alive[t]) continue;
-        if (t0[t] != k && t1[t] != k && t2[t] != k) continue;
-        if (m < MAXFV) {
-          fx[m] = vx[t];
-          fy[m] = vy[t];
-          fz[m] = vz[t];
-          ++m;
-        }
-      }
+      const int m = faceOrdered(k, fx, fy, fz);
       if (m < 3) continue;
-      // in-plane basis from the (non-unit) normal
-      const Real nx = pn[k][0], ny = pn[k][1], nz = pn[k][2];
-      const Real nlen = Kokkos::sqrt(nx * nx + ny * ny + nz * nz);
-      if (nlen == Real(0)) continue;
-      const Real un[3] = {nx / nlen, ny / nlen, nz / nlen};
-      // e1 ⊥ un
-      Real e1[3];
-      if (Kokkos::fabs(un[0]) <= Kokkos::fabs(un[1]) && Kokkos::fabs(un[0]) <= Kokkos::fabs(un[2])) {
-        e1[0] = 0;
-        e1[1] = -un[2];
-        e1[2] = un[1];
-      } else if (Kokkos::fabs(un[1]) <= Kokkos::fabs(un[2])) {
-        e1[0] = -un[2];
-        e1[1] = 0;
-        e1[2] = un[0];
-      } else {
-        e1[0] = -un[1];
-        e1[1] = un[0];
-        e1[2] = 0;
-      }
-      const Real e1l = Kokkos::sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
-      e1[0] /= e1l;
-      e1[1] /= e1l;
-      e1[2] /= e1l;
-      const Real e2[3] = {un[1] * e1[2] - un[2] * e1[1], un[2] * e1[0] - un[0] * e1[2],
-                          un[0] * e1[1] - un[1] * e1[0]};
-      // centroid
-      Real cx = 0, cy = 0, cz = 0;
-      for (int i = 0; i < m; ++i) {
-        cx += fx[i];
-        cy += fy[i];
-        cz += fz[i];
-      }
-      cx /= m;
-      cy /= m;
-      cz /= m;
-      // angle of each vertex, insertion sort (m is small)
-      Real ang[MAXFV];
-      for (int i = 0; i < m; ++i) {
-        const Real dx = fx[i] - cx, dy = fy[i] - cy, dz = fz[i] - cz;
-        const Real a1 = dx * e1[0] + dy * e1[1] + dz * e1[2];
-        const Real a2 = dx * e2[0] + dy * e2[1] + dz * e2[2];
-        ang[i] = Kokkos::atan2(a2, a1);
-      }
-      for (int i = 1; i < m; ++i) {
-        Real ka = ang[i], kx = fx[i], ky = fy[i], kz = fz[i];
-        int j = i - 1;
-        while (j >= 0 && ang[j] > ka) {
-          ang[j + 1] = ang[j];
-          fx[j + 1] = fx[j];
-          fy[j + 1] = fy[j];
-          fz[j + 1] = fz[j];
-          --j;
-        }
-        ang[j + 1] = ka;
-        fx[j + 1] = kx;
-        fy[j + 1] = ky;
-        fz[j + 1] = kz;
-      }
-      // polygon area vector = 0.5 Σ vi × v(i+1)
-      Real ax = 0, ay = 0, az = 0;
-      for (int i = 0; i < m; ++i) {
-        const int j = (i + 1 == m) ? 0 : i + 1;
-        ax += fy[i] * fz[j] - fz[i] * fy[j];
-        ay += fz[i] * fx[j] - fx[i] * fz[j];
-        az += fx[i] * fy[j] - fy[i] * fx[j];
-      }
-      const Real area = Real(0.5) * Kokkos::sqrt(ax * ax + ay * ay + az * az);
-      const Real support = pd[k] / nlen;  // origin-to-plane distance (origin interior)
-      vol += support * area;
+      Real A[3];
+      polyAreaVec(fx, fy, fz, m, A);
+      const Real area = Kokkos::sqrt(A[0] * A[0] + A[1] * A[1] + A[2] * A[2]);
+      const Real nlen = Kokkos::sqrt(pn[k][0] * pn[k][0] + pn[k][1] * pn[k][1] + pn[k][2] * pn[k][2]);
+      vol += (pd[k] / nlen) * area;
     }
     return vol * (Real(1) / Real(3));
+  }
+
+  /// Per-facet physics geometry (G2 tier) for plane k: the outward face area VECTOR, the
+  /// volume gradient dV = ∂V/∂r_k, and the connecting vector r_k (= the plane normal). Matches
+  /// the half-edge facetArea / facetConnect / facetConnVec. Returns false if k is not a face.
+  ///
+  /// Derivation of dV: the cell is { r_k·x ≤ ½|r_k|² }. Perturbing r_k → r_k+δ moves a point x
+  /// on face k off the plane by δ·(x−r_k); the outward normal displacement is −δ·(x−r_k)/|r_k|,
+  /// so δV = ∫_face (−δ·(x−r_k)/|r_k|) dA = (area/|r_k|) δ·(r_k − c_k), with c_k the face
+  /// centroid. Holding all other planes fixed, this is first-order exact ⇒
+  ///   dV = ∂V/∂r_k = (area/|r_k|)·(r_k − c_k).
+  KOKKOS_INLINE_FUNCTION bool facetGeometry(int k, Real areaVec[3], Real dv[3], Real conn[3]) const {
+    Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
+    const int m = faceOrdered(k, fx, fy, fz);
+    if (m < 3) return false;
+    Real A[3];
+    polyAreaVec(fx, fy, fz, m, A);
+    const Real* r = pn[k];
+    if (A[0] * r[0] + A[1] * r[1] + A[2] * r[2] < Real(0)) {  // orient outward (toward neighbour)
+      A[0] = -A[0];
+      A[1] = -A[1];
+      A[2] = -A[2];
+    }
+    const Real area = Kokkos::sqrt(A[0] * A[0] + A[1] * A[1] + A[2] * A[2]);
+    // area-weighted centroid (fan-triangulate from v0)
+    Real cx = 0, cy = 0, cz = 0, asum = 0;
+    for (int i = 1; i + 1 < m; ++i) {
+      const Real ux = fx[i] - fx[0], uy = fy[i] - fy[0], uz = fz[i] - fz[0];
+      const Real wx = fx[i + 1] - fx[0], wy = fy[i + 1] - fy[0], wz = fz[i + 1] - fz[0];
+      const Real tx = uy * wz - uz * wy, ty = uz * wx - ux * wz, tz = ux * wy - uy * wx;
+      const Real at = Real(0.5) * Kokkos::sqrt(tx * tx + ty * ty + tz * tz);
+      cx += at * (fx[0] + fx[i] + fx[i + 1]);
+      cy += at * (fy[0] + fy[i] + fy[i + 1]);
+      cz += at * (fz[0] + fz[i] + fz[i + 1]);
+      asum += at;
+    }
+    const Real inv = asum > Real(0) ? Real(1) / (Real(3) * asum) : Real(0);
+    cx *= inv;
+    cy *= inv;
+    cz *= inv;
+    const Real s = area / Kokkos::sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+    areaVec[0] = A[0];
+    areaVec[1] = A[1];
+    areaVec[2] = A[2];
+    dv[0] = s * (r[0] - cx);
+    dv[1] = s * (r[1] - cy);
+    dv[2] = s * (r[2] - cz);
+    conn[0] = r[0];
+    conn[1] = r[1];
+    conn[2] = r[2];
+    return true;
   }
 };
 

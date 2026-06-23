@@ -85,6 +85,9 @@ endif()
 # Option-A prototype: ConvexCell controlled unit tests (known cells, exact volumes).
 add_vorflow_kokkos_test(test_convexcell_unit)
 
+# G2 validation: ConvexCell per-facet geometry (area/dV/connVec) vs the half-edge oracle.
+add_vorflow_kokkos_test(test_convexcell_geometry)
+
 # Phase 0 of the GPU-Voronoi-for-physics program: characterise the moving-point workload
 # (topology-stable fraction vs per-step displacement). Uses the half-edge device tessellator.
 add_executable(phase0_incremental phase0_incremental.cpp)
