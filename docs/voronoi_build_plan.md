@@ -178,3 +178,54 @@ measured; the split says **optimise B + tiered-G data structure now (F2, F3 — 
 (F4) as the build-only lever.** No refactor was forced — the engines already compose as
 `N → B(update) → G(tier)`; the explicit reusable interface will be cut when F2 picks the topology
 representation (so the interface is shaped by the winner, not guessed).
+
+---
+
+## F2 + F3 (geometry) results — topology decision + tiered geometry, measured
+
+Two pieces landed together: **G2 derivatives on the ConvexCell** (the open "can derivatives be done
+on the dual?" question) and the **isolated construction cost** (B+G, no gather — the always-relevant
+core + the repair fast path).
+
+**G2 on the ConvexCell — YES, and machine-exact.** `facetGeometry(k)` returns the face area vector,
+the volume gradient `dV = ∂V/∂r_k = (area/|r_k|)(r_k − centroid_k)` (derived directly — moving plane k
+sweeps area·displacement; no edge-tensor machinery), and the connecting vector. Validated vs the
+half-edge oracle per (cell, neighbour), 23278 facets: **maxArea 3.8e-17, maxDV 3.1e-17, maxConn 0** —
+the simple per-face formula reproduces the half-edge's intricate `computeGeometry`/`fdV` exactly. The
+ConvexCell is therefore a **complete physics representation** (volumes + areas + derivatives).
+
+**Isolated construction (RTX 5080, no gather, kcells/s):**
+
+| tier | ConvexCell FP32 | ConvexCell FP64 |
+|---|---:|---:|
+| G0 topology only (vertices free) | **17 200** | 8 880 |
+| G1 + volume | 13 900 (+19 %) | 7 170 |
+| G2 + per-facet area/dV/connVec | **12 000** (+13 %) | 5 300 |
+
+vs full build *with* gather: ConvexCell FP32 5 420, half-edge 2 490.
+
+**Findings.** (1) **Construction is not the bottleneck — the gather is**: removing it triples
+throughput (5.4 → 17.2 M/s). (2) **Construction-from-cached-neighbours with full physics is 12 M/s
+FP32** — ~5× the half-edge full build, so the Phase-1.5 repair (re-clip a cell from its cached
+neighbour list, no gather) is cheap, confirming the Phase-0 speedup model. (3) **Tiering pays**:
++volume ≈ 19 %, +derivatives ≈ 13–26 % — callers that only need volumes skip the derivative cost.
+
+**F2 decision — topology representation.**
+
+| axis | half-edge | ConvexCell (dual) |
+|---|---|---|
+| GPU full build | 2.49 M/s | **5.4 M/s** (2.2×) |
+| construct-from-cache, G2 | (not isolated on GPU) | **12 M/s** |
+| frame footprint | 32 KB | **3.5 KB** (9×) |
+| physics (V, A, derivatives) | validated | **validated to machine eps** |
+| serial CPU vs voro++ | **≈ 1.0×** | 0.4–0.6× |
+| robustness (today) | round-off fallback | needs Phase-3 (topology-oriented) |
+| repair (re-clip cached list) | supported | supported, **faster** |
+
+**Verdict: the ConvexCell (dual-triangle) is the GPU build-engine topology** — it wins build speed,
+footprint, and (now) full physics, and its construction core is very fast. Keep the **half-edge as the
+validated oracle + the serial-CPU representation** (it matches voro++ serially; the ConvexCell trades
+that for GPU-occupancy + FP32). Robustness will be **topology-oriented (Sugihara, Phase 3)**, which
+suits the ConvexCell's convex-by-construction property — not exact predicates. The remaining
+cold-build lever is the **gather (F4, ArborX BVH)**, since construction is now 12–17 M/s and the gather
+caps the full build at 5.4.

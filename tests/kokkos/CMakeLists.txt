@@ -129,3 +129,14 @@ target_compile_definitions(bench_cutter PRIVATE VORFLOW_CUTTER_PROFILE MORTON_EN
 target_include_directories(bench_cutter PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
 target_compile_features(bench_cutter PRIVATE cxx_std_20)
+
+# F2/F3: isolate cell construction from cached candidate planes (B+G, no gather), per tier.
+foreach(suffix "" "_f32")
+  add_executable(bench_construct${suffix} bench_construct.cpp)
+  target_link_libraries(bench_construct${suffix} PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+  target_compile_definitions(bench_construct${suffix} PRIVATE MORTON_ENABLE_KOKKOS=1)
+  target_include_directories(bench_construct${suffix} PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+  target_compile_features(bench_construct${suffix} PRIVATE cxx_std_20)
+endforeach()
+target_compile_definitions(bench_construct_f32 PRIVATE CC_FLOAT=1)
