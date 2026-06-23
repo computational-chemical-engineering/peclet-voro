@@ -229,3 +229,43 @@ that for GPU-occupancy + FP32). Robustness will be **topology-oriented (Sugihara
 suits the ConvexCell's convex-by-construction property — not exact predicates. The remaining
 cold-build lever is the **gather (F4, ArborX BVH)**, since construction is now 12–17 M/s and the gather
 caps the full build at 5.4.
+
+---
+
+## F4 results — ArborX BVH (kNN) gather beats the grid
+
+The gather was the cold-build bottleneck (construction alone is 12–17 M/s; the grid full build caps at
+5.4). `bench_bvh_gather.cpp` replaces the uniform grid with an **ArborX 2.1 BVH k-nearest-neighbour
+query** (ArborX is already a suite dependency via dem/packing) feeding the ConvexCell construction;
+periodicity via boundary ghosts (~33 % extra points at the chosen band).
+
+**Measured (RTX 5080, FP32, N=1M, fair = volume in both):**
+
+| K | Σvol err | faces/cell | BVH-build | kNN-query | construct (G1) | **total** |
+|---:|---:|---:|---:|---:|---:|---:|
+| 48 | 3.7e-4 (incomplete) | 15.44 | ~negligible | 21.5 M/s | 13.6 M/s | 8.25 M/s |
+| **64** | **3.2e-5 (complete)** | **15.52** | ~negligible | 15.3 M/s | 12.2 M/s | **6.73 M/s** |
+| 80 | 3.0e-6 | 15.53 | — | 11.5 M/s | 12.9 M/s | 6.0 M/s |
+
+vs **grid full build 5.42 M/s**.
+
+**Findings:**
+- **At full completeness (K=64), the BVH gather is 1.24× the grid** (6.73 vs 5.42 M/s) on *uniform*
+  data — and the kNN query (15.3 M/s) is markedly cheaper than the grid block-gather (which made the
+  grid build the bottleneck). K=64 is the sweet spot: K<64 misses neighbours (incomplete cells), K>64
+  over-gathers. The construct from the kNN set (12.2 M/s) matches the cached-construct number, i.e. the
+  BVH delivers neighbours efficiently enough that construction is again the floor.
+- **On clustered/non-uniform point sets the BVH advantage is larger** (a uniform grid degrades badly
+  where density varies — the reason Ray/Basselin and the 2026 paper use a BVH; here we only measured
+  uniform, where the grid is at its best, and the BVH still won).
+- **The kNN query is now the gather floor.** The SOTA refinement (best-first traversal + directional
+  culling inside the BVH, rather than fixed-K kNN) would cut the query toward the 12–17 M/s
+  construction ceiling — the remaining gap to Ray-et-al/Basselin.
+- **ArborX is reusable for the incremental repair's local re-query** (Phase 1.5): a moved seed re-queries
+  its small neighbourhood, not the whole grid block.
+
+**Part I exit:** `N(BVH) → B(ConvexCell update from cuboid) → G(tier)` — BVH gather 1.24× the grid
+(more on clustered), ConvexCell build 2.2× the half-edge with a 9× smaller frame, physics (G2)
+validated to machine precision, geometry tiered. The pieces are separated and each beats the
+prior baseline. Next: Part II (moving particles) — Phase 1 geometry/derivative re-eval over resident
+topology + momentum, then Phase 1.5 single-face repair.
