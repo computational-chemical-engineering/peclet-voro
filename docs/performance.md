@@ -304,3 +304,46 @@ representation (face/plane-list à la voro++, clipped cooperatively), which woul
 bit-exact with the legacy half-edge oracle — a separate method with its own validation reference,
 not an optimisation of this one. Recommendation: keep the per-thread path as production; pursue the
 parallel-clip representation only if GPU tessellation throughput becomes a hard bottleneck.
+
+## Option-A prototype (ConvexCell): a compact one-thread-per-cell cell beats the half-edge
+
+The analysis above projected that the GPU's ~98 % idle headroom is reachable not by intra-cell
+parallelism but by a **compact, register-resident cell** kept one-per-thread (the optimal layout for
+a sequential clip). This is now **built and measured** — `include/vorflow/device/convex_cell.hpp`
+(`bench_convexcell`, validated by `test_convexcell_unit`).
+
+**Representation.** The cell is the intersection of half-spaces stored in the **dual**: each primal
+vertex is a triple of plane indices (one byte each), with the vertex coordinate cached per triangle.
+Clipping by a plane = mark the dual triangles outside it, find the horizon (edges shared between a
+killed and a kept triangle), add one triangle per horizon edge. Half-space intersection is
+order-independent, so cuts are applied **on the fly with no candidate buffer** — the cell is the
+*only* per-thread state. NOT bit-exact with the half-edge oracle (different algorithm); validated
+against voro++ and the space-filling identity (Σ vol = box, faces/cell = 15.52, both to ~3.7e-5).
+
+**Measured (RTX 5080, pure tessellation, kcells/s):**
+
+| method | serial | 24-core | GPU @1M | GPU @4M | GPU kernel |
+|---|---:|---:|---:|---:|---|
+| voro++ | 75 | — | — | — | — |
+| half-edge per-thread (production) | 76 | 1240 | 2451 | 2490 | 142 reg / **32 KB** frame |
+| **ConvexCell FP64** | 31 | 1175 | 2176 | 2209 | 72 reg / **6.2 KB** |
+| **ConvexCell FP32** | 40 | 1257 | **4372** | **4416** | 51 reg / **3.5 KB** |
+
+- **The frame collapses 32 KB → 3.5–6.2 KB** (the dual-triangle cell + cached vertices, no candidate
+  buffer), exactly the occupancy lever the roofline pointed to. Throughput rises with N to a plateau,
+  as before.
+- **FP64 ConvexCell is 0.88×** the half-edge — it does more arithmetic per cell (O(#tri²) horizon
+  search, on-the-fly clip of every candidate), which on the crippled-FP64 consumer GPU roughly
+  cancels the occupancy win. **But the tessellation tolerates FP32** (volume still matches voro++ to
+  3.7e-5, topology identical), and on the same GPU **FP32 ConvexCell is 4372 kcells/s = 1.77× the
+  production half-edge** and 2.0× the FP64 ConvexCell. On CPU it is slower than the half-edge (more
+  arithmetic, no FP64 penalty to escape) — but the CPU was never the target.
+
+**Conclusion (measured, not projected):** option A works. A compact one-thread-per-cell convex-clip
+cell, in FP32, **beats the production half-edge GPU path by ~1.8×** with a 5–9× smaller frame, and it
+still has headroom: store triangle adjacency to make the horizon O(1) (drops the O(#tri²) scan), a
+small per-cell candidate prefilter, and mixed-precision predicates for robustness. The remaining cost
+is that it is a **new method** (own validation reference, not bit-exact with the legacy half-edge),
+and the prototype's volume has a ~3.7e-5 systematic error to tighten. Recommended next step to
+productionise: adjacency + the published-style face-geometry output so it can publish the same
+`TessellationView`, then gate it as the FP32 GPU tessellation path.

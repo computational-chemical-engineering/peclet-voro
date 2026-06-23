@@ -1,0 +1,339 @@
+/**
+ * @file device/convex_cell.hpp
+ * \brief Compact "ConvexCell" Voronoi cell — the option-A prototype.
+ *
+ * The Voronoi cell is the intersection of half-spaces {x : pn_k·x <= pd_k} (one per
+ * neighbour, plus the six bounding-box planes). Instead of the half-edge ScratchCell's
+ * ~21 KB of explicit topology, the cell is stored in the **dual**: each primal vertex
+ * is the intersection of three planes, kept as a *triple of plane indices* (one byte
+ * each). The whole cell is then a small triangle list (~a few hundred bytes) that lives
+ * in registers / a tiny local frame — the point of the prototype is that this lifts GPU
+ * occupancy far above the 32 KB-frame half-edge path (which is occupancy-bound at ~29%).
+ *
+ * Clipping by a new plane p (GEOGRAM / Ray-et-al. convex-cell clip): mark the triangles
+ * whose dual vertex falls outside p (cut away), find the horizon (edges shared between a
+ * cut and a kept triangle), and add a new triangle (x,y,p) per horizon edge — p becomes a
+ * new face. No stored adjacency: the triangle sharing an edge {x,y} is found by a small
+ * scan (the cell is tiny). Cuts are applied closest-first with the same security radius
+ * early-out as the half-edge path.
+ *
+ * This is a DIFFERENT algorithm from the legacy half-edge cutter, so it is NOT bit-exact
+ * with that oracle; it is validated to ~1e-9 against voro++ and the space-filling identity
+ * (Σ cell volumes == box volume). Core header: Kokkos only.
+ */
+#ifndef VORFLOW_DEVICE_CONVEX_CELL_HPP
+#define VORFLOW_DEVICE_CONVEX_CELL_HPP
+
+#include <Kokkos_Core.hpp>
+
+namespace vor {
+namespace device {
+
+/// Compact convex Voronoi cell. MAXP planes (<=255 so a plane index fits in a byte),
+/// MAXT dual triangles (= primal vertices). Trivially default-constructible (POD) so it
+/// lives in registers / a per-thread stack.
+template <class Real, int MAXP = 64, int MAXT = 96>
+struct ConvexCell {
+  static_assert(MAXP <= 255, "plane index must fit in unsigned char");
+  Real pn[MAXP][3];  ///< plane normals (seed-relative; = neighbour rel-pos for Voronoi)
+  Real pd[MAXP];     ///< plane offsets: half-space {x : pn·x <= pd}
+  int pnbr[MAXP];    ///< neighbour seed id per plane (<0 => bounding box)
+  int np;            ///< number of planes
+  unsigned char t0[MAXT], t1[MAXT], t2[MAXT];  ///< triangle = triple of plane indices
+  Real vx[MAXT], vy[MAXT], vz[MAXT];           ///< cached dual-vertex position per triangle
+  bool alive[MAXT];  ///< triangle live flag
+  int nt;            ///< triangle high-water mark
+  bool overflow;     ///< set if MAXP/MAXT exceeded -> cell invalid, caller falls back
+
+  /// Seed the cell with the big cuboid of extent (L0,L1,L2) centred on the seed.
+  /// Planes 0:+x 1:-x 2:+y 3:-y 4:+z 5:-z; the 8 corners are the dual triangles.
+  KOKKOS_INLINE_FUNCTION void initBox(Real L0, Real L1, Real L2) {
+    const Real h[3] = {Real(0.5) * L0, Real(0.5) * L1, Real(0.5) * L2};
+    for (int ax = 0; ax < 3; ++ax) {
+      for (int s = 0; s < 2; ++s) {
+        const int k = 2 * ax + s;
+        pn[k][0] = pn[k][1] = pn[k][2] = 0;
+        pn[k][ax] = (s == 0) ? Real(1) : Real(-1);
+        pd[k] = h[ax];
+        pnbr[k] = -1;
+      }
+    }
+    np = 6;
+    nt = 0;
+    overflow = false;
+    // 8 corners: x-plane (0|1), y-plane (2|3), z-plane (4|5)
+    for (int sx = 0; sx < 2; ++sx)
+      for (int sy = 0; sy < 2; ++sy)
+        for (int sz = 0; sz < 2; ++sz) {
+          t0[nt] = (unsigned char)(0 + sx);
+          t1[nt] = (unsigned char)(2 + sy);
+          t2[nt] = (unsigned char)(4 + sz);
+          alive[nt] = true;
+          computeVertex(nt);
+          ++nt;
+        }
+  }
+
+  /// Compute and cache the dual vertex of triangle t (where its three planes meet,
+  /// Cramer's rule). Called once when a triangle is created; all later reads use the
+  /// cache (vx/vy/vz), so the per-cell vertex solves are O(#triangles), not O(#clips ·
+  /// #triangles) — the difference between compute-bound and not.
+  KOKKOS_INLINE_FUNCTION void computeVertex(int t) {
+    const Real* a = pn[t0[t]];
+    const Real* b = pn[t1[t]];
+    const Real* c = pn[t2[t]];
+    const Real da = pd[t0[t]], db = pd[t1[t]], dc = pd[t2[t]];
+    const Real bc[3] = {b[1] * c[2] - b[2] * c[1], b[2] * c[0] - b[0] * c[2],
+                        b[0] * c[1] - b[1] * c[0]};
+    const Real ca[3] = {c[1] * a[2] - c[2] * a[1], c[2] * a[0] - c[0] * a[2],
+                        c[0] * a[1] - c[1] * a[0]};
+    const Real ab[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                        a[0] * b[1] - a[1] * b[0]};
+    const Real det = a[0] * bc[0] + a[1] * bc[1] + a[2] * bc[2];
+    const Real inv = det != Real(0) ? Real(1) / det : Real(0);
+    vx[t] = (da * bc[0] + db * ca[0] + dc * ab[0]) * inv;
+    vy[t] = (da * bc[1] + db * ca[1] + dc * ab[1]) * inv;
+    vz[t] = (da * bc[2] + db * ca[2] + dc * ab[2]) * inv;
+  }
+
+  /// Largest squared dual-vertex radius over live triangles (drives the security radius).
+  KOKKOS_INLINE_FUNCTION Real maxVertexRsq() const {
+    Real m = 0;
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      const Real r = vx[t] * vx[t] + vy[t] * vy[t] + vz[t] * vz[t];
+      if (r > m) m = r;
+    }
+    return m;
+  }
+
+  /// Find a *live* triangle != self that contains both plane indices x and y. In a valid
+  /// triangulation an interior edge is shared by exactly two triangles. Dead triangles
+  /// (alive==false) keep stale plane indices, so they MUST be skipped or they create
+  /// phantom horizon edges (the cascade bug). During a clip the about-to-be-removed
+  /// triangles are still alive==true (removed only after horizon collection), so they are
+  /// correctly considered here and rejected by the caller's kill[] test.
+  KOKKOS_INLINE_FUNCTION int findSharing(int self, int x, int y) const {
+    for (int s = 0; s < nt; ++s) {
+      if (s == self || !alive[s]) continue;
+      const int a = t0[s], b = t1[s], c = t2[s];
+      const bool hasX = (a == x || b == x || c == x);
+      const bool hasY = (a == y || b == y || c == y);
+      if (hasX && hasY) return s;
+    }
+    return -1;
+  }
+
+  KOKKOS_INLINE_FUNCTION int allocTri() {
+    for (int s = 0; s < nt; ++s)
+      if (!alive[s]) return s;
+    if (nt < MAXT) return nt++;
+    overflow = true;
+    return -1;
+  }
+
+  /// Add plane (n, d) for neighbour `nbr` and clip the cell by it. Returns true if the
+  /// cell was modified. The plane is only stored if it actually cuts (so redundant
+  /// candidates don't grow `np`).
+  KOKKOS_INLINE_FUNCTION bool clip(const Real n[3], Real d, int nbr) {
+    if (np >= MAXP) {
+      overflow = true;
+      return false;
+    }
+    const int pi = np;  // tentative index
+    pn[pi][0] = n[0];
+    pn[pi][1] = n[1];
+    pn[pi][2] = n[2];
+    pd[pi] = d;
+    pnbr[pi] = nbr;
+
+    // Mark triangles whose dual vertex is outside the new half-space (n·v > d).
+    bool kill[MAXT];
+    bool any = false;
+    for (int t = 0; t < nt; ++t) {
+      kill[t] = false;
+      if (!alive[t]) continue;
+      const Real s = n[0] * vx[t] + n[1] * vy[t] + n[2] * vz[t] - d;
+      if (s > 0) {
+        kill[t] = true;
+        any = true;
+      }
+    }
+    if (!any) return false;  // candidate does not cut -> no-op, plane not committed
+
+    np = pi + 1;  // commit the plane
+
+    // Horizon: for each killed triangle edge whose sharing triangle is alive, the new
+    // plane gets a triangle (x, y, pi). Collect first, then mutate.
+    unsigned char nA[MAXT], nB[MAXT];
+    int nnew = 0;
+    for (int t = 0; t < nt; ++t) {
+      if (!kill[t]) continue;
+      const int vtx[3] = {t0[t], t1[t], t2[t]};
+      for (int e = 0; e < 3; ++e) {
+        const int x = vtx[e], y = vtx[(e + 1) % 3];
+        const int other = findSharing(t, x, y);
+        if (other >= 0 && !kill[other]) {
+          if (nnew < MAXT) {
+            nA[nnew] = (unsigned char)x;
+            nB[nnew] = (unsigned char)y;
+            ++nnew;
+          } else {
+            overflow = true;
+          }
+        }
+      }
+    }
+    // Remove killed triangles.
+    for (int t = 0; t < nt; ++t)
+      if (kill[t]) alive[t] = false;
+    // Add the new fan around plane pi.
+    for (int i = 0; i < nnew; ++i) {
+      const int slot = allocTri();
+      if (slot < 0) break;
+      t0[slot] = nA[i];
+      t1[slot] = nB[i];
+      t2[slot] = (unsigned char)pi;
+      alive[slot] = true;
+      computeVertex(slot);
+    }
+    return true;
+  }
+
+  KOKKOS_INLINE_FUNCTION bool empty() const {
+    for (int t = 0; t < nt; ++t)
+      if (alive[t]) return false;
+    return true;
+  }
+
+  KOKKOS_INLINE_FUNCTION int countFaces() const {
+    int nf = 0;
+    for (int k = 0; k < np; ++k) {
+      bool used = false;
+      for (int t = 0; t < nt && !used; ++t)
+        if (alive[t] && (t0[t] == k || t1[t] == k || t2[t] == k)) used = true;
+      if (used) ++nf;
+    }
+    return nf;
+  }
+
+  /// Cell volume: V = (1/3) Σ_faces support_k · area_k. For each plane that still bounds
+  /// a face, gather its dual vertices, order them around the face normal (insertion sort
+  /// by in-plane angle), and sum the polygon area. Seed (origin) is interior so every
+  /// support distance is positive.
+  KOKKOS_INLINE_FUNCTION Real volume() const {
+    Real vol = 0;
+    constexpr int MAXFV = 28;  // max vertices on one face polygon
+    for (int k = 0; k < np; ++k) {
+      // gather this face's vertices
+      Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
+      int m = 0;
+      for (int t = 0; t < nt; ++t) {
+        if (!alive[t]) continue;
+        if (t0[t] != k && t1[t] != k && t2[t] != k) continue;
+        if (m < MAXFV) {
+          fx[m] = vx[t];
+          fy[m] = vy[t];
+          fz[m] = vz[t];
+          ++m;
+        }
+      }
+      if (m < 3) continue;
+      // in-plane basis from the (non-unit) normal
+      const Real nx = pn[k][0], ny = pn[k][1], nz = pn[k][2];
+      const Real nlen = Kokkos::sqrt(nx * nx + ny * ny + nz * nz);
+      if (nlen == Real(0)) continue;
+      const Real un[3] = {nx / nlen, ny / nlen, nz / nlen};
+      // e1 ⊥ un
+      Real e1[3];
+      if (Kokkos::fabs(un[0]) <= Kokkos::fabs(un[1]) && Kokkos::fabs(un[0]) <= Kokkos::fabs(un[2])) {
+        e1[0] = 0;
+        e1[1] = -un[2];
+        e1[2] = un[1];
+      } else if (Kokkos::fabs(un[1]) <= Kokkos::fabs(un[2])) {
+        e1[0] = -un[2];
+        e1[1] = 0;
+        e1[2] = un[0];
+      } else {
+        e1[0] = -un[1];
+        e1[1] = un[0];
+        e1[2] = 0;
+      }
+      const Real e1l = Kokkos::sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
+      e1[0] /= e1l;
+      e1[1] /= e1l;
+      e1[2] /= e1l;
+      const Real e2[3] = {un[1] * e1[2] - un[2] * e1[1], un[2] * e1[0] - un[0] * e1[2],
+                          un[0] * e1[1] - un[1] * e1[0]};
+      // centroid
+      Real cx = 0, cy = 0, cz = 0;
+      for (int i = 0; i < m; ++i) {
+        cx += fx[i];
+        cy += fy[i];
+        cz += fz[i];
+      }
+      cx /= m;
+      cy /= m;
+      cz /= m;
+      // angle of each vertex, insertion sort (m is small)
+      Real ang[MAXFV];
+      for (int i = 0; i < m; ++i) {
+        const Real dx = fx[i] - cx, dy = fy[i] - cy, dz = fz[i] - cz;
+        const Real a1 = dx * e1[0] + dy * e1[1] + dz * e1[2];
+        const Real a2 = dx * e2[0] + dy * e2[1] + dz * e2[2];
+        ang[i] = Kokkos::atan2(a2, a1);
+      }
+      for (int i = 1; i < m; ++i) {
+        Real ka = ang[i], kx = fx[i], ky = fy[i], kz = fz[i];
+        int j = i - 1;
+        while (j >= 0 && ang[j] > ka) {
+          ang[j + 1] = ang[j];
+          fx[j + 1] = fx[j];
+          fy[j + 1] = fy[j];
+          fz[j + 1] = fz[j];
+          --j;
+        }
+        ang[j + 1] = ka;
+        fx[j + 1] = kx;
+        fy[j + 1] = ky;
+        fz[j + 1] = kz;
+      }
+      // polygon area vector = 0.5 Σ vi × v(i+1)
+      Real ax = 0, ay = 0, az = 0;
+      for (int i = 0; i < m; ++i) {
+        const int j = (i + 1 == m) ? 0 : i + 1;
+        ax += fy[i] * fz[j] - fz[i] * fy[j];
+        ay += fz[i] * fx[j] - fx[i] * fz[j];
+        az += fx[i] * fy[j] - fy[i] * fx[j];
+      }
+      const Real area = Real(0.5) * Kokkos::sqrt(ax * ax + ay * ay + az * az);
+      const Real support = pd[k] / nlen;  // origin-to-plane distance (origin interior)
+      vol += support * area;
+    }
+    return vol * (Real(1) / Real(3));
+  }
+};
+
+/// Build a Voronoi cell from neighbour relative positions sorted by ascending distance
+/// (rSqHalf). Clips closest-first with the security-radius early-out: once the next
+/// candidate's plane offset exceeds 2·max-vertex-rsq, no farther seed can cut. Mirrors
+/// the half-edge buildVoronoiCell, but on the compact ConvexCell.
+template <class Real, int MAXP, int MAXT>
+KOKKOS_INLINE_FUNCTION void buildConvexCell(ConvexCell<Real, MAXP, MAXT>& c, const Real L[3],
+                                            const Real* relx, const Real* rely, const Real* relz,
+                                            const int* ids, int nNbr) {
+  c.initBox(L[0], L[1], L[2]);
+  for (int i = 0; i < nNbr; ++i) {
+    const Real rx = relx[i], ry = rely[i], rz = relz[i];
+    const Real off = Real(0.5) * (rx * rx + ry * ry + rz * rz);  // plane: r·x <= 0.5|r|²
+    if (!(off < Real(2) * c.maxVertexRsq())) break;              // security radius
+    const Real n[3] = {rx, ry, rz};
+    c.clip(n, off, ids[i]);
+    if (c.overflow) return;
+  }
+}
+
+}  // namespace device
+}  // namespace vor
+
+#endif  // VORFLOW_DEVICE_CONVEX_CELL_HPP

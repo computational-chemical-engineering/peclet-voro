@@ -82,6 +82,33 @@ if(TARGET voro++)
   target_compile_definitions(bench_device PRIVATE VORFLOW_HAVE_VOROPP)
 endif()
 
+# Option-A prototype: ConvexCell controlled unit tests (known cells, exact volumes).
+add_vorflow_kokkos_test(test_convexcell_unit)
+
+# Option-A prototype: compact ConvexCell (dual-triangle) one-cell-per-thread benchmark.
+add_executable(bench_convexcell bench_convexcell.cpp)
+target_link_libraries(bench_convexcell PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+target_compile_definitions(bench_convexcell PRIVATE MORTON_ENABLE_KOKKOS=1)
+target_include_directories(bench_convexcell PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+target_compile_features(bench_convexcell PRIVATE cxx_std_20)
+if(TARGET voro++)
+  target_link_libraries(bench_convexcell PRIVATE voro++)
+  target_compile_definitions(bench_convexcell PRIVATE VORFLOW_HAVE_VOROPP)
+endif()
+
+# FP32 ConvexCell variant (precision-policy lever for the crippled consumer FP64).
+add_executable(bench_convexcell_f32 bench_convexcell.cpp)
+target_link_libraries(bench_convexcell_f32 PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+target_compile_definitions(bench_convexcell_f32 PRIVATE MORTON_ENABLE_KOKKOS=1 CC_FLOAT=1)
+target_include_directories(bench_convexcell_f32 PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+target_compile_features(bench_convexcell_f32 PRIVATE cxx_std_20)
+if(TARGET voro++)
+  target_link_libraries(bench_convexcell_f32 PRIVATE voro++)
+  target_compile_definitions(bench_convexcell_f32 PRIVATE VORFLOW_HAVE_VOROPP)
+endif()
+
 # Per-cell cutter profiler (Phase 0): attributes cutCell2 time to its sub-phases.
 # Built with VORFLOW_CUTTER_PROFILE so cell_cutter.hpp bumps the host-only counters.
 add_executable(bench_cutter bench_cutter.cpp)
