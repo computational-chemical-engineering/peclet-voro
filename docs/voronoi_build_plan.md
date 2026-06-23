@@ -258,11 +258,47 @@ vs **grid full build 5.42 M/s**.
 - **On clustered/non-uniform point sets the BVH advantage is larger** (a uniform grid degrades badly
   where density varies — the reason Ray/Basselin and the 2026 paper use a BVH; here we only measured
   uniform, where the grid is at its best, and the BVH still won).
-- **The kNN query is now the gather floor.** The SOTA refinement (best-first traversal + directional
-  culling inside the BVH, rather than fixed-K kNN) would cut the query toward the 12–17 M/s
-  construction ceiling — the remaining gap to Ray-et-al/Basselin.
+- **The kNN query is now the gather floor.** The SOTA literature uses a best-first traversal + a
+  cell-dependent (security-radius) stop rather than fixed-K kNN — measured next (Option 2). It did
+  **not** pay off here (see below); fixed-K=64 remains the cold-build engine.
 - **ArborX is reusable for the incremental repair's local re-query** (Phase 1.5): a moved seed re-queries
   its small neighbourhood, not the whole grid block.
+
+## Option 2 results — best-first BVH traversal (custom, cell-dependent stop) does NOT beat fixed-K kNN
+
+`bench_bvh_bestfirst.cpp` drives a **custom best-first traversal over ArborX's BVH nodes** and fuses
+the gather with the clip: per cell, a per-thread min-heap of pending nodes keyed by distance²-to-seed;
+pop the closest, clip the ConvexCell, and **stop the instant the closest pending node is beyond the
+security radius** `2·√maxVertexRsq` — no fixed K, no over/under-gather, exact and robust to clustering.
+This is the thing ArborX's public API *cannot* express (its `nearest` is fixed-K, callback post-hoc), so
+node access goes through a thin `BvhAccess` adapter over `ArborX::Details::HappyTreeFriends` (the one
+file that would change if ArborX's internals move). Two enabling fixes were needed: seed a **tight
+initial box** (~10·spacing, not the full domain) so the security radius starts ~100× smaller and prunes
+from the first node; and **prune children at push time** (`dist² ≥ secR`). A stack-DFS variant with the
+same radius was measured *slower* (more nodes visited despite cheaper per-node cost), so the heap stays.
+
+**Measured (RTX 5080 / 48-thread OpenMP, FP32, N=1M, faces/cell 15.53 = complete):**
+
+| backend | best-first (traverse+clip, fused) | fixed-K=64 kNN (F4) | ratio |
+|---|---:|---:|---:|
+| **GPU (Cuda)** | 1.49 M/s | 6.73 M/s | **0.22×** |
+| **CPU (OpenMP)** | 1.30 M/s | 1.44 M/s | 0.90× |
+
+Stable across N (0.2M/1M/4M GPU: 1.51/1.49/1.47 M/s).
+
+**Findings:**
+- **Best-first is correct but loses — decisively on GPU (4.5×), marginally on CPU (1.1×).** The exact,
+  K-free stop saves clip work, but that saving is dwarfed by the cost of the traversal itself.
+- **Why fixed-K wins:** the fixed-K over-gather is cheap, and F4's **two-pass pipeline** (ArborX-tuned,
+  warp-coherent kNN query → construct from a *contiguous* candidate buffer) keeps each pass coalesced.
+  The fused best-first is a **divergent per-thread priority queue** with BVH-node fetches throughout —
+  exactly the access pattern GPUs punish, which is why its deficit is 4.5× on GPU but only 1.1× on CPU.
+- **Conclusion: fusion hurts here; fixed-K=64 kNN (F4) is the cold-build engine on both backends.**
+  Best-first would only win on point sets clustered enough that fixed-K badly mis-sizes — not the
+  uniform/Poisson workload. Its real home is the **incremental/repair path** (Phase 1.5), where the
+  candidate set per moved seed is a handful of nodes and a small heap is cheap and exact.
+- The `HappyTreeFriends` coupling is contained to `BvhAccess`; the bench stays as the characterisation
+  that justifies *not* taking the SOTA best-first route for the cold build.
 
 **Part I exit:** `N(BVH) → B(ConvexCell update from cuboid) → G(tier)` — BVH gather 1.24× the grid
 (more on clustered), ConvexCell build 2.2× the half-edge with a 9× smaller frame, physics (G2)

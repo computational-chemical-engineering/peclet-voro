@@ -150,6 +150,12 @@ if(ArborX_FOUND)
   target_include_directories(bench_bvh_gather PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
   target_compile_features(bench_bvh_gather PRIVATE cxx_std_20)
+  add_executable(bench_bvh_bestfirst bench_bvh_bestfirst.cpp)
+  target_link_libraries(bench_bvh_bestfirst PRIVATE Kokkos::kokkos ArborX::ArborX OpenMP::OpenMP_CXX)
+  target_compile_definitions(bench_bvh_bestfirst PRIVATE MORTON_ENABLE_KOKKOS=1 CC_FLOAT=1)
+  target_include_directories(bench_bvh_bestfirst PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+  target_compile_features(bench_bvh_bestfirst PRIVATE cxx_std_20)
   message(STATUS "vorflow: ArborX ${ArborX_VERSION} found -> bench_bvh_gather")
 else()
   message(STATUS "vorflow: ArborX not found -> skipping bench_bvh_gather")
