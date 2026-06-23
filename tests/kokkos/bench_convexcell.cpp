@@ -43,6 +43,7 @@ struct Result {
   double volSum = 0;
   long faceSum = 0;
   long overflow = 0;
+  long clipSum = 0;
   double secsBest = 0;
 };
 
@@ -95,6 +96,8 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   const real_t Lx = L[0], Ly = L[1], Lz = L[2];
   Kokkos::View<real_t*, MemSpace> cellVol("cellVol", N);
   Kokkos::View<int*, MemSpace> cellFaces("cellFaces", N), cellOvf("cellOvf", N);
+  Kokkos::View<long*, MemSpace> cellClips("cellClips", N);  // profiling: clip() calls per cell
+  const bool doVol = std::getenv("CC_NOVOL") == nullptr;    // CC_NOVOL=1 -> skip volume() (timing)
 
   // Grid offsets in the (2sw+1)^3 block, sorted by nearest-corner distance² (×minCsz²).
   // Half-space intersection is order-independent, so we clip on the fly with NO candidate
@@ -141,8 +144,10 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           const real_t Lxh = 0.5 * Lx, Lyh = 0.5 * Ly, Lzh = 0.5 * Lz;
           vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
           c.initBox(Lx, Ly, Lz);
+          long nclip = 0;
           for (int o = 0; o < nOff; ++o) {
-            if (offD(o) > 2.0 * c.maxVertexRsq()) break;  // security radius: stop (sorted)
+            const real_t secR2 = 2.0 * c.maxVertexRsq();  // security radius² (cell shrinks)
+            if (offD(o) > secR2) break;                   // no closer grid cell can cut (sorted)
             int gx = ((cx + offX(o)) % dimx + dimx) % dimx;
             int gy = ((cy + offY(o)) % dimy + dimy) % dimy;
             int gz = ((cz + offZ(o)) % dimz + dimz) % dimz;
@@ -154,17 +159,24 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
               ax = ax > Lxh ? ax - Lx : (ax < -Lxh ? ax + Lx : ax);
               ay = ay > Lyh ? ay - Ly : (ay < -Lyh ? ay + Ly : ay);
               az = az > Lzh ? az - Lz : (az < -Lzh ? az + Lz : az);
-              real_t n[3] = {ax, ay, az};
               real_t off = 0.5 * (ax * ax + ay * ay + az * az);
+              // Per-candidate security cull: a grid cell within the corner bound can still
+              // hold seeds beyond the radius (the bound is the nearest corner, not the seed).
+              // off >= 2·maxVrsq => the bisector is past every vertex => cannot cut. Skipping
+              // avoids the O(#tri) clip scan for the ~85% of gathered candidates that are no-ops.
+              if (off >= secR2) continue;
+              real_t n[3] = {ax, ay, az};
               c.clip(n, off, j);
+              ++nclip;
               if (c.overflow) break;
             }
             if (c.overflow) break;
           }
           (void)minCsz;
-          cellVol(i) = c.overflow ? 0.0 : c.volume();
+          cellVol(i) = (c.overflow || !doVol) ? 0.0 : c.volume();
           cellFaces(i) = c.overflow ? 0 : c.countFaces();
           cellOvf(i) = c.overflow ? 1 : 0;
+          cellClips(i) = nclip;
         });
     Kokkos::fence();
   };
@@ -175,13 +187,16 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
     auto hv = Kokkos::create_mirror_view(cellVol);
     auto hf = Kokkos::create_mirror_view(cellFaces);
     auto ho = Kokkos::create_mirror_view(cellOvf);
+    auto hc = Kokkos::create_mirror_view(cellClips);
     Kokkos::deep_copy(hv, cellVol);
     Kokkos::deep_copy(hf, cellFaces);
     Kokkos::deep_copy(ho, cellOvf);
+    Kokkos::deep_copy(hc, cellClips);
     for (int i = 0; i < N; ++i) {
       r.volSum += hv(i);
       r.faceSum += hf(i);
       r.overflow += ho(i);
+      r.clipSum += hc(i);
     }
   }
   double best = 1e30;
@@ -229,11 +244,11 @@ static void run(int N) {
   const double voroErr = std::fabs(r.volSum - voroVol) / voroVol;
   std::printf(
       "N=%-8d  convexcell %7.1f k/s  | Σvol/box err=%.2e  Σvol/voro err=%.2e  faces/cell=%.2f  "
-      "overflow=%ld\n",
-      N, N / r.secsBest / 1e3, volErr, voroErr, (double)r.faceSum / N, r.overflow);
+      "overflow=%ld clips/cell=%.1f\n",
+      N, N / r.secsBest / 1e3, volErr, voroErr, (double)r.faceSum / N, r.overflow, (double)r.clipSum / N);
 #else
-  std::printf("N=%-8d  convexcell %7.1f k/s  | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld\n",
-              N, N / r.secsBest / 1e3, volErr, (double)r.faceSum / N, r.overflow);
+  std::printf("N=%-8d  convexcell %7.1f k/s  | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld clips/cell=%.1f\n",
+              N, N / r.secsBest / 1e3, volErr, (double)r.faceSum / N, r.overflow, (double)r.clipSum / N);
 #endif
 }
 

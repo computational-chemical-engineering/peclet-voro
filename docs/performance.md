@@ -320,30 +320,59 @@ order-independent, so cuts are applied **on the fly with no candidate buffer** �
 *only* per-thread state. NOT bit-exact with the half-edge oracle (different algorithm); validated
 against voro++ and the space-filling identity (Σ vol = box, faces/cell = 15.52, both to ~3.7e-5).
 
-**Measured (RTX 5080, pure tessellation, kcells/s):**
+**Measured (RTX 5080, pure tessellation, kcells/s; ConvexCell after the per-candidate cull below):**
 
 | method | serial | 24-core | GPU @1M | GPU @4M | GPU kernel |
 |---|---:|---:|---:|---:|---|
 | voro++ | 75 | — | — | — | — |
 | half-edge per-thread (production) | 76 | 1240 | 2451 | 2490 | 142 reg / **32 KB** frame |
-| **ConvexCell FP64** | 31 | 1175 | 2176 | 2209 | 72 reg / **6.2 KB** |
-| **ConvexCell FP32** | 40 | 1257 | **4372** | **4416** | 51 reg / **3.5 KB** |
+| **ConvexCell FP64** | 31 | 1175 | 2814 | — | 72 reg / **6.2 KB** |
+| **ConvexCell FP32** | 43 | 1257 | **5418** | **5328** | 51 reg / **3.5 KB** |
 
 - **The frame collapses 32 KB → 3.5–6.2 KB** (the dual-triangle cell + cached vertices, no candidate
-  buffer), exactly the occupancy lever the roofline pointed to. Throughput rises with N to a plateau,
-  as before.
-- **FP64 ConvexCell is 0.88×** the half-edge — it does more arithmetic per cell (O(#tri²) horizon
-  search, on-the-fly clip of every candidate), which on the crippled-FP64 consumer GPU roughly
-  cancels the occupancy win. **But the tessellation tolerates FP32** (volume still matches voro++ to
-  3.7e-5, topology identical), and on the same GPU **FP32 ConvexCell is 4372 kcells/s = 1.77× the
-  production half-edge** and 2.0× the FP64 ConvexCell. On CPU it is slower than the half-edge (more
+  buffer), exactly the occupancy lever the roofline pointed to.
+- The tessellation **tolerates FP32** (volume matches voro++ to 2.6e-5, topology identical). On the
+  same GPU **FP32 ConvexCell is 5418 kcells/s = 2.18× the production half-edge** and ~1.9× the FP64
+  ConvexCell (FP64 is crippled on this consumer card). CPU is slower than the half-edge (more
   arithmetic, no FP64 penalty to escape) — but the CPU was never the target.
 
-**Conclusion (measured, not projected):** option A works. A compact one-thread-per-cell convex-clip
-cell, in FP32, **beats the production half-edge GPU path by ~1.8×** with a 5–9× smaller frame, and it
-still has headroom: store triangle adjacency to make the horizon O(1) (drops the O(#tri²) scan), a
-small per-cell candidate prefilter, and mixed-precision predicates for robustness. The remaining cost
-is that it is a **new method** (own validation reference, not bit-exact with the legacy half-edge),
-and the prototype's volume has a ~3.7e-5 systematic error to tighten. Recommended next step to
-productionise: adjacency + the published-style face-geometry output so it can publish the same
-`TessellationView`, then gate it as the FP32 GPU tessellation path.
+**The bottleneck is the neighbour query, not the cell.** Profiling (clips/cell counter) showed the
+build issuing **109 `clip()` calls/cell for only ~15.5 faces** — ~85 % no-ops, each paying the
+O(#tri) side-test. The grid-offset security bound is loose (a near grid *cell* can hold far *seeds*).
+Adding a **per-candidate cull** (`off ≥ 2·maxVrsq ⇒ skip` before the clip) halved it to ~50 clips/cell
+and lifted FP32 4372 → **5418** (FP64 2176 → 2814), bit-identically. The residual ~35 no-ops are
+candidates inside the isotropic radius but in directions where the cell is already tight — exactly
+what the SOTA removes with **directional culling inside a BVH traversal** (see references below); a
+uniform grid + isotropic radius can't cull them cheaply.
+
+**Two "obvious" optimisations that helped the CPU but NOT the GPU** (each tried, measured, reverted):
+*triangle adjacency* to make the horizon O(1) (CPU +25 %, **GPU −36 %**) and an *incremental security
+radius* (CPU +8 %, GPU flat). Both make each operation cheaper but don't reduce the operation *count*;
+the GPU has spare ALU and is bound by the per-thread frame + memory traffic + divergence, so only
+**reducing work** (the cull) helps it. A clean instance of GPU-vs-CPU optimisation divergence.
+
+### Where this lands vs the literature
+
+The convex-cell-clipping representation is the **state-of-the-art family**, confirmed by current work:
+- **Ray, Sokolov, Lefebvre, Lévy, "Meshless Voronoi on the GPU," ACM TOG 37(6) 2018** — the method
+  this prototype implements. Reports **~12.5 M cells/s on a V100** (10 M points / 800 ms; 84 M Delaunay
+  tets/s), ~1 order of magnitude over multicore CPU.
+- **Basselin et al. 2021, "Restricted Power Diagrams on the GPU"** and **"Scalable GPU Construction of
+  3D Voronoi and Power Diagrams" (arXiv 2605.06408, 2026, RTX 5090 / H200)** — same clipping method,
+  but with a **best-first BVH neighbour traversal + directional culling** that beats **gDel3D** (the
+  GPU-Delaunay alternative) by ~137 % at ≥5 M points. There is no single "record cells/s" — it is
+  hardware- and distribution-dependent — but the clipping family holds it; GPU Delaunay is slower.
+
+So **our 5.4 M/s prototype (RTX 5080, FP32) is ~2–3× below those implementations** — and since the
+RTX 5080 has ~4× the V100's FP32 throughput, the gap is *our implementation*, specifically the
+**grid + isotropic-radius neighbour query** vs their **BVH best-first + directional culling**. The cell
+representation and FP32 choice are right; closing the gap is a **neighbour-query rewrite (BVH +
+directional bounds)**, which is its own project, not a tweak. (Honesty note: an earlier draft of this
+section projected "tens of millions of cells/s" — that was an overstatement; the published figure is
+~12.5 M/s on a V100, and this prototype reaches 5.4 M/s.)
+
+**Conclusion:** option A works — a compact one-thread-per-cell convex-clip cell in FP32 **beats the
+production half-edge GPU path 2.18×** with a 5–9× smaller frame, validated against voro++. It is a
+**new method** (own validation reference, not bit-exact with the legacy half-edge; volume has a
+~3e-5 systematic error to tighten). Reaching published SOTA throughput needs the BVH+directional
+neighbour query; productionising needs that plus face-geometry output to publish the `TessellationView`.
