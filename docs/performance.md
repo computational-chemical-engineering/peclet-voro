@@ -226,44 +226,53 @@ all cores or the GPU, where the device is already 12–30× voro++. So closing t
 serial is a completeness goal, not a throughput necessity; the layout work is worth doing
 mainly because Morton ordering *also* benefits the multicore and GPU paths.
 
-## Team/warp-per-cell — implemented, measured: occupancy-bound by the shared cell
+## Team/warp-per-cell — implemented + shrunk: now cut-parallelism-bound (~0.6× default)
 
-The team-per-cell redesign above was implemented incrementally and gated behind
+The team-per-cell redesign was implemented incrementally and is gated behind
 `VORFLOW_TEAM=<teamSize>` (the default GPU path stays the per-thread RangePolicy build, so
-production throughput is unchanged). The per-cell numerics are factored into one
-`CellBuilder` functor used by both paths, so they are **bit-exact** (validated on the device
-+ MPI ctests, Voronoi and Power, volErr 1e-15).
+production throughput is unchanged and bit-identical). The per-cell numerics are factored into
+one `CellBuilder` functor used by both paths, so they stay bit-exact (validated on the device +
+MPI ctests, Voronoi and Power, volErr 1e-15; the published geometry matches the legacy oracle
+to machine epsilon).
 
-What was done and measured (RTX 5080, sm_120, N=1M, `double`):
+Measured progression (RTX 5080, sm_120, N=1M, `double`):
 
 | build path | pure-tess | with forces | note |
 |---|---:|---:|---:|
 | per-thread default | **2459 k/s** | **2024 k/s** | cell in 32 KB/thread local frame |
 | team, leader-only | 439 | 175 | cell in shared; cuobjdump stack 32 736 → **200 B** |
-| team, **parallel gather** | **753** | 208 | gather across the warp (Voronoi) |
+| team, + parallel gather | 753 | 208 | Voronoi gather across the warp |
+| team, + cell-shrink (CAP 52 / cand 256) | **1554** | 1236¹ | more teams/SM |
+| team, + parallel geometry | 1554 | **1236** | warp-scatter the force geometry |
 
-- **The 32 KB/thread local frame is eliminated** — cuobjdump confirms the team build kernel's
-  stack drops from 32 736 to 200 bytes (the `ScratchCell` + candidate arrays now live in team
-  shared memory). That was the stated goal of moving the cell on-chip.
-- **But occupancy is now shared-memory-limited.** The cell + candidate arrays are ~32 KB of
-  *shared* per team, so only ~3 teams/SM are resident (a ~100 KB shared SM). With the cut (and,
-  with forces, the geometry) still on the warp leader, that is far fewer concurrent cuts than
-  the per-thread path's many in-flight cells — so even a perfectly parallel gather cannot reach
-  the default. Team size 32 (one warp) is the measured sweet spot (8/16/64 are worse).
-- **Parallel gather is bit-exact for Voronoi** because the per-shell min-heap re-sorts each
-  shell's candidates by key — the cut order is independent of the (now racy, parallel) gather
-  order. Power keeps the serial leader gather (no re-sort; parallelising it would reorder the
-  cuts → needs a deterministic sort first).
+¹ with-forces only reaches 1236 after the geometry is parallelised (the row above it, 208,
+is geometry-on-leader at the shrunk cell).
 
-**Verdict (measured, not predicted):** warp-per-cell at `CAP=128` **cannot beat the per-thread
-path** — the binding constraint is the **shared-memory footprint of the cell**, which caps
-teams/SM at ~3. The gather parallelisation is a genuine 1.7× over leader-only but the path is
-~3× below the default. **The next lever is therefore cell-shrinking, not more parallelism**:
-a smaller cell representation (lower `CAP` for the facet/vertex-indexed arrays; mixed-precision
-storage for the geometry arrays) shrinks the shared footprint so many more teams fit per SM —
-*then* the team path's parallel gather/geometry can overtake the per-thread build. Remaining
-team-path work, all gated and lower-value until the cell shrinks: parallelise `computeGeometry`
-across the team with a **deterministic** (bit-exact) per-facet reduction — naïve vertex-parallel
-atomic accumulation reorders the FP sums and is *not* bit-exact — and a deterministic Power
-gather sort. The half-edge `cutCell2` stays leader-sequential (Amdahl) unless a cooperative cut
-is written.
+What moved the needle, in order:
+
+1. **Cell on-chip.** The 32 KB/thread local frame is eliminated (cuobjdump stack 32 736 → 200 B):
+   the `ScratchCell` + candidate arrays live in team shared memory.
+2. **Parallel gather (Voronoi).** Bit-exact: the per-shell min-heap re-sorts each shell's
+   candidates by key, so the cut order is independent of the racy parallel gather order. Power
+   keeps the per-thread path (no early-out ⇒ it gathers the whole sphere, no per-shell reuse).
+3. **Cell-shrink — the big lever.** `ScratchCell` is templated on capacity; the team path uses
+   `CAP=52` (vs 128) with a per-shell-reset candidate buffer of 256, and any cell/gather that
+   overruns is flagged and re-run at full capacity by a cheap fallback pass (≤0.4% of cells, so
+   correctness is independent of the caps). Swept: throughput peaks at `CAP≈52 / cand≈256`
+   (smaller `CAP` raises occupancy but the fallback rate climbs and turns it over). 753 → 1554.
+4. **Parallel geometry.** `computeGeometry` is split into a zero + a per-vertex scatter
+   (`accumGeometryVertex<Atomic>`); the team distributes the vertex loop with atomic adds into
+   the shared cell. The serial path (`Atomic=false`) is bit-identical; the atomic reorder stays
+   at machine epsilon (≪ the 1e-9 oracle tolerance). with-forces 320 → 1236.
+
+**Verdict (measured):** the team path is now uniformly **~0.6× the per-thread default** (1554/2459
+pure, 1236/2024 forces) — a 3.5× lift over the leader-only scaffold, but still short of the
+default. The binding constraint is no longer occupancy (cell-shrink fixed that) but the
+**leader-serial half-edge cut**: the per-thread path runs one cut per *thread* (~hundreds of
+cut-streams/SM), the team path one cut per *team* (~the teams/SM, now ~6–8 after the shrink).
+Cell-shrinking narrowed that gap (more teams/SM) but cannot close a ~50× cut-parallelism deficit.
+**The only remaining lever is a cooperative (warp-parallel) `cutCell2`** — a genuinely parallel
+half-edge plane cut, the hard algorithmic problem the redesign was always Amdahl-bounded by.
+Until that exists, the per-thread RangePolicy stays the production GPU path; the team path is a
+validated, gated platform for the cooperative-cut work (tune via `VORFLOW_TEAM`, `VORFLOW_MAXCAND`;
+`VORFLOW_PROFILE` reports the fallback rate and max facets/cell).
