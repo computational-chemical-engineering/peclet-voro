@@ -71,15 +71,24 @@ enum class CutStatus : int { Ok = 0, Overflow = 1, Empty = 2 };
 
 /**
  * Fixed-capacity scratch cell. Holds the half-edge topology under construction
- * plus the small work stacks cutCell2 needs. One instance per cell; sized for
- * the 128 label cap. Trivially default-constructible (POD-like) so it can live
- * in registers, team scratch, or a per-thread stack.
+ * plus the small work stacks cutCell2 needs. One instance per cell. Trivially
+ * default-constructible (POD-like) so it can live in registers, team scratch, or a
+ * per-thread stack.
+ *
+ * @tparam CAPV  slot capacity (vertices/facets). The half-edge label packs the
+ *   facet/vertex index in 7-bit fields, so CAPV must be <= 128; the sentinel "dummy"
+ *   index is CAPV-1. The default 128 is the worst-case bound (the full label range).
+ *   A smaller CAPV shrinks the cell for shared-memory residency (team-per-cell path);
+ *   a cell that needs more slots overflows (reported via the cut's *ovf flag) and is
+ *   re-run on the full-capacity path — random Poisson–Voronoi cells top out at ~68
+ *   vertices / ~36 facets (measured to N=4M), so a CAPV~80 is overflow-free in practice.
  */
-template <class Real>
+template <class Real, int CAPV = 128>
 struct ScratchCell {
-  static constexpr int CAP = 128;
-  static constexpr int VDUM = CAP - 1;  // dummy vertex sentinel (127)
-  static constexpr int FDUM = CAP - 1;  // dummy facet sentinel (127)
+  static constexpr int CAP = CAPV;
+  static constexpr int VDUM = CAP - 1;  // dummy vertex sentinel (CAP-1)
+  static constexpr int FDUM = CAP - 1;  // dummy facet sentinel (CAP-1)
+  static_assert(CAPV > 8 && CAPV <= 128, "ScratchCell CAP must be in (8,128] (7-bit label)");
 
   // Vertex data.
   Real vpos[CAP][3];
