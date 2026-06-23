@@ -130,3 +130,51 @@ Ray-et-al ≈ 12.5 M/s (V100, the SOTA family — clip + BVH + directional culli
 **Non-negotiables that order everything:** derivatives + momentum conservation + topology-oriented
 robustness must not regress (this is why the half-edge exists), and the per-step update — not the cold
 rebuild — is the ultimate number to minimise. Part I optimises the shared engine that both depend on.
+
+---
+
+## F1 results — stages separated, per-stage split measured
+
+**The structure was already there.** Both engines are `init(cuboid) → update(plane)* → geometry`:
+the half-edge is `initCuboid` + a sequence of `cutCell2` (each clips by one plane — *already an
+update*); the ConvexCell is `initBox` + `clip`. So the **"always an update" formulation is native** —
+a cold build *is* "update an empty cell from the cuboid," and a repair will be "update the existing
+cell with the changed planes," same code. **(N) and (B) are deliberately coupled** by the security
+early-out (you must clip to shrink the cell to know when to stop gathering); **(G) is cleanly
+separable** (skip it and the build still produces correct topology + vertices).
+
+**Per-stage split (cold build, N=1M, measured):**
+
+| stage | half-edge GPU | ConvexCell FP32 GPU | half-edge serial CPU |
+|---|---:|---:|---:|
+| **N** gather | (N+B = 82%) | (N+B = 91%) | **≈ 49 %** |
+| **B** clip/topology | | | ≈ 30 % |
+| **G** geometry | **18 %** (incl. derivatives) | **9 %** (volume only) | ≈ 21 % |
+
+(GPU: half-edge 2015→2455 k/s with G off ⇒ G=18 %; ConvexCell 5428→5959 ⇒ G1=9 %. Serial: standalone
+cutter 124 k/s vs full 62.7 ⇒ gather ≈ 49 %; within the cutter, cut ≈ 59 % / geom ≈ 36 %. N and B can't
+be split cleanly on GPU because the early-out couples them; the serial split is the guide.)
+
+**Three findings that order F2/F3/F4:**
+
+1. **The neighbour query (N) is the single largest stage of the *cold* build (~49 % serial; dominant
+   on GPU).** So the biggest *cold-build* throughput lever is **F4 (BVH/directional gather)**, not the
+   clip. *But* in the steady-state incremental loop (Part II) N is mostly **avoided** (the topology and
+   its neighbour list are resident), so there B (repair) + G dominate. This is the key tension: **N
+   matters for the first build; B + G matter every step.** It justifies the user's instinct to optimise
+   the *cell-building (B) + geometry (G) data structure* first — that is the always-relevant part — and
+   to treat the gather (F4) as a separable, build-only concern.
+2. **G is cheap and cleanly separable — and tiering pays.** Volume-only (G1) is ~9 %; adding the
+   *derivatives* (G2) roughly doubles the geometry cost (half-edge's geometry, which includes `fdV`, is
+   ~18 % vs ConvexCell's volume-only 9 %). So computing only the needed tier saves ~half the geometry
+   time when derivatives aren't required — exactly the tiering motivation. (G0 vertices are a *free
+   byproduct* of the clip in both engines — already cached.)
+3. **B (the clip) is ~30 % serial / a large part of the GPU N+B.** This is the part the user wants to
+   attack via the topology data structure (F2) and where the half-edge↔ConvexCell choice + the
+   single-face-repair cost (Phase 1.5) live.
+
+**F1 exit:** stages confirmed separable with the native update-from-cuboid form; G isolated and
+measured; the split says **optimise B + tiered-G data structure now (F2, F3 — always relevant), keep N
+(F4) as the build-only lever.** No refactor was forced — the engines already compose as
+`N → B(update) → G(tier)`; the explicit reusable interface will be cut when F2 picks the topology
+representation (so the interface is shaped by the winner, not guessed).
