@@ -272,7 +272,35 @@ default. The binding constraint is no longer occupancy (cell-shrink fixed that) 
 cut-streams/SM), the team path one cut per *team* (~the teams/SM, now ~6–8 after the shrink).
 Cell-shrinking narrowed that gap (more teams/SM) but cannot close a ~50× cut-parallelism deficit.
 **The only remaining lever is a cooperative (warp-parallel) `cutCell2`** — a genuinely parallel
-half-edge plane cut, the hard algorithmic problem the redesign was always Amdahl-bounded by.
-Until that exists, the per-thread RangePolicy stays the production GPU path; the team path is a
-validated, gated platform for the cooperative-cut work (tune via `VORFLOW_TEAM`, `VORFLOW_MAXCAND`;
+half-edge plane cut. Until that exists, the per-thread RangePolicy stays the production GPU path;
+the team path is a validated, gated platform (tune via `VORFLOW_TEAM`, `VORFLOW_MAXCAND`;
 `VORFLOW_PROFILE` reports the fallback rate and max facets/cell).
+
+### Cooperative cut — attempted (parallel distance precompute), measured: does NOT help
+
+The one part of `cutCell2` that is genuinely data-parallel is the **distance evaluation**: the
+cutter profiler (`bench_cutter`, `-DVORFLOW_CUTTER_PROFILE`) shows ~42 cut attempts/cell doing
+~598 `cdist` calls (≈14 signed-distance dot-products per cut) plus ~130 sequential trace steps.
+So the cooperative attempt precomputed those distances across the warp: per cut the leader pops the
+closest candidate, bumps the dist-cache generation and broadcasts the candidate index; the warp
+fills every alive vertex's signed distance in parallel (one lane per vertex); the leader then runs
+`cutCell2(distCached=true)` reading the cache. It is **bit-exact** (each lane recomputes the plane
+from the candidate via `relVec`, `off = ½|pv|²` = the heap key, so the cached distances equal what
+`cdist` would compute; Voronoi volErr 1e-15, all device ctests pass).
+
+**Measured (RTX 5080, N=1M, VORFLOW_TEAM=32): it is ~1% *slower*** — pure-tess 1554 → 1529,
+with-forces 1235 → 1223. The per-cut team synchronisation (the leader-pop → warp-precompute →
+leader-cut hand-off needs ~3 `team_barrier`s + a `TeamThreadRange` launch per cut, ×~42 cuts/cell)
+costs as much as the ~14 saved dot-products. The parallelisable fraction of the cut is simply too
+small, and the trace/DFS that dominate it are pointer-chasing with serial data dependencies — not
+parallelisable at all. The experiment was reverted (kept only here as the durable record).
+
+**Deeper conclusion:** for a *sequential-per-cell* algorithm like the half-edge cut, the per-thread
+decomposition (one cell per thread, many independent cuts in flight to hide latency) is the *right*
+GPU design — it maximises the number of concurrent sequential cuts. Team-per-cell trades that
+in-flight parallelism for intra-cut parallelism the cut cannot use. The team path's ~0.6× is the
+ceiling of that trade; closing it would require a *fundamentally* different, parallel-clip cell
+representation (face/plane-list à la voro++, clipped cooperatively), which would **not** be
+bit-exact with the legacy half-edge oracle — a separate method with its own validation reference,
+not an optimisation of this one. Recommendation: keep the per-thread path as production; pursue the
+parallel-clip representation only if GPU tessellation throughput becomes a hard bottleneck.
