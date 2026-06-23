@@ -33,7 +33,12 @@ static double secs(clk::time_point a, clk::time_point b) {
   return std::chrono::duration<double>(b - a).count();
 }
 static constexpr int KCAND = 64;  // cached closest candidates per cell
-static constexpr int CC_MAXP = 64, CC_MAXT = 112;
+#ifndef CC_MAXP
+#define CC_MAXP 64
+#endif
+#ifndef CC_MAXT
+#define CC_MAXT 112
+#endif
 
 int main(int argc, char** argv) {
   using MemSpace = tpx::MemSpace;

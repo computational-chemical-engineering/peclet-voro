@@ -35,25 +35,58 @@ static double secs(clk::time_point a, clk::time_point b) {
   return std::chrono::duration<double>(b - a).count();
 }
 
-// Per-thread candidate cap and cell sizing (compact).
-static constexpr int CC_MAXP = 64;
-static constexpr int CC_MAXT = 112;
+// 21-bit Morton (Z-order) encode of a grid cell (gx,gy,gz). Used as the cell id so that the
+// counting-sort orders points along a space-filling curve: a warp of consecutive seeds is a
+// COMPACT 3D blob, so their 3x3x3 neighbour blocks overlap and the gather reuses L1/L2 — unlike
+// a row-major id (gx + gy*dimx + gz*dimx*dimy), where y/z neighbours are dimx/dimx*dimy apart.
+KOKKOS_INLINE_FUNCTION unsigned long mortonPart1By2(unsigned long x) {
+  x &= 0x1ffffful;
+  x = (x | (x << 32)) & 0x1f00000000fffful;
+  x = (x | (x << 16)) & 0x1f0000ff0000fful;
+  x = (x | (x << 8)) & 0x100f00f00f00f00ful;
+  x = (x | (x << 4)) & 0x10c30c30c30c30c3ul;
+  x = (x | (x << 2)) & 0x1249249249249249ul;
+  return x;
+}
+KOKKOS_INLINE_FUNCTION unsigned long mortonEncode(int x, int y, int z) {
+  return mortonPart1By2((unsigned long)x) | (mortonPart1By2((unsigned long)y) << 1) |
+         (mortonPart1By2((unsigned long)z) << 2);
+}
+
+// Per-thread candidate cap and cell sizing (compact). Smaller caps shrink the per-thread cell
+// state (pn/pd/pnbr[MAXP] + t*/v*/alive[MAXT]); below ~MAXT=48 it stops spilling to local memory
+// and throughput jumps. Override at compile time to sweep.
+#ifndef CC_MAXP
+#define CC_MAXP 64
+#endif
+#ifndef CC_MAXT
+#define CC_MAXT 112
+#endif
 
 struct Result {
   double volSum = 0;
   long faceSum = 0;
   long overflow = 0;
   long clipSum = 0;
+  long clipMax = 0;
   double secsBest = 0;
+  // spatially-sorted variant (points reordered into grid order, threads = sorted slots)
+  double volSumS = 0;
+  long faceSumS = 0;
+  long overflowS = 0;
+  double secsBestS = 0;
 };
 
 static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, const real_t L[3],
                        int sw, bool timeOnly) {
   using MemSpace = tpx::MemSpace;
   using Exec = tpx::ExecSpace;
-  // grid ~1 seed/cell
+  // grid ~CC_DENS seeds/cell (default 1). Coarser cells = fewer offset iterations to walk
+  // (less per-offset morton/modulo/cellStart overhead), at the cost of examining more candidates
+  // per cell. Sweep to find the throughput optimum for the fused gather.
   const real_t vol = L[0] * L[1] * L[2];
-  const real_t spacing = std::cbrt(vol / std::max(1, N));
+  const real_t dens = std::getenv("CC_DENS") ? std::atof(std::getenv("CC_DENS")) : 1.0;
+  const real_t spacing = std::cbrt(dens * vol / std::max(1, N));
   int dim[3];
   real_t icsz[3], csz[3];
   for (int k = 0; k < 3; ++k) {
@@ -61,10 +94,14 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
     csz[k] = L[k] / dim[k];
     icsz[k] = 1.0 / csz[k];
   }
-  const int dimx = dim[0], dimy = dim[1], dimz = dim[2], ncell = dimx * dimy * dimz;
+  const int dimx = dim[0], dimy = dim[1], dimz = dim[2];
+  // Morton cell id => cellStart sized to the (power-of-two)^3 Z-order range, not dimx*dimy*dimz.
+  int nbits = 1;
+  while ((1 << nbits) < std::max({dimx, dimy, dimz})) ++nbits;
+  const long ncell = 1L << (3 * nbits);
   real_t minCsz = std::min({csz[0], csz[1], csz[2]});
 
-  // counting-sort grid
+  // counting-sort grid (cell id = Morton(gx,gy,gz))
   Kokkos::View<int*, MemSpace> cellOf("cellOf", N), counts("counts", ncell + 1);
   Kokkos::deep_copy(counts, 0);
   const real_t icx = icsz[0], icy = icsz[1], icz = icsz[2];
@@ -73,7 +110,7 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
         int gx = ((((int)Kokkos::floor(pos(3 * i) * icx)) % dimx) + dimx) % dimx;
         int gy = ((((int)Kokkos::floor(pos(3 * i + 1) * icy)) % dimy) + dimy) % dimy;
         int gz = ((((int)Kokkos::floor(pos(3 * i + 2) * icz)) % dimz) + dimz) % dimz;
-        int c = gx + gy * dimx + gz * dimx * dimy;
+        int c = (int)mortonEncode(gx, gy, gz);
         cellOf(i) = c;
         Kokkos::atomic_inc(&counts(c));
       });
@@ -151,10 +188,11 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
             int gx = ((cx + offX(o)) % dimx + dimx) % dimx;
             int gy = ((cy + offY(o)) % dimy + dimy) % dimy;
             int gz = ((cz + offZ(o)) % dimz + dimz) % dimz;
-            int gc = gx + gy * dimx + gz * dimx * dimy;
+            int gc = (int)mortonEncode(gx, gy, gz);
             for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
               int j = binned(q);
               if (j == i) continue;
+              ++nclip;  // EXAMINED: distance computed for this candidate (the gather's real work)
               real_t ax = pos(3 * j) - pix, ay = pos(3 * j + 1) - piy, az = pos(3 * j + 2) - piz;
               ax = ax > Lxh ? ax - Lx : (ax < -Lxh ? ax + Lx : ax);
               ay = ay > Lyh ? ay - Ly : (ay < -Lyh ? ay + Ly : ay);
@@ -167,7 +205,6 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
               if (off >= secR2) continue;
               real_t n[3] = {ax, ay, az};
               c.clip(n, off, j);
-              ++nclip;
               if (c.overflow) break;
             }
             if (c.overflow) break;
@@ -176,12 +213,68 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           cellVol(i) = (c.overflow || !doVol) ? 0.0 : c.volume();
           cellFaces(i) = c.overflow ? 0 : c.countFaces();
           cellOvf(i) = c.overflow ? 1 : 0;
-          cellClips(i) = nclip;
+          cellClips(i) = nclip;  // candidates EXAMINED per cell (gather volume)
         });
     Kokkos::fence();
   };
 
-  build();  // warm
+  // --- spatially-sorted variant: reorder points into grid (binned) order ONCE, then assign
+  // thread q -> sorted slot q. Now a warp of 32 threads = 32 spatially-adjacent seeds sharing
+  // the same neighbour cells (L1/L2 reuse) and the neighbour position reads are contiguous —
+  // no binned() indirection into an unsorted array. This is the SOTA gather pattern.
+  Kokkos::View<real_t*, MemSpace> posS(
+      Kokkos::view_alloc(std::string("posS"), Kokkos::WithoutInitializing), (size_t)N * 3);
+  Kokkos::parallel_for(
+      "reorder", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int q) {
+        const int i = binned(q);
+        posS(3 * q) = pos(3 * i);
+        posS(3 * q + 1) = pos(3 * i + 1);
+        posS(3 * q + 2) = pos(3 * i + 2);
+      });
+  Kokkos::View<real_t*, MemSpace> cellVolS("cellVolS", N);
+  Kokkos::View<int*, MemSpace> cellFacesS("cellFacesS", N), cellOvfS("cellOvfS", N);
+  auto build_sorted = [&]() {
+    Kokkos::parallel_for(
+        "cc.build_sorted", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int q) {
+          const real_t pix = posS(3 * q), piy = posS(3 * q + 1), piz = posS(3 * q + 2);
+          int cx = ((((int)Kokkos::floor(pix * icx)) % dimx) + dimx) % dimx;
+          int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
+          int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
+          const real_t Lxh = 0.5 * Lx, Lyh = 0.5 * Ly, Lzh = 0.5 * Lz;
+          vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
+          c.initBox(Lx, Ly, Lz);
+          real_t secR2 = 2.0 * c.maxVertexRsq();  // cached; only shrinks when a clip cuts
+          for (int o = 0; o < nOff; ++o) {
+            if (offD(o) > secR2) break;
+            // branchless periodic wrap (offX in [-sw,sw], cx in [0,dim) => one add/sub suffices),
+            // replacing 2 integer-modulo per axis — GPU idiv is ~20+ cycles and this runs ~100x/cell
+            int gx = cx + offX(o); gx = gx < 0 ? gx + dimx : (gx >= dimx ? gx - dimx : gx);
+            int gy = cy + offY(o); gy = gy < 0 ? gy + dimy : (gy >= dimy ? gy - dimy : gy);
+            int gz = cz + offZ(o); gz = gz < 0 ? gz + dimz : (gz >= dimz ? gz - dimz : gz);
+            int gc = (int)mortonEncode(gx, gy, gz);
+            for (int q2 = cellStart(gc); q2 < cellStart(gc + 1); ++q2) {
+              if (q2 == q) continue;
+              real_t ax = posS(3 * q2) - pix, ay = posS(3 * q2 + 1) - piy, az = posS(3 * q2 + 2) - piz;
+              ax = ax > Lxh ? ax - Lx : (ax < -Lxh ? ax + Lx : ax);
+              ay = ay > Lyh ? ay - Ly : (ay < -Lyh ? ay + Ly : ay);
+              az = az > Lzh ? az - Lz : (az < -Lzh ? az + Lz : az);
+              real_t off = 0.5 * (ax * ax + ay * ay + az * az);
+              if (off >= secR2) continue;
+              real_t n[3] = {ax, ay, az};
+              if (c.clip(n, off, q2)) secR2 = 2.0 * c.maxVertexRsq();  // recompute only on a cut
+              if (c.overflow) break;
+            }
+            if (c.overflow) break;
+          }
+          cellVolS(q) = (c.overflow || !doVol) ? 0.0 : c.volume();
+          cellFacesS(q) = c.overflow ? 0 : c.countFaces();
+          cellOvfS(q) = c.overflow ? 1 : 0;
+        });
+    Kokkos::fence();
+  };
+
+  build();         // warm
+  build_sorted();  // warm
   Result r;
   if (!timeOnly) {
     auto hv = Kokkos::create_mirror_view(cellVol);
@@ -197,16 +290,33 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
       r.faceSum += hf(i);
       r.overflow += ho(i);
       r.clipSum += hc(i);
+      if (hc(i) > r.clipMax) r.clipMax = hc(i);
+    }
+    auto hvs = Kokkos::create_mirror_view(cellVolS);
+    auto hfs = Kokkos::create_mirror_view(cellFacesS);
+    auto hos = Kokkos::create_mirror_view(cellOvfS);
+    Kokkos::deep_copy(hvs, cellVolS);
+    Kokkos::deep_copy(hfs, cellFacesS);
+    Kokkos::deep_copy(hos, cellOvfS);
+    for (int i = 0; i < N; ++i) {
+      r.volSumS += hvs(i);
+      r.faceSumS += hfs(i);
+      r.overflowS += hos(i);
     }
   }
-  double best = 1e30;
+  double best = 1e30, bestS = 1e30;
   for (int rep = 0; rep < 3; ++rep) {
     auto t0 = clk::now();
     build();
     auto t1 = clk::now();
     best = std::min(best, secs(t0, t1));
+    auto t2 = clk::now();
+    build_sorted();
+    auto t3 = clk::now();
+    bestS = std::min(bestS, secs(t2, t3));
   }
   r.secsBest = best;
+  r.secsBestS = bestS;
   return r;
 }
 
@@ -244,12 +354,15 @@ static void run(int N) {
   const double voroErr = std::fabs(r.volSum - voroVol) / voroVol;
   std::printf(
       "N=%-8d  convexcell %7.1f k/s  | Σvol/box err=%.2e  Σvol/voro err=%.2e  faces/cell=%.2f  "
-      "overflow=%ld clips/cell=%.1f\n",
-      N, N / r.secsBest / 1e3, volErr, voroErr, (double)r.faceSum / N, r.overflow, (double)r.clipSum / N);
+      "overflow=%ld examined/cell mean=%.1f max=%ld\n",
+      N, N / r.secsBest / 1e3, volErr, voroErr, (double)r.faceSum / N, r.overflow, (double)r.clipSum / N, r.clipMax);
 #else
-  std::printf("N=%-8d  convexcell %7.1f k/s  | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld clips/cell=%.1f\n",
-              N, N / r.secsBest / 1e3, volErr, (double)r.faceSum / N, r.overflow, (double)r.clipSum / N);
+  std::printf("N=%-8d  convexcell %7.1f k/s  | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld examined/cell mean=%.1f max=%ld\n",
+              N, N / r.secsBest / 1e3, volErr, (double)r.faceSum / N, r.overflow, (double)r.clipSum / N, r.clipMax);
 #endif
+  const double volErrS = std::fabs(r.volSumS - boxVol) / boxVol;
+  std::printf("          spatial-sort %7.1f k/s (%.2fx) | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld\n",
+              N / r.secsBestS / 1e3, r.secsBest / r.secsBestS, volErrS, (double)r.faceSumS / N, r.overflowS);
 }
 
 int main(int argc, char** argv) {

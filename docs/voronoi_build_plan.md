@@ -300,6 +300,55 @@ Stable across N (0.2M/1M/4M GPU: 1.51/1.49/1.47 M/s).
 - The `HappyTreeFriends` coupling is contained to `BvhAccess`; the bench stays as the characterisation
   that justifies *not* taking the SOTA best-first route for the cold build.
 
+## Where the performance is, and why the cold build sits at ~6.7 not ~14 M/s (full accounting)
+
+Prompted by "reach SOTA — you expected 15–20 M/s and moved away," the whole pipeline was re-measured
+and every locality/occupancy hypothesis tested to destruction (RTX 5080, FP32, N=1M). The result is an
+honest decomposition, not a knob left unturned.
+
+**The construct (cell building) is already at SOTA.** Construct-from-cache (candidates pre-supplied, no
+gather; `bench_construct`): **G0 17.2 / G1 14.0 / G2 12.0 M/s**. That *is* the Ray-et-al class (12.5 M/s,
+V100, 2018). The hard part — clip + dual-triangle retriangulation + volume + derivatives — is not behind.
+
+**The entire gap is the neighbour gather.** Full cold build: F4 fixed-K=64 kNN **6.73 M/s**; fused
+grid-walk **5.5 M/s** (tuned 6.45, below). So neighbour-finding roughly *doubles* the time vs the 14 M/s
+construct ceiling. Diagnosis of the fused grid (`bench_convexcell`, instrumented):
+
+- **It examines ~108 candidate distances to build a 15.5-face cell** (`examined/cell mean=107.6`). This
+  is the cost, and it is *not* wasteful: a cell's security ball (radius 2·Rmax, Rmax≈1.3·spacing) holds
+  ⁴⁄₃π(2.6)³≈**70 points** — you genuinely must test ~70 neighbours to *safely* close a 15-face cell.
+  Computing ~70 periodic neighbour-distances per cell costs about as much as building the cell. Inherent.
+- **Things that do NOT move it (each measured, each ~0):** Morton/Z-order point ordering vs row-major
+  (gather is *not* memory-latency-bound — it's instruction/throughput-bound on the distance count);
+  branchless periodic wrap vs integer-modulo; caching `secR2` between clips; shrinking the cell caps
+  MAXP/MAXT (with overflow held at 0; peak `nt` is only mean 28.8 / max 66, so 112 was head-room, and
+  68 runs identically — the apparent "+47% at 24/44" was **overflow cells bailing early**, an artifact).
+- **What DOES help (kept):** processing seeds in spatial (binned) order so a warp hits shared neighbour
+  cells — a steady **1.16–1.20×**; and a **finer grid + matched search window** (CC_DENS≈0.3, CC_SW=4)
+  that tightens the per-cell stop from 108→~65 examined → **6.45 M/s** (err 8e-5, complete). Both land
+  the fused path at F4-kNN parity (~6.5 M/s), up from the original 4.75.
+
+**Why we cannot just be 4× faster than V100 despite 4× its FP32.** The construct (14 M/s) is only ~1.1×
+Ray's V100 number, not ~4×. So the kernel is **not FP-bound** — it is memory/latency-bound on the
+per-thread cell state (the ConvexCell is hundreds of bytes of `pn/pd/pnbr` + `t*/v*/alive`, partly
+local-memory-resident). RTX 5080 and V100 have similar bandwidth, so they land in the same place. **This
+is the real ceiling, and SOTA shares it** — Ray's 12.5 M/s is construct-ceiling-dominated, with the
+gather folded in. The best-first detour (1.5 M/s) violated exactly this: it replaced a coalesced stream
+with a divergent per-thread BVH heap — maximal scatter, the opposite of what the hardware wants.
+
+**What it would actually take to exceed it** (none a quick win, all logged for Part III):
+1. **Warp-cooperative cell building** — distribute one cell across 32 threads' registers (cell leaves
+   local memory → register-resident → unlocks the 5080's FP headroom). The earlier warp-per-cell attempt
+   was occupancy/cut-bound (~0.6×); doing it *right* (vertex-parallel clip, no atomics) is the lever.
+2. **A more compact cell** (fewer live triangles / bytes) so one-thread-per-cell stops spilling.
+3. **Cooperative tiled gather** — a thread-block stages a grid tile + halo into shared memory once and
+   all its cells read neighbours from there, amortising the ~70 distance-tests across the block.
+
+**Bottom line for the cold build: construct = SOTA (14 M/s); full build = ~6.7 M/s, gather-limited by an
+irreducible ~70 distance-tests/cell; beating it needs warp-cooperative register-resident cells, not
+another gather tweak.** The moving-point workload (Part II) is the bigger win anyway — it *reuses*
+topology and re-runs only G (12–18 M/s) over a resident cell, skipping the gather entirely.
+
 **Part I exit:** `N(BVH) → B(ConvexCell update from cuboid) → G(tier)` — BVH gather 1.24× the grid
 (more on clustered), ConvexCell build 2.2× the half-edge with a 9× smaller frame, physics (G2)
 validated to machine precision, geometry tiered. The pieces are separated and each beats the
