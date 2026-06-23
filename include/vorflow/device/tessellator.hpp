@@ -149,7 +149,8 @@ struct CellBuilder {
   /// the serial buildCell and the team-per-cell leader so the published outputs match.
   template <int CAP>
   KOKKOS_INLINE_FUNCTION void finishCell(ScratchCell<Real, CAP>& c, int i, Real pix, Real piy,
-                                         Real piz, Real covSq, bool ovf) const {
+                                         Real piz, Real covSq, bool ovf,
+                                         bool geomDone = false) const {
     // Overflow short-circuit: a cell that overran its slot/candidate capacity may be a
     // corrupt half-edge mesh, so volume()/computeGeometry()/the facet walk could loop
     // forever or read garbage. Publish only the kOverflow flag (no facets) and leave it
@@ -177,8 +178,9 @@ struct CellBuilder {
     if (incomplete) st |= kIncomplete;
     status(i) = st;
     cellVol(i) = c.volume();
-    // Per-facet geometry (area vector + dV volume gradient); skipped for pure tess.
-    if (!c.emptyV() && withForceGeom) c.computeGeometry();
+    // Per-facet geometry (area vector + dV volume gradient); skipped for pure tess and
+    // when the team path already computed it in parallel (geomDone).
+    if (!c.emptyV() && withForceGeom && !geomDone) c.computeGeometry();
     // Collect this cell's live facets, then reserve a contiguous CSR range with one
     // atomic and write straight into the over-buffer.
     int faces[MAXF_TMP];
@@ -435,9 +437,29 @@ struct CellBuilder {
       covSq = Real(swUsed) * minCsz * Real(swUsed) * minCsz;
     }
 
-    // Leader finishes the cell (geometry parallelised in a later step).
+    // Force-geometry, parallelised across the team: zero the per-facet accumulators
+    // (leader; facets are few) then scatter each vertex's contribution in parallel with
+    // atomic adds. Only for the no-SDF path (the geometry must run on the post-clip cell,
+    // and the clip lives in the leader's finishCell); SDF cells keep the leader geometry.
+    // The atomic scatter reorders the per-facet sum vs the serial order (~1e-15, well under
+    // the 1e-9 oracle tolerance); the cut and topology stay bit-identical.
+    const bool ovf = sh[1] != 0;
+    bool geomDone = false;
+    if constexpr (std::is_same_v<Sdf, NoSdf>) {
+      if (withForceGeom && !ovf && !c.emptyV()) {
+        Kokkos::single(Kokkos::PerTeam(team), [&]() { c.zeroGeometry(0, c.numAllocF); });
+        team.team_barrier();
+        const int nv = c.numAllocV;
+        Kokkos::parallel_for(Kokkos::TeamThreadRange(team, 0, nv),
+                             [&](const int vc) { c.template accumGeometryVertex<true>(vc); });
+        team.team_barrier();
+        geomDone = true;
+      }
+    }
+    // Leader finishes the cell (status/volume/SDF clip/facet write; geometry already done
+    // above when geomDone).
     Kokkos::single(Kokkos::PerTeam(team),
-                   [&]() { finishCell(c, i, pix, piy, piz, covSq, sh[1] != 0); });
+                   [&]() { finishCell(c, i, pix, piy, piz, covSq, ovf, geomDone); });
   }
 };
 

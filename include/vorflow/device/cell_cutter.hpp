@@ -526,60 +526,86 @@ struct ScratchCell {
         eInv[m][c] /= vol;
   }
 
-  /// Faithful port of CellGeometry::computeEdgeInv + diffVolume: fills fArea, fdV
-  /// from the in-scratch half-edge mesh. connV[f] is the plane vector pvec[f]
-  /// (= pos[nbr]-pos[seed] for both Voronoi and Power); m_rSq[f] is poff[f].
-  KOKKOS_INLINE_FUNCTION void computeGeometry() {
-    for (int f = 0; f < numAllocF; ++f)
+  /// Accumulate `val` into `dst`, atomically iff Atomic (the team-parallel geometry
+  /// scatters from several vertices into the same facet concurrently). The atomic path
+  /// reorders the per-facet sum, so it differs from the serial order by rounding (~1e-15),
+  /// far below the published 1e-9 oracle tolerance; the serial path (Atomic=false) is
+  /// plain += and bit-identical to the legacy reference.
+  template <bool Atomic>
+  KOKKOS_INLINE_FUNCTION static void addAcc(Real& dst, Real val) {
+    if constexpr (Atomic)
+      Kokkos::atomic_add(&dst, val);
+    else
+      dst += val;
+  }
+
+  /// Zero the per-facet geometry accumulators for alive facets in [f0,f1).
+  KOKKOS_INLINE_FUNCTION void zeroGeometry(int f0, int f1) {
+    for (int f = f0; f < f1; ++f)
       if (aliveF[f])
         for (int c = 0; c < 3; ++c) {
           fArea[f][c] = 0;
           fdV[f][c] = 0;
         }
+  }
+
+  /// Scatter one vertex vc's contributions to its three incident facets' area/dV.
+  /// Atomic selects atomic vs plain accumulation (see addAcc). Requires the geometry
+  /// accumulators to be zeroed first. Faithful to CellGeometry::diffVolume per vertex.
+  template <bool Atomic>
+  KOKKOS_INLINE_FUNCTION void accumGeometryVertex(int vc) {
+    if (!aliveV[vc])
+      return;
     const int eOpp[3] = {2, 0, 1};
-    for (int vc = 0; vc < numAllocV; ++vc) {
-      if (!aliveV[vc])
-        continue;
-      int vN[3], ff[3];
-      vN[0] = getVertex(vlab[vc][0]);
-      ff[2] = getFacet(vlab[vc][0]);
-      vN[1] = getVertex(vlab[vc][1]);
-      ff[0] = getFacet(vlab[vc][1]);
-      vN[2] = getVertex(vlab[vc][2]);
-      ff[1] = getFacet(vlab[vc][2]);
-      Real dv[3][3];
-      for (int c = 0; c < 3; ++c) {
-        dv[0][c] = vpos[vN[0]][c] - vpos[vN[1]][c];
-        dv[1][c] = vpos[vN[1]][c] - vpos[vN[2]][c];
-        dv[2][c] = vpos[vN[2]][c] - vpos[vN[0]][c];
-      }
-      Real eInv[3][3];
-      vertexEdgeInv(vc, eInv);
-      Real dVertex[3][3][3];
-      for (int j = 0; j < 3; ++j)
-        for (int ii = 0; ii < 3; ++ii)
-          for (int l = 0; l < 3; ++l)
-            dVertex[j][ii][l] = eInv[eOpp[ii]][l] * (pvec[ff[ii]][j] - vpos[vc][j]);
-      for (int m = 0; m < 3; ++m) {
-        Real dA[3];
-        dA[0] = vpos[vc][1] * dv[m][2] - vpos[vc][2] * dv[m][1];
-        dA[1] = vpos[vc][2] * dv[m][0] - vpos[vc][0] * dv[m][2];
-        dA[2] = vpos[vc][0] * dv[m][1] - vpos[vc][1] * dv[m][0];
-        for (int c = 0; c < 3; ++c)
-          fArea[ff[m]][c] += Real(0.25) * dA[c];
-        for (int j = 0; j < 3; ++j) {
-          for (int ii = 0; ii < 3; ++ii) {
-            Real ddA[3];
-            ddA[0] = dVertex[j][ii][1] * dv[m][2] - dVertex[j][ii][2] * dv[m][1];
-            ddA[1] = dVertex[j][ii][2] * dv[m][0] - dVertex[j][ii][0] * dv[m][2];
-            ddA[2] = dVertex[j][ii][0] * dv[m][1] - dVertex[j][ii][1] * dv[m][0];
-            for (int c = 0; c < 3; ++c)
-              fdV[ff[ii]][j] += pvec[ff[m]][c] * ddA[c] / Real(12);
-          }
-          fdV[ff[m]][j] += dA[j] / Real(24);
+    int vN[3], ff[3];
+    vN[0] = getVertex(vlab[vc][0]);
+    ff[2] = getFacet(vlab[vc][0]);
+    vN[1] = getVertex(vlab[vc][1]);
+    ff[0] = getFacet(vlab[vc][1]);
+    vN[2] = getVertex(vlab[vc][2]);
+    ff[1] = getFacet(vlab[vc][2]);
+    Real dv[3][3];
+    for (int c = 0; c < 3; ++c) {
+      dv[0][c] = vpos[vN[0]][c] - vpos[vN[1]][c];
+      dv[1][c] = vpos[vN[1]][c] - vpos[vN[2]][c];
+      dv[2][c] = vpos[vN[2]][c] - vpos[vN[0]][c];
+    }
+    Real eInv[3][3];
+    vertexEdgeInv(vc, eInv);
+    Real dVertex[3][3][3];
+    for (int j = 0; j < 3; ++j)
+      for (int ii = 0; ii < 3; ++ii)
+        for (int l = 0; l < 3; ++l)
+          dVertex[j][ii][l] = eInv[eOpp[ii]][l] * (pvec[ff[ii]][j] - vpos[vc][j]);
+    for (int m = 0; m < 3; ++m) {
+      Real dA[3];
+      dA[0] = vpos[vc][1] * dv[m][2] - vpos[vc][2] * dv[m][1];
+      dA[1] = vpos[vc][2] * dv[m][0] - vpos[vc][0] * dv[m][2];
+      dA[2] = vpos[vc][0] * dv[m][1] - vpos[vc][1] * dv[m][0];
+      for (int c = 0; c < 3; ++c)
+        addAcc<Atomic>(fArea[ff[m]][c], Real(0.25) * dA[c]);
+      for (int j = 0; j < 3; ++j) {
+        for (int ii = 0; ii < 3; ++ii) {
+          Real ddA[3];
+          ddA[0] = dVertex[j][ii][1] * dv[m][2] - dVertex[j][ii][2] * dv[m][1];
+          ddA[1] = dVertex[j][ii][2] * dv[m][0] - dVertex[j][ii][0] * dv[m][2];
+          ddA[2] = dVertex[j][ii][0] * dv[m][1] - dVertex[j][ii][1] * dv[m][0];
+          for (int c = 0; c < 3; ++c)
+            addAcc<Atomic>(fdV[ff[ii]][j], pvec[ff[m]][c] * ddA[c] / Real(12));
         }
+        addAcc<Atomic>(fdV[ff[m]][j], dA[j] / Real(24));
       }
     }
+  }
+
+  /// Faithful port of CellGeometry::computeEdgeInv + diffVolume: fills fArea, fdV
+  /// from the in-scratch half-edge mesh (serial; bit-identical to the legacy reference).
+  /// connV[f] is the plane vector pvec[f]; m_rSq[f] is poff[f]. The team-parallel path
+  /// splits the vertex loop across a team (zeroGeometry + atomic accumGeometryVertex).
+  KOKKOS_INLINE_FUNCTION void computeGeometry() {
+    zeroGeometry(0, numAllocF);
+    for (int vc = 0; vc < numAllocV; ++vc)
+      accumGeometryVertex<false>(vc);
   }
 
   /// Gradient of facet f's area² w.r.t. the plane positions of f and its
