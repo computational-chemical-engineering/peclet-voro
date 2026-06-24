@@ -231,22 +231,27 @@ A_k = ½ Σ v_i×v_{i+1} is a sum of **outer products** — but over *cyclically
 triangle list is unordered, so the cyclic order must be recovered. `atan2` recovers it by sorting on the
 in-plane angle. Two ways to avoid it, both tried (RTX 5080, N=1M, re-eval throughput):
 
-| volume method | Mc/s | correct? |
+| volume method | Mc/s (full re-eval) | correct? |
 |---|---:|---|
-| `atan2` face-sort (original) | 65.0 | — |
-| **pseudo-angle** (diamond angle, transcendental-free, same sort) | 65.1 | Δ=2e-12, tests pass |
-| **order-free topological walk** (cyclic order from shared-plane adjacency, cross products only) | 45.5 | Δ=6e-11 |
+| `atan2` face-sort (original) | 65.4 | — |
+| pseudo-angle (diamond, transcendental-free, same sort) | 65.4 | Δ=2e-12, tests pass |
+| order-free walk, **no** stored adjacency (`findSharing` hops) | 45.7 (0.70×) | Δ=6e-11 |
+| **order-free walk, STORED adjacency (O(1) hops)** — `volumeAdj` | **69.3 (1.06×)** | Δ=2e-12 |
 
-- **`atan2` was NOT the bottleneck:** the transcendental-free pseudo-angle is the *same* speed (the GPU
-  hides `atan2`). Kept it anyway — free, robust, identical ordering, geometry+dV tests pass (`volume()` and
-  `facetGeometry`).
-- **The order-free walk is correct but slower (0.70×):** with no stored adjacency, each boundary hop is an
-  O(nt) `findSharing` search, which costs more than the `atan2` it removes. (`ConvexCell::volumeWalk()` kept
-  as the documented order-free variant — it would win only with stored triangle adjacency, which is itself
-  GPU-negative for the clip.)
-- ⇒ the volume cost is the **per-face gather + ordering + area summation** (inherent to the dual-triangle
-  representation), not the transcendental. Re-eval stays at **65 M/s**; the geometry tier has no cheap win
-  on this representation. (A true single-pass O(nt) volume would need adjacency or a different cell rep.)
+The right resolution (per a reviewer note): the face area `A_k=½Σ vᵢ×vⱼ` is outer products over *cyclically
+adjacent* vertices — so the global `atan2` sort is **not** needed, only the **local** order, i.e. each
+vertex's neighbour on each face (its dual triangle shares two planes). Findings:
+- **`atan2` is not the bottleneck** — the transcendental-free pseudo-angle is identical speed (GPU hides
+  `atan2`); kept it (free, robust, geometry+dV tests pass).
+- **Order-free needs *stored* adjacency to win.** The walk that recovers the local order by `findSharing`
+  (O(nt)/hop) is slower (0.70×); precomputing the 3 neighbours per triangle ONCE at build (amortised; the
+  adjacency-maintenance cost that made adjacency GPU-negative for the *clip* is NOT paid in re-eval, where
+  topology is frozen) makes each hop O(1) → **`volumeAdj` is +6% (65→69 M/s), order-free, exact.**
+- Modest because for small cells (~28 triangles) the gather+sort isn't much dearer than the walk, and the
+  stored adjacency adds ~672 B/cell of read traffic. `ConvexCell::buildAdjacency()`/`volumeAdj()` added;
+  `adjT` field is free for the cold construct (13.9 M/s unchanged). **The bigger payoff is applying the
+  same adjacency walk to `facetGeometry` (G2/dV) — the oriented area vectors for forces use the same
+  gather+sort and would become order-free too — the next step if pushing re-eval further.**
 
 ---
 

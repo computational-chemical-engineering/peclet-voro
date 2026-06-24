@@ -132,18 +132,29 @@ int main(int argc, char** argv) {
                          KOKKOS_LAMBDA(int i) { buildCell(i, cells0L(i), posRaw, candRaw, ncRaw, L); });
     Kokkos::fence();
 
-    // --- compact resident topology: pnbr + packed triangles only (no planes/vertices/box), ~200 B/cell
+    // adjacency for the order-free O(1)-hop volume — computed ONCE at build (amortised)
+    Kokkos::parallel_for("buildAdj", Kokkos::RangePolicy<Exec>(0, N),
+                         KOKKOS_LAMBDA(int i) { cells0L(i).buildAdjacency(); });
+    Kokkos::fence();
+
+    // --- compact resident topology: pnbr + packed triangles + adjacency (no planes/vertices/box)
     Kokkos::View<int*, Mem> topoNp("topoNp", N), topoNt("topoNt", N);
     Kokkos::View<int*, Mem> topoPnbr("topoPnbr", (size_t)N * CMAXP);
     Kokkos::View<unsigned*, Mem> topoTri("topoTri", (size_t)N * CMAXT);
+    Kokkos::View<unsigned short*, Mem> topoAdj("topoAdj", (size_t)N * CMAXT * 3);
     auto topoNpL = topoNp; auto topoNtL = topoNt; auto topoPnbrL = topoPnbr; auto topoTriL = topoTri;
+    auto topoAdjL = topoAdj;
     Kokkos::parallel_for("extract", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
       const Cell& c = cells0L(i);
       topoNpL(i) = c.np; topoNtL(i) = c.nt;
       for (int k = 0; k < c.np; ++k) topoPnbrL((size_t)i * CMAXP + k) = c.pnbr[k];
-      for (int t = 0; t < c.nt; ++t)
+      for (int t = 0; t < c.nt; ++t) {
         topoTriL((size_t)i * CMAXT + t) = (unsigned)c.t0[t] | ((unsigned)c.t1[t] << 8) |
                                           ((unsigned)c.t2[t] << 16) | ((c.alive[t] ? 1u : 0u) << 24);
+        topoAdjL(((size_t)i * CMAXT + t) * 3 + 0) = c.adjT[t][0];
+        topoAdjL(((size_t)i * CMAXT + t) * 3 + 1) = c.adjT[t][1];
+        topoAdjL(((size_t)i * CMAXT + t) * 3 + 2) = c.adjT[t][2];
+      }
     });
     Kokkos::fence();
     std::printf("  storage/cell: full=%zu B   compact=%d B\n", sizeof(Cell),
@@ -256,25 +267,45 @@ int main(int argc, char** argv) {
         });
         Kokkos::fence();
       };
-      aos(true); aos(false); soa(); walk();  // warm
-      // correctness: walk-volume sum vs atan2-volume sum
+      auto adj = [&]() {  // order-free O(1)-hop volume via stored adjacency (the user's idea)
+        Kokkos::parallel_for("adj", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c; c.initBoxPlanes(L, L, L);
+          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
+          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+          for (int t = 0; t < nt; ++t) {
+            const unsigned w = topoTriL((size_t)i * CMAXT + t);
+            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
+            c.alive[t] = (w >> 24) & 1u;
+            c.adjT[t][0] = topoAdjL(((size_t)i * CMAXT + t) * 3 + 0);
+            c.adjT[t][1] = topoAdjL(((size_t)i * CMAXT + t) * 3 + 1);
+            c.adjT[t][2] = topoAdjL(((size_t)i * CMAXT + t) * 3 + 2);
+          }
+          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+          vtmpL(i) = c.volumeAdj();
+        });
+        Kokkos::fence();
+      };
+      aos(true); aos(false); soa(); walk(); adj();  // warm
       auto sumv = [&]() {
         auto h = Kokkos::create_mirror_view(vtmp); Kokkos::deep_copy(h, vtmp);
         double s = 0; for (int i = 0; i < N; ++i) s += h(i); return s;
       };
       aos(true); const double sAtan = sumv();
       walk(); const double sWalk = sumv();
-      double tA = 1e30, tNv = 1e30, tS = 1e30, tW = 1e30;
+      adj(); const double sAdj = sumv();
+      double tA = 1e30, tNv = 1e30, tS = 1e30, tW = 1e30, tJ = 1e30;
       for (int r = 0; r < 5; ++r) {
         auto a0 = clk::now(); aos(true); auto a1 = clk::now(); tA = std::min(tA, secs(a0, a1));
         auto b0 = clk::now(); aos(false); auto b1 = clk::now(); tNv = std::min(tNv, secs(b0, b1));
         auto c0 = clk::now(); soa(); auto c1 = clk::now(); tS = std::min(tS, secs(c0, c1));
         auto d0 = clk::now(); walk(); auto d1 = clk::now(); tW = std::min(tW, secs(d0, d1));
+        auto e0 = clk::now(); adj(); auto e1 = clk::now(); tJ = std::min(tJ, secs(e0, e1));
       }
-      std::printf("  re-eval decomposition (Mc/s):  AoS-full %.1f   AoS-no-volume %.1f   SoA-full %.1f"
-                  "   walk-volume %.1f\n", N / tA / 1e3, N / tNv / 1e3, N / tS / 1e3, N / tW / 1e3);
-      std::printf("  volume check: atan2 Σ=%.6f  walk Σ=%.6f  |Δ|=%.2e\n", sAtan, sWalk,
-                  std::fabs(sAtan - sWalk));
+      std::printf("  re-eval decomposition (Mc/s):  AoS-full %.1f   no-volume %.1f   SoA %.1f"
+                  "   walk %.1f   adj %.1f\n", N / tA / 1e3, N / tNv / 1e3, N / tS / 1e3,
+                  N / tW / 1e3, N / tJ / 1e3);
+      std::printf("  volume check: atan2 Σ=%.6f  walk |Δ|=%.2e  adj |Δ|=%.2e\n", sAtan,
+                  std::fabs(sAtan - sWalk), std::fabs(sAtan - sAdj));
     }
 
     std::printf("  delta  reeval-full reeval-cmp  rebuild  cmp/rebuild  topo-stable  Σvol err\n");

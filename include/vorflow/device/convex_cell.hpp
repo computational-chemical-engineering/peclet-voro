@@ -370,6 +370,60 @@ struct ConvexCell {
     return vol * (Real(1) / Real(3));
   }
 
+  unsigned short adjT[MAXT][3];  ///< (optional) neighbour triangle across the edge OPPOSITE local
+                                 ///< vertex 0/1/2 — built once for the O(1)-hop order-free volume.
+
+  /// Fill adjT: for each triangle, the neighbour across each of its 3 edges. O(nt²) — call ONCE
+  /// (e.g. after the cold build); re-eval then reuses it. Edge opposite vertex 0 is (t1,t2), etc.
+  KOKKOS_INLINE_FUNCTION void buildAdjacency() {
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      adjT[t][0] = (unsigned short)findSharing(t, t1[t], t2[t]);
+      adjT[t][1] = (unsigned short)findSharing(t, t0[t], t2[t]);
+      adjT[t][2] = (unsigned short)findSharing(t, t0[t], t1[t]);
+    }
+  }
+
+  /// Cell volume (G1), order-free AND search-free: walk each face's boundary via the stored
+  /// adjacency (O(1) hops, no findSharing, no atan2, no sort). One O(nt) pass picks a start
+  /// triangle per face; the per-face walk then accumulates A_k = ½ Σ v×v' via the local winding.
+  KOKKOS_INLINE_FUNCTION Real volumeAdj() const {
+    short faceTri[MAXP];
+    for (int k = 0; k < np; ++k) faceTri[k] = -1;
+    for (int t = 0; t < nt; ++t) {  // one start triangle per face, single pass
+      if (!alive[t]) continue;
+      if (faceTri[t0[t]] < 0) faceTri[t0[t]] = (short)t;
+      if (faceTri[t1[t]] < 0) faceTri[t1[t]] = (short)t;
+      if (faceTri[t2[t]] < 0) faceTri[t2[t]] = (short)t;
+    }
+    Real vol = 0;
+    for (int k = 0; k < np; ++k) {
+      int tstart = faceTri[k];
+      if (tstart < 0) continue;
+      int inplane = (t0[tstart] != k) ? t0[tstart] : t1[tstart];  // arrival edge (k, inplane)
+      Real Ax = 0, Ay = 0, Az = 0;
+      int tcur = tstart;
+      for (int g = 0; g <= nt; ++g) {
+        const int q0 = t0[tcur], q1 = t1[tcur], q2 = t2[tcur];
+        // leave via edge (k, outplane); neighbour = edge OPPOSITE the arrival plane `inplane`
+        const int outplane = (q0 != k && q0 != inplane) ? q0 : ((q1 != k && q1 != inplane) ? q1 : q2);
+        const int li = (q0 == inplane) ? 0 : ((q1 == inplane) ? 1 : 2);
+        const int tnext = adjT[tcur][li];
+        if (tnext < 0 || tnext >= nt) break;
+        Ax += vy[tcur] * vz[tnext] - vz[tcur] * vy[tnext];
+        Ay += vz[tcur] * vx[tnext] - vx[tcur] * vz[tnext];
+        Az += vx[tcur] * vy[tnext] - vy[tcur] * vx[tnext];
+        inplane = outplane;
+        tcur = tnext;
+        if (tcur == tstart) break;
+      }
+      const Real area = Real(0.5) * Kokkos::sqrt(Ax * Ax + Ay * Ay + Az * Az);
+      const Real nlen = Kokkos::sqrt(pn[k][0] * pn[k][0] + pn[k][1] * pn[k][1] + pn[k][2] * pn[k][2]);
+      vol += (pd[k] / nlen) * area;
+    }
+    return vol * (Real(1) / Real(3));
+  }
+
   /// Cell volume (G1), order-free / atan2-free. Same V = (1/3) Σ_k h_k A_k, but each face's area
   /// vector A_k = ½ Σ v_i × v_{i+1} is summed by WALKING the face boundary in topological order
   /// instead of sorting its vertices by angle: two face-k vertices are adjacent iff their dual
