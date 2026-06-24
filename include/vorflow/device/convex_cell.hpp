@@ -463,6 +463,91 @@ struct ConvexCell {
     return vol * (Real(1) / Real(3));
   }
 
+  // ---- Vertex-local, SORT-FREE geometry (Ray/Sokolov/Lefebvre/Lévy TOG 2018; geogram ConvexCell) ----
+  // Plane stored as a (non-unit) normal n with interior {x : n·x ≤ n·n}; then x=n is the foot of the
+  // perpendicular from the origin onto the plane (the facet point), and |n| is the origin→plane distance.
+  // Our cell stores (pn,pd) as {pn·x ≤ pd}, so n = (pd/|pn|²) pn. Volume by the divergence theorem,
+  // coning every boundary flag (facet n_i, edge foot f, vertex v) to the origin: each tetra (0,n_i,f,v)
+  // is LOCAL to one vertex + its 3 planes, and the signed sum is exact even when feet fall outside their
+  // faces. No vertex ordering, no adjacency — a pure per-vertex scatter.
+
+  /// n-representation of plane k (foot of perpendicular from origin): n = (pd/|pn|²) pn.
+  KOKKOS_INLINE_FUNCTION void planeN(int k, Real n[3]) const {
+    const Real l2 = pn[k][0] * pn[k][0] + pn[k][1] * pn[k][1] + pn[k][2] * pn[k][2];
+    const Real a = (l2 > Real(0)) ? pd[k] / l2 : Real(0);
+    n[0] = a * pn[k][0]; n[1] = a * pn[k][1]; n[2] = a * pn[k][2];
+  }
+  KOKKOS_INLINE_FUNCTION static void xprod(const Real a[3], const Real b[3], Real o[3]) {
+    o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0];
+  }
+  KOKKOS_INLINE_FUNCTION static Real dot3(const Real a[3], const Real b[3]) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  }
+  KOKKOS_INLINE_FUNCTION static Real det3(const Real a[3], const Real b[3], const Real c[3]) {
+    Real bc[3]; xprod(b, c, bc); return dot3(a, bc);
+  }
+  /// foot of the perpendicular from v onto the edge line of direction ck: v − (v·ck/ck·ck) ck.
+  KOKKOS_INLINE_FUNCTION static void edgeFoot(const Real v[3], const Real ck[3], Real f[3]) {
+    const Real c2 = dot3(ck, ck), s = (c2 > Real(0)) ? dot3(v, ck) / c2 : Real(0);
+    f[0] = v[0] - s * ck[0]; f[1] = v[1] - s * ck[1]; f[2] = v[2] - s * ck[2];
+  }
+
+  /// Cell volume (G1) by the vertex-local flag/divergence sum — NO ordering, NO adjacency, NO atan2,
+  /// NO findSharing. One pass over vertices; each contributes 3 signed determinants.
+  KOKKOS_INLINE_FUNCTION Real volumePerVertex() const {
+    Real vol = 0;
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      Real n1[3], n2[3], n3[3];
+      planeN(t0[t], n1); planeN(t1[t], n2); planeN(t2[t], n3);
+      Real c1[3], c2[3], c3[3];
+      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      Real D = dot3(n1, c1);
+      if (D < Real(0))  // canonical order D>0: swap (n2,n3) and (c2,c3); v is unchanged
+        for (int a = 0; a < 3; ++a) {
+          Real tmp = n2[a]; n2[a] = n3[a]; n3[a] = tmp;
+          tmp = c2[a]; c2[a] = c3[a]; c3[a] = tmp;
+        }
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      Real f12[3], f23[3], f31[3];
+      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      Real e[3], d = 0;
+      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; d += det3(e, f12, v);
+      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; d += det3(e, f23, v);
+      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2]; d += det3(e, f31, v);
+      vol += d;
+    }
+    return vol * (Real(1) / Real(6));
+  }
+
+  /// Per-facet areas by the same vertex-local scatter (area[k] zeroed by caller, size np). Each vertex
+  /// scatters into its 3 incident facets; |n_i| is the only sqrt (per facet). Order/adjacency-free.
+  KOKKOS_INLINE_FUNCTION void facetAreasPerVertex(Real* area) const {
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      int k1 = t0[t], k2 = t1[t], k3 = t2[t];
+      Real n1[3], n2[3], n3[3];
+      planeN(k1, n1); planeN(k2, n2); planeN(k3, n3);
+      Real c1[3], c2[3], c3[3];
+      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      Real D = dot3(n1, c1);
+      if (D < Real(0)) {  // canonical: swap planes 2,3 (normals, cross, AND indices)
+        for (int a = 0; a < 3; ++a) { Real tm = n2[a]; n2[a] = n3[a]; n3[a] = tm; tm = c2[a]; c2[a] = c3[a]; c3[a] = tm; }
+        int tk = k2; k2 = k3; k3 = tk;
+      }
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      Real f12[3], f23[3], f31[3];
+      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      Real g[3];
+      g[0] = f12[0] - f31[0]; g[1] = f12[1] - f31[1]; g[2] = f12[2] - f31[2];
+      area[k1] += det3(n1, g, v) / (Real(2) * Kokkos::sqrt(dot3(n1, n1)));
+      g[0] = f23[0] - f12[0]; g[1] = f23[1] - f12[1]; g[2] = f23[2] - f12[2];
+      area[k2] += det3(n2, g, v) / (Real(2) * Kokkos::sqrt(dot3(n2, n2)));
+      g[0] = f31[0] - f23[0]; g[1] = f31[1] - f23[1]; g[2] = f31[2] - f23[2];
+      area[k3] += det3(n3, g, v) / (Real(2) * Kokkos::sqrt(dot3(n3, n3)));
+    }
+  }
+
   /// Per-facet physics geometry (G2 tier) for plane k: the outward face area VECTOR, the
   /// volume gradient dV = ∂V/∂r_k, and the connecting vector r_k (= the plane normal). Matches
   /// the half-edge facetArea / facetConnect / facetConnVec. Returns false if k is not a face.
