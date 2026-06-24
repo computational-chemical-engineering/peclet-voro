@@ -1,3 +1,4 @@
 geogram/
 *.o
 bench_geogram
+voro_gpu/

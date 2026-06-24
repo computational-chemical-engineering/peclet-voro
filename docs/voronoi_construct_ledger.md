@@ -133,3 +133,42 @@ Hardware: RTX 2080 Ti / 3080. Code: not located (no GitHub link in the paper).
 
 **Recommended next direction (if pushing construct further): implement the edge-crossing / point-in-cell
 bisector test to skip no-op clips, rather than any further cell-representation tweak.**
+
+## REAL SOTA GPU benchmark on the RTX 5080 (Liu et al. 2020 CUDA), measured
+
+Built and ran an actual published SOTA GPU Voronoi CUDA code — **Liu/Ma/Guo/Yan, "Parallel Computation of
+3D Clipped Voronoi Diagrams", TVCG 2020** (`github.com/xh-liu-tech/3D-Voronoi-GPU`), the ConvexCell+kNN
+follow-up to Ray et al. — **on this RTX 5080**. Ported to CUDA 13.2 / sm_120 (arch flag, cublas path,
+3 removed `cudaDeviceProp` fields; the texture code uses the modern object API so it built). Harness =
+`extern_bench/voro_gpu_bench.md` (reproduction steps + the box-mesh generator + the timing patch).
+Input: refined unit-cube tet domain + **1M uniform (white-noise) sites**, K=90 (their white-noise preset).
+Added `cudaEvent` timing around exactly the gather (`kn_solve`) and the pure construct
+(`voro_cell_test_GPU_param`); bypassed the restricted/tet-clip path (it crashes on our coarse box, and is
+not the comparable phase).
+
+| phase (1M sites, K=90, RTX 5080, FP32) | SOTA (Liu et al.) | ours |
+|---|---:|---:|
+| **gather** (grid kNN) | **17.5 Msites/s** (57 ms) | ~15 (F4 kNN query) |
+| **construct** (ConvexCell clip) | **9.5 Mcells/s** (105 ms) | **14.5** (G1) / 12.0 (G2) |
+
+**Findings — this settles the "are we at SOTA" question empirically:**
+- **Our construct (14.5 M/s) is FASTER than this SOTA code's construct (9.5 M/s)** on the same GPU. Caveat:
+  their `voro_cell_test` also writes the full cell topology (`vc.tr[]`, `vc.clip[]`) to global memory,
+  while our G1 writes only volume — but even our G2 (full geometry + derivatives, 12.0) beats their 9.5,
+  and we compute dV which they don't. So we are at/above SOTA on the construct, confirmed against running code.
+- **The "~12 M/s" is confirmed as the right ballpark** for the per-phase GPU throughput: construct 9.5–14.5,
+  gather 17.5 — consistent with Ray's V100 12.5 (full, volume-only) and the 2026 paper's 10–19 M/s. The
+  full restricted-Voronoi-with-topology pipeline here is ~6 M/s on the 5080 (gather 57 ms + construct
+  105 ms), i.e. **the same order as our own full build (6.7)** — the full-build number is gather-limited
+  for everyone, not a sign we're behind.
+- **How the SOTA gather hits 17.5 M/s** (`knearests.cu::knearest`, the part specifically asked about):
+  (1) a **grid counting-sort** reorders points so a cell's neighbours are contiguous; (2) a per-thread
+  **shared-memory K-max-heap** — the heap root is the running K-th-nearest distance, so most candidates
+  are killed by ONE O(1) compare and only closer ones pay O(log K); (3) a **distance-sorted shell walk**
+  over precomputed cell offsets; (4) **early termination** when the K-th-nearest-so-far is closer than the
+  nearest possible point in the next shell. That is the gather recipe — and it's essentially the kNN
+  pattern we already use; the 17.5 vs our ~15 gap is small.
+
+**Net (empirical, on real SOTA code): we are at/above SOTA on the construct, comparable on the gather and
+full build. The remaining headroom is the no-op-clip avoidance (point-in-cell, above), not the cell rep
+and not the gather.**
