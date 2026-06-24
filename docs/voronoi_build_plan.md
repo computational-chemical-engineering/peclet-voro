@@ -300,6 +300,36 @@ Stable across N (0.2M/1M/4M GPU: 1.51/1.49/1.47 M/s).
 - The `HappyTreeFriends` coupling is contained to `BvhAccess`; the bench stays as the characterisation
   that justifies *not* taking the SOTA best-first route for the cold build.
 
+## Compact-cell redesign — tested, does NOT help: the construct is not memory-bound
+
+Hypothesis (good one): the cell is 3536 B of local memory (ptxas: `3536 bytes stack frame, 0 spill,
+56 reg` — local because the arrays are dynamically indexed, *not* because of size), so shrink the
+footprint and the memory-bound construct should speed up. `convex_cell_compact.hpp` does exactly that:
+**packed 32-bit triangle** (3×10-bit plane indices + alive bit, 16 B→4 B) and **no vertex cache** —
+the dual vertex is recomputed from its 3 planes (Cramer) wherever needed, trading ~17 KB/cell of local
+vertex traffic for FP32 on the ~idle units. Cell shrinks 3084→1484 B. `bench_construct_compact` A/Bs
+it against the cached cell on identical candidates.
+
+**Result (RTX 5080, FP32, N=1M):** compact = **0.72× the cached cell** (G1 10.0 vs 14.0 M/s), same
+volumes. Smaller AND fewer registers (52 vs 56) yet *slower*. So the construct is **not** footprint- or
+register-occupancy-bound — the recompute's division in the dependent kill-scan cost more than the memory
+it saved. The cached-vertex design is already the right call.
+
+**Occupancy sweep (LaunchBounds<MaxThreads,MinBlocksPerSM>):** default 13.2 → `<256,4>` **14.5** (+10%)
+→ `<256,6>`/`<128,12>` 12.2 (register spill). So the construct is only *mildly* occupancy-sensitive:
++10% at the sweet spot, then negative. `LaunchBounds<256,4>` is a small free win worth keeping on the
+construct-heavy kernels.
+
+**Conclusion:** at 0.1% of compute and ~4.5% of bandwidth the construct *looks* latency-bound, but it is
+bound by the **intrinsic serial work of the clip chain** (per-candidate `maxVertexRsq` O(nt) + per-clip
+O(nt) kill-scan + O(nt)-per-edge `findSharing`), and every standard lever to cut that has now been tried
+and lost: footprint/packing (here, 0.72×), explicit triangle adjacency (earlier, GPU-negative),
+incremental security radius (earlier, GPU-negative), cell-cap shrink (neutral at overflow=0). **14.5 M/s
+is the algorithm's ceiling on this hardware, and it already matches/beats Ray-et-al's V100 12.5.** The
+cold-build redesign target was the wrong component: ConvexCell is at its ceiling and is *not* the
+full-build bottleneck — the **gather** is (next section). Warp-cooperative is also contraindicated: the
+occupancy result says we want *more* cells in flight, and one-cell-per-warp gives 32× *fewer*.
+
 ## Where the performance is, and why the cold build sits at ~6.7 not ~14 M/s (full accounting)
 
 Prompted by "reach SOTA — you expected 15–20 M/s and moved away," the whole pipeline was re-measured
