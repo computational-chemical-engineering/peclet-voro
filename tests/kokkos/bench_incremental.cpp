@@ -118,6 +118,9 @@ int main(int argc, char** argv) {
     Kokkos::View<real_t*, Mem> pos("pos", 3 * N);  // current global positions
     Kokkos::View<Cell*, Mem> cells0("cells0", N);  // resident topology (built once)
     Kokkos::View<real_t*, Mem> volRe("volRe", N), volRb("volRb", N), volRc("volRc", N);
+    Kokkos::View<int*, Mem> needfix("needfix", N);          // Phase 1.5 reclip flag
+    Kokkos::View<int*, Mem> fixList("fixList", N);          // compacted flagged indices
+    Kokkos::View<int, Mem> fixCount("fixCount");            // # flagged
     const real_t* posRaw = pos.data();
     const int* candRaw = candId.data();
     const int* ncRaw = ncand.data();
@@ -221,6 +224,93 @@ int main(int argc, char** argv) {
       std::printf("  %4.2f  %9.1f  %9.1f  %8.1f  %7.2fx   %8.1f%%   %.2e\n", d, N / tRe / 1e3,
                   N / tRc / 1e3, N / tRb / 1e3, tRb / tRc, 100.0 * stable / N, std::fabs(sre - 1.0));
       if (scmp_match > 1e-3) std::printf("    [warn] compact vs full re-eval differ: %.2e\n", scmp_match);
+
+      // ---- Phase 1.5: re-eval + flag, stream-compact, re-clip only flagged ----
+      auto needfixL = needfix; auto fixListL = fixList; auto fixCountL = fixCount;
+      auto reevalFlag = [&] {
+        Kokkos::deep_copy(fixCount, 0);
+        Kokkos::parallel_for("reevalFlag", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c;
+          c.initBoxPlanes(L, L, L);
+          const int np = topoNpL(i), nt = topoNtL(i);
+          c.np = np; c.nt = nt; c.overflow = false;
+          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+          for (int t = 0; t < nt; ++t) {
+            const unsigned w = topoTriL((size_t)i * CMAXT + t);
+            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
+            c.alive[t] = (w >> 24) & 1u;
+          }
+          const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
+          c.reevalGeometry(sx, sy, sz, posRaw, L);
+          volRcL(i) = c.volume();
+          // needs-reclip test: face beyond 2Rmax (lost) OR non-face kNN that actually cuts (gained)
+          const real_t Rm2 = c.maxVertexRsq();  // cache: one O(nt) scan, not one per candidate
+          const real_t Lh = 0.5f * L, rad2 = 4.0f * 1.1f * Rm2;  // (2Rmax)^2 +10% margin
+          auto dist2 = [&](int g) {
+            real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;
+            rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+            ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+            rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+            return rx * rx + ry * ry + rz * rz;
+          };
+          bool flag = false;
+          // lost face: a current face-neighbour whose bisector is now beyond every vertex
+          for (int k = 6; k < np && !flag; ++k)
+            if (c.pnbr[k] >= 0 && dist2(c.pnbr[k]) > rad2) flag = true;
+          // gained face: a non-face kNN whose bisector ACTUALLY cuts a vertex (n·v > d) — the real
+          // test, not just "inside 2Rmax" (most candidates in that ball are no-ops, not new faces)
+          const int kk = ncRaw[i];
+          for (int t = 0; t < kk && !flag; ++t) {
+            const int g = candRaw[(size_t)i * KCAND + t];
+            real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;
+            rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+            ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+            rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+            const real_t dd = 0.5f * (rx * rx + ry * ry + rz * rz);
+            if (dd >= 2.0f * Rm2) continue;  // bisector beyond the cell (cached Rmax) -> cannot cut
+            bool isFace = false;
+            for (int m = 6; m < np; ++m)
+              if (c.pnbr[m] == g) { isFace = true; break; }
+            if (isFace) continue;
+            for (int t2 = 0; t2 < c.nt; ++t2)  // does this non-face bisector cut any vertex?
+              if (c.alive[t2] && rx * c.vx[t2] + ry * c.vy[t2] + rz * c.vz[t2] > dd) { flag = true; break; }
+          }
+          needfixL(i) = flag;
+          if (flag) { int s = Kokkos::atomic_fetch_add(&fixCountL(), 1); fixListL(s) = i; }
+        });
+        Kokkos::fence();
+      };
+      auto repair = [&](int nfix) {
+        Kokkos::parallel_for("repair", Kokkos::RangePolicy<Exec>(0, nfix), KOKKOS_LAMBDA(int s) {
+          const int i = fixListL(s);
+          Cell c;
+          buildCell(i, c, posRaw, candRaw, ncRaw, L);
+          volRcL(i) = c.overflow ? 0.0f : c.volume();
+        });
+        Kokkos::fence();
+      };
+      reevalFlag();
+      int nfix = 0;
+      Kokkos::deep_copy(Kokkos::View<int, Kokkos::HostSpace>(&nfix), fixCount);
+      repair(nfix);  // warm
+      double tFlag = 1e30, tFix = 1e30;
+      for (int rep = 0; rep < 3; ++rep) {
+        auto t0 = clk::now(); reevalFlag(); auto t1 = clk::now(); tFlag = std::min(tFlag, secs(t0, t1));
+        Kokkos::deep_copy(Kokkos::View<int, Kokkos::HostSpace>(&nfix), fixCount);
+        auto t2 = clk::now(); repair(nfix); auto t3 = clk::now(); tFix = std::min(tFix, secs(t2, t3));
+      }
+      // residual error after repair (vs full rebuild) — validates no false negatives
+      double resid = 0;
+      {
+        auto hRc = Kokkos::create_mirror_view(volRc);
+        auto hRb = Kokkos::create_mirror_view(volRb);
+        Kokkos::deep_copy(hRc, volRc); Kokkos::deep_copy(hRb, volRb);
+        for (int i = 0; i < N; ++i) resid += std::fabs((double)hRc(i) - (double)hRb(i));
+      }
+      const double effMcs = N / (tFlag + tFix) / 1e3;
+      std::printf("    Phase1.5: flagged %.1f%%  reeval+flag %.1f + repair %.1f ms  -> %.1f Mc/s "
+                  "(%.2fx rebuild)  resid=%.2e\n",
+                  100.0 * nfix / N, tFlag * 1e3, tFix * 1e3, effMcs, effMcs / (N / tRb / 1e3), resid);
     }
   }
   Kokkos::finalize();

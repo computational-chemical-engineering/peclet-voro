@@ -149,8 +149,40 @@ recomputes them). re-eval-compact is the canonical path.
   the speedup when steps are larger. `facetGeometry` (G2/dV) runs on the re-evaled cell unchanged ⇒
   forces/momentum available for the physics.
 
-**Next: Phase 1.5** — a cheap per-cell *needs-reclip* test (cache the security radius; flag a cell if a
-non-face neighbour now penetrates it) + stream-compact + local re-clip of only the flagged cells.
+### Phase 1.5 results — per-cell needs-reclip flag + local repair (implemented, measured)
+
+`bench_incremental` now also does: re-eval (compact) **+ a per-cell needs-reclip flag**, stream-compact the
+flagged cells (atomic), and **re-clip only those**. The flag (no false negatives): a cell changed topology
+iff a current **face neighbour moved beyond 2·Rmax** (face lost) OR a **non-face kNN neighbour's bisector
+now actually cuts a vertex** (face gained — the *real* cut test `n·v>d`, not just "inside 2·Rmax", since
+the isotropic ball is full of no-op candidates).
+
+**Measured (RTX 5080, FP32, N=1M):**
+
+| δ | flagged | re-eval+flag | repair | effective | vs rebuild | residual (after repair) |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0.001 | 1.8% | 57.6 ms | 3.8 | 16.3 M/s | 1.20× | 9e-5 |
+| 0.003 | 5.9% | 56.6 | 5.6 | 16.1 | 1.19× | 6e-4 |
+| 0.010 | 23.2% | 53.1 | 20.6 | 13.6 | 1.00× | 4e-3 |
+
+**Findings — the flag, not the repair, is the bottleneck:**
+- **The flag is correct** (repair drives the residual to ~0; flagged% tracks the topology-changed fraction).
+  Repair is cheap (re-clip only ~2–23% of cells).
+- **But the cut-test flag costs ~0.57× a full rebuild** (re-eval 15 ms → re-eval+flag ~57 ms): testing each
+  kNN candidate's bisector against the vertices IS the construct's kill-scan, the expensive part. So per-
+  step flag+repair only reaches **~1.2× rebuild** — correct, but far below plain re-eval's 4.9×.
+- **So the practical incremental strategy is re-eval every step + a periodic full rebuild** (Verlet-style:
+  re-eval is exact for stable cells and only ~3e-4 off at δ=0.001; rebuild every ~10–50 steps to reset
+  accumulated topology drift) ⇒ **~4× amortized** (re-eval 65 M/s dominates, rebuild 13.5 amortized away),
+  near the pure re-eval ceiling.
+- **True cheap per-step local repair needs a precomputed skin**, not a per-step cut test: at build, record
+  each cell's *near-miss* candidates (no-op bisectors within a small margin of cutting) + the displacement
+  margin; per step, cut-test only those few (O(1–3), not O(K)) and gate on the seed/neighbour displacement.
+  That removes the flag's O(K·nt) cost — the remaining Phase-1.5 work.
+
+**Net Part II so far:** re-eval over resident topology = **65 M/s, ~4.9× full rebuild** (compact topology),
+exact for stable cells; correctness for the moving ~3% via cheap periodic rebuild (~4× amortized) or, later,
+a precomputed-near-miss skin for true per-step local repair.
 
 ---
 
