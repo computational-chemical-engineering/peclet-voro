@@ -1,0 +1,3 @@
+geogram/
+*.o
+bench_geogram

@@ -86,6 +86,50 @@ and is dominated by the gather + hardware, not a faster cell algorithm. **Do not
 The full-build gap (6.7 vs 12.5) is the gather and the fused-pipeline overlap; the genuinely large,
 likely win is Part II (moving points, topology reuse, no gather).
 
-## Newer references to check
-- *Efficient Computation of Voronoi Diagrams Using Point-in-Cell Tests* (arXiv 2509.07175, 2025) —
-  possibly a different/faster construct; not yet read.
+## Head-to-head vs geogram's ACTUAL code (Ray et al.'s `VBW::ConvexCell`), same machine
+
+Built geogram's ConvexCell standalone (`-DSTANDALONE_CONVEX_CELL`) and ran it against ours on the
+identical workload (N=1M, K=64 sorted neighbours, clip all, + volume), FP64, CPU. Harness =
+`extern_bench/` (`build.sh` clones geogram + builds; `bench_geogram.cpp`). Both give Σvol err 2.77e-5
+(identical cells).
+
+| threads | geogram `clip_by_plane` | geogram `_fast` | ours | ours / geogram |
+|---|---:|---:|---:|---:|
+| **1 (pure algorithm)** | **94.6 k/s** | 49.7 | **82.2 k/s** | **0.87×** |
+| 8 | 758.8 | — | 655.6 | 0.86× |
+| 48 | 2754.6 | — | 2754.8 | 1.00× (bandwidth-saturated) |
+
+**Findings:**
+- **Ours is 0.87× geogram per core on CPU — a real but modest ~13–15% gap, not a 2×.** geogram's
+  adjacency-walked horizon (O(border)) beats our `findSharing` (O(n)) on CPU (no divergence, good cache).
+- **This is the OPPOSITE of GPU**, where our GPU port of that same adjacency structure
+  (`convex_cell_adj.hpp`) was **0.46×** — adjacency's branchy pointer-walk is punished by GPU divergence,
+  while the flat `findSharing` scan is coalesced. ⇒ the right cell structure is *architecture-dependent*;
+  our `findSharing` cell is correct for our GPU target, geogram's adjacency cell for CPU.
+- `clip_by_plane_fast` is *slower* here (49.7) — not geogram's best path for this usage.
+- At 48 threads both saturate memory bandwidth (reading the 1.5 GB candidate array) → identical 2754 k/s.
+- Our GPU construct (FP32) is **14.5 M/s** — geogram's heap-backed standalone cell can't run on GPU, so
+  no direct GPU number, but the CPU 0.87× + the GPU adjacency 0.46× bound the cell-algorithm difference.
+
+**Net: our construct is within ~15% of SOTA per-core on CPU and uses the GPU-correct structure. There is
+no large hidden construct win in the SOTA cell.** A ~15% CPU gap exists but closing it (adopt adjacency)
+would regress the GPU, which is our target — so not worth it.
+
+## The actually-promising lead: avoid the no-op clips (point-in-cell, arXiv 2509.07175, 2026)
+
+Read the paper (Xiao, Cao, Chen, IEEE TVCG, Feb 2026). **Fig. 1: 5M cells bounded by a cube, RTX 3080,
+their method 0.49 s (white noise) / 0.26 s (blue noise) = 10–19 M cells/s, ~6× faster than the kNN-based
+methods [24],[27] (2.81–3.12 s).** They DO produce the clipped cell geometry (domain-cell intersection),
+not just combinatorics — so volumes are available; derivatives are not addressed.
+
+**Their secret is directly relevant and untested by us:** they **avoid invalid/no-op clippings**. We
+measured our construct examines ~70 candidates but only ~15 actually cut a face — the other ~55 are
+wasted `clip()` calls that scan all triangles to find they don't cut. Their **point-in-cell / edge-
+crossing test** predicts which bisectors actually contribute (walk the current cell's edges; a bisector
+contributes iff an edge has one endpoint inside and one outside it) and clips ONLY those. This attacks
+the real waste — the ~55 no-op clips — which neither our cell nor geogram's avoids. This is the most
+promising path to a genuinely faster construct AND a cheaper gather (fewer candidates fully tested).
+Hardware: RTX 2080 Ti / 3080. Code: not located (no GitHub link in the paper).
+
+**Recommended next direction (if pushing construct further): implement the edge-crossing / point-in-cell
+bisector test to skip no-op clips, rather than any further cell-representation tweak.**
