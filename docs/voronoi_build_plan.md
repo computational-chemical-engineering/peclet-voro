@@ -205,6 +205,26 @@ full rebuild**, exact for stable cells; with the **near-miss skin** giving cheap
 **3.5× rebuild** in the realistic regime, and a Verlet full-rebuild trigger when the skin budget is spent.
 This is the genuine Part II win the whole investigation pointed to — entirely outside the cold-build ceiling.
 
+### Topology/geometry datastructure split — study (does NOT help further; re-eval is compute-bound)
+
+Question: split the cell into separate topology and geometry datastructures so re-eval never reads the
+geometry it recomputes? The compact-topology storage **already does this** (store `pnbr`+packed triangles,
+recompute planes/vertices) — that IS the 29→65 M/s win. Tested whether pushing the split further helps,
+decomposing re-eval (RTX 5080, N=1M):
+
+| variant | Mc/s |
+|---|---:|
+| AoS compact (cell-major topology) | 65.1 |
+| **SoA topology** (field-major, warp-coalesced read) | 65.6 (≈ no change) |
+| AoS compact, **volume() skipped** (topology read + plane + vertex recompute only) | **196.3** |
+
+**Findings:** (1) a coalesced/relaid topology datastructure (SoA) gives **nothing** — re-eval is *not*
+bound on the topology read; the compact storage already removed that. (2) Re-eval is **compute-bound on
+the geometry tier**: dropping `volume()` is **3×** faster, so topology-read+vertex-recompute is cheap
+(196 M/s) and `volume()` (the `atan2` face-ordering + polygon area) is ~2/3 of the cost. ⇒ the split is
+fully captured; the **next** lever is a cheaper geometry compute (order-free tet volume, or a cross-product
+comparator instead of `atan2`), **not** the datastructure layout.
+
 ---
 
 ## Metrics & harness (throughout)

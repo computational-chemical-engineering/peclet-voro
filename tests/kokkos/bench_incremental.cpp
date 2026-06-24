@@ -196,6 +196,62 @@ int main(int argc, char** argv) {
                   100.0 * skin / spacing, (double)sumnm / N);
     }
 
+    // ===== topology/geometry split study: is re-eval bound on the topology READ or the RECOMPUTE? =====
+    // Compare AoS-compact (cell-major) vs SoA (field-major, warp-coalesced) topology, and isolate the
+    // volume compute (AoS-novol). If SoA≈AoS and novol≈full, re-eval is recompute-bound ⇒ the split is
+    // fully captured; if SoA>AoS, a coalesced topology datastructure extracts more.
+    {
+      Kokkos::View<int*, Mem> pnbrSoA("pnbrSoA", (size_t)N * CMAXP);
+      Kokkos::View<unsigned*, Mem> triSoA("triSoA", (size_t)N * CMAXT);
+      auto pnbrSoAL = pnbrSoA; auto triSoAL = triSoA;
+      Kokkos::parallel_for("toSoA", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+        const int np = topoNpL(i), nt = topoNtL(i);
+        for (int k = 0; k < np; ++k) pnbrSoAL((size_t)k * N + i) = topoPnbrL((size_t)i * CMAXP + k);
+        for (int t = 0; t < nt; ++t) triSoAL((size_t)t * N + i) = topoTriL((size_t)i * CMAXT + t);
+      });
+      Kokkos::fence();
+      Kokkos::View<real_t*, Mem> vtmp("vtmp", N); auto vtmpL = vtmp;
+      auto aos = [&](bool dovol) {
+        Kokkos::parallel_for("aos", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c; c.initBoxPlanes(L, L, L);
+          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
+          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+          for (int t = 0; t < nt; ++t) {
+            const unsigned w = topoTriL((size_t)i * CMAXT + t);
+            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
+            c.alive[t] = (w >> 24) & 1u;
+          }
+          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+          vtmpL(i) = dovol ? c.volume() : c.maxVertexRsq();
+        });
+        Kokkos::fence();
+      };
+      auto soa = [&]() {
+        Kokkos::parallel_for("soa", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c; c.initBoxPlanes(L, L, L);
+          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
+          for (int k = 6; k < np; ++k) c.pnbr[k] = pnbrSoAL((size_t)k * N + i);
+          for (int t = 0; t < nt; ++t) {
+            const unsigned w = triSoAL((size_t)t * N + i);
+            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
+            c.alive[t] = (w >> 24) & 1u;
+          }
+          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+          vtmpL(i) = c.volume();
+        });
+        Kokkos::fence();
+      };
+      aos(true); aos(false); soa();  // warm
+      double tA = 1e30, tNv = 1e30, tS = 1e30;
+      for (int r = 0; r < 5; ++r) {
+        auto a0 = clk::now(); aos(true); auto a1 = clk::now(); tA = std::min(tA, secs(a0, a1));
+        auto b0 = clk::now(); aos(false); auto b1 = clk::now(); tNv = std::min(tNv, secs(b0, b1));
+        auto c0 = clk::now(); soa(); auto c1 = clk::now(); tS = std::min(tS, secs(c0, c1));
+      }
+      std::printf("  re-eval decomposition (Mc/s):  AoS-full %.1f   AoS-no-volume %.1f   SoA-full %.1f\n",
+                  N / tA / 1e3, N / tNv / 1e3, N / tS / 1e3);
+    }
+
     std::printf("  delta  reeval-full reeval-cmp  rebuild  cmp/rebuild  topo-stable  Σvol err\n");
     auto volReL = volRe;
     auto volRbL = volRb;
