@@ -115,6 +115,42 @@ tiered geometry cleanly separated so Part II can reuse them.
 - **Phase 4 — end-to-end incremental driver.** Wire the three tiers; per-step cost vs full rebuild and
   vs the OpenMP incremental.
 
+### Phase 1 results — re-eval over resident topology (DONE, measured)
+
+`ConvexCell::reevalGeometry` re-evaluates a cell IN PLACE after the seeds move, **reusing the resident
+topology** (the surviving plane set `pnbr` + the dual-triangle structure): each neighbour plane is
+rebuilt from the neighbour's new position, every live vertex is recomputed (Cramer), then geometry —
+**no gather, no clip**. `bench_incremental` builds N cells once, displaces all seeds by `δ·spacing`
+(Gaussian), and times re-eval vs full rebuild + checks the per-cell volume match.
+
+**Measured (RTX 5080, FP32, N=1M):**
+
+| δ (×spacing) | re-eval | rebuild | speedup | topology-stable |
+|---:|---:|---:|---:|---:|
+| 0.000 | 29.3 M/s | 13.3 | **2.20×** | 100.0% (err 3e-5, exact) |
+| 0.001 | 29.3 | 13.3 | 2.20× | 97.4% |
+| 0.003 | 29.3 | 13.3 | 2.20× | 84.1% |
+| 0.010 | 29.2 | 13.4 | 2.19× | 46.5% |
+| 0.030 | 29.2 | 13.4 | 2.18× | 10.8% |
+
+**Findings:**
+- **Re-eval is exact for topologically-stable cells** (δ=0 ⇒ 100% match, machine precision) and runs at
+  **29 M/s = 2.2× the full rebuild** — and 2× our cold construct (14.5) / 3× the running SOTA construct
+  (9.5). Incremental is the genuine fast path, as predicted.
+- **Stability is high at realistic per-step displacement** (97% at 0.1%-spacing, the DEM/CFL regime) and
+  degrades with step size. At 97% stable with rebuild-cost repair the *effective* per-step throughput is
+  ≈ the re-eval rate (~28 M/s) ⇒ ~2.2× a full rebuild every step.
+- Changed cells flip ~1 (usually small) face, so re-eval's error on them is small (Σvol err 2e-3 at
+  δ=0.001) — but exactness needs **Phase 1.5 local repair** (re-clip only the flagged cells), which also
+  lifts the speedup when steps are larger.
+- Storage: the prototype keeps the full 3 KB cell per seed; a compact topology (pnbr + triangle struct,
+  no cached vertices/box planes — re-eval recomputes them) would shrink the per-cell copy and push re-eval
+  past 2.2×. Derivatives: `facetGeometry` (G2/dV) runs on the re-evaled cell unchanged ⇒ forces/momentum
+  available for the physics.
+
+**Next: Phase 1.5** — a cheap per-cell *needs-reclip* test (cache the security radius; flag a cell if a
+non-face neighbour now penetrates it) + stream-compact + local re-clip of only the flagged cells.
+
 ---
 
 ## Metrics & harness (throughout)

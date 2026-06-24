@@ -152,6 +152,14 @@ foreach(suffix "" "_f32")
 endforeach()
 target_compile_definitions(bench_construct_compact_f32 PRIVATE CC_FLOAT=1)
 
+# Part II / Phase 1: incremental geometry re-eval over resident topology vs full rebuild.
+add_executable(bench_incremental bench_incremental.cpp)
+target_link_libraries(bench_incremental PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+target_compile_definitions(bench_incremental PRIVATE MORTON_ENABLE_KOKKOS=1)
+target_include_directories(bench_incremental PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+target_compile_features(bench_incremental PRIVATE cxx_std_20)
+
 # F4: ArborX BVH (kNN) neighbour query vs the grid gather. ArborX is in the same prefix as Kokkos.
 find_package(ArborX CONFIG QUIET)
 if(ArborX_FOUND)

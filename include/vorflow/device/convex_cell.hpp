@@ -96,6 +96,29 @@ struct ConvexCell {
     vz[t] = (da * bc[2] + db * ca[2] + dc * ab[2]) * inv;
   }
 
+  /// Part II (moving points): re-evaluate this cell's geometry IN PLACE after the seeds moved,
+  /// REUSING the resident topology (the surviving plane set `pnbr` + the dual-triangle structure
+  /// t0/t1/t2/alive). No gather, no clip: each neighbour plane is rebuilt from the neighbour's new
+  /// position (box planes pnbr<0 are fixed), then every live vertex is recomputed. Correct exactly
+  /// when the topology is unchanged (the common case for small per-step displacement); a topology
+  /// flip must be detected + repaired separately (Phase 1.5). `pos` is the global seed array (x-
+  /// fastest, 3*N); `L` the periodic box length for min-imaging.
+  KOKKOS_INLINE_FUNCTION void reevalGeometry(Real sx, Real sy, Real sz, const Real* pos, Real L) {
+    const Real Lh = Real(0.5) * L;
+    for (int k = 0; k < np; ++k) {
+      if (pnbr[k] < 0) continue;  // bounding-box plane — does not move
+      const int g = pnbr[k];
+      Real rx = pos[3 * g] - sx, ry = pos[3 * g + 1] - sy, rz = pos[3 * g + 2] - sz;
+      rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+      ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+      rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+      pn[k][0] = rx; pn[k][1] = ry; pn[k][2] = rz;
+      pd[k] = Real(0.5) * (rx * rx + ry * ry + rz * rz);
+    }
+    for (int t = 0; t < nt; ++t)
+      if (alive[t]) computeVertex(t);
+  }
+
   /// Largest squared dual-vertex radius over live triangles (drives the security radius).
   KOKKOS_INLINE_FUNCTION Real maxVertexRsq() const {
     Real m = 0;
