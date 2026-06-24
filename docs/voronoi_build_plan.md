@@ -221,9 +221,32 @@ decomposing re-eval (RTX 5080, N=1M):
 **Findings:** (1) a coalesced/relaid topology datastructure (SoA) gives **nothing** — re-eval is *not*
 bound on the topology read; the compact storage already removed that. (2) Re-eval is **compute-bound on
 the geometry tier**: dropping `volume()` is **3×** faster, so topology-read+vertex-recompute is cheap
-(196 M/s) and `volume()` (the `atan2` face-ordering + polygon area) is ~2/3 of the cost. ⇒ the split is
-fully captured; the **next** lever is a cheaper geometry compute (order-free tet volume, or a cross-product
-comparator instead of `atan2`), **not** the datastructure layout.
+(196 M/s) and `volume()` (the face-ordering + polygon area) is ~2/3 of the cost. ⇒ the split is fully
+captured; the next lever is the geometry compute, **not** the datastructure layout.
+
+### Order-free / atan2-free volume — tested; neither helps (the gather is the cost, not the transcendental)
+
+Why `atan2` is there: V = ⅓ Σ_k h_k A_k with h_k free from the plane eqn; the face area
+A_k = ½ Σ v_i×v_{i+1} is a sum of **outer products** — but over *cyclically adjacent* vertices, and the
+triangle list is unordered, so the cyclic order must be recovered. `atan2` recovers it by sorting on the
+in-plane angle. Two ways to avoid it, both tried (RTX 5080, N=1M, re-eval throughput):
+
+| volume method | Mc/s | correct? |
+|---|---:|---|
+| `atan2` face-sort (original) | 65.0 | — |
+| **pseudo-angle** (diamond angle, transcendental-free, same sort) | 65.1 | Δ=2e-12, tests pass |
+| **order-free topological walk** (cyclic order from shared-plane adjacency, cross products only) | 45.5 | Δ=6e-11 |
+
+- **`atan2` was NOT the bottleneck:** the transcendental-free pseudo-angle is the *same* speed (the GPU
+  hides `atan2`). Kept it anyway — free, robust, identical ordering, geometry+dV tests pass (`volume()` and
+  `facetGeometry`).
+- **The order-free walk is correct but slower (0.70×):** with no stored adjacency, each boundary hop is an
+  O(nt) `findSharing` search, which costs more than the `atan2` it removes. (`ConvexCell::volumeWalk()` kept
+  as the documented order-free variant — it would win only with stored triangle adjacency, which is itself
+  GPU-negative for the clip.)
+- ⇒ the volume cost is the **per-face gather + ordering + area summation** (inherent to the dual-triangle
+  representation), not the transcendental. Re-eval stays at **65 M/s**; the geometry tier has no cheap win
+  on this representation. (A true single-pass O(nt) volume would need adjacency or a different cell rep.)
 
 ---
 

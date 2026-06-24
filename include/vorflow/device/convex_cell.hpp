@@ -313,8 +313,12 @@ struct ConvexCell {
     Real ang[MAXFV];
     for (int i = 0; i < m; ++i) {
       const Real dx = fx[i] - cx, dy = fy[i] - cy, dz = fz[i] - cz;
-      ang[i] = Kokkos::atan2(dx * e2[0] + dy * e2[1] + dz * e2[2],
-                             dx * e1[0] + dy * e1[1] + dz * e1[2]);
+      const Real px = dx * e1[0] + dy * e1[1] + dz * e1[2];  // in-plane coords
+      const Real py = dx * e2[0] + dy * e2[1] + dz * e2[2];
+      // diamond pseudo-angle: monotonic in true angle, in [0,4), NO atan2 (transcendental)
+      const Real s = Kokkos::fabs(px) + Kokkos::fabs(py);
+      const Real t = (s > Real(0)) ? py / s : Real(0);            // [-1,1]
+      ang[i] = (px < Real(0)) ? (Real(2) - t) : (py < Real(0) ? Real(4) + t : t);
     }
     for (int i = 1; i < m; ++i) {
       Real ka = ang[i], kx = fx[i], ky = fy[i], kz = fz[i];
@@ -360,6 +364,45 @@ struct ConvexCell {
       Real A[3];
       polyAreaVec(fx, fy, fz, m, A);
       const Real area = Kokkos::sqrt(A[0] * A[0] + A[1] * A[1] + A[2] * A[2]);
+      const Real nlen = Kokkos::sqrt(pn[k][0] * pn[k][0] + pn[k][1] * pn[k][1] + pn[k][2] * pn[k][2]);
+      vol += (pd[k] / nlen) * area;
+    }
+    return vol * (Real(1) / Real(3));
+  }
+
+  /// Cell volume (G1), order-free / atan2-free. Same V = (1/3) Σ_k h_k A_k, but each face's area
+  /// vector A_k = ½ Σ v_i × v_{i+1} is summed by WALKING the face boundary in topological order
+  /// instead of sorting its vertices by angle: two face-k vertices are adjacent iff their dual
+  /// triangles share a second plane, so we hop along that shared plane around the face. No gather,
+  /// no atan2, no sort — just cross products in connectivity order.
+  KOKKOS_INLINE_FUNCTION Real volumeWalk() const {
+    Real vol = 0;
+    for (int k = 0; k < np; ++k) {
+      int tstart = -1;  // any live triangle on face k
+      for (int t = 0; t < nt; ++t)
+        if (alive[t] && (t0[t] == k || t1[t] == k || t2[t] == k)) { tstart = t; break; }
+      if (tstart < 0) continue;  // plane k carries no face
+      Real Ax = 0, Ay = 0, Az = 0;
+      int tcur = tstart, inplane;
+      {  // arrive at tstart via one of its two non-k planes; leave via the other
+        const int p[3] = {t0[tcur], t1[tcur], t2[tcur]};
+        inplane = (p[0] != k) ? p[0] : p[1];
+      }
+      for (int guard = 0; guard <= nt + 1; ++guard) {
+        const int p[3] = {t0[tcur], t1[tcur], t2[tcur]};
+        int outplane = -1;  // the plane of tcur that is neither k nor the arrival edge
+        for (int e = 0; e < 3; ++e)
+          if (p[e] != k && p[e] != inplane) outplane = p[e];
+        const int tnext = findSharing(tcur, k, outplane);  // other triangle on edge (k, outplane)
+        if (tnext < 0) break;
+        Ax += vy[tcur] * vz[tnext] - vz[tcur] * vy[tnext];
+        Ay += vz[tcur] * vx[tnext] - vx[tcur] * vz[tnext];
+        Az += vx[tcur] * vy[tnext] - vy[tcur] * vx[tnext];
+        inplane = outplane;
+        tcur = tnext;
+        if (tcur == tstart) break;  // face boundary closed
+      }
+      const Real area = Real(0.5) * Kokkos::sqrt(Ax * Ax + Ay * Ay + Az * Az);
       const Real nlen = Kokkos::sqrt(pn[k][0] * pn[k][0] + pn[k][1] * pn[k][1] + pn[k][2] * pn[k][2]);
       vol += (pd[k] / nlen) * area;
     }
