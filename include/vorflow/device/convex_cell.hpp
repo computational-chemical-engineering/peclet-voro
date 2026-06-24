@@ -548,6 +548,45 @@ struct ConvexCell {
     }
   }
 
+  /// Scatter one facet's area + first moment (∫x dA) at a vertex into the per-facet accumulators.
+  /// Facet i's local boundary at v is the path f_first → v → f_last with apex n_i: two signed
+  /// triangles (n_i,f_first,v) and (n_i,v,f_last). |n_i| is the one sqrt (per facet).
+  KOKKOS_INLINE_FUNCTION static void scatterFacetMoment(int ki, const Real ni[3], const Real ff[3],
+                                                        const Real fl[3], const Real v[3], Real* area,
+                                                        Real* mx, Real* my, Real* mz) {
+    const Real inv2n = Real(0.5) / Kokkos::sqrt(dot3(ni, ni));
+    const Real sa = det3(ni, ff, v) * inv2n;   // triangle (ni, ff, v)
+    const Real sb = -det3(ni, fl, v) * inv2n;  // triangle (ni, v, fl)
+    area[ki] += sa + sb;
+    mx[ki] += sa * (ni[0] + ff[0] + v[0]) / Real(3) + sb * (ni[0] + v[0] + fl[0]) / Real(3);
+    my[ki] += sa * (ni[1] + ff[1] + v[1]) / Real(3) + sb * (ni[1] + v[1] + fl[1]) / Real(3);
+    mz[ki] += sa * (ni[2] + ff[2] + v[2]) / Real(3) + sb * (ni[2] + v[2] + fl[2]) / Real(3);
+  }
+
+  /// Per-facet area + first moment ∫x dA by the same vertex-local scatter (caller zeroes the np-sized
+  /// arrays). The area-weighted facet centroid is c_k = (mx,my,mz)[k]/area[k]; the volume gradient
+  /// (force) is then dV_k = ∂V/∂r_k = (area_k/|r_k|)(r_k − c_k) with r_k = pn[k] — sort/adjacency-free.
+  KOKKOS_INLINE_FUNCTION void facetMomentsPerVertex(Real* area, Real* mx, Real* my, Real* mz) const {
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      int k1 = t0[t], k2 = t1[t], k3 = t2[t];
+      Real n1[3], n2[3], n3[3];
+      planeN(k1, n1); planeN(k2, n2); planeN(k3, n3);
+      Real c1[3], c2[3], c3[3];
+      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      if (dot3(n1, c1) < Real(0)) {  // canonical: swap planes 2,3 (normals, cross, indices)
+        for (int a = 0; a < 3; ++a) { Real tm = n2[a]; n2[a] = n3[a]; n3[a] = tm; tm = c2[a]; c2[a] = c3[a]; c3[a] = tm; }
+        int tk = k2; k2 = k3; k3 = tk;
+      }
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      Real f12[3], f23[3], f31[3];
+      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      scatterFacetMoment(k1, n1, f12, f31, v, area, mx, my, mz);
+      scatterFacetMoment(k2, n2, f23, f12, v, area, mx, my, mz);
+      scatterFacetMoment(k3, n3, f31, f23, v, area, mx, my, mz);
+    }
+  }
+
   /// Per-facet physics geometry (G2 tier) for plane k: the outward face area VECTOR, the
   /// volume gradient dV = ∂V/∂r_k, and the connecting vector r_k (= the plane normal). Matches
   /// the half-edge facetArea / facetConnect / facetConnVec. Returns false if k is not a face.

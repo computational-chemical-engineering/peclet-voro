@@ -69,7 +69,7 @@ int main(int argc, char** argv) {
         grid[gid(std::min(gx, dim - 1), std::min(gy, dim - 1), std::min(gz, dim - 1))].push_back(i);
       }
 
-      double maxV = 0, maxDiv = 0, maxArea = 0, maxAreaAbs = 0, maxLabel = 0;
+      double maxV = 0, maxDiv = 0, maxArea = 0, maxAreaAbs = 0, maxLabel = 0, maxDVforce = 0;
       long nchecked = 0, nfaceChecked = 0, nGradTot = 0, nGradPass = 0;
       double cellScale = spacing * spacing;  // typical face area ~ spacing²
       const int sw = 3;
@@ -102,10 +102,10 @@ int main(int argc, char** argv) {
         const double Vpv = c.volumePerVertex();
         maxV = std::max(maxV, std::fabs(Vpv - Vref) / Vref);
 
-        // areas (vertex-local scatter)
-        double area[64];
-        for (int k = 0; k < c.np; ++k) area[k] = 0.0;
-        c.facetAreasPerVertex(area);
+        // areas + first moments (vertex-local scatter)
+        double area[64], mx[64], my[64], mz[64];
+        for (int k = 0; k < c.np; ++k) { area[k] = mx[k] = my[k] = mz[k] = 0.0; }
+        c.facetMomentsPerVertex(area, mx, my, mz);
 
         // (4) divergence identity  V == (1/3) Σ_f |n_f| A_f   (|n_f| = pd/|pn|)
         double Vdiv = 0;
@@ -129,6 +129,21 @@ int main(int argc, char** argv) {
             maxArea = std::max(maxArea, std::fabs(area[k] - aref) / aref);
             ++nfaceChecked;
           }
+        }
+
+        // (7) volume gradient / FORCE: per-vertex dV vs the oracle-validated facetGeometry.dv
+        real_t aV[3], dvRef[3], cn[3];
+        for (int k = 6; k < c.np; ++k) {
+          if (area[k] < 0.05 * cellScale) continue;
+          if (!c.facetGeometry(k, aV, dvRef, cn)) continue;
+          const double rl = std::sqrt(c.pn[k][0] * c.pn[k][0] + c.pn[k][1] * c.pn[k][1] + c.pn[k][2] * c.pn[k][2]);
+          const double s = area[k] / rl;
+          const double cxk = mx[k] / area[k], cyk = my[k] / area[k], czk = mz[k] / area[k];
+          const double dvx = s * (c.pn[k][0] - cxk), dvy = s * (c.pn[k][1] - cyk), dvz = s * (c.pn[k][2] - czk);
+          const double err = std::sqrt((dvx - dvRef[0]) * (dvx - dvRef[0]) + (dvy - dvRef[1]) * (dvy - dvRef[1]) +
+                                       (dvz - dvRef[2]) * (dvz - dvRef[2]));
+          const double mag = std::sqrt(dvRef[0] * dvRef[0] + dvRef[1] * dvRef[1] + dvRef[2] * dvRef[2]);
+          if (mag > 1e-9) maxDVforce = std::max(maxDVforce, err / mag);
         }
 
         // (5) label invariance: cyclically rotate every triangle's plane triple
@@ -166,10 +181,11 @@ int main(int argc, char** argv) {
                   maxArea, maxAreaAbs);
       std::printf("  (4) divergence identity  max rel = %.3e\n", maxDiv);
       std::printf("  (5) label invariance     max rel = %.3e\n", maxLabel);
+      std::printf("  (7) dV(force) vs oracle  max rel = %.3e\n", maxDVforce);
       std::printf("  (6) gradient (FD<1e-4)   %.4f%% of cells (rest are at topology events)\n",
                   100.0 * gradFrac);
       const double tol = 1e-9;
-      if (maxV > tol || maxArea > tol || maxDiv > tol || maxLabel > 1e-12 || maxAreaAbs > tol ||
+      if (maxV > tol || maxArea > tol || maxDiv > tol || maxLabel > 1e-12 || maxAreaAbs > tol || maxDVforce > 1e-9 ||
           gradFrac < 0.98) {
         std::printf("  FAIL\n");
         rc = 1;

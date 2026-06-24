@@ -61,6 +61,7 @@ sites that produce skinny cells whose facet/edge feet fall *outside* their faces
 | (4) divergence identity `V == ⅓ Σ_f |n_f| A_f` (rel) | **1.0e-15** | **2.5e-15** |
 | (5) label invariance (permute a vertex's 3 planes) (rel) | 5.9e-16 | 7.3e-16 |
 | (6) gradient: FD `dV/dh` vs analytic `A_f` within 1e-4 | **100%** of cells | **100%** |
+| (7) **force** `dV=∂V/∂r_k` (per-vertex) vs oracle `facetGeometry.dv` (rel) | **9.9e-14** | **2.7e-13** |
 
 Notes:
 - (4) is the strongest internal check — volume and areas, computed independently, are mutually consistent
@@ -107,12 +108,13 @@ honest, not inflated by the volume method.)
 
 ## 4. Why it matters / what it unlocks
 
-- **Forces for free-ish.** Per your §6, the volume's sensitivity to a facet's supporting plane *is* the
-  facet area: `dV = Σ_f A_f δh_f`. So the per-cell **force contributions come straight from
-  `facetAreasPerVertex`** — no separate `facetGeometry` gather+sort. The current G2 path
-  (`facetGeometry`, area vector + `dV` via ordered faces) can be replaced by the per-vertex areas + the
-  §1 chain rule `dh_f/dp`. That's the next concrete step and should make the *force* evaluation as cheap
-  as the volume.
+- **Forces — done and validated.** `facetMomentsPerVertex` scatters each facet's area AND first moment
+  `∫x dA` (note §5) in the same per-vertex pass; the area-weighted facet centroid is `c_k =
+  moment_k/area_k`, and the volume gradient (force) is `dV_k = ∂V/∂r_k = (area_k/|r_k|)(r_k − c_k)`. This
+  reproduces the oracle-validated `facetGeometry.dv` to **machine precision** (criterion 7: 1e-13). So the
+  G2 tier — area vectors + `dV` for forces/momentum — is now **fully order-free and vertex-local**, no
+  `faceOrdered`/`atan2` anywhere. (Equivalently, the §6 analytic form `dV=Σ A_f δh_f` with `dh_f/dp` from
+  §1 gives the same thing; both are now available.)
 - **Differentiability.** The kernel is dot/cross/det/divide only → templating the scalar type gives exact
   forward-mode autodiff (your route 1), or use the analytic `Σ A_f δh_f` (route 2). Either gives the
   semidiscrete-OT / CVT gradient the drivers need.
@@ -140,9 +142,10 @@ honest, not inflated by the volume method.)
 
 ## 6. Files
 
-- `include/vorflow/device/convex_cell.hpp` — `planeN`, `volumePerVertex`, `facetAreasPerVertex` (+
-  helpers); also `volumeWalk`/`volumeAdj`/`buildAdjacency` from the prior order-free investigation, kept
-  as documented variants.
+- `include/vorflow/device/convex_cell.hpp` — `planeN`, `volumePerVertex`, `facetAreasPerVertex`,
+  `facetMomentsPerVertex` (area + first moment → centroid → force `dV`), helpers; also
+  `volumeWalk`/`volumeAdj`/`buildAdjacency` from the prior order-free investigation, kept as documented
+  variants.
 - `tests/kokkos/test_pervertex_geometry.cpp` — FP64 acceptance criteria (ctest `test_pervertex_geometry`).
 - `tests/kokkos/bench_incremental.cpp` — re-eval decomposition incl. `pervertex(V)` / `pervertex(V+A)`;
   re-eval paths now use `volumePerVertex`.
