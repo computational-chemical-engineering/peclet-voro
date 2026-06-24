@@ -18,6 +18,7 @@
 
 #include "tpx/common/view.hpp"
 #include "vorflow/device/convex_cell.hpp"
+#include "vorflow/device/convex_cell_adj.hpp"
 #include "vorflow/device/convex_cell_compact.hpp"
 
 #ifdef CC_FLOAT
@@ -41,12 +42,13 @@ static double run_tier_lb(int N, int tier, const CandV& cand, const NcandV& ncan
     Cell c;
     c.initBox(L, L, L);
     const int k = ncand(i);
+    real_t secR2 = real_t(2) * c.maxVertexRsq();  // cached; candidates are sorted, so break-able
     for (int t = 0; t < k; ++t) {
       const real_t* r = &cand((size_t)(i * KCAND + t) * 3);
       const real_t off = real_t(0.5) * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
-      if (off >= real_t(2) * c.maxVertexRsq()) continue;
+      if (off >= secR2) break;  // sorted: nothing closer remains
       const real_t n[3] = {r[0], r[1], r[2]};
-      c.clip(n, off, t);
+      if (c.clip(n, off, t)) secR2 = real_t(2) * c.maxVertexRsq();  // only recompute on a cut
       if (c.overflow) break;
     }
     outVol(i) = (tier >= 1 && !c.overflow) ? c.volume() : real_t(0);
@@ -79,12 +81,13 @@ static double run_tier(const char* tag, int N, int tier, const CandV& cand, cons
     Cell c;
     c.initBox(L, L, L);
     const int k = ncand(i);
+    real_t secR2 = real_t(2) * c.maxVertexRsq();  // cached; candidates sorted -> break-able
     for (int t = 0; t < k; ++t) {
       const real_t* r = &cand((size_t)(i * KCAND + t) * 3);
       const real_t off = real_t(0.5) * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
-      if (off >= real_t(2) * c.maxVertexRsq()) continue;
+      if (off >= secR2) break;
       const real_t n[3] = {r[0], r[1], r[2]};
-      c.clip(n, off, t);
+      if (c.clip(n, off, t)) secR2 = real_t(2) * c.maxVertexRsq();
       if (c.overflow) break;
     }
     outVol(i) = (tier >= 1 && !c.overflow) ? c.volume() : real_t(0);
@@ -172,18 +175,29 @@ int main(int argc, char** argv) {
     using Orig = vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT>;
     using Comp = vor::device::ConvexCellCompact<real_t, CC_MAXP, CC_MAXT>;
 
-    double vO = 0, vC = 0;
+    using Adj = vor::device::ConvexCellAdj<real_t, CC_MAXP, CC_MAXT, false>;       // recompute
+    using AdjC = vor::device::ConvexCellAdj<real_t, CC_MAXP, CC_MAXT, true>;       // cached vertex
+    std::printf("  (ConvexCellAdj recompute=%zu B  cached=%zu B)\n", sizeof(Adj), sizeof(AdjC));
+    double vO = 0, vC = 0, vA = 0, vAC = 0;
     const double oG0 = run_tier<Orig>("orig", N, 0, cand, ncand, outVol, L, nullptr);
     const double oG1 = run_tier<Orig>("orig", N, 1, cand, ncand, outVol, L, &vO);
     const double cG0 = run_tier<Comp>("comp", N, 0, cand, ncand, outVol, L, nullptr);
     const double cG1 = run_tier<Comp>("comp", N, 1, cand, ncand, outVol, L, &vC);
+    const double aG0 = run_tier<Adj>("adj", N, 0, cand, ncand, outVol, L, nullptr);
+    const double aG1 = run_tier<Adj>("adj", N, 1, cand, ncand, outVol, L, &vA);
+    const double acG0 = run_tier<AdjC>("adjc", N, 0, cand, ncand, outVol, L, nullptr);
+    const double acG1 = run_tier<AdjC>("adjc", N, 1, cand, ncand, outVol, L, &vAC);
 
     std::printf("N=%d  construct-from-cache, kcells/s        G0(topo)     G1(+vol)   Σvol/box err\n", N);
-    std::printf("  ConvexCell  (cached vertex, 16 B/tri) : %9.1f   %9.1f   %.2e\n", oG0, oG1,
+    std::printf("  ConvexCell  (cached vertex, findSharing): %9.1f   %9.1f   %.2e\n", oG0, oG1,
                 std::fabs(vO - 1.0));
-    std::printf("  Compact     (packed tri, recompute)   : %9.1f   %9.1f   %.2e\n", cG0, cG1,
+    std::printf("  Compact     (packed tri, recompute)    : %9.1f   %9.1f   %.2e\n", cG0, cG1,
                 std::fabs(vC - 1.0));
-    std::printf("  speedup (compact / cached)            : %8.2fx   %8.2fx\n", cG0 / oG0, cG1 / oG1);
+    std::printf("  Adj         (adjacency + recompute)    : %9.1f   %9.1f   %.2e\n", aG0, aG1,
+                std::fabs(vA - 1.0));
+    std::printf("  Adj+cache   (adjacency + cached vertex): %9.1f   %9.1f   %.2e\n", acG0, acG1,
+                std::fabs(vAC - 1.0));
+    std::printf("  speedup (adj+cache / cached findShare) : %8.2fx   %8.2fx\n", acG0 / oG0, acG1 / oG1);
 
     // Occupancy test: force the compiler toward fewer registers / more blocks per SM via
     // LaunchBounds. If throughput rises, the construct is latency/occupancy-bound (=> more cells
