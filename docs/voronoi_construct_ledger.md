@@ -170,5 +170,32 @@ not the comparable phase).
   pattern we already use; the 17.5 vs our ~15 gap is small.
 
 **Net (empirical, on real SOTA code): we are at/above SOTA on the construct, comparable on the gather and
-full build. The remaining headroom is the no-op-clip avoidance (point-in-cell, above), not the cell rep
-and not the gather.**
+full build.**
+
+## No-op-clip avoidance — PROTOTYPED, also a negative result (GPU 0.96×, CPU 0.95×)
+
+The last lever: our construct clips ~51 candidates per cell but only ~15 cut a face; the other ~36 are
+no-ops that still pay an O(nt) kill scan. Prototype: maintain a tight **AABB / 6-DOP of the live
+vertices** and add an O(1) directional **support test (`mayCut`)** before each clip — if the AABB support
+in the candidate's direction can't reach the bisector, it's a guaranteed no-op and the kill scan is
+skipped. Two versions measured (RTX 5080, FP32, N=1M, identical volumes):
+- **separate AABB recompute** per cut: **0.91×** (the extra O(nt) pass costs more than it saves).
+- **AABB folded into the existing per-cut `maxVertexRsq` scan** (so the bound is nearly free): **0.96×**.
+- CPU single-thread: **0.95×**.
+
+**Still negative on both architectures.** Why: the no-op clips are individually *cheap* — a flat,
+branch-predictable, coalesced O(nt≈28) scan that finds nothing fast — and the construct cost is dominated
+by the **cuts** (retriangulation + volume/geometry), which the cull does NOT remove. So culling cheap
+no-ops can't help, and the per-candidate `mayCut` overhead + bound maintenance slightly exceed the
+savings. **This is why the 2026 point-in-cell paper's 6× does NOT transfer:** their speedup is in the
+*restricted* Voronoi (decomposing a tet/domain mesh), where avoiding invalid clippings removes many
+*expensive* simplex-cell operations; in our per-cell kNN construct the no-ops are cheap and few relative
+to the cuts. Prototype reverted (production cell kept pristine); approach + result recorded here.
+
+## FINAL STANDING — every construct lever is now tested and lost; we are at SOTA
+cached `findSharing` cell @ ~14.5 M/s (LaunchBounds<256,4>) is the ceiling on this GPU and ≥ the running
+SOTA code's construct (9.5). Everything tried and lost: best-first gather (0.22×), packing/recompute
+(0.72×), adjacency (0.46× GPU / faithful to geogram which is only 1.15× ours per-core on CPU), cap shrink
+(neutral), incremental security radius (neutral), occupancy (+10% kept), no-op-clip cull (0.96×). The
+construct is done. Only non-construct directions remain real: Part II moving points (topology reuse, skips
+the gather) — the actual workload and the genuine large win.
