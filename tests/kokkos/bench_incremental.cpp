@@ -285,7 +285,42 @@ int main(int argc, char** argv) {
         });
         Kokkos::fence();
       };
-      aos(true); aos(false); soa(); walk(); adj();  // warm
+      auto pv = [&]() {  // vertex-local flag/divergence volume (the design note) — no order, no adjacency
+        Kokkos::parallel_for("pv", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c; c.initBoxPlanes(L, L, L);
+          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
+          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+          for (int t = 0; t < nt; ++t) {
+            const unsigned w = topoTriL((size_t)i * CMAXT + t);
+            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
+            c.alive[t] = (w >> 24) & 1u;
+          }
+          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+          vtmpL(i) = c.volumePerVertex();
+        });
+        Kokkos::fence();
+      };
+      auto pva = [&]() {  // FULL physics geometry: per-vertex volume + per-facet areas (forces)
+        Kokkos::parallel_for("pva", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c; c.initBoxPlanes(L, L, L);
+          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
+          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+          for (int t = 0; t < nt; ++t) {
+            const unsigned w = topoTriL((size_t)i * CMAXT + t);
+            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
+            c.alive[t] = (w >> 24) & 1u;
+          }
+          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+          real_t area[CMAXP];
+          for (int k = 0; k < np; ++k) area[k] = 0;
+          c.facetAreasPerVertex(area);  // forces follow from areas (dV = Σ A_f dh_f)
+          real_t s = c.volumePerVertex();
+          for (int k = 0; k < np; ++k) s += area[k];  // touch areas so they aren't elided
+          vtmpL(i) = s;
+        });
+        Kokkos::fence();
+      };
+      aos(true); aos(false); soa(); walk(); adj(); pv(); pva();  // warm
       auto sumv = [&]() {
         auto h = Kokkos::create_mirror_view(vtmp); Kokkos::deep_copy(h, vtmp);
         double s = 0; for (int i = 0; i < N; ++i) s += h(i); return s;
@@ -293,19 +328,23 @@ int main(int argc, char** argv) {
       aos(true); const double sAtan = sumv();
       walk(); const double sWalk = sumv();
       adj(); const double sAdj = sumv();
-      double tA = 1e30, tNv = 1e30, tS = 1e30, tW = 1e30, tJ = 1e30;
+      pv(); const double sPv = sumv();
+      double tA = 1e30, tNv = 1e30, tS = 1e30, tW = 1e30, tJ = 1e30, tP = 1e30, tPA = 1e30;
       for (int r = 0; r < 5; ++r) {
         auto a0 = clk::now(); aos(true); auto a1 = clk::now(); tA = std::min(tA, secs(a0, a1));
         auto b0 = clk::now(); aos(false); auto b1 = clk::now(); tNv = std::min(tNv, secs(b0, b1));
         auto c0 = clk::now(); soa(); auto c1 = clk::now(); tS = std::min(tS, secs(c0, c1));
         auto d0 = clk::now(); walk(); auto d1 = clk::now(); tW = std::min(tW, secs(d0, d1));
         auto e0 = clk::now(); adj(); auto e1 = clk::now(); tJ = std::min(tJ, secs(e0, e1));
+        auto p0 = clk::now(); pv(); auto p1 = clk::now(); tP = std::min(tP, secs(p0, p1));
+        auto q0 = clk::now(); pva(); auto q1 = clk::now(); tPA = std::min(tPA, secs(q0, q1));
       }
       std::printf("  re-eval decomposition (Mc/s):  AoS-full %.1f   no-volume %.1f   SoA %.1f"
-                  "   walk %.1f   adj %.1f\n", N / tA / 1e3, N / tNv / 1e3, N / tS / 1e3,
-                  N / tW / 1e3, N / tJ / 1e3);
-      std::printf("  volume check: atan2 Σ=%.6f  walk |Δ|=%.2e  adj |Δ|=%.2e\n", sAtan,
-                  std::fabs(sAtan - sWalk), std::fabs(sAtan - sAdj));
+                  "   walk %.1f   adj %.1f   pervertex(V) %.1f   pervertex(V+A) %.1f\n",
+                  N / tA / 1e3, N / tNv / 1e3, N / tS / 1e3, N / tW / 1e3, N / tJ / 1e3,
+                  N / tP / 1e3, N / tPA / 1e3);
+      std::printf("  volume check (FP32): atan2 Σ=%.6f  walk |Δ|=%.2e  adj |Δ|=%.2e  pervertex |Δ|=%.2e\n",
+                  sAtan, std::fabs(sAtan - sWalk), std::fabs(sAtan - sAdj), std::fabs(sAtan - sPv));
     }
 
     std::printf("  delta  reeval-full reeval-cmp  rebuild  cmp/rebuild  topo-stable  Σvol err\n");
@@ -330,7 +369,7 @@ int main(int argc, char** argv) {
         Kokkos::parallel_for("reeval", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
           Cell c = cells0L(i);  // copy resident topology
           c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          volReL(i) = c.volume();
+          volReL(i) = c.volumePerVertex();
         });
         Kokkos::fence();
       };
@@ -348,7 +387,7 @@ int main(int argc, char** argv) {
             c.alive[t] = (w >> 24) & 1u;
           }
           c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          volRcL(i) = c.volume();
+          volRcL(i) = c.volumePerVertex();
         });
         Kokkos::fence();
       };
@@ -356,7 +395,7 @@ int main(int argc, char** argv) {
         Kokkos::parallel_for("rebuild", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
           Cell c;
           buildCell(i, c, posRaw, candRaw, ncRaw, L);
-          volRbL(i) = c.overflow ? 0.0f : c.volume();
+          volRbL(i) = c.overflow ? 0.0f : c.volumePerVertex();
         });
         Kokkos::fence();
       };
@@ -401,7 +440,7 @@ int main(int argc, char** argv) {
           }
           const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
           c.reevalGeometry(sx, sy, sz, posRaw, L);
-          volRcL(i) = c.volume();
+          volRcL(i) = c.volumePerVertex();
           // needs-reclip test: face beyond 2Rmax (lost) OR non-face kNN that actually cuts (gained)
           const real_t Rm2 = c.maxVertexRsq();  // cache: one O(nt) scan, not one per candidate
           const real_t Lh = 0.5f * L, rad2 = 4.0f * 1.1f * Rm2;  // (2Rmax)^2 +10% margin
@@ -444,7 +483,7 @@ int main(int argc, char** argv) {
           const int i = fixListL(s);
           Cell c;
           buildCell(i, c, posRaw, candRaw, ncRaw, L);
-          volRcL(i) = c.overflow ? 0.0f : c.volume();
+          volRcL(i) = c.overflow ? 0.0f : c.volumePerVertex();
         });
         Kokkos::fence();
       };
@@ -487,7 +526,7 @@ int main(int argc, char** argv) {
           }
           const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
           c.reevalGeometry(sx, sy, sz, posRaw, L);
-          volRcL(i) = c.volume();
+          volRcL(i) = c.volumePerVertex();
           const real_t Lh = 0.5f * L, rad2 = 4.0f * 1.1f * c.maxVertexRsq();
           auto dist2 = [&](int g) {
             real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;

@@ -248,10 +248,32 @@ vertex's neighbour on each face (its dual triangle shares two planes). Findings:
   adjacency-maintenance cost that made adjacency GPU-negative for the *clip* is NOT paid in re-eval, where
   topology is frozen) makes each hop O(1) → **`volumeAdj` is +6% (65→69 M/s), order-free, exact.**
 - Modest because for small cells (~28 triangles) the gather+sort isn't much dearer than the walk, and the
-  stored adjacency adds ~672 B/cell of read traffic. `ConvexCell::buildAdjacency()`/`volumeAdj()` added;
-  `adjT` field is free for the cold construct (13.9 M/s unchanged). **The bigger payoff is applying the
-  same adjacency walk to `facetGeometry` (G2/dV) — the oriented area vectors for forces use the same
-  gather+sort and would become order-free too — the next step if pushing re-eval further.**
+  stored adjacency adds ~672 B/cell of read traffic.
+
+### THE win — vertex-local flag/divergence geometry (sort-free AND adjacency-free), 2.57×
+
+A reviewer design note (Ray/Sokolov/Lefebvre/Lévy TOG 2018; geogram `ConvexCell`) gives the right
+construction, which neither the sort nor the adjacency-walk used: store each plane as a non-unit normal
+`n` with interior `{n·x ≤ n·n}`, so `x=n` is the **foot of the perpendicular** from the origin onto the
+facet. Volume by the divergence theorem, coning each boundary **flag** (facet foot `n_i`, edge foot `f`,
+vertex `v`) to the origin: each tetra `(0,n_i,f,v)` is **local to one vertex + its 3 planes**, and the
+signed sum is exact even when feet fall outside their faces. ⇒ a pure **per-vertex scatter** — no
+ordering, no adjacency, no `atan2`, no `findSharing`. (`ConvexCell::volumePerVertex` /
+`facetAreasPerVertex`; full writeup in `voronoi_pervertex_geometry_report.md`.)
+
+| volume method (re-eval Mc/s) | | |
+|---|---:|---|
+| `atan2` sort | 65.4 | — |
+| adjacency walk | 69.1 | 1.06× |
+| **`volumePerVertex`** | **166.2** | **2.54×** (≈ the 194 no-volume ceiling) |
+
+Validated FP64 (`test_pervertex_geometry`, 60k cells × isotropic + obtuse) to **machine precision** on all
+acceptance criteria: volume vs ordered 3.8e-15, divergence identity `V=⅓Σ|n|A` 1.0e-15, label invariance
+6e-16, areas 1e-13, gradient FD 100%. **Part II impact:** re-eval over resident topology **4.9× → 11.4×
+full rebuild**; full physics geometry (volume **+** facet areas → forces via `dV=ΣA_f δh_f`) **119 M/s ≈
+8× rebuild**; near-miss-skin per-step repair **3.5× → 6.1×**. Forces follow from the areas (analytic shape
+derivative); the kernel is dot/cross/det/divide → trivially autodiff-able. **The biggest geometry-tier win
+in the whole investigation.**
 
 ---
 
