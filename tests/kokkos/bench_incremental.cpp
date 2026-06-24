@@ -30,7 +30,8 @@
 using real_t = float;
 using Exec = tpx::ExecSpace;
 using Mem = tpx::MemSpace;
-using Cell = vor::device::ConvexCell<real_t, 64, 112>;
+static constexpr int CMAXP = 64, CMAXT = 112;
+using Cell = vor::device::ConvexCell<real_t, CMAXP, CMAXT>;
 using clk = std::chrono::high_resolution_clock;
 static double secs(clk::time_point a, clk::time_point b) {
   return std::chrono::duration<double>(b - a).count();
@@ -116,7 +117,7 @@ int main(int argc, char** argv) {
 
     Kokkos::View<real_t*, Mem> pos("pos", 3 * N);  // current global positions
     Kokkos::View<Cell*, Mem> cells0("cells0", N);  // resident topology (built once)
-    Kokkos::View<real_t*, Mem> volRe("volRe", N), volRb("volRb", N);
+    Kokkos::View<real_t*, Mem> volRe("volRe", N), volRb("volRb", N), volRc("volRc", N);
     const real_t* posRaw = pos.data();
     const int* candRaw = candId.data();
     const int* ncRaw = ncand.data();
@@ -128,9 +129,27 @@ int main(int argc, char** argv) {
                          KOKKOS_LAMBDA(int i) { buildCell(i, cells0L(i), posRaw, candRaw, ncRaw, L); });
     Kokkos::fence();
 
-    std::printf("  delta   re-eval     rebuild   speedup   topo-stable   Σvol(re) err\n");
+    // --- compact resident topology: pnbr + packed triangles only (no planes/vertices/box), ~200 B/cell
+    Kokkos::View<int*, Mem> topoNp("topoNp", N), topoNt("topoNt", N);
+    Kokkos::View<int*, Mem> topoPnbr("topoPnbr", (size_t)N * CMAXP);
+    Kokkos::View<unsigned*, Mem> topoTri("topoTri", (size_t)N * CMAXT);
+    auto topoNpL = topoNp; auto topoNtL = topoNt; auto topoPnbrL = topoPnbr; auto topoTriL = topoTri;
+    Kokkos::parallel_for("extract", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+      const Cell& c = cells0L(i);
+      topoNpL(i) = c.np; topoNtL(i) = c.nt;
+      for (int k = 0; k < c.np; ++k) topoPnbrL((size_t)i * CMAXP + k) = c.pnbr[k];
+      for (int t = 0; t < c.nt; ++t)
+        topoTriL((size_t)i * CMAXT + t) = (unsigned)c.t0[t] | ((unsigned)c.t1[t] << 8) |
+                                          ((unsigned)c.t2[t] << 16) | ((c.alive[t] ? 1u : 0u) << 24);
+    });
+    Kokkos::fence();
+    std::printf("  storage/cell: full=%zu B   compact=%d B\n", sizeof(Cell),
+                (int)(8 + CMAXP * 4 + CMAXT * 4));
+
+    std::printf("  delta  reeval-full reeval-cmp  rebuild  cmp/rebuild  topo-stable  Σvol err\n");
     auto volReL = volRe;
     auto volRbL = volRb;
+    auto volRcL = volRc;
     for (real_t d : deltas) {
       // displace all seeds by d*spacing (Gaussian), wrap into [0,1)
       {
@@ -153,6 +172,24 @@ int main(int argc, char** argv) {
         });
         Kokkos::fence();
       };
+      // re-eval from the COMPACT topology: rebuild a local cell from pnbr + packed triangles, reeval
+      auto reevalCompact = [&] {
+        Kokkos::parallel_for("reevalCmp", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c;
+          c.initBoxPlanes(L, L, L);
+          const int np = topoNpL(i), nt = topoNtL(i);
+          c.np = np; c.nt = nt; c.overflow = false;
+          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+          for (int t = 0; t < nt; ++t) {
+            const unsigned w = topoTriL((size_t)i * CMAXT + t);
+            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
+            c.alive[t] = (w >> 24) & 1u;
+          }
+          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+          volRcL(i) = c.volume();
+        });
+        Kokkos::fence();
+      };
       auto rebuild = [&] {
         Kokkos::parallel_for("rebuild", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
           Cell c;
@@ -161,25 +198,29 @@ int main(int argc, char** argv) {
         });
         Kokkos::fence();
       };
-      reeval(); rebuild();  // warm
-      double tRe = 1e30, tRb = 1e30;
+      reeval(); reevalCompact(); rebuild();  // warm
+      double tRe = 1e30, tRc = 1e30, tRb = 1e30;
       for (int rep = 0; rep < 3; ++rep) {
         auto t0 = clk::now(); reeval(); auto t1 = clk::now(); tRe = std::min(tRe, secs(t0, t1));
+        auto ta = clk::now(); reevalCompact(); auto tb = clk::now(); tRc = std::min(tRc, secs(ta, tb));
         auto t2 = clk::now(); rebuild(); auto t3 = clk::now(); tRb = std::min(tRb, secs(t2, t3));
       }
-      long stable = 0; double sre = 0;
+      long stable = 0; double sre = 0, scmp_match = 0;
       {
         auto hRe = Kokkos::create_mirror_view(volRe);
         auto hRb = Kokkos::create_mirror_view(volRb);
-        Kokkos::deep_copy(hRe, volRe); Kokkos::deep_copy(hRb, volRb);
+        auto hRc = Kokkos::create_mirror_view(volRc);
+        Kokkos::deep_copy(hRe, volRe); Kokkos::deep_copy(hRb, volRb); Kokkos::deep_copy(hRc, volRc);
         for (int i = 0; i < N; ++i) {
-          sre += hRe(i);
-          const double rel = hRb(i) > 0 ? std::fabs(hRe(i) - hRb(i)) / hRb(i) : 1.0;
+          sre += hRc(i);
+          const double rel = hRb(i) > 0 ? std::fabs(hRc(i) - hRb(i)) / hRb(i) : 1.0;
           if (rel < 1e-3) ++stable;
+          scmp_match += std::fabs((double)hRc(i) - (double)hRe(i));  // compact vs full re-eval agree?
         }
       }
-      std::printf("  %4.2f  %8.1f   %8.1f   %6.2fx   %8.1f%%    %.2e\n", d, N / tRe / 1e3,
-                  N / tRb / 1e3, tRb / tRe, 100.0 * stable / N, std::fabs(sre - 1.0));
+      std::printf("  %4.2f  %9.1f  %9.1f  %8.1f  %7.2fx   %8.1f%%   %.2e\n", d, N / tRe / 1e3,
+                  N / tRc / 1e3, N / tRb / 1e3, tRb / tRc, 100.0 * stable / N, std::fabs(sre - 1.0));
+      if (scmp_match > 1e-3) std::printf("    [warn] compact vs full re-eval differ: %.2e\n", scmp_match);
     }
   }
   Kokkos::finalize();

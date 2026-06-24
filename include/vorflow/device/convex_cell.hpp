@@ -96,6 +96,23 @@ struct ConvexCell {
     vz[t] = (da * bc[2] + db * ca[2] + dc * ab[2]) * inv;
   }
 
+  /// Set ONLY the six bounding-box planes (0:+x 1:-x 2:+y 3:-y 4:+z 5:-z), np=6, no triangles.
+  /// Used to rebuild a cell from a compact stored topology: the caller then overwrites np/nt and the
+  /// triangle structure and calls reevalGeometry() (which fills the neighbour planes + all vertices).
+  KOKKOS_INLINE_FUNCTION void initBoxPlanes(Real L0, Real L1, Real L2) {
+    const Real h[3] = {Real(0.5) * L0, Real(0.5) * L1, Real(0.5) * L2};
+    for (int ax = 0; ax < 3; ++ax)
+      for (int s = 0; s < 2; ++s) {
+        const int k = 2 * ax + s;
+        pn[k][0] = pn[k][1] = pn[k][2] = 0;
+        pn[k][ax] = (s == 0) ? Real(1) : Real(-1);
+        pd[k] = h[ax];
+        pnbr[k] = -1;
+      }
+    np = 6;
+    overflow = false;
+  }
+
   /// Part II (moving points): re-evaluate this cell's geometry IN PLACE after the seeds moved,
   /// REUSING the resident topology (the surviving plane set `pnbr` + the dual-triangle structure
   /// t0/t1/t2/alive). No gather, no clip: each neighbour plane is rebuilt from the neighbour's new
