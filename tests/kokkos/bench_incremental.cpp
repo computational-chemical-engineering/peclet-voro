@@ -149,6 +149,53 @@ int main(int argc, char** argv) {
     std::printf("  storage/cell: full=%zu B   compact=%d B\n", sizeof(Cell),
                 (int)(8 + CMAXP * 4 + CMAXT * 4));
 
+    // --- precompute the near-miss SKIN: per cell, the non-face kNN whose bisector is within `skin`
+    // of cutting a vertex at build. Only these can flip into a face under a per-step move < ~skin/2,
+    // so the per-step flag cut-tests just this short watch list (O(NMISS·nt)) instead of all K.
+    constexpr int NMISS = 16;
+    const real_t skin = 0.04f * spacing;  // displacement budget before a rebuild is required
+    Kokkos::View<int*, Mem> nmId("nmId", (size_t)N * NMISS);
+    Kokkos::View<int*, Mem> nmCount("nmCount", N);
+    auto nmIdL = nmId; auto nmCountL = nmCount;
+    {
+      Kokkos::parallel_for("nearmiss", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+        const Cell& c = cells0L(i);
+        const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
+        const real_t Lh = 0.5f * L;
+        int cnt = 0;
+        const int k = ncRaw[i];
+        for (int t = 0; t < k && cnt < NMISS; ++t) {
+          const int g = candRaw[(size_t)i * KCAND + t];
+          bool isFace = false;
+          for (int m = 6; m < c.np; ++m)
+            if (c.pnbr[m] == g) { isFace = true; break; }
+          if (isFace) continue;
+          real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;
+          rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+          ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+          rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+          const real_t rlen2 = rx * rx + ry * ry + rz * rz, dd = 0.5f * rlen2;
+          real_t maxnv = -1e30f;  // most-extreme vertex toward g
+          for (int t2 = 0; t2 < c.nt; ++t2)
+            if (c.alive[t2]) {
+              const real_t nv = rx * c.vx[t2] + ry * c.vy[t2] + rz * c.vz[t2];
+              if (nv > maxnv) maxnv = nv;
+            }
+          const real_t margin = (dd - maxnv) / Kokkos::sqrt(rlen2);  // perpendicular slack (>=0)
+          if (margin < skin) nmIdL((size_t)i * NMISS + cnt++) = g;
+        }
+        nmCountL(i) = cnt;
+      });
+      Kokkos::fence();
+      // report mean watch-list length
+      long sumnm = 0;
+      auto hnm = Kokkos::create_mirror_view(nmCount);
+      Kokkos::deep_copy(hnm, nmCount);
+      for (int i = 0; i < N; ++i) sumnm += hnm(i);
+      std::printf("  near-miss skin=%.4f (%.2f%% spacing)  watch-list mean=%.2f / cell\n", skin,
+                  100.0 * skin / spacing, (double)sumnm / N);
+    }
+
     std::printf("  delta  reeval-full reeval-cmp  rebuild  cmp/rebuild  topo-stable  Σvol err\n");
     auto volReL = volRe;
     auto volRbL = volRb;
@@ -308,9 +355,75 @@ int main(int argc, char** argv) {
         for (int i = 0; i < N; ++i) resid += std::fabs((double)hRc(i) - (double)hRb(i));
       }
       const double effMcs = N / (tFlag + tFix) / 1e3;
-      std::printf("    Phase1.5: flagged %.1f%%  reeval+flag %.1f + repair %.1f ms  -> %.1f Mc/s "
-                  "(%.2fx rebuild)  resid=%.2e\n",
+      std::printf("    Phase1.5  (cut-test all K): flagged %.1f%%  reeval+flag %.1f + repair %.1f ms"
+                  "  -> %.1f Mc/s (%.2fx)  resid=%.2e\n",
                   100.0 * nfix / N, tFlag * 1e3, tFix * 1e3, effMcs, effMcs / (N / tRb / 1e3), resid);
+
+      // ---- Phase 1.5b: near-miss SKIN flag — cut-test only the precomputed watch list ----
+      auto reevalFlagSkin = [&] {
+        Kokkos::deep_copy(fixCount, 0);
+        Kokkos::parallel_for("reevalSkin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c;
+          c.initBoxPlanes(L, L, L);
+          const int np = topoNpL(i), nt = topoNtL(i);
+          c.np = np; c.nt = nt; c.overflow = false;
+          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+          for (int t = 0; t < nt; ++t) {
+            const unsigned w = topoTriL((size_t)i * CMAXT + t);
+            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
+            c.alive[t] = (w >> 24) & 1u;
+          }
+          const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
+          c.reevalGeometry(sx, sy, sz, posRaw, L);
+          volRcL(i) = c.volume();
+          const real_t Lh = 0.5f * L, rad2 = 4.0f * 1.1f * c.maxVertexRsq();
+          auto dist2 = [&](int g) {
+            real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;
+            rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+            ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+            rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+            return rx * rx + ry * ry + rz * rz;
+          };
+          bool flag = false;
+          for (int k = 6; k < np && !flag; ++k)
+            if (c.pnbr[k] >= 0 && dist2(c.pnbr[k]) > rad2) flag = true;  // lost face
+          const int nm = nmCountL(i);
+          for (int q = 0; q < nm && !flag; ++q) {  // gained face: cut-test ONLY the watch list
+            const int g = nmIdL((size_t)i * NMISS + q);
+            real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;
+            rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+            ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+            rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+            const real_t dd = 0.5f * (rx * rx + ry * ry + rz * rz);
+            for (int t2 = 0; t2 < c.nt; ++t2)
+              if (c.alive[t2] && rx * c.vx[t2] + ry * c.vy[t2] + rz * c.vz[t2] > dd) { flag = true; break; }
+          }
+          needfixL(i) = flag;
+          if (flag) { int s = Kokkos::atomic_fetch_add(&fixCountL(), 1); fixListL(s) = i; }
+        });
+        Kokkos::fence();
+      };
+      reevalFlagSkin();
+      int nfix2 = 0;
+      Kokkos::deep_copy(Kokkos::View<int, Kokkos::HostSpace>(&nfix2), fixCount);
+      repair(nfix2);  // warm
+      double tSkin = 1e30, tFix2 = 1e30;
+      for (int rep = 0; rep < 3; ++rep) {
+        auto t0 = clk::now(); reevalFlagSkin(); auto t1 = clk::now(); tSkin = std::min(tSkin, secs(t0, t1));
+        Kokkos::deep_copy(Kokkos::View<int, Kokkos::HostSpace>(&nfix2), fixCount);
+        auto t2 = clk::now(); repair(nfix2); auto t3 = clk::now(); tFix2 = std::min(tFix2, secs(t2, t3));
+      }
+      double resid2 = 0;
+      {
+        auto hRc = Kokkos::create_mirror_view(volRc);
+        auto hRb = Kokkos::create_mirror_view(volRb);
+        Kokkos::deep_copy(hRc, volRc); Kokkos::deep_copy(hRb, volRb);
+        for (int i = 0; i < N; ++i) resid2 += std::fabs((double)hRc(i) - (double)hRb(i));
+      }
+      const double effSkin = N / (tSkin + tFix2) / 1e3;
+      std::printf("    Phase1.5b (near-miss skin): flagged %.1f%%  reeval+flag %.1f + repair %.1f ms"
+                  "  -> %.1f Mc/s (%.2fx)  resid=%.2e\n",
+                  100.0 * nfix2 / N, tSkin * 1e3, tFix2 * 1e3, effSkin, effSkin / (N / tRb / 1e3), resid2);
     }
   }
   Kokkos::finalize();

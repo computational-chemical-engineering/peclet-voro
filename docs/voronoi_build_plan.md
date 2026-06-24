@@ -171,18 +171,39 @@ the isotropic ball is full of no-op candidates).
 - **But the cut-test flag costs ~0.57× a full rebuild** (re-eval 15 ms → re-eval+flag ~57 ms): testing each
   kNN candidate's bisector against the vertices IS the construct's kill-scan, the expensive part. So per-
   step flag+repair only reaches **~1.2× rebuild** — correct, but far below plain re-eval's 4.9×.
-- **So the practical incremental strategy is re-eval every step + a periodic full rebuild** (Verlet-style:
-  re-eval is exact for stable cells and only ~3e-4 off at δ=0.001; rebuild every ~10–50 steps to reset
-  accumulated topology drift) ⇒ **~4× amortized** (re-eval 65 M/s dominates, rebuild 13.5 amortized away),
-  near the pure re-eval ceiling.
-- **True cheap per-step local repair needs a precomputed skin**, not a per-step cut test: at build, record
-  each cell's *near-miss* candidates (no-op bisectors within a small margin of cutting) + the displacement
-  margin; per step, cut-test only those few (O(1–3), not O(K)) and gate on the seed/neighbour displacement.
-  That removes the flag's O(K·nt) cost — the remaining Phase-1.5 work.
+- **So a cheap per-step flag must NOT cut-test all K** — it needs a precomputed skin (next).
 
-**Net Part II so far:** re-eval over resident topology = **65 M/s, ~4.9× full rebuild** (compact topology),
-exact for stable cells; correctness for the moving ~3% via cheap periodic rebuild (~4× amortized) or, later,
-a precomputed-near-miss skin for true per-step local repair.
+### Phase 1.5b — precomputed near-miss skin (DONE, the cheap per-step flag)
+
+At build (once, amortised), record each cell's **near-miss** candidates: the non-face kNN whose bisector is
+within a `skin` perpendicular margin of cutting a vertex. Only these can flip into a face under a per-step
+move smaller than the skin, so the per-step flag cut-tests just this **short watch list** (O(NMISS·nt))
+instead of all K, plus the O(np) face-loss check. `skin = 0.04·spacing`, NMISS=16.
+
+**Measured (RTX 5080, FP32, N=1M); watch-list mean = 1.82 candidates/cell:**
+
+| δ | flag variant | flagged | re-eval+flag | repair | effective | vs rebuild | residual |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 0.001 | cut-test all K | 1.8% | 57.7 ms | 3.7 | 16.3 M/s | 1.23× | 9e-5 |
+| 0.001 | **near-miss skin** | 1.7% | **17.6** | 3.7 | **46.8** | **3.54×** | 1.4e-4 |
+| 0.005 | near-miss skin | 9.6% | 17.6 | 9.2 | 37.4 | 2.82× | 1.7e-2 |
+| 0.010 | near-miss skin | 19.6% | 17.6 | 19.8 | 26.8 | 2.01× | 1.1e-2 |
+
+**Findings:**
+- **The watch list is tiny (1.82/cell vs K=64)**, so the skin flag costs almost nothing: re-eval+flag = 17.6
+  ms, barely above plain re-eval (15 ms) and **3.3× cheaper than the cut-test-all-K flag** (57.7 ms).
+- **At realistic per-step displacement (δ=0.001, the DEM/CFL regime) the skin gives 3.5× rebuild WITH local
+  repair** — 3× the exhaustive flag's 1.23×, and approaching the no-repair re-eval ceiling (4.9×), but with
+  the ~1.7% changed cells re-clipped (residual 1.4e-4 vs 3e-4 for re-eval alone).
+- It degrades gracefully as the step grows (2.8× @ 0.5%-spacing, 2.0× @ 1%): the displacement exceeds the
+  skin budget, more cells flip + some flips escape the watch list (vertices can move more than δ near thin
+  cells), so residual rises — **that is the Verlet rebuild trigger** (rebuild + re-skin when accumulated
+  displacement ≳ skin). NMISS/skin trade watch-list length (cost) against budget (rebuild frequency).
+
+**Net Part II:** the moving-point fast path is **re-eval over resident topology (compact) = 65 M/s, 4.9×
+full rebuild**, exact for stable cells; with the **near-miss skin** giving cheap per-step local repair at
+**3.5× rebuild** in the realistic regime, and a Verlet full-rebuild trigger when the skin budget is spent.
+This is the genuine Part II win the whole investigation pointed to — entirely outside the cold-build ceiling.
 
 ---
 
