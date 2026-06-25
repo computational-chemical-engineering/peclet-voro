@@ -26,6 +26,14 @@
 
 #include <Kokkos_Core.hpp>
 
+// Loop unroll hint, applied ONLY in the CUDA/HIP device passes (where it lets the compiler scalarize
+// small dynamically-indexed local arrays into registers); a no-op on the host so gcc sees no unknown pragma.
+#if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
+#define VOR_UNROLL _Pragma("unroll")
+#else
+#define VOR_UNROLL
+#endif
+
 namespace vor {
 namespace device {
 
@@ -677,17 +685,109 @@ struct ConvexCell {
     vol = V * (Real(1) / Real(6));
   }
 
+  /// Adjoint of a cross-product edge direction: (∂(N[p]×N[q])/∂n_j)^T w. Used by the analytic dAreaTri.
+  KOKKOS_INLINE_FUNCTION static void edgeCrossAdj(int j, int p, int q, const Real Nn[3][3],
+                                                  const Real w[3], Real out[3]) {
+    if (j == p) {
+      xprod(Nn[q], w, out);
+    } else if (j == q) {
+      Real tm[3]; xprod(Nn[p], w, tm);
+      out[0] = -tm[0]; out[1] = -tm[1]; out[2] = -tm[2];
+    } else {
+      out[0] = out[1] = out[2] = Real(0);
+    }
+  }
+
   /// geomFull primitive: the per-dual-triangle ("subtetrahedron") area-Jacobian block — the building
   /// block of the FULL coupled dA_k/dn_l (the OT/power-diagram Hessian), with NO ordering and NO
-  /// adjacency. For triangle `t` it recomputes, in forward-mode dual arithmetic seeding the 9 components
-  /// of the 3 plane normals, the three per-facet area contributions AND their derivatives toward those
-  /// three normals. Outputs: `pl[3]` = the (canonically ordered) plane indices the three contributions
-  /// belong to; `contrib[3]` = the area contributions (Σ over triangles reproduces facetAreasPerVertex's
-  /// area[k]); `grad[i][j][c]` = ∂contrib_i/∂n_{pl[j]}[c]. The consumer GATHERS over triangles —
-  /// A_{pl[i]} += contrib[i] and dA_{pl[i]}/dn_{pl[j]} += grad[i][j] — in any order. The dual vertex is
-  /// recomputed (not read from the cache) and the plane offset nn=|n|² is formed from n inside, so the
-  /// dependence of BOTH the vertex and every plane offset on the normals is captured exactly.
+  /// adjacency. ANALYTIC, no-recompute version: it reuses the CACHED vertex v and computes the per-triangle
+  /// intermediates (edge directions, feet) once in Real, then forms the derivatives in closed form. The
+  /// vertex derivative is the rank-1 ∂v/∂n_j = (c_j/D)(2n_j − v)^T (c_j the cofactor, D the determinant);
+  /// the area numerator N_i=det3(n_i,g_i,v) is differentiated trilinearly (∂/∂n_i = g_i×v, ∂/∂g via the
+  /// foot adjoints, ∂/∂v via the rank-1 above), and the 1/(2|n_i|) factor adds the −δ_ij A_i n_i/nn_i term.
+  /// Outputs: `pl[3]` = the (canonically ordered) plane indices; `contrib[3]` = the area contributions
+  /// (Σ over triangles reproduces facetAreasPerVertex's area[k]); `grad[i][j][c]` = ∂contrib_i/∂n_{pl[j]}[c].
+  /// Consumer gathers A_{pl[i]} += contrib[i], dA_{pl[i]}/dn_{pl[j]} += grad[i][j], in any order.
   KOKKOS_INLINE_FUNCTION void dAreaTri(int t, int pl[3], Real contrib[3], Real grad[3][3][3]) const {
+    // planes + canonical swap (matches facetAreasPerVertex), reusing the cached vertex — nothing recomputed.
+    // Every loop is VOR_UNROLL'd so the small local arrays scalarize into registers on GPU (no local-memory
+    // spill from runtime indices); on CPU the macro is empty.
+    int kk[3] = {t0[t], t1[t], t2[t]};
+    Real Nn[3][3];
+    VOR_UNROLL for (int a = 0; a < 3; ++a) { Nn[a][0] = n[kk[a]][0]; Nn[a][1] = n[kk[a]][1]; Nn[a][2] = n[kk[a]][2]; }
+    { Real c01[3]; xprod(Nn[1], Nn[2], c01);
+      if (dot3(Nn[0], c01) < Real(0)) {
+        VOR_UNROLL for (int d = 0; d < 3; ++d) { Real tm = Nn[1][d]; Nn[1][d] = Nn[2][d]; Nn[2][d] = tm; }
+        int tk = kk[1]; kk[1] = kk[2]; kk[2] = tk;
+      }
+    }
+    pl[0] = kk[0]; pl[1] = kk[1]; pl[2] = kk[2];
+    const Real v[3] = {vx[t], vy[t], vz[t]};
+    Real nn3[3], u[3][3];  // u[a] = 2 n_a − v
+    VOR_UNROLL for (int a = 0; a < 3; ++a) { nn3[a] = dot3(Nn[a], Nn[a]); VOR_UNROLL for (int d = 0; d < 3; ++d) u[a][d] = Real(2) * Nn[a][d] - v[d]; }
+    // edge directions e[m] = N[eP]×N[eQ] for edges (0,1),(1,2),(2,0); cofactor of plane j is c_j = e[(j+1)%3]
+    const int eP[3] = {0, 1, 2}, eQ[3] = {1, 2, 0};
+    Real e[3][3], ecc[3], es[3], F[3][3];
+    VOR_UNROLL for (int m = 0; m < 3; ++m) {
+      xprod(Nn[eP[m]], Nn[eQ[m]], e[m]);
+      ecc[m] = dot3(e[m], e[m]);
+      const Real evc = dot3(v, e[m]);
+      es[m] = (ecc[m] > Real(0)) ? evc / ecc[m] : Real(0);
+      VOR_UNROLL for (int d = 0; d < 3; ++d) F[m][d] = v[d] - es[m] * e[m][d];  // foot of v on edge line m
+    }
+    const Real D = dot3(Nn[0], e[1]);  // e[1] = N1×N2 = cofactor c_0;  D = det(n0,n1,n2) > 0
+    Real g[3][3], den[3];
+    VOR_UNROLL for (int i = 0; i < 3; ++i) {  // facet i: g_i = F[i] − F[(i+2)%3]
+      const int mb = (i + 2) % 3;
+      VOR_UNROLL for (int d = 0; d < 3; ++d) g[i][d] = F[i][d] - F[mb][d];
+      const Real Ni = det3(Nn[i], g[i], v);
+      den[i] = Real(2) * Kokkos::sqrt(nn3[i]);
+      contrib[i] = (den[i] > Real(0)) ? Ni / den[i] : Real(0);
+    }
+    VOR_UNROLL for (int i = 0; i < 3; ++i) {
+      Real wi[3]; xprod(v, Nn[i], wi);         // w_i = v×n_i  (∂det3(n_i,·,v)/∂g)
+      Real nixg[3]; xprod(Nn[i], g[i], nixg);  // n_i×g_i      (∂det3(n_i,g_i,·)/∂v)
+      const int mb = (i + 2) % 3;
+      VOR_UNROLL for (int j = 0; j < 3; ++j) {
+        const Real* cj = e[(j + 1) % 3];  // cofactor of plane j
+        Real gN[3] = {0, 0, 0};
+        if (i == j) { Real gxv[3]; xprod(g[i], v, gxv); VOR_UNROLL for (int d = 0; d < 3; ++d) gN[d] += gxv[d]; }  // ∂/∂n_i
+        const Real alpha = dot3(nixg, cj) / D;  // ∂/∂v (rank-1)
+        VOR_UNROLL for (int d = 0; d < 3; ++d) gN[d] += alpha * u[j][d];
+        // ∂/∂g = (∂F[i]/∂n_j − ∂F[(i+2)%3]/∂n_j)^T w_i  — the two foot adjoints
+        VOR_UNROLL for (int s = 0; s < 2; ++s) {
+          const int m = (s == 0) ? i : mb;
+          const Real sgn = (s == 0) ? Real(1) : Real(-1);
+          const int p = eP[m], q = eQ[m];
+          const Real cjw = dot3(cj, wi);     // for vAdj
+          const Real cje = dot3(cj, e[m]);   // for dS
+          const Real emw = dot3(e[m], wi);
+          Real eaW[3], eaV[3], eaE[3];
+          edgeCrossAdj(j, p, q, Nn, wi, eaW);
+          edgeCrossAdj(j, p, q, Nn, v, eaV);
+          edgeCrossAdj(j, p, q, Nn, e[m], eaE);
+          const Real inv_ecc = (ecc[m] > Real(0)) ? Real(1) / ecc[m] : Real(0);
+          Real dS[3];  // ∂s_m/∂n_j
+          VOR_UNROLL for (int d = 0; d < 3; ++d)
+            dS[d] = ((cje / D) * u[j][d] + eaV[d]) * inv_ecc - (es[m] * inv_ecc) * Real(2) * eaE[d];
+          // (∂F[m]/∂n_j)^T w_i = (c_j·w_i/D) u_j − (e_m·w_i) dS − s_m (∂e_m/∂n_j)^T w_i
+          VOR_UNROLL for (int d = 0; d < 3; ++d)
+            gN[d] += sgn * ((cjw / D) * u[j][d] - emw * dS[d] - es[m] * eaW[d]);
+        }
+        const Real invden = (den[i] > Real(0)) ? Real(1) / den[i] : Real(0);
+        VOR_UNROLL for (int d = 0; d < 3; ++d) grad[i][j][d] = gN[d] * invden;
+        if (i == j) {  // 1/(2|n_i|) factor: −A_i n_i/nn_i
+          const Real f = (nn3[i] > Real(0)) ? contrib[i] / nn3[i] : Real(0);
+          VOR_UNROLL for (int d = 0; d < 3; ++d) grad[i][j][d] -= f * Nn[i][d];
+        }
+      }
+    }
+  }
+
+  /// Reference (forward-AD) implementation of the per-triangle area-Jacobian, kept only as the
+  /// machine-precision ORACLE for the analytic dAreaTri (it recomputes everything in dual arithmetic,
+  /// including the vertex — the redundancy the analytic version removes). Same outputs as dAreaTri.
+  KOKKOS_INLINE_FUNCTION void dAreaTriAD(int t, int pl[3], Real contrib[3], Real grad[3][3][3]) const {
     using D = detail::Dual<Real, 9>;
     int k1 = t0[t], k2 = t1[t], k3 = t2[t];
     Real rn1[3] = {n[k1][0], n[k1][1], n[k1][2]};

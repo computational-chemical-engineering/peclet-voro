@@ -72,7 +72,8 @@ int main(int argc, char** argv) {
       double maxV = 0, maxDiv = 0, maxArea = 0, maxAreaAbs = 0, maxLabel = 0, maxDVforce = 0, maxMerged = 0;
       double maxGrad = 0, maxGradVol = 0;        // (9) geomVolumeGrad vs closed-form dV/dn
       double maxAreaVec = 0, maxGradA = 0, maxAreaVol = 0;  // (10) geomVolumeArea vs facetGeometry/closed form
-      double maxAreaGather = 0, maxdAfd = 0;  long ndAtot = 0, ndApass = 0, nFull = 0;  // (11) geomFull dA/dn
+      double maxAreaGather = 0, maxdAfd = 0, maxAreaJacAD = 0;  // (11) geomFull dA/dn
+      long ndAtot = 0, ndApass = 0, nFull = 0;
       long nchecked = 0, nfaceChecked = 0, nGradTot = 0, nGradPass = 0;
       double cellScale = spacing * spacing;  // typical face area ~ spacing²
       const int sw = 3;
@@ -177,6 +178,17 @@ int main(int argc, char** argv) {
             if (!c.alive[t]) continue;
             int pl[3]; double cb[3], gr[3][3][3];
             c.dAreaTri(t, pl, cb, gr);
+            { // analytic vs forward-AD oracle (must match to machine precision)
+              int plA[3]; double cbA[3], grA[3][3][3];
+              c.dAreaTriAD(t, plA, cbA, grA);
+              double sc = 0;
+              for (int ii = 0; ii < 3; ++ii) sc = std::max(sc, std::fabs(cb[ii]));
+              sc = std::max(sc, 1e-30);
+              for (int ii = 0; ii < 3; ++ii)
+                for (int jj = 0; jj < 3; ++jj)
+                  for (int dd = 0; dd < 3; ++dd)
+                    maxAreaJacAD = std::max(maxAreaJacAD, std::fabs(gr[ii][jj][dd] - grA[ii][jj][dd]) / (sc / spacing));
+            }
             for (int ii = 0; ii < 3; ++ii) {
               Ag[pl[ii]] += cb[ii];
               for (int jj = 0; jj < 3; ++jj)
@@ -294,14 +306,14 @@ int main(int argc, char** argv) {
       std::printf("  (10) geomVolumeArea       areaVec rel = %.3e   dV/dn rel = %.3e   (vol match = %.3e)\n",
                   maxAreaVec, maxGradA, maxAreaVol);
       const double dAfrac = ndAtot ? (double)ndApass / ndAtot : 1.0;
-      std::printf("  (11) geomFull dA/dn vs FD  %.4f%% of %ld couplings (max rel %.2e)   gather match = %.3e\n",
-                  100.0 * dAfrac, ndAtot, maxdAfd, maxAreaGather);
+      std::printf("  (11) geomFull dA/dn vs FD  %.4f%% of %ld couplings (max rel %.2e)   gather %.3e   analytic-vs-AD %.3e\n",
+                  100.0 * dAfrac, ndAtot, maxdAfd, maxAreaGather, maxAreaJacAD);
       std::printf("  (6) gradient (FD<1e-4)   %.4f%% of cells (rest are at topology events)\n",
                   100.0 * gradFrac);
       const double tol = 1e-9;
       if (maxV > tol || maxArea > tol || maxDiv > tol || maxLabel > 1e-12 || maxAreaAbs > tol || maxDVforce > 1e-9 || maxMerged > 1e-9 ||
           maxGrad > 1e-9 || maxGradVol > 1e-9 || maxAreaVec > tol || maxGradA > 1e-9 || maxAreaVol > 1e-9 ||
-          maxAreaGather > tol || dAfrac < 0.95 || gradFrac < 0.98) {
+          maxAreaGather > tol || dAfrac < 0.95 || maxAreaJacAD > 1e-9 || gradFrac < 0.98) {
         std::printf("  FAIL\n");
         rc = 1;
       } else {
