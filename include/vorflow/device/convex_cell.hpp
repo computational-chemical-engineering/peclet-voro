@@ -370,99 +370,6 @@ struct ConvexCell {
     return vol * (Real(1) / Real(3));
   }
 
-  unsigned short adjT[MAXT][3];  ///< (optional) neighbour triangle across the edge OPPOSITE local
-                                 ///< vertex 0/1/2 — built once for the O(1)-hop order-free volume.
-
-  /// Fill adjT: for each triangle, the neighbour across each of its 3 edges. O(nt²) — call ONCE
-  /// (e.g. after the cold build); re-eval then reuses it. Edge opposite vertex 0 is (t1,t2), etc.
-  KOKKOS_INLINE_FUNCTION void buildAdjacency() {
-    for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
-      adjT[t][0] = (unsigned short)findSharing(t, t1[t], t2[t]);
-      adjT[t][1] = (unsigned short)findSharing(t, t0[t], t2[t]);
-      adjT[t][2] = (unsigned short)findSharing(t, t0[t], t1[t]);
-    }
-  }
-
-  /// Cell volume (G1), order-free AND search-free: walk each face's boundary via the stored
-  /// adjacency (O(1) hops, no findSharing, no atan2, no sort). One O(nt) pass picks a start
-  /// triangle per face; the per-face walk then accumulates A_k = ½ Σ v×v' via the local winding.
-  KOKKOS_INLINE_FUNCTION Real volumeAdj() const {
-    short faceTri[MAXP];
-    for (int k = 0; k < np; ++k) faceTri[k] = -1;
-    for (int t = 0; t < nt; ++t) {  // one start triangle per face, single pass
-      if (!alive[t]) continue;
-      if (faceTri[t0[t]] < 0) faceTri[t0[t]] = (short)t;
-      if (faceTri[t1[t]] < 0) faceTri[t1[t]] = (short)t;
-      if (faceTri[t2[t]] < 0) faceTri[t2[t]] = (short)t;
-    }
-    Real vol = 0;
-    for (int k = 0; k < np; ++k) {
-      int tstart = faceTri[k];
-      if (tstart < 0) continue;
-      int inplane = (t0[tstart] != k) ? t0[tstart] : t1[tstart];  // arrival edge (k, inplane)
-      Real Ax = 0, Ay = 0, Az = 0;
-      int tcur = tstart;
-      for (int g = 0; g <= nt; ++g) {
-        const int q0 = t0[tcur], q1 = t1[tcur], q2 = t2[tcur];
-        // leave via edge (k, outplane); neighbour = edge OPPOSITE the arrival plane `inplane`
-        const int outplane = (q0 != k && q0 != inplane) ? q0 : ((q1 != k && q1 != inplane) ? q1 : q2);
-        const int li = (q0 == inplane) ? 0 : ((q1 == inplane) ? 1 : 2);
-        const int tnext = adjT[tcur][li];
-        if (tnext < 0 || tnext >= nt) break;
-        Ax += vy[tcur] * vz[tnext] - vz[tcur] * vy[tnext];
-        Ay += vz[tcur] * vx[tnext] - vx[tcur] * vz[tnext];
-        Az += vx[tcur] * vy[tnext] - vy[tcur] * vx[tnext];
-        inplane = outplane;
-        tcur = tnext;
-        if (tcur == tstart) break;
-      }
-      const Real area = Real(0.5) * Kokkos::sqrt(Ax * Ax + Ay * Ay + Az * Az);
-      const Real nlen = Kokkos::sqrt(pn[k][0] * pn[k][0] + pn[k][1] * pn[k][1] + pn[k][2] * pn[k][2]);
-      vol += (pd[k] / nlen) * area;
-    }
-    return vol * (Real(1) / Real(3));
-  }
-
-  /// Cell volume (G1), order-free / atan2-free. Same V = (1/3) Σ_k h_k A_k, but each face's area
-  /// vector A_k = ½ Σ v_i × v_{i+1} is summed by WALKING the face boundary in topological order
-  /// instead of sorting its vertices by angle: two face-k vertices are adjacent iff their dual
-  /// triangles share a second plane, so we hop along that shared plane around the face. No gather,
-  /// no atan2, no sort — just cross products in connectivity order.
-  KOKKOS_INLINE_FUNCTION Real volumeWalk() const {
-    Real vol = 0;
-    for (int k = 0; k < np; ++k) {
-      int tstart = -1;  // any live triangle on face k
-      for (int t = 0; t < nt; ++t)
-        if (alive[t] && (t0[t] == k || t1[t] == k || t2[t] == k)) { tstart = t; break; }
-      if (tstart < 0) continue;  // plane k carries no face
-      Real Ax = 0, Ay = 0, Az = 0;
-      int tcur = tstart, inplane;
-      {  // arrive at tstart via one of its two non-k planes; leave via the other
-        const int p[3] = {t0[tcur], t1[tcur], t2[tcur]};
-        inplane = (p[0] != k) ? p[0] : p[1];
-      }
-      for (int guard = 0; guard <= nt + 1; ++guard) {
-        const int p[3] = {t0[tcur], t1[tcur], t2[tcur]};
-        int outplane = -1;  // the plane of tcur that is neither k nor the arrival edge
-        for (int e = 0; e < 3; ++e)
-          if (p[e] != k && p[e] != inplane) outplane = p[e];
-        const int tnext = findSharing(tcur, k, outplane);  // other triangle on edge (k, outplane)
-        if (tnext < 0) break;
-        Ax += vy[tcur] * vz[tnext] - vz[tcur] * vy[tnext];
-        Ay += vz[tcur] * vx[tnext] - vx[tcur] * vz[tnext];
-        Az += vx[tcur] * vy[tnext] - vy[tcur] * vx[tnext];
-        inplane = outplane;
-        tcur = tnext;
-        if (tcur == tstart) break;  // face boundary closed
-      }
-      const Real area = Real(0.5) * Kokkos::sqrt(Ax * Ax + Ay * Ay + Az * Az);
-      const Real nlen = Kokkos::sqrt(pn[k][0] * pn[k][0] + pn[k][1] * pn[k][1] + pn[k][2] * pn[k][2]);
-      vol += (pd[k] / nlen) * area;
-    }
-    return vol * (Real(1) / Real(3));
-  }
-
   // ---- Vertex-local, SORT-FREE geometry (Ray/Sokolov/Lefebvre/Lévy TOG 2018; geogram ConvexCell) ----
   // Plane stored as a (non-unit) normal n with interior {x : n·x ≤ n·n}; then x=n is the foot of the
   // perpendicular from the origin onto the plane (the facet point), and |n| is the origin→plane distance.
@@ -585,6 +492,39 @@ struct ConvexCell {
       scatterFacetMoment(k2, n2, f23, f12, v, area, mx, my, mz);
       scatterFacetMoment(k3, n3, f31, f23, v, area, mx, my, mz);
     }
+  }
+
+  /// MERGED vertex-local geometry: cell volume + per-facet area + per-facet first moment ∫x dA, all in
+  /// ONE pass (shares n,c,D,v,feet per vertex). The production G1+G2 kernel — sort-free, adjacency-free.
+  /// Caller zeroes the np-sized arrays. Derive per facet k:
+  ///   areaVec_k = area[k] · pn[k]/|pn[k]|   (outward, since pn = r points toward the neighbour)
+  ///   centroid_k = (mx,my,mz)[k]/area[k]
+  ///   force dV_k = (area[k]/|pn[k]|)·(pn[k] − centroid_k)
+  KOKKOS_INLINE_FUNCTION void geometryPerVertex(Real& vol, Real* area, Real* mx, Real* my, Real* mz) const {
+    Real V = 0;
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      int k1 = t0[t], k2 = t1[t], k3 = t2[t];
+      Real n1[3], n2[3], n3[3];
+      planeN(k1, n1); planeN(k2, n2); planeN(k3, n3);
+      Real c1[3], c2[3], c3[3];
+      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      if (dot3(n1, c1) < Real(0)) {  // canonical D>0: swap planes 2,3 (normals, cross, indices)
+        for (int a = 0; a < 3; ++a) { Real tm = n2[a]; n2[a] = n3[a]; n3[a] = tm; tm = c2[a]; c2[a] = c3[a]; c3[a] = tm; }
+        int tk = k2; k2 = k3; k3 = tk;
+      }
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      Real f12[3], f23[3], f31[3];
+      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      Real e[3];
+      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; V += det3(e, f12, v);
+      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; V += det3(e, f23, v);
+      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2]; V += det3(e, f31, v);
+      scatterFacetMoment(k1, n1, f12, f31, v, area, mx, my, mz);
+      scatterFacetMoment(k2, n2, f23, f12, v, area, mx, my, mz);
+      scatterFacetMoment(k3, n3, f31, f23, v, area, mx, my, mz);
+    }
+    vol = V * (Real(1) / Real(6));
   }
 
   /// Per-facet physics geometry (G2 tier) for plane k: the outward face area VECTOR, the

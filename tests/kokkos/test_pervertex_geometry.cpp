@@ -69,7 +69,7 @@ int main(int argc, char** argv) {
         grid[gid(std::min(gx, dim - 1), std::min(gy, dim - 1), std::min(gz, dim - 1))].push_back(i);
       }
 
-      double maxV = 0, maxDiv = 0, maxArea = 0, maxAreaAbs = 0, maxLabel = 0, maxDVforce = 0;
+      double maxV = 0, maxDiv = 0, maxArea = 0, maxAreaAbs = 0, maxLabel = 0, maxDVforce = 0, maxMerged = 0;
       long nchecked = 0, nfaceChecked = 0, nGradTot = 0, nGradPass = 0;
       double cellScale = spacing * spacing;  // typical face area ~ spacing²
       const int sw = 3;
@@ -106,6 +106,16 @@ int main(int argc, char** argv) {
         double area[64], mx[64], my[64], mz[64];
         for (int k = 0; k < c.np; ++k) { area[k] = mx[k] = my[k] = mz[k] = 0.0; }
         c.facetMomentsPerVertex(area, mx, my, mz);
+
+        // merged G1+G2 kernel must match the separate calls
+        {
+          double vg = 0, ag[64], gmx[64], gmy[64], gmz[64];
+          for (int k = 0; k < c.np; ++k) { ag[k] = gmx[k] = gmy[k] = gmz[k] = 0.0; }
+          c.geometryPerVertex(vg, ag, gmx, gmy, gmz);
+          maxMerged = std::max(maxMerged, std::fabs(vg - Vpv) / Vref);
+          for (int k = 0; k < c.np; ++k)
+            maxMerged = std::max(maxMerged, std::fabs(ag[k] - area[k]) / cellScale);
+        }
 
         // (4) divergence identity  V == (1/3) Σ_f |n_f| A_f   (|n_f| = pd/|pn|)
         double Vdiv = 0;
@@ -182,10 +192,11 @@ int main(int argc, char** argv) {
       std::printf("  (4) divergence identity  max rel = %.3e\n", maxDiv);
       std::printf("  (5) label invariance     max rel = %.3e\n", maxLabel);
       std::printf("  (7) dV(force) vs oracle  max rel = %.3e\n", maxDVforce);
+      std::printf("  (8) merged kernel match  max rel = %.3e\n", maxMerged);
       std::printf("  (6) gradient (FD<1e-4)   %.4f%% of cells (rest are at topology events)\n",
                   100.0 * gradFrac);
       const double tol = 1e-9;
-      if (maxV > tol || maxArea > tol || maxDiv > tol || maxLabel > 1e-12 || maxAreaAbs > tol || maxDVforce > 1e-9 ||
+      if (maxV > tol || maxArea > tol || maxDiv > tol || maxLabel > 1e-12 || maxAreaAbs > tol || maxDVforce > 1e-9 || maxMerged > 1e-9 ||
           gradFrac < 0.98) {
         std::printf("  FAIL\n");
         rc = 1;

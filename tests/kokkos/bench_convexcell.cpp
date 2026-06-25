@@ -210,7 +210,7 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
             if (c.overflow) break;
           }
           (void)minCsz;
-          cellVol(i) = (c.overflow || !doVol) ? 0.0 : c.volume();
+          cellVol(i) = (c.overflow || !doVol) ? 0.0 : c.volumePerVertex();
           cellFaces(i) = c.overflow ? 0 : c.countFaces();
           cellOvf(i) = c.overflow ? 1 : 0;
           cellClips(i) = nclip;  // candidates EXAMINED per cell (gather volume)
@@ -266,7 +266,7 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
             }
             if (c.overflow) break;
           }
-          cellVolS(q) = (c.overflow || !doVol) ? 0.0 : c.volume();
+          cellVolS(q) = (c.overflow || !doVol) ? 0.0 : c.volumePerVertex();
           cellFacesS(q) = c.overflow ? 0 : c.countFaces();
           cellOvfS(q) = c.overflow ? 1 : 0;
         });

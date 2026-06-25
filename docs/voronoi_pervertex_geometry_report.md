@@ -123,20 +123,24 @@ honest, not inflated by the volume method.)
 
 ---
 
-## 5. Caveats & open items
+## 5. Follow-ups — all DONE in this session
 
-- **Simple vertices assumed.** The kernel assumes exactly 3 planes per vertex. Our clipper already
-  produces 3-plane dual triangles, so this holds; a 4-fold-degenerate vertex would need splitting (the
-  note's guard). Not observed in 120 000 test cells, but worth an assert in production.
-- **Cold construct unchanged.** `volumePerVertex` is now the default in the *re-eval* paths and the bench;
-  the *cold* construct still calls the ordered `volume()` (validated, tested). Switching it too is safe
-  (same machine-precision result) and would speed the cold build's volume tier ~2.5× — left as a 1-line
-  change pending a green full regression.
-- **Combined V+A kernel.** The 119 M/s "V+A" number calls `volumePerVertex` and `facetAreasPerVertex` as
-  two passes; a single merged pass (sharing the per-vertex `n,c,D,v,feet`) would land between 119 and 166.
-- **`adjT` field.** The adjacency I added earlier (for the now-superseded adjacency-walk volume) adds 672 B
-  to the cell; the per-vertex kernel does **not** need it. It can be removed unless kept for repair-path
-  locality. The cold construct was unaffected (13.9 M/s), so it's not urgent.
+- **Cold construct switched to per-vertex.** `bench_construct` G1+G2 now use `volumePerVertex` /
+  `geometryPerVertex` (no `facetGeometry`/`atan2` in the construct hot path). Cold-construct ceiling:
+  **G1 14.0 → 17.0 (+22%), G2 12.0 → 16.1 M/s (+34%)** — the volume tier overhead dropped from +19%→+3%
+  and the derivative tier from +16%→+5%. The fused grid build (`bench_convexcell`) rose 5.5 → 6.0.
+- **Merged single-pass V+A kernel:** `ConvexCell::geometryPerVertex(vol, area, mx,my,mz)` does volume +
+  areas + first moments in one vertex pass (shares `n,c,D,v,feet`); validated bit-for-bit vs the separate
+  calls (criterion 8: 1.3e-15). This is the production G1+G2 kernel; forces derive per-facet as
+  `dV_k=(area_k/|r_k|)(r_k − moment_k/area_k)`.
+- **`facetGeometry`/`faceOrdered` retired from the hot path.** They remain only as the FP64 reference/
+  oracle in the tests; no production path calls them.
+- **`adjT` field + `buildAdjacency`/`volumeAdj`/`volumeWalk` removed** (the superseded adjacency-walk
+  experiment). Cell back to 3084 B; this also sped the full-cell re-eval read (44 → 54 M/s).
+
+Remaining caveat: **simple vertices assumed** (exactly 3 planes/vertex). Our clipper produces 3-plane
+dual triangles, so this holds; a 4-fold-degenerate vertex would need splitting (the note's guard). Not
+observed in 120 000 test cells — worth a production assert.
 
 ---
 

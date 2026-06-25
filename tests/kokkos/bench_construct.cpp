@@ -115,16 +115,25 @@ int main(int argc, char** argv) {
           c.clip(n, off, t);
           if (c.overflow) break;
         }
-        if (tier >= 1) outVol(i) = c.overflow ? real_t(0) : c.volume();
-        if (tier >= 2) {
-          real_t asum = 0;
-          for (int kk = 0; kk < c.np; ++kk) {
-            if (c.pnbr[kk] < 0) continue;
-            real_t a[3], d[3], cv[3];
-            if (c.facetGeometry(kk, a, d, cv))
-              asum += a[0] + d[0] + cv[0];  // touch all outputs
+        if (tier == 1) outVol(i) = c.overflow ? real_t(0) : c.volumePerVertex();
+        if (tier >= 2) {  // full G2 (volume + area vectors + dV forces) by the merged per-vertex kernel
+          if (c.overflow) { outVol(i) = 0; outArea(i) = 0; }
+          else {
+            real_t vol = 0, area[CC_MAXP], mx[CC_MAXP], my[CC_MAXP], mz[CC_MAXP];
+            for (int kk = 0; kk < c.np; ++kk) area[kk] = mx[kk] = my[kk] = mz[kk] = 0;
+            c.geometryPerVertex(vol, area, mx, my, mz);
+            outVol(i) = vol;
+            real_t asum = 0;
+            for (int kk = 6; kk < c.np; ++kk) {  // derive areaVec + dV per facet (no faceOrdered/atan2)
+              if (area[kk] <= real_t(0)) continue;
+              const real_t pl = Kokkos::sqrt(c.pn[kk][0] * c.pn[kk][0] + c.pn[kk][1] * c.pn[kk][1] + c.pn[kk][2] * c.pn[kk][2]);
+              const real_t s = area[kk] / pl, inva = real_t(1) / area[kk];
+              const real_t aV = area[kk] * c.pn[kk][0] / pl;                 // outward area vector (x)
+              const real_t dv = s * (c.pn[kk][0] - mx[kk] * inva);          // force dV (x)
+              asum += aV + dv + c.pn[kk][0];                                // touch outputs
+            }
+            outArea(i) = asum;
           }
-          outArea(i) = asum;
         }
       };
       Kokkos::parallel_for("warm", Kokkos::RangePolicy<Exec>(0, N), kern);
