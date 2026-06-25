@@ -38,7 +38,7 @@ namespace vor {
 namespace device {
 
 namespace detail {
-// Minimal forward-mode dual number (value + K partials) used by ConvexCell::dAreaTri (the geomFull
+// Minimal forward-mode dual number (value + K partials) used by ConvexCell::geomVolumeAreaGrad (the geomFull
 // area-Jacobian). Templated on Real so it routes through nvcc/hipcc like the rest of the header.
 template <class Real, int K>
 struct Dual {
@@ -685,7 +685,7 @@ struct ConvexCell {
     vol = V * (Real(1) / Real(6));
   }
 
-  /// Adjoint of a cross-product edge direction: (∂(N[p]×N[q])/∂n_j)^T w. Used by the analytic dAreaTri.
+  /// Adjoint of a cross-product edge direction: (∂(N[p]×N[q])/∂n_j)^T w. Used by the analytic geomVolumeAreaGrad.
   KOKKOS_INLINE_FUNCTION static void edgeCrossAdj(int j, int p, int q, const Real Nn[3][3],
                                                   const Real w[3], Real out[3]) {
     if (j == p) {
@@ -708,7 +708,7 @@ struct ConvexCell {
   /// Outputs: `pl[3]` = the (canonically ordered) plane indices; `contrib[3]` = the area contributions
   /// (Σ over triangles reproduces facetAreasPerVertex's area[k]); `grad[i][j][c]` = ∂contrib_i/∂n_{pl[j]}[c].
   /// Consumer gathers A_{pl[i]} += contrib[i], dA_{pl[i]}/dn_{pl[j]} += grad[i][j], in any order.
-  KOKKOS_INLINE_FUNCTION void dAreaTri(int t, int pl[3], Real contrib[3], Real grad[3][3][3]) const {
+  KOKKOS_INLINE_FUNCTION void geomVolumeAreaGrad(int t, int pl[3], Real contrib[3], Real grad[3][3][3]) const {
     // planes + canonical swap (matches facetAreasPerVertex), reusing the cached vertex — nothing recomputed.
     // Every loop is VOR_UNROLL'd so the small local arrays scalarize into registers on GPU (no local-memory
     // spill from runtime indices); on CPU the macro is empty.
@@ -785,9 +785,9 @@ struct ConvexCell {
   }
 
   /// Reference (forward-AD) implementation of the per-triangle area-Jacobian, kept only as the
-  /// machine-precision ORACLE for the analytic dAreaTri (it recomputes everything in dual arithmetic,
-  /// including the vertex — the redundancy the analytic version removes). Same outputs as dAreaTri.
-  KOKKOS_INLINE_FUNCTION void dAreaTriAD(int t, int pl[3], Real contrib[3], Real grad[3][3][3]) const {
+  /// machine-precision ORACLE for the analytic geomVolumeAreaGrad (it recomputes everything in dual arithmetic,
+  /// including the vertex — the redundancy the analytic version removes). Same outputs as geomVolumeAreaGrad.
+  KOKKOS_INLINE_FUNCTION void geomVolumeAreaGradAD(int t, int pl[3], Real contrib[3], Real grad[3][3][3]) const {
     using D = detail::Dual<Real, 9>;
     int k1 = t0[t], k2 = t1[t], k3 = t2[t];
     Real rn1[3] = {n[k1][0], n[k1][1], n[k1][2]};

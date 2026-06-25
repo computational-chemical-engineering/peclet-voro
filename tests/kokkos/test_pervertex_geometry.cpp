@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "vorflow/device/convex_cell.hpp"
+#include "vorflow/device/plane_policy.hpp"
 
 using real_t = double;
 using Cell = vor::device::ConvexCell<real_t, 64, 128>;
@@ -74,6 +75,7 @@ int main(int argc, char** argv) {
       double maxAreaVec = 0, maxGradA = 0, maxAreaVol = 0;  // (10) geomVolumeArea vs facetGeometry/closed form
       double maxAreaGather = 0, maxdAfd = 0, maxAreaJacAD = 0;  // (11) geomFull dA/dn
       long ndAtot = 0, ndApass = 0, nFull = 0;
+      double maxChain = 0;  long nChainTot = 0, nChainPass = 0, nChainCells = 0;  // (12) Voronoi chainToDofs
       long nchecked = 0, nfaceChecked = 0, nGradTot = 0, nGradPass = 0;
       double cellScale = spacing * spacing;  // typical face area ~ spacing²
       const int sw = 3;
@@ -168,7 +170,7 @@ int main(int argc, char** argv) {
           }
         }
 
-        // (11) geomFull: gather the per-triangle area-Jacobian dAreaTri into the full dA_k/dn_l and
+        // (11) geomFull: gather the per-triangle area-Jacobian geomVolumeAreaGrad into the full dA_k/dn_l and
         // (on a sample) finite-difference check it. Expensive, so cap the sample per batch.
         if (nFull < 60) {
           ++nFull;
@@ -177,10 +179,10 @@ int main(int argc, char** argv) {
           for (int t = 0; t < c.nt; ++t) {
             if (!c.alive[t]) continue;
             int pl[3]; double cb[3], gr[3][3][3];
-            c.dAreaTri(t, pl, cb, gr);
+            c.geomVolumeAreaGrad(t, pl, cb, gr);
             { // analytic vs forward-AD oracle (must match to machine precision)
               int plA[3]; double cbA[3], grA[3][3][3];
-              c.dAreaTriAD(t, plA, cbA, grA);
+              c.geomVolumeAreaGradAD(t, plA, cbA, grA);
               double sc = 0;
               for (int ii = 0; ii < 3; ++ii) sc = std::max(sc, std::fabs(cb[ii]));
               sc = std::max(sc, 1e-30);
@@ -221,6 +223,31 @@ int main(int argc, char** argv) {
                 }
               }
             }
+          }
+        }
+
+        // (12) Phase 3: Voronoi policy + chainToDofs — dV/dp_self (geomVolumeGrad's dV/dn chained to the
+        // own seed) vs a finite difference of the rebuilt cell's volume. End-to-end geometry→DOF check.
+        if (nChainCells < 40) {
+          ++nChainCells;
+          double vg = 0, dgx[64], dgy[64], dgz[64];
+          for (int k = 0; k < c.np; ++k) dgx[k] = dgy[k] = dgz[k] = 0.0;
+          c.geomVolumeGrad(vg, dgx, dgy, dgz);
+          double fSelf[3], fnx[64], fny[64], fnz[64];
+          vor::device::chainToDofs<vor::device::Voronoi>(c, dgx, dgy, dgz, fSelf, fnx, fny, fnz);
+          const double fmag = std::sqrt(fSelf[0] * fSelf[0] + fSelf[1] * fSelf[1] + fSelf[2] * fSelf[2]);
+          const double denom = std::max(fmag, cellScale);
+          const double eps = 1e-7;
+          for (int cc = 0; cc < 3; ++cc) {  // FD of V wrt the self seed, rebuilding from the same neighbours
+            std::vector<real_t> pp = pos;
+            pp[3 * i + cc] += eps; Cell cpp; const bool okp = buildCell(cpp, i, pp, N, L, nbr);
+            pp[3 * i + cc] -= 2 * eps; Cell cpm; const bool okm = buildCell(cpm, i, pp, N, L, nbr);
+            if (!okp || !okm) continue;
+            const double fd = (cpp.volumePerVertex() - cpm.volumePerVertex()) / (2 * eps);
+            ++nChainTot;
+            const double rel = std::fabs(fd - fSelf[cc]) / denom;
+            if (rel < 2e-3) ++nChainPass;  // FD-limited; misses are topology events
+            maxChain = std::max(maxChain, rel);
           }
         }
 
@@ -308,12 +335,15 @@ int main(int argc, char** argv) {
       const double dAfrac = ndAtot ? (double)ndApass / ndAtot : 1.0;
       std::printf("  (11) geomFull dA/dn vs FD  %.4f%% of %ld couplings (max rel %.2e)   gather %.3e   analytic-vs-AD %.3e\n",
                   100.0 * dAfrac, ndAtot, maxdAfd, maxAreaGather, maxAreaJacAD);
+      const double chainFrac = nChainTot ? (double)nChainPass / nChainTot : 1.0;
+      std::printf("  (12) Voronoi chain dV/dp_self vs FD  %.4f%% of %ld comps (max rel %.2e)\n",
+                  100.0 * chainFrac, nChainTot, maxChain);
       std::printf("  (6) gradient (FD<1e-4)   %.4f%% of cells (rest are at topology events)\n",
                   100.0 * gradFrac);
       const double tol = 1e-9;
       if (maxV > tol || maxArea > tol || maxDiv > tol || maxLabel > 1e-12 || maxAreaAbs > tol || maxDVforce > 1e-9 || maxMerged > 1e-9 ||
           maxGrad > 1e-9 || maxGradVol > 1e-9 || maxAreaVec > tol || maxGradA > 1e-9 || maxAreaVol > 1e-9 ||
-          maxAreaGather > tol || dAfrac < 0.95 || maxAreaJacAD > 1e-9 || gradFrac < 0.98) {
+          maxAreaGather > tol || dAfrac < 0.95 || maxAreaJacAD > 1e-9 || chainFrac < 0.95 || gradFrac < 0.98) {
         std::printf("  FAIL\n");
         rc = 1;
       } else {

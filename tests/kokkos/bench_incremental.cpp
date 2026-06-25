@@ -386,7 +386,7 @@ int main(int argc, char** argv) {
           for (int t = 0; t < nt; ++t) {
             if (!c.alive[t]) continue;
             int pl[3]; real_t cb[3], gr[3][3][3];
-            if (ad) c.dAreaTriAD(t, pl, cb, gr); else c.dAreaTri(t, pl, cb, gr);
+            if (ad) c.geomVolumeAreaGradAD(t, pl, cb, gr); else c.geomVolumeAreaGrad(t, pl, cb, gr);
             for (int ii = 0; ii < 3; ++ii) { s += cb[ii];
               for (int jj = 0; jj < 3; ++jj) for (int dd = 0; dd < 3; ++dd) s += gr[ii][jj][dd]; }
           }
@@ -422,7 +422,7 @@ int main(int argc, char** argv) {
                   N / tPG / 1e3, N / tPF / 1e3);
       std::printf("  full-physics path (Mc/s):  geomVolumeArea(1-pass) %.1f   geometryPerVertex+derive2(2-pass) %.1f\n",
                   N / tPGA / 1e3, N / tPFA / 1e3);
-      std::printf("  dA/dn Jacobian (Mc/s):  dAreaTri analytic %.1f   dAreaTriAD forward-AD %.1f   (speedup %.2fx)\n",
+      std::printf("  dA/dn Jacobian (Mc/s):  geomVolumeAreaGrad analytic %.1f   geomVolumeAreaGradAD forward-AD %.1f   (speedup %.2fx)\n",
                   N / tJac / 1e3, N / tJacAD / 1e3, tJacAD / tJac);
       std::printf("  volume check (FP32): atan2 Σ=%.6f  pervertex |Δ|=%.2e\n", sAtan,
                   std::fabs(sAtan - sPv));
