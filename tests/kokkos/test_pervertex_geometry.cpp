@@ -72,6 +72,7 @@ int main(int argc, char** argv) {
       double maxV = 0, maxDiv = 0, maxArea = 0, maxAreaAbs = 0, maxLabel = 0, maxDVforce = 0, maxMerged = 0;
       double maxGrad = 0, maxGradVol = 0;        // (9) geomVolumeGrad vs closed-form dV/dn
       double maxAreaVec = 0, maxGradA = 0, maxAreaVol = 0;  // (10) geomVolumeArea vs facetGeometry/closed form
+      double maxAreaGather = 0, maxdAfd = 0;  long ndAtot = 0, ndApass = 0, nFull = 0;  // (11) geomFull dA/dn
       long nchecked = 0, nfaceChecked = 0, nGradTot = 0, nGradPass = 0;
       double cellScale = spacing * spacing;  // typical face area ~ spacing²
       const int sw = 3;
@@ -166,6 +167,51 @@ int main(int argc, char** argv) {
           }
         }
 
+        // (11) geomFull: gather the per-triangle area-Jacobian dAreaTri into the full dA_k/dn_l and
+        // (on a sample) finite-difference check it. Expensive, so cap the sample per batch.
+        if (nFull < 60) {
+          ++nFull;
+          const int np = c.np;
+          std::vector<double> dA((size_t)np * np * 3, 0.0), Ag(np, 0.0);
+          for (int t = 0; t < c.nt; ++t) {
+            if (!c.alive[t]) continue;
+            int pl[3]; double cb[3], gr[3][3][3];
+            c.dAreaTri(t, pl, cb, gr);
+            for (int ii = 0; ii < 3; ++ii) {
+              Ag[pl[ii]] += cb[ii];
+              for (int jj = 0; jj < 3; ++jj)
+                for (int cc = 0; cc < 3; ++cc) dA[((size_t)pl[ii] * np + pl[jj]) * 3 + cc] += gr[ii][jj][cc];
+            }
+          }
+          for (int k = 0; k < np; ++k)  // gathered area must reproduce facetAreasPerVertex's area[k]
+            maxAreaGather = std::max(maxAreaGather, std::fabs(Ag[k] - area[k]) / cellScale);
+          // finite-difference dA_k/dn_l vs the gathered analytic, over real faces
+          const double eps = 1e-7;
+          for (int l = 6; l < np; ++l) {
+            if (area[l] < 0.05 * cellScale) continue;
+            for (int cc = 0; cc < 3; ++cc) {
+              auto areasAt = [&](double dd) {
+                Cell cp = c;
+                cp.n[l][cc] += dd;
+                cp.nn[l] = cp.n[l][0] * cp.n[l][0] + cp.n[l][1] * cp.n[l][1] + cp.n[l][2] * cp.n[l][2];
+                for (int t = 0; t < cp.nt; ++t) if (cp.alive[t]) cp.computeVertex(t);
+                std::vector<double> ar(cp.np, 0.0); cp.facetAreasPerVertex(ar.data()); return ar;
+              };
+              auto ap = areasAt(eps), am = areasAt(-eps);
+              for (int k = 6; k < np; ++k) {
+                if (area[k] < 0.05 * cellScale) continue;
+                const double fd = (ap[k] - am[k]) / (2 * eps);
+                const double an = dA[((size_t)k * np + l) * 3 + cc];
+                if (std::fabs(fd) > 0.02 * spacing) {  // only significant couplings (FD-resolvable)
+                  ++ndAtot;
+                  if (std::fabs(an - fd) / std::fabs(fd) < 2e-3) ++ndApass;
+                  maxdAfd = std::max(maxdAfd, std::fabs(an - fd) / std::fabs(fd));
+                }
+              }
+            }
+          }
+        }
+
         // (4) divergence identity  V == (1/3) Σ_f |n_f| A_f   (|n_f| = sqrt(nn) = seed->plane distance)
         double Vdiv = 0;
         for (int k = 0; k < c.np; ++k) Vdiv += std::sqrt(c.nn[k]) * area[k];
@@ -247,11 +293,15 @@ int main(int argc, char** argv) {
       std::printf("  (9) geomVolumeGrad dV/dn  max rel = %.3e   (vol match = %.3e)\n", maxGrad, maxGradVol);
       std::printf("  (10) geomVolumeArea       areaVec rel = %.3e   dV/dn rel = %.3e   (vol match = %.3e)\n",
                   maxAreaVec, maxGradA, maxAreaVol);
+      const double dAfrac = ndAtot ? (double)ndApass / ndAtot : 1.0;
+      std::printf("  (11) geomFull dA/dn vs FD  %.4f%% of %ld couplings (max rel %.2e)   gather match = %.3e\n",
+                  100.0 * dAfrac, ndAtot, maxdAfd, maxAreaGather);
       std::printf("  (6) gradient (FD<1e-4)   %.4f%% of cells (rest are at topology events)\n",
                   100.0 * gradFrac);
       const double tol = 1e-9;
       if (maxV > tol || maxArea > tol || maxDiv > tol || maxLabel > 1e-12 || maxAreaAbs > tol || maxDVforce > 1e-9 || maxMerged > 1e-9 ||
-          maxGrad > 1e-9 || maxGradVol > 1e-9 || maxAreaVec > tol || maxGradA > 1e-9 || maxAreaVol > 1e-9 || gradFrac < 0.98) {
+          maxGrad > 1e-9 || maxGradVol > 1e-9 || maxAreaVec > tol || maxGradA > 1e-9 || maxAreaVol > 1e-9 ||
+          maxAreaGather > tol || dAfrac < 0.95 || gradFrac < 0.98) {
         std::printf("  FAIL\n");
         rc = 1;
       } else {

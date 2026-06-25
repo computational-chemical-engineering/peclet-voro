@@ -29,6 +29,64 @@
 namespace vor {
 namespace device {
 
+namespace detail {
+// Minimal forward-mode dual number (value + K partials) used by ConvexCell::dAreaTri (the geomFull
+// area-Jacobian). Templated on Real so it routes through nvcc/hipcc like the rest of the header.
+template <class Real, int K>
+struct Dual {
+  Real v;
+  Real d[K];
+};
+template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> dnum(Real c) {
+  Dual<Real, K> r; r.v = c;
+  for (int i = 0; i < K; ++i) r.d[i] = Real(0);
+  return r;
+}
+template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> dseed(Real c, int s) {
+  Dual<Real, K> r = dnum<Real, K>(c); r.d[s] = Real(1);
+  return r;
+}
+template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> operator+(const Dual<Real, K>& a, const Dual<Real, K>& b) {
+  Dual<Real, K> r; r.v = a.v + b.v;
+  for (int i = 0; i < K; ++i) r.d[i] = a.d[i] + b.d[i];
+  return r;
+}
+template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> operator-(const Dual<Real, K>& a, const Dual<Real, K>& b) {
+  Dual<Real, K> r; r.v = a.v - b.v;
+  for (int i = 0; i < K; ++i) r.d[i] = a.d[i] - b.d[i];
+  return r;
+}
+template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> operator*(const Dual<Real, K>& a, const Dual<Real, K>& b) {
+  Dual<Real, K> r; r.v = a.v * b.v;
+  for (int i = 0; i < K; ++i) r.d[i] = a.d[i] * b.v + a.v * b.d[i];
+  return r;
+}
+template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> operator/(const Dual<Real, K>& a, const Dual<Real, K>& b) {
+  Dual<Real, K> r; const Real inv = Real(1) / b.v; r.v = a.v * inv;
+  for (int i = 0; i < K; ++i) r.d[i] = (a.d[i] - r.v * b.d[i]) * inv;
+  return r;
+}
+template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> dsqrt(const Dual<Real, K>& a) {
+  Dual<Real, K> r; r.v = Kokkos::sqrt(a.v);
+  const Real inv = (r.v > Real(0)) ? Real(1) / (Real(2) * r.v) : Real(0);
+  for (int i = 0; i < K; ++i) r.d[i] = a.d[i] * inv;
+  return r;
+}
+template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> ddot(const Dual<Real, K> a[3], const Dual<Real, K> b[3]) {
+  return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+template <class Real, int K> KOKKOS_INLINE_FUNCTION void dcross(const Dual<Real, K> a[3], const Dual<Real, K> b[3], Dual<Real, K> o[3]) {
+  o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0];
+}
+template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> ddet3(const Dual<Real, K> a[3], const Dual<Real, K> b[3], const Dual<Real, K> c[3]) {
+  Dual<Real, K> bc[3]; dcross(b, c, bc); return ddot(a, bc);
+}
+template <class Real, int K> KOKKOS_INLINE_FUNCTION void dedgeFoot(const Dual<Real, K> v[3], const Dual<Real, K> c[3], Dual<Real, K> f[3]) {
+  const Dual<Real, K> s = ddot(v, c) / ddot(c, c);
+  f[0] = v[0] - s * c[0]; f[1] = v[1] - s * c[1]; f[2] = v[2] - s * c[2];
+}
+}  // namespace detail
+
 /// Compact convex Voronoi cell. MAXP planes (<=255 so a plane index fits in a byte),
 /// MAXT dual triangles (= primal vertices). Trivially default-constructible (POD) so it
 /// lives in registers / a per-thread stack.
@@ -617,6 +675,59 @@ struct ConvexCell {
       avz[k] = sa * n[k][2] * inv;
     }
     vol = V * (Real(1) / Real(6));
+  }
+
+  /// geomFull primitive: the per-dual-triangle ("subtetrahedron") area-Jacobian block — the building
+  /// block of the FULL coupled dA_k/dn_l (the OT/power-diagram Hessian), with NO ordering and NO
+  /// adjacency. For triangle `t` it recomputes, in forward-mode dual arithmetic seeding the 9 components
+  /// of the 3 plane normals, the three per-facet area contributions AND their derivatives toward those
+  /// three normals. Outputs: `pl[3]` = the (canonically ordered) plane indices the three contributions
+  /// belong to; `contrib[3]` = the area contributions (Σ over triangles reproduces facetAreasPerVertex's
+  /// area[k]); `grad[i][j][c]` = ∂contrib_i/∂n_{pl[j]}[c]. The consumer GATHERS over triangles —
+  /// A_{pl[i]} += contrib[i] and dA_{pl[i]}/dn_{pl[j]} += grad[i][j] — in any order. The dual vertex is
+  /// recomputed (not read from the cache) and the plane offset nn=|n|² is formed from n inside, so the
+  /// dependence of BOTH the vertex and every plane offset on the normals is captured exactly.
+  KOKKOS_INLINE_FUNCTION void dAreaTri(int t, int pl[3], Real contrib[3], Real grad[3][3][3]) const {
+    using D = detail::Dual<Real, 9>;
+    int k1 = t0[t], k2 = t1[t], k3 = t2[t];
+    Real rn1[3] = {n[k1][0], n[k1][1], n[k1][2]};
+    Real rn2[3] = {n[k2][0], n[k2][1], n[k2][2]};
+    Real rn3[3] = {n[k3][0], n[k3][1], n[k3][2]};
+    {  // canonical D>0 swap on the real values (same as facetAreasPerVertex) so contributions land right
+      Real cc[3]; xprod(rn2, rn3, cc);
+      if (dot3(rn1, cc) < Real(0)) {
+        for (int a = 0; a < 3; ++a) { Real tm = rn2[a]; rn2[a] = rn3[a]; rn3[a] = tm; }
+        int tk = k2; k2 = k3; k3 = tk;
+      }
+    }
+    pl[0] = k1; pl[1] = k2; pl[2] = k3;
+    D n1[3], n2[3], n3[3];
+    for (int a = 0; a < 3; ++a) {  // seed: n1 <- slots 0..2, n2 <- 3..5, n3 <- 6..8
+      n1[a] = detail::dseed<Real, 9>(rn1[a], a);
+      n2[a] = detail::dseed<Real, 9>(rn2[a], 3 + a);
+      n3[a] = detail::dseed<Real, 9>(rn3[a], 6 + a);
+    }
+    const D nn1 = detail::ddot<Real, 9>(n1, n1), nn2 = detail::ddot<Real, 9>(n2, n2), nn3 = detail::ddot<Real, 9>(n3, n3);
+    D c1[3], c2[3], c3[3];
+    detail::dcross<Real, 9>(n2, n3, c1); detail::dcross<Real, 9>(n3, n1, c2); detail::dcross<Real, 9>(n1, n2, c3);
+    const D Dd = detail::ddot<Real, 9>(n1, c1);  // det
+    D v[3];
+    for (int a = 0; a < 3; ++a) v[a] = (nn1 * c1[a] + nn2 * c2[a] + nn3 * c3[a]) / Dd;  // Cramer vertex
+    D f12[3], f23[3], f31[3];
+    detail::dedgeFoot<Real, 9>(v, c3, f12); detail::dedgeFoot<Real, 9>(v, c1, f23); detail::dedgeFoot<Real, 9>(v, c2, f31);
+    const D two = detail::dnum<Real, 9>(Real(2));
+    D g[3], aa[3];
+    for (int a = 0; a < 3; ++a) g[a] = f12[a] - f31[a];
+    aa[0] = detail::ddet3<Real, 9>(n1, g, v) / (two * detail::dsqrt<Real, 9>(nn1));
+    for (int a = 0; a < 3; ++a) g[a] = f23[a] - f12[a];
+    aa[1] = detail::ddet3<Real, 9>(n2, g, v) / (two * detail::dsqrt<Real, 9>(nn2));
+    for (int a = 0; a < 3; ++a) g[a] = f31[a] - f23[a];
+    aa[2] = detail::ddet3<Real, 9>(n3, g, v) / (two * detail::dsqrt<Real, 9>(nn3));
+    for (int i = 0; i < 3; ++i) {
+      contrib[i] = aa[i].v;
+      for (int j = 0; j < 3; ++j)
+        for (int c = 0; c < 3; ++c) grad[i][j][c] = aa[i].d[3 * j + c];
+    }
   }
 
   /// MERGED vertex-local geometry: cell volume + per-facet area + per-facet first moment ∫x dA, all in
