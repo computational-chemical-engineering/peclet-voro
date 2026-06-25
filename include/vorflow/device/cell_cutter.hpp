@@ -40,7 +40,9 @@ struct CutterCounters {
   long findRsqMaxCalls = 0, findRsqMaxScans = 0, exhaustiveCalls = 0, exhaustiveScans = 0;
 };
 extern CutterCounters g_cc;
-#define VF_CC(stmt) stmt
+// Host-only: g_cc is a host global, but the cutter is KOKKOS_INLINE_FUNCTION so nvcc also compiles
+// it for device — guard the increment to the host target so device compilation doesn't see g_cc.
+#define VF_CC(stmt) KOKKOS_IF_ON_HOST((stmt;))
 #else
 #define VF_CC(stmt)
 #endif
