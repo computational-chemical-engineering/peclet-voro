@@ -70,6 +70,7 @@ int main(int argc, char** argv) {
       }
 
       double maxV = 0, maxDiv = 0, maxArea = 0, maxAreaAbs = 0, maxLabel = 0, maxDVforce = 0, maxMerged = 0;
+      double maxGrad = 0, maxGradVol = 0;  // (9) geomVolumeGrad vs closed-form dV/dn
       long nchecked = 0, nfaceChecked = 0, nGradTot = 0, nGradPass = 0;
       double cellScale = spacing * spacing;  // typical face area ~ spacing²
       const int sw = 3;
@@ -115,6 +116,25 @@ int main(int argc, char** argv) {
           maxMerged = std::max(maxMerged, std::fabs(vg - Vpv) / Vref);
           for (int k = 0; k < c.np; ++k)
             maxMerged = std::max(maxMerged, std::fabs(ag[k] - area[k]) / cellScale);
+        }
+
+        // (9) geomVolumeGrad: areas-free reverse-scatter dV/dn vs the closed form (2·area·n − m)/|n|
+        {
+          double vg = 0, dgx[64], dgy[64], dgz[64];
+          for (int k = 0; k < c.np; ++k) { dgx[k] = dgy[k] = dgz[k] = 0.0; }
+          c.geomVolumeGrad(vg, dgx, dgy, dgz);
+          maxGradVol = std::max(maxGradVol, std::fabs(vg - Vpv) / Vref);
+          for (int k = 0; k < c.np; ++k) {
+            if (area[k] < 0.05 * cellScale) continue;  // skip near-degenerate facets (mag → 0)
+            const double invn = 1.0 / std::sqrt(c.nn[k]);
+            const double cfx = (2.0 * area[k] * c.n[k][0] - mx[k]) * invn;
+            const double cfy = (2.0 * area[k] * c.n[k][1] - my[k]) * invn;
+            const double cfz = (2.0 * area[k] * c.n[k][2] - mz[k]) * invn;
+            const double err = std::sqrt((dgx[k] - cfx) * (dgx[k] - cfx) + (dgy[k] - cfy) * (dgy[k] - cfy) +
+                                         (dgz[k] - cfz) * (dgz[k] - cfz));
+            const double mag = std::sqrt(cfx * cfx + cfy * cfy + cfz * cfz);
+            if (mag > 1e-9) maxGrad = std::max(maxGrad, err / mag);
+          }
         }
 
         // (4) divergence identity  V == (1/3) Σ_f |n_f| A_f   (|n_f| = sqrt(nn) = seed->plane distance)
@@ -195,11 +215,12 @@ int main(int argc, char** argv) {
       std::printf("  (5) label invariance     max rel = %.3e\n", maxLabel);
       std::printf("  (7) dV(force) vs oracle  max rel = %.3e\n", maxDVforce);
       std::printf("  (8) merged kernel match  max rel = %.3e\n", maxMerged);
+      std::printf("  (9) geomVolumeGrad dV/dn  max rel = %.3e   (vol match = %.3e)\n", maxGrad, maxGradVol);
       std::printf("  (6) gradient (FD<1e-4)   %.4f%% of cells (rest are at topology events)\n",
                   100.0 * gradFrac);
       const double tol = 1e-9;
       if (maxV > tol || maxArea > tol || maxDiv > tol || maxLabel > 1e-12 || maxAreaAbs > tol || maxDVforce > 1e-9 || maxMerged > 1e-9 ||
-          gradFrac < 0.98) {
+          maxGrad > 1e-9 || maxGradVol > 1e-9 || gradFrac < 0.98) {
         std::printf("  FAIL\n");
         rc = 1;
       } else {

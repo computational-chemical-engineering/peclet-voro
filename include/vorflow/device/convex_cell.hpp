@@ -500,6 +500,64 @@ struct ConvexCell {
     }
   }
 
+  /// Scatter one facet's contribution to the volume-gradient NUMERATOR 2·S_a·n_k − S_m AT a vertex, with
+  /// NO sqrt and into just the 3 output arrays. The trick: n_k is the SAME normal (= ni) at every vertex
+  /// of facet k, so the per-vertex term 2·da·ni − mom already carries the facet normal; summed over the
+  /// facet's vertices it is exactly 2·(Σda)·n_k − Σmom = 2·S_a·n_k − S_m. `da`, `mom` are RAW (no 1/(2|n|)
+  /// factor); geomVolumeGrad's fold supplies the shared 1/(2·nn[k]) once per facet (also sqrt-free).
+  KOKKOS_INLINE_FUNCTION static void scatterGradRaw(int ki, const Real ni[3], const Real ff[3],
+                                                    const Real fl[3], const Real v[3], Real* dgx,
+                                                    Real* dgy, Real* dgz) {
+    const Real sa = det3(ni, ff, v);   // raw signed area of triangle (ni, ff, v)
+    const Real sb = -det3(ni, fl, v);  // raw signed area of triangle (ni, v, fl)
+    const Real da = sa + sb;
+    const Real momx = sa * (ni[0] + ff[0] + v[0]) / Real(3) + sb * (ni[0] + v[0] + fl[0]) / Real(3);
+    const Real momy = sa * (ni[1] + ff[1] + v[1]) / Real(3) + sb * (ni[1] + v[1] + fl[1]) / Real(3);
+    const Real momz = sa * (ni[2] + ff[2] + v[2]) / Real(3) + sb * (ni[2] + v[2] + fl[2]) / Real(3);
+    dgx[ki] += Real(2) * da * ni[0] - momx;  // 2·da·n_k − mom  (numerator piece)
+    dgy[ki] += Real(2) * da * ni[1] - momy;
+    dgz[ki] += Real(2) * da * ni[2] - momz;
+  }
+
+  /// geomVolumeGrad tier (Phase 2): cell volume + the volume gradient dV/dn_k per plane, with NO area/
+  /// centroid arrays exposed, NO sqrt anywhere, and only the 3 output arrays touched (so it keeps the
+  /// compact cell's GPU occupancy). dV/dn_k = (2·A_k·n_k − m_k)/|n_k|; scattering the raw numerator
+  /// 2·S_a·n_k − S_m per vertex (S_a = 2|n_k|·A_k, S_m = 2|n_k|·m_k), the per-facet fold is
+  /// dV/dn_k = (numerator)/(2·nn[k]) — the |n_k| cancels into the stored nn=|n|². Caller zeroes the
+  /// np-sized dgx/dgy/dgz (accumulate the numerator, then overwritten in place by the fold). Matches
+  /// geometryPerVertex's closed form to round-off. Voronoi position force dV/dr_k = ½·(dgx,dgy,dgz)[k];
+  /// the policy layer (Phase 3) owns that chain.
+  KOKKOS_INLINE_FUNCTION void geomVolumeGrad(Real& vol, Real* dgx, Real* dgy, Real* dgz) const {
+    Real V = 0;
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      int k1 = t0[t], k2 = t1[t], k3 = t2[t];
+      Real n1[3], n2[3], n3[3];
+      planeN(k1, n1); planeN(k2, n2); planeN(k3, n3);
+      Real c1[3], c2[3], c3[3];
+      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      if (dot3(n1, c1) < Real(0)) {  // canonical D>0: swap planes 2,3 (normals, cross, indices)
+        for (int a = 0; a < 3; ++a) { Real tm = n2[a]; n2[a] = n3[a]; n3[a] = tm; tm = c2[a]; c2[a] = c3[a]; c3[a] = tm; }
+        int tk = k2; k2 = k3; k3 = tk;
+      }
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      Real f12[3], f23[3], f31[3];
+      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      Real e[3];
+      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; V += det3(e, f12, v);
+      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; V += det3(e, f23, v);
+      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2]; V += det3(e, f31, v);
+      scatterGradRaw(k1, n1, f12, f31, v, dgx, dgy, dgz);
+      scatterGradRaw(k2, n2, f23, f12, v, dgx, dgy, dgz);
+      scatterGradRaw(k3, n3, f31, f23, v, dgx, dgy, dgz);
+    }
+    for (int k = 0; k < np; ++k) {  // per-facet fold, sqrt-free: numerator/(2·nn)
+      const Real inv = (nn[k] > Real(0)) ? Real(1) / (Real(2) * nn[k]) : Real(0);
+      dgx[k] *= inv; dgy[k] *= inv; dgz[k] *= inv;
+    }
+    vol = V * (Real(1) / Real(6));
+  }
+
   /// MERGED vertex-local geometry: cell volume + per-facet area + per-facet first moment ∫x dA, all in
   /// ONE pass (shares n,c,D,v,feet per vertex). The production G1+G2 kernel — sort-free, adjacency-free.
   /// Caller zeroes the np-sized arrays. With connector r_k = 2·n[k] (so |r_k| = 2·sqrt(nn[k])), derive
