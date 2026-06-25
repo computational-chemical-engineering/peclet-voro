@@ -339,10 +339,12 @@ static void run(int N) {
   const double volErr = std::fabs(r.volSum - boxVol) / boxVol;
 
 #ifdef VORFLOW_HAVE_VOROPP
-  // per-cell voro++ comparison on a small subsample (build all, compare a few)
-  double voroVol = 0;
-  {
+  // voro++ FULL periodic tessellation, timed (single-threaded library = the serial reference). Skip
+  // with CC_NOVORO=1 for large-N our-only sweeps. The put()+compute_cell() loop is the cold-build work.
+  double voroVol = 0, voroSecs = -1;
+  if (!std::getenv("CC_NOVORO")) {
     const int nbl = std::max(1, (int)std::cbrt(N / 8.0));
+    auto vt0 = clk::now();
     voro::container_periodic con(L[0], 0, L[1], 0, 0, L[2], nbl, nbl, nbl, 8);
     for (int i = 0; i < N; ++i) con.put(i, h[3 * i], h[3 * i + 1], h[3 * i + 2]);
     voro::voronoicell c(con);
@@ -350,12 +352,14 @@ static void run(int N) {
     if (vl.start()) do {
         if (con.compute_cell(c, vl)) voroVol += c.volume();
       } while (vl.inc());
+    voroSecs = secs(vt0, clk::now());
   }
-  const double voroErr = std::fabs(r.volSum - voroVol) / voroVol;
+  const double voroErr = voroSecs < 0 ? 0.0 : std::fabs(r.volSum - voroVol) / voroVol;
   std::printf(
-      "N=%-8d  convexcell %7.1f k/s  | Σvol/box err=%.2e  Σvol/voro err=%.2e  faces/cell=%.2f  "
+      "N=%-8d  convexcell %7.1f k/s  voro++ %7.1f k/s  | Σvol/box err=%.2e  Σvol/voro err=%.2e  faces/cell=%.2f  "
       "overflow=%ld examined/cell mean=%.1f max=%ld\n",
-      N, N / r.secsBest / 1e3, volErr, voroErr, (double)r.faceSum / N, r.overflow, (double)r.clipSum / N, r.clipMax);
+      N, N / r.secsBest / 1e3, voroSecs < 0 ? 0.0 : N / voroSecs / 1e3, volErr, voroErr, (double)r.faceSum / N,
+      r.overflow, (double)r.clipSum / N, r.clipMax);
 #else
   std::printf("N=%-8d  convexcell %7.1f k/s  | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld examined/cell mean=%.1f max=%ld\n",
               N, N / r.secsBest / 1e3, volErr, (double)r.faceSum / N, r.overflow, (double)r.clipSum / N, r.clipMax);
