@@ -123,7 +123,7 @@ int main(int argc, char** argv) {
           pz = 4.0 * std::rand() / RAND_MAX - 2;
         bool in = true;
         for (int k = 0; k < c.np && in; ++k)
-          if (c.pn[k][0] * px + c.pn[k][1] * py + c.pn[k][2] * pz > c.pd[k]) in = false;
+          if (c.n[k][0] * px + c.n[k][1] * py + c.n[k][2] * pz > c.nn[k]) in = false;
         if (in) ++inside;
       }
       double mc = 64.0 * inside / total;
@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
             pz = Rb * (2.0 * std::rand() / RAND_MAX - 1);
           bool in = true;
           for (int k = 0; k < c.np && in; ++k)
-            if (c.pn[k][0] * px + c.pn[k][1] * py + c.pn[k][2] * pz > c.pd[k]) in = false;
+            if (c.n[k][0] * px + c.n[k][1] * py + c.n[k][2] * pz > c.nn[k]) in = false;
           if (in) ++inside;
         }
         double mc = (2 * Rb) * (2 * Rb) * (2 * Rb) * inside / total;

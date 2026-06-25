@@ -117,12 +117,9 @@ int main(int argc, char** argv) {
             maxMerged = std::max(maxMerged, std::fabs(ag[k] - area[k]) / cellScale);
         }
 
-        // (4) divergence identity  V == (1/3) Σ_f |n_f| A_f   (|n_f| = pd/|pn|)
+        // (4) divergence identity  V == (1/3) Σ_f |n_f| A_f   (|n_f| = sqrt(nn) = seed->plane distance)
         double Vdiv = 0;
-        for (int k = 0; k < c.np; ++k) {
-          const double pl = std::sqrt(c.pn[k][0] * c.pn[k][0] + c.pn[k][1] * c.pn[k][1] + c.pn[k][2] * c.pn[k][2]);
-          if (pl > 0) Vdiv += (c.pd[k] / pl) * area[k];
-        }
+        for (int k = 0; k < c.np; ++k) Vdiv += std::sqrt(c.nn[k]) * area[k];
         Vdiv /= 3.0;
         maxDiv = std::max(maxDiv, std::fabs(Vdiv - Vpv) / Vref);
 
@@ -146,10 +143,12 @@ int main(int argc, char** argv) {
         for (int k = 6; k < c.np; ++k) {
           if (area[k] < 0.05 * cellScale) continue;
           if (!c.facetGeometry(k, aV, dvRef, cn)) continue;
-          const double rl = std::sqrt(c.pn[k][0] * c.pn[k][0] + c.pn[k][1] * c.pn[k][1] + c.pn[k][2] * c.pn[k][2]);
+          // connector r = 2·n (foot point); force dV/dr = (area/|r|)(r − centroid)
+          const double rx = 2.0 * c.n[k][0], ry = 2.0 * c.n[k][1], rz = 2.0 * c.n[k][2];
+          const double rl = std::sqrt(rx * rx + ry * ry + rz * rz);
           const double s = area[k] / rl;
           const double cxk = mx[k] / area[k], cyk = my[k] / area[k], czk = mz[k] / area[k];
-          const double dvx = s * (c.pn[k][0] - cxk), dvy = s * (c.pn[k][1] - cyk), dvz = s * (c.pn[k][2] - czk);
+          const double dvx = s * (rx - cxk), dvy = s * (ry - cyk), dvz = s * (rz - czk);
           const double err = std::sqrt((dvx - dvRef[0]) * (dvx - dvRef[0]) + (dvy - dvRef[1]) * (dvy - dvRef[1]) +
                                        (dvz - dvRef[2]) * (dvz - dvRef[2]));
           const double mag = std::sqrt(dvRef[0] * dvRef[0] + dvRef[1] * dvRef[1] + dvRef[2] * dvRef[2]);
@@ -164,23 +163,26 @@ int main(int argc, char** argv) {
           }
         maxLabel = std::max(maxLabel, std::fabs(c2.volumePerVertex() - Vpv) / Vref);
 
-        // (6) gradient: dV/d(pd_f) finite-diff vs analytic A_f/|pn_f|  (one real face per cell)
+        // (6) gradient: dV/dh_f finite-diff vs analytic A_f  (one real face per cell). Perturb plane kf
+        // along its normal by dh: scale the foot point n[kf] by (h+dh)/h, set nn = (h+dh)².
         int kf = -1;
         for (int k = 6; k < c.np; ++k)
           if (area[k] > 1e-6) { kf = k; break; }
         if (kf >= 0) {
-          const double pl = std::sqrt(c.pn[kf][0] * c.pn[kf][0] + c.pn[kf][1] * c.pn[kf][1] + c.pn[kf][2] * c.pn[kf][2]);
+          const double h = std::sqrt(c.nn[kf]);  // |n_kf| = seed->plane distance
           const double eps = 1e-8;  // small step; topology stays fixed away from combinatorial events
-          auto Vat = [&](double dpd) {
+          auto Vat = [&](double dh) {
             Cell cc = c;
-            cc.pd[kf] += dpd;
+            const double sc = (h + dh) / h;
+            cc.n[kf][0] *= sc; cc.n[kf][1] *= sc; cc.n[kf][2] *= sc;
+            cc.nn[kf] = (h + dh) * (h + dh);
             for (int t = 0; t < cc.nt; ++t) if (cc.alive[t]) cc.computeVertex(t);
             return cc.volumePerVertex();
           };
-          const double dVdpd = (Vat(eps) - Vat(-eps)) / (2 * eps);
-          const double analytic = area[kf] / pl;  // dV/dh=A_f, dh/dpd=1/|pn|
+          const double dVdh = (Vat(eps) - Vat(-eps)) / (2 * eps);
+          const double analytic = area[kf];  // dV/dh = A_f
           ++nGradTot;
-          if (std::fabs(dVdpd - analytic) / std::fabs(analytic) < 1e-4) ++nGradPass;  // smooth cells
+          if (std::fabs(dVdh - analytic) / std::fabs(analytic) < 1e-4) ++nGradPass;  // smooth cells
         }
       }
       std::printf("batch %d (%s): cells=%ld faces=%ld\n", batch, batch ? "anisotropic/obtuse" : "isotropic",

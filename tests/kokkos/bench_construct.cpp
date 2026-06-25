@@ -126,11 +126,12 @@ int main(int argc, char** argv) {
             real_t asum = 0;
             for (int kk = 6; kk < c.np; ++kk) {  // derive areaVec + dV per facet (no faceOrdered/atan2)
               if (area[kk] <= real_t(0)) continue;
-              const real_t pl = Kokkos::sqrt(c.pn[kk][0] * c.pn[kk][0] + c.pn[kk][1] * c.pn[kk][1] + c.pn[kk][2] * c.pn[kk][2]);
+              const real_t rx = real_t(2) * c.n[kk][0];                      // connector r = 2·foot (x)
+              const real_t pl = real_t(2) * Kokkos::sqrt(c.nn[kk]);          // |r| = 2|n|
               const real_t s = area[kk] / pl, inva = real_t(1) / area[kk];
-              const real_t aV = area[kk] * c.pn[kk][0] / pl;                 // outward area vector (x)
-              const real_t dv = s * (c.pn[kk][0] - mx[kk] * inva);          // force dV (x)
-              asum += aV + dv + c.pn[kk][0];                                // touch outputs
+              const real_t aV = area[kk] * rx / pl;                          // outward area vector (x)
+              const real_t dv = s * (rx - mx[kk] * inva);                    // force dV (x)
+              asum += aV + dv + rx;                                          // touch outputs
             }
             outArea(i) = asum;
           }
