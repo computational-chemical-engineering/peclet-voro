@@ -322,14 +322,63 @@ int main(int argc, char** argv) {
         });
         Kokkos::fence();
       };
-      aos(true); aos(false); soa(); pv(); pva(); pvg(); pvf();  // warm
+      auto pvga = [&]() {  // geomVolumeArea tier: V + outward area-vectors + dV/dn, one sqrt-free pass
+        Kokkos::parallel_for("pvga", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c; c.initBoxPlanes(L, L, L);
+          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
+          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+          for (int t = 0; t < nt; ++t) {
+            const unsigned w = topoTriL((size_t)i * CMAXT + t);
+            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
+            c.alive[t] = (w >> 24) & 1u;
+          }
+          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+          real_t vol = 0, avx[CMAXP], avy[CMAXP], avz[CMAXP], dgx[CMAXP], dgy[CMAXP], dgz[CMAXP];
+          for (int k = 0; k < np; ++k) avx[k] = avy[k] = avz[k] = dgx[k] = dgy[k] = dgz[k] = 0;
+          c.geomVolumeArea(vol, avx, avy, avz, dgx, dgy, dgz);
+          real_t s = vol;
+          for (int k = 0; k < np; ++k) s += avx[k] + avy[k] + avz[k] + dgx[k] + dgy[k] + dgz[k];  // touch
+          vtmpL(i) = s;
+        });
+        Kokkos::fence();
+      };
+      auto pvfa = [&]() {  // OLD full-physics path: V+area+moment (4 arrays) THEN derive areaVec AND dV/dn
+        Kokkos::parallel_for("pvfa", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c; c.initBoxPlanes(L, L, L);
+          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
+          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+          for (int t = 0; t < nt; ++t) {
+            const unsigned w = topoTriL((size_t)i * CMAXT + t);
+            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
+            c.alive[t] = (w >> 24) & 1u;
+          }
+          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+          real_t vol = 0, area[CMAXP], mx[CMAXP], my[CMAXP], mz[CMAXP];
+          for (int k = 0; k < np; ++k) area[k] = mx[k] = my[k] = mz[k] = 0;
+          c.geometryPerVertex(vol, area, mx, my, mz);
+          real_t s = vol;
+          for (int k = 6; k < np; ++k) {  // derive areaVec = area·n/|n| AND force dV/dn = (2·area·n − m)/|n|
+            if (area[k] <= real_t(0)) continue;
+            const real_t invn = real_t(1) / Kokkos::sqrt(c.nn[k]);
+            for (int d = 0; d < 3; ++d) {
+              const real_t nd = c.n[k][d];
+              const real_t avd = area[k] * nd * invn;
+              const real_t dvd = (real_t(2) * area[k] * nd - (d == 0 ? mx[k] : d == 1 ? my[k] : mz[k])) * invn;
+              s += avd + dvd;
+            }
+          }
+          vtmpL(i) = s;
+        });
+        Kokkos::fence();
+      };
+      aos(true); aos(false); soa(); pv(); pva(); pvg(); pvf(); pvga(); pvfa();  // warm
       auto sumv = [&]() {
         auto h = Kokkos::create_mirror_view(vtmp); Kokkos::deep_copy(h, vtmp);
         double s = 0; for (int i = 0; i < N; ++i) s += h(i); return s;
       };
       aos(true); const double sAtan = sumv();
       pv(); const double sPv = sumv();
-      double tA = 1e30, tNv = 1e30, tS = 1e30, tP = 1e30, tPA = 1e30, tPG = 1e30, tPF = 1e30;
+      double tA = 1e30, tNv = 1e30, tS = 1e30, tP = 1e30, tPA = 1e30, tPG = 1e30, tPF = 1e30, tPGA = 1e30, tPFA = 1e30;
       for (int r = 0; r < 5; ++r) {
         auto a0 = clk::now(); aos(true); auto a1 = clk::now(); tA = std::min(tA, secs(a0, a1));
         auto b0 = clk::now(); aos(false); auto b1 = clk::now(); tNv = std::min(tNv, secs(b0, b1));
@@ -338,12 +387,16 @@ int main(int argc, char** argv) {
         auto q0 = clk::now(); pva(); auto q1 = clk::now(); tPA = std::min(tPA, secs(q0, q1));
         auto g0 = clk::now(); pvg(); auto g1 = clk::now(); tPG = std::min(tPG, secs(g0, g1));
         auto f0 = clk::now(); pvf(); auto f1 = clk::now(); tPF = std::min(tPF, secs(f0, f1));
+        auto ga0 = clk::now(); pvga(); auto ga1 = clk::now(); tPGA = std::min(tPGA, secs(ga0, ga1));
+        auto fa0 = clk::now(); pvfa(); auto fa1 = clk::now(); tPFA = std::min(tPFA, secs(fa0, fa1));
       }
       std::printf("  re-eval decomposition (Mc/s):  atan2-sort %.1f   no-volume %.1f   SoA-topo %.1f"
                   "   pervertex(V) %.1f   pervertex(V+A) %.1f\n", N / tA / 1e3, N / tNv / 1e3, N / tS / 1e3,
                   N / tP / 1e3, N / tPA / 1e3);
       std::printf("  force path (Mc/s):  geomVolumeGrad(1-pass) %.1f   geometryPerVertex+derive(2-pass) %.1f\n",
                   N / tPG / 1e3, N / tPF / 1e3);
+      std::printf("  full-physics path (Mc/s):  geomVolumeArea(1-pass) %.1f   geometryPerVertex+derive2(2-pass) %.1f\n",
+                  N / tPGA / 1e3, N / tPFA / 1e3);
       std::printf("  volume check (FP32): atan2 Σ=%.6f  pervertex |Δ|=%.2e\n", sAtan,
                   std::fabs(sAtan - sPv));
     }

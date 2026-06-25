@@ -70,7 +70,8 @@ int main(int argc, char** argv) {
       }
 
       double maxV = 0, maxDiv = 0, maxArea = 0, maxAreaAbs = 0, maxLabel = 0, maxDVforce = 0, maxMerged = 0;
-      double maxGrad = 0, maxGradVol = 0;  // (9) geomVolumeGrad vs closed-form dV/dn
+      double maxGrad = 0, maxGradVol = 0;        // (9) geomVolumeGrad vs closed-form dV/dn
+      double maxAreaVec = 0, maxGradA = 0, maxAreaVol = 0;  // (10) geomVolumeArea vs facetGeometry/closed form
       long nchecked = 0, nfaceChecked = 0, nGradTot = 0, nGradPass = 0;
       double cellScale = spacing * spacing;  // typical face area ~ spacing²
       const int sw = 3;
@@ -134,6 +135,34 @@ int main(int argc, char** argv) {
                                          (dgz[k] - cfz) * (dgz[k] - cfz));
             const double mag = std::sqrt(cfx * cfx + cfy * cfy + cfz * cfz);
             if (mag > 1e-9) maxGrad = std::max(maxGrad, err / mag);
+          }
+        }
+
+        // (10) geomVolumeArea: areas-free sqrt-free area-vectors + dV/dn vs facetGeometry / closed form
+        {
+          double varea = 0, avx[64], avy[64], avz[64], dgx[64], dgy[64], dgz[64];
+          for (int k = 0; k < c.np; ++k) { avx[k] = avy[k] = avz[k] = dgx[k] = dgy[k] = dgz[k] = 0.0; }
+          c.geomVolumeArea(varea, avx, avy, avz, dgx, dgy, dgz);
+          maxAreaVol = std::max(maxAreaVol, std::fabs(varea - Vpv) / Vref);
+          real_t aV[3], dvRef[3], cn[3];
+          for (int k = 6; k < c.np; ++k) {
+            if (area[k] < 0.05 * cellScale) continue;
+            // area-vector vs facetGeometry's oriented polygon area vector
+            if (c.facetGeometry(k, aV, dvRef, cn)) {
+              const double aerr = std::sqrt((avx[k] - aV[0]) * (avx[k] - aV[0]) + (avy[k] - aV[1]) * (avy[k] - aV[1]) +
+                                            (avz[k] - aV[2]) * (avz[k] - aV[2]));
+              const double amag = std::sqrt((double)aV[0] * aV[0] + (double)aV[1] * aV[1] + (double)aV[2] * aV[2]);
+              if (amag > 1e-9) maxAreaVec = std::max(maxAreaVec, aerr / amag);
+            }
+            // dV/dn vs closed form (2·area·n − m)/|n|
+            const double invn = 1.0 / std::sqrt(c.nn[k]);
+            const double cfx = (2.0 * area[k] * c.n[k][0] - mx[k]) * invn;
+            const double cfy = (2.0 * area[k] * c.n[k][1] - my[k]) * invn;
+            const double cfz = (2.0 * area[k] * c.n[k][2] - mz[k]) * invn;
+            const double err = std::sqrt((dgx[k] - cfx) * (dgx[k] - cfx) + (dgy[k] - cfy) * (dgy[k] - cfy) +
+                                         (dgz[k] - cfz) * (dgz[k] - cfz));
+            const double mag = std::sqrt(cfx * cfx + cfy * cfy + cfz * cfz);
+            if (mag > 1e-9) maxGradA = std::max(maxGradA, err / mag);
           }
         }
 
@@ -216,11 +245,13 @@ int main(int argc, char** argv) {
       std::printf("  (7) dV(force) vs oracle  max rel = %.3e\n", maxDVforce);
       std::printf("  (8) merged kernel match  max rel = %.3e\n", maxMerged);
       std::printf("  (9) geomVolumeGrad dV/dn  max rel = %.3e   (vol match = %.3e)\n", maxGrad, maxGradVol);
+      std::printf("  (10) geomVolumeArea       areaVec rel = %.3e   dV/dn rel = %.3e   (vol match = %.3e)\n",
+                  maxAreaVec, maxGradA, maxAreaVol);
       std::printf("  (6) gradient (FD<1e-4)   %.4f%% of cells (rest are at topology events)\n",
                   100.0 * gradFrac);
       const double tol = 1e-9;
       if (maxV > tol || maxArea > tol || maxDiv > tol || maxLabel > 1e-12 || maxAreaAbs > tol || maxDVforce > 1e-9 || maxMerged > 1e-9 ||
-          maxGrad > 1e-9 || maxGradVol > 1e-9 || gradFrac < 0.98) {
+          maxGrad > 1e-9 || maxGradVol > 1e-9 || maxAreaVec > tol || maxGradA > 1e-9 || maxAreaVol > 1e-9 || gradFrac < 0.98) {
         std::printf("  FAIL\n");
         rc = 1;
       } else {

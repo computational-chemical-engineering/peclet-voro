@@ -558,6 +558,67 @@ struct ConvexCell {
     vol = V * (Real(1) / Real(6));
   }
 
+  /// Scatter one facet's RAW area S_a (=Σdet3) and RAW first moment S_m (=Σdet3·centroid_tri) AT a vertex
+  /// — scatterFacetMoment without the 1/(2|n|) factor (so NO sqrt). geomVolumeArea defers the shared
+  /// 1/(2|n|) to its per-facet fold, where it cancels against |n| for the area-vector and the gradient.
+  KOKKOS_INLINE_FUNCTION static void scatterAreaMomentRaw(int ki, const Real ni[3], const Real ff[3],
+                                                          const Real fl[3], const Real v[3], Real* sa_acc,
+                                                          Real* smx, Real* smy, Real* smz) {
+    const Real sa = det3(ni, ff, v);   // raw signed area of triangle (ni, ff, v)
+    const Real sb = -det3(ni, fl, v);  // raw signed area of triangle (ni, v, fl)
+    sa_acc[ki] += sa + sb;
+    smx[ki] += sa * (ni[0] + ff[0] + v[0]) / Real(3) + sb * (ni[0] + v[0] + fl[0]) / Real(3);
+    smy[ki] += sa * (ni[1] + ff[1] + v[1]) / Real(3) + sb * (ni[1] + v[1] + fl[1]) / Real(3);
+    smz[ki] += sa * (ni[2] + ff[2] + v[2]) / Real(3) + sb * (ni[2] + v[2] + fl[2]) / Real(3);
+  }
+
+  /// geomVolumeArea tier (Phase 2): cell volume + the outward area-VECTOR A_k·n_k/|n_k| AND the volume
+  /// gradient dV/dn_k per plane — the full G2 physics set (areas for fluxes/momentum, gradient for force).
+  /// Like geomVolumeGrad it is fully SQRT-FREE: both outputs are |n|²-normalized — areaVec_k =
+  /// S_a·n_k/(2·nn[k]) and dV/dn_k = (2·S_a·n_k − S_m)/(2·nn[k]) — with the raw S_a (=2|n_k|·A_k) and
+  /// S_m (=2|n_k|·m_k) scattered per vertex. No extra scratch: during the scatter `avx` holds S_a and
+  /// (dgx,dgy,dgz) hold S_m; the per-facet fold overwrites them in place (so the compact-cell stack stays
+  /// at the 6 caller arrays). Caller zeroes all six. The facet centroid, if wanted, is c_k = S_m/S_a
+  /// (also sqrt-free) — derivable but not exposed here. Matches facetGeometry's areaVec/dv to round-off.
+  KOKKOS_INLINE_FUNCTION void geomVolumeArea(Real& vol, Real* avx, Real* avy, Real* avz, Real* dgx,
+                                             Real* dgy, Real* dgz) const {
+    Real V = 0;
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      int k1 = t0[t], k2 = t1[t], k3 = t2[t];
+      Real n1[3], n2[3], n3[3];
+      planeN(k1, n1); planeN(k2, n2); planeN(k3, n3);
+      Real c1[3], c2[3], c3[3];
+      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      if (dot3(n1, c1) < Real(0)) {  // canonical D>0: swap planes 2,3 (normals, cross, indices)
+        for (int a = 0; a < 3; ++a) { Real tm = n2[a]; n2[a] = n3[a]; n3[a] = tm; tm = c2[a]; c2[a] = c3[a]; c3[a] = tm; }
+        int tk = k2; k2 = k3; k3 = tk;
+      }
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      Real f12[3], f23[3], f31[3];
+      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      Real e[3];
+      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; V += det3(e, f12, v);
+      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; V += det3(e, f23, v);
+      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2]; V += det3(e, f31, v);
+      scatterAreaMomentRaw(k1, n1, f12, f31, v, avx, dgx, dgy, dgz);  // avx <- S_a, (dgx,dgy,dgz) <- S_m
+      scatterAreaMomentRaw(k2, n2, f23, f12, v, avx, dgx, dgy, dgz);
+      scatterAreaMomentRaw(k3, n3, f31, f23, v, avx, dgx, dgy, dgz);
+    }
+    for (int k = 0; k < np; ++k) {  // per-facet fold, sqrt-free
+      const Real inv = (nn[k] > Real(0)) ? Real(1) / (Real(2) * nn[k]) : Real(0);
+      const Real sa = avx[k];  // raw area S_a (accumulated here during the scatter)
+      const Real smx = dgx[k], smy = dgy[k], smz = dgz[k];
+      dgx[k] = (Real(2) * sa * n[k][0] - smx) * inv;  // dV/dn_k
+      dgy[k] = (Real(2) * sa * n[k][1] - smy) * inv;
+      dgz[k] = (Real(2) * sa * n[k][2] - smz) * inv;
+      avx[k] = sa * n[k][0] * inv;  // outward area-vector A_k·n_k/|n_k|
+      avy[k] = sa * n[k][1] * inv;
+      avz[k] = sa * n[k][2] * inv;
+    }
+    vol = V * (Real(1) / Real(6));
+  }
+
   /// MERGED vertex-local geometry: cell volume + per-facet area + per-facet first moment ∫x dA, all in
   /// ONE pass (shares n,c,D,v,feet per vertex). The production G1+G2 kernel — sort-free, adjacency-free.
   /// Caller zeroes the np-sized arrays. With connector r_k = 2·n[k] (so |r_k| = 2·sqrt(nn[k])), derive
