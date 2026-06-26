@@ -79,6 +79,7 @@ struct Result {
   double volSumW = 0;
   long faceSumW = 0;
   long overflowW = 0;
+  long exhaustW = 0;  // Phase C: cells that drained the worklist without the radius break (0 ⇒ provably complete)
   double secsBestW = -1;
 };
 
@@ -308,7 +309,7 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   Kokkos::View<real_t*, MemSpace> cellVolS("cellVolS", N);
   Kokkos::View<int*, MemSpace> cellFacesS("cellFacesS", N), cellOvfS("cellOvfS", N);
   Kokkos::View<real_t*, MemSpace> cellVolW("cellVolW", N);
-  Kokkos::View<int*, MemSpace> cellFacesW("cellFacesW", N), cellOvfW("cellOvfW", N);
+  Kokkos::View<int*, MemSpace> cellFacesW("cellFacesW", N), cellOvfW("cellOvfW", N), cellExhaustW("cellExhaustW", N);
   auto build_sorted = [&]() {
     Kokkos::parallel_for(
         "cc.build_sorted", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int q) {
@@ -386,8 +387,9 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
           c.initBox(Lx, Ly, Lz);
           real_t secR2 = 2.0 * c.maxVertexRsq();
+          bool radiusClosed = false;  // Phase C: did the rmin break fire before the worklist ran out?
           for (int g = 0; g < nOff; ++g) {
-            if (wlRmin(base + g) > 2.0 * secR2) break;  // sorted by rmin ⇒ all remaining are farther
+            if (wlRmin(base + g) > 2.0 * secR2) { radiusClosed = true; break; }  // sorted ⇒ rest are farther
             int gx = cx + wlX(base + g); real_t dispx = 0;
             if (gx >= dimx) { gx -= dimx; dispx = Lx; } else if (gx < 0) { gx += dimx; dispx = -Lx; }
             int gy = cy + wlY(base + g); real_t dispy = 0;
@@ -427,6 +429,13 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           cellVolW(q) = (c.overflow || !doVol) ? 0.0 : c.volumePerVertex();
           cellFacesW(q) = c.overflow ? 0 : c.countFaces();
           cellOvfW(q) = c.overflow ? 1 : 0;
+          // Phase C completeness guard: a cell that drained the whole worklist WITHOUT the radius break
+          // firing may have a neighbour outside the window — the gather is then NOT provably complete for
+          // that cell. Flag it so incompleteness can never pass silently (unlike the fixed-window
+          // spatial-sort, which just drops the neighbour). exhausted=0 over all cells ⇒ provably exact;
+          // any count >0 means sw (auto-sized, CC_SW to override) must grow. Overflowed cells are excluded
+          // (their loop exits early by design, not by exhaustion).
+          cellExhaustW(q) = (!radiusClosed && !c.overflow) ? 1 : 0;
         });
     Kokkos::fence();
   };
@@ -466,13 +475,16 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
       auto hvw = Kokkos::create_mirror_view(cellVolW);
       auto hfw = Kokkos::create_mirror_view(cellFacesW);
       auto how = Kokkos::create_mirror_view(cellOvfW);
+      auto hew = Kokkos::create_mirror_view(cellExhaustW);
       Kokkos::deep_copy(hvw, cellVolW);
       Kokkos::deep_copy(hfw, cellFacesW);
       Kokkos::deep_copy(how, cellOvfW);
+      Kokkos::deep_copy(hew, cellExhaustW);
       for (int i = 0; i < N; ++i) {
         r.volSumW += hvw(i);
         r.faceSumW += hfw(i);
         r.overflowW += how(i);
+        r.exhaustW += hew(i);
       }
     }
   }
@@ -548,8 +560,10 @@ static void run(int N) {
               N / r.secsBestS / 1e3, r.secsBest / r.secsBestS, volErrS, (double)r.faceSumS / N, r.overflowS);
   if (r.secsBestW >= 0) {
     const double volErrW = std::fabs(r.volSumW - boxVol) / boxVol;
-    std::printf("          worklist     %7.1f k/s (%.2fx) | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld\n",
-                N / r.secsBestW / 1e3, r.secsBestS / r.secsBestW, volErrW, (double)r.faceSumW / N, r.overflowW);
+    std::printf(
+        "          worklist     %7.1f k/s (%.2fx) | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld  exhausted=%ld%s\n",
+        N / r.secsBestW / 1e3, r.secsBestS / r.secsBestW, volErrW, (double)r.faceSumW / N, r.overflowW, r.exhaustW,
+        r.exhaustW ? "  <-- WINDOW TOO SMALL (raise CC_SW)" : " (complete)");
   }
 }
 
