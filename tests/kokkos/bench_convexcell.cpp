@@ -87,6 +87,11 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   const real_t vol = L[0] * L[1] * L[2];
   const real_t dens = std::getenv("CC_DENS") ? std::atof(std::getenv("CC_DENS")) : 1.0;
   const real_t spacing = std::cbrt(dens * vol / std::max(1, N));
+  // Auto-size the search window to cover the security radius (~2·R_vertex ≈ 2.6·mean-spacing) at this
+  // grid density: a cell needs blocks out to ~2.6·mean/minCsz = 2.6/cbrt(dens) cells; +3 margin for
+  // irregular cells. The sorted radius break terminates early inside it, so an over-size window only
+  // costs setup, not the per-cell walk. CC_SW still overrides for sweeps.
+  if (std::getenv("CC_SW") == nullptr) sw = (int)std::ceil(2.6 / std::cbrt(dens)) + 3;
   int dim[3];
   real_t icsz[3], csz[3];
   for (int k = 0; k < 3; ++k) {
@@ -243,11 +248,16 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           const real_t Lxh = 0.5 * Lx, Lyh = 0.5 * Ly, Lzh = 0.5 * Lz;
           vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
           c.initBox(Lx, Ly, Lz);
+          // Sorted-offset gather with the CORRECT radius cutoff. The offsets offX/Y/Z are sorted by
+          // nearest-corner dist² offD, so `break` on the first offD past the radius is provably complete
+          // (all remaining are farther). The cutoff is 2·secR2, NOT secR2: a seed at full dist² d cuts
+          // iff d < 2·R_vertex i.e. d² < 4·maxVrsq = 2·secR2 (the per-candidate `off`=½d² is culled at
+          // off>=secR2). Comparing offD to secR2 under-reaches by √2 and silently drops neighbours — that
+          // was the long-standing bug. The window (sw) is auto-sized above to cover this radius at the
+          // chosen density, so the break always fires inside it.
           real_t secR2 = 2.0 * c.maxVertexRsq();  // cached; only shrinks when a clip cuts
           for (int o = 0; o < nOff; ++o) {
-            if (offD(o) > secR2) break;
-            // branchless periodic wrap (offX in [-sw,sw], cx in [0,dim) => one add/sub suffices),
-            // replacing 2 integer-modulo per axis — GPU idiv is ~20+ cycles and this runs ~100x/cell
+            if (offD(o) > 2.0 * secR2) break;  // sorted ⇒ all remaining offsets are beyond the radius
             int gx = cx + offX(o); gx = gx < 0 ? gx + dimx : (gx >= dimx ? gx - dimx : gx);
             int gy = cy + offY(o); gy = gy < 0 ? gy + dimy : (gy >= dimy ? gy - dimy : gy);
             int gz = cz + offZ(o); gz = gz < 0 ? gz + dimz : (gz >= dimz ? gz - dimz : gz);
