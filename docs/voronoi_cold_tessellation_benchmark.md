@@ -90,9 +90,18 @@ goes silently inexact if its window is too small (e.g. at coarse `dens`).
   (per-block ±L periodic shift), just walks a tighter offset list — so it cuts work *and* warp divergence;
   the gain grows with density (its GPU optimum sits at a coarser `dens≈1.0, S=4`). Whole-block-accept's
   branches *would* diverge, which is why that stays off. (`CC_GATHER` selects the gather on either backend.)
-- **Scaling:** CPU throughput is flat in N (memory-bandwidth-saturated above ~100 k); the GPU climbs with
-  N (1.59 → 5.07 → 7.88) as occupancy fills, needing ≥~300 k to near its ceiling. 24-core is bandwidth-bound
-  (~1.4 M/s, well under the ~2.75 M/s clip-only ceiling).
+- **Scaling:** CPU throughput is flat in N above ~100 k; the GPU climbs with N (1.59 → 5.07 → 7.88) as
+  occupancy fills, needing ≥~300 k to near its ceiling.
+- **Multicore CPU (5965WX, 24c/48t, measured):** near-**linear to ~12 cores** (75 → 900 k/s, 99.6%
+  efficiency), then rolls off — 24 cores ≈ 1.29 M/s (71% eff), 48 threads (SMT) ≈ 1.66 M/s (+28%). The
+  rolloff is **NOT clock throttling** (cores hold 4.54 GHz at 1 *and* 48 threads) and **NOT byte-bandwidth**
+  (FP32 ≡ FP64 at every thread count — halving the position bytes changes nothing). Per-core it's
+  **latency / cache-line-transaction-bound** (each cell pulls ~13–27 scattered 64 B neighbour lines;
+  precision doesn't shrink the line count), and the 12→24 rolloff is the **shared uncore** (L3 / Infinity-
+  Fabric / memory-controller transaction throughput across the 4 CCDs) saturating — not the algorithm, which
+  is embarrassingly parallel. SMT adds only ~28% (latency-bound ⇒ the 2nd thread hides some stalls). Lever:
+  SIMD *cells-as-lanes* (more compute per fetched line) raises the per-core ceiling; FP32 helps only once
+  vectorised. Count **cores, not the 48 threads** — it's 17× on 24 physical cores.
 
 **Headline:** our clip is SOTA everywhere; the worklist gather is now the default on both backends and wins
 on each — **serial CPU reaches voro++ parity** (was 0.89×) and **GPU reaches 1.28× the Liu-2020 SOTA** (7.88
