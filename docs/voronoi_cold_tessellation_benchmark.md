@@ -21,9 +21,10 @@ lookup, tightening the radius break (it fires sooner → fewer blocks walked →
 divergence). The same branchless inner loop as the old sorted-offset walk; only the offset sequence is new.
 - **Serial CPU** (S=3): worklist ≈ **0.074–0.075 M/s vs voro++ ≈ 0.071–0.076 (≈1.0–1.05×)**, up from the
   sorted-offset walk's 0.89×.
-- **GPU FP32** (S=4, dens≈1.0): **7.82 M/s vs sorted-offset 6.99 (+12%)**, now **1.27× the Liu-2020 SOTA**
+- **GPU FP32** (S=4, dens≈1.0): **7.88 M/s vs sorted-offset 6.99 (+13%)**, now **1.28× the Liu-2020 SOTA**
   (was 1.13×). The earlier expectation that worklist branching would hurt the GPU was wrong — that concern
-  was about whole-block-accept (off); the gather itself just walks fewer blocks.
+  was about whole-block-accept (off); the gather itself just walks fewer blocks. The block offsets are
+  packed `(dx,dy,dz)`→one int (1 table load + bit-unpack per offset), worth a further ~1%.
 
 Both machine-exact, clip untouched. Whole-block-accept via the farthest-corner dist² (`rmax`, `CC_WBA=1`)
 was tried and is a **net loss** on this fine grid (≤~1 seed/block ⇒ nothing to amortise); kept opt-in, off.
@@ -35,13 +36,14 @@ in parentheses. Serial/24-core S=3 FP64 `dens=0.3`; GPU S=4 FP32 `dens=1.0`.
 
 | N | ours **serial** worklist (sorted) | **voro++** (serial, FP64) | ours **24-core** (48 thr, FP64) | ours **GPU** worklist (sorted) | **SOTA** Liu GPU, full (FP32) |
 |------:|------:|------:|------:|------:|------:|
-| 10 k  | 0.074 (0.066) | 0.071 | 0.66 | 1.55 (1.45) | — *(SOTA `n>14000` branch only)* |
+| 10 k  | 0.074 (0.066) | 0.071 | 0.66 | 1.59 (1.45) | — *(SOTA `n>14000` branch only)* |
 | 100 k | 0.075 (0.067) | 0.075 | 1.28 | 5.07 (4.62) | 5.82 |
-| 1 M   | 0.075 (0.068) | 0.074 | 1.40 | **7.82** (6.99) | 6.16 |
+| 1 M   | 0.075 (0.068) | 0.074 | 1.40 | **7.88** (6.99) | 6.16 |
 
 SOTA "full" = `N/(gather_ms+construct_ms)`; its two phases at 1 M are gather 17.5 Msites/s, construct
-9.5 Mcells/s. Our GPU at 1 M (**7.82**) now **beats the SOTA full build (1.27×)** — the correctness fix took
-it from 5.95 (inexact) to 6.99 (exact, sorted-offset), and the worklist gather lifts it again to 7.82.
+9.5 Mcells/s. Our GPU at 1 M (**7.88**) now **beats the SOTA full build (1.28×)** — the correctness fix took
+it from 5.95 (inexact) to 6.99 (exact, sorted-offset), and the worklist gather (packed offsets) lifts it
+again to 7.88.
 
 ## Construct kernel only — clip from cached neighbours (GPU, FP32, 1 M)
 
@@ -83,17 +85,17 @@ goes silently inexact if its window is too small (e.g. at coarse `dens`).
   the accept amortises over nothing while adding a per-block branch (voro++'s win needs its coarse ~8-seed
   regions). The cell data structure and clip are untouched. **The win over voro++ is multicore (~18×) and
   GPU (~92×); serial CPU is now level.**
-- **GPU: the worklist wins here too — 7.82 M/s at 1 M, 1.27× the SOTA full build** (was 6.99 / 1.13× on
+- **GPU: the worklist wins here too — 7.88 M/s at 1 M, 1.28× the SOTA full build** (was 6.99 / 1.13× on
   the sorted-offset path) and 1.8× the SOTA clip kernel. The worklist keeps the same branchless inner loop
   (per-block ±L periodic shift), just walks a tighter offset list — so it cuts work *and* warp divergence;
   the gain grows with density (its GPU optimum sits at a coarser `dens≈1.0, S=4`). Whole-block-accept's
   branches *would* diverge, which is why that stays off. (`CC_GATHER` selects the gather on either backend.)
 - **Scaling:** CPU throughput is flat in N (memory-bandwidth-saturated above ~100 k); the GPU climbs with
-  N (1.55 → 5.07 → 7.82) as occupancy fills, needing ≥~300 k to near its ceiling. 24-core is bandwidth-bound
+  N (1.59 → 5.07 → 7.88) as occupancy fills, needing ≥~300 k to near its ceiling. 24-core is bandwidth-bound
   (~1.4 M/s, well under the ~2.75 M/s clip-only ceiling).
 
 **Headline:** our clip is SOTA everywhere; the worklist gather is now the default on both backends and wins
-on each — **serial CPU reaches voro++ parity** (was 0.89×) and **GPU reaches 1.27× the Liu-2020 SOTA** (7.82
+on each — **serial CPU reaches voro++ parity** (was 0.89×) and **GPU reaches 1.28× the Liu-2020 SOTA** (7.88
 M/s, was 1.13×) — all machine-exact with a self-checked completeness guard, while we win decisively on
 multicore too.
 

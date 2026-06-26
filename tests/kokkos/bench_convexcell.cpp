@@ -206,12 +206,14 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   // rmin-only walk at every density 0.3–4. Kept as an opt-in for the record; default OFF.
   const bool wholeBlockAccept = std::getenv("CC_WBA") && std::atoi(std::getenv("CC_WBA")) != 0;
   const int nSub = wlS * wlS * wlS;
-  Kokkos::View<int*, MemSpace> wlX("wlX", (size_t)nSub * nOff), wlY("wlY", (size_t)nSub * nOff),
-      wlZ("wlZ", (size_t)nSub * nOff);
+  // Lever #3: pack the three block-offset components (dx,dy,dz ∈ [-sw,sw], sw ≤ 127) into ONE int (8 bits
+  // each, biased by OFFB) so the hot walk does a single table load + bit-unpack instead of three scattered
+  // loads — less L2 traffic / fewer load instructions per offset.
+  constexpr int OFFB = 128;
+  Kokkos::View<int*, MemSpace> wlOff("wlOff", (size_t)nSub * nOff);  // packed (dx,dy,dz)
   Kokkos::View<real_t*, MemSpace> wlRmin("wlRmin", (size_t)nSub * nOff), wlRmax("wlRmax", (size_t)nSub * nOff);
   if (gatherMode == 1) {
-    auto hwx = Kokkos::create_mirror_view(wlX), hwy = Kokkos::create_mirror_view(wlY),
-         hwz = Kokkos::create_mirror_view(wlZ);
+    auto hwoff = Kokkos::create_mirror_view(wlOff);
     auto hrmin = Kokkos::create_mirror_view(wlRmin), hrmax = Kokkos::create_mirror_view(wlRmax);
     // axis box-to-box gap/far between query sub-interval [a0,a1] and target block [b0,b1] (local cell units)
     auto axisGap = [](real_t a0, real_t a1, real_t b0, real_t b1) {
@@ -246,11 +248,11 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           for (int g = 0; g < nOff; ++g) {
             const int k = idx[g];
             const size_t slot = (size_t)p * nOff + g;
-            hwx(slot) = oX[k]; hwy(slot) = oY[k]; hwz(slot) = oZ[k];
+            hwoff(slot) = (oX[k] + OFFB) | ((oY[k] + OFFB) << 8) | ((oZ[k] + OFFB) << 16);
             hrmin(slot) = rmn[k]; hrmax(slot) = rmx[k];
           }
         }
-    Kokkos::deep_copy(wlX, hwx); Kokkos::deep_copy(wlY, hwy); Kokkos::deep_copy(wlZ, hwz);
+    Kokkos::deep_copy(wlOff, hwoff);
     Kokkos::deep_copy(wlRmin, hrmin); Kokkos::deep_copy(wlRmax, hrmax);
   }
 
@@ -379,7 +381,7 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
 
   // --- Phase A: worklist gather (CC_GATHER=1). Same clip + per-block periodic displacement as the sorted
   // gather, but the block-offset sequence and the radius break come from the precomputed per-sub-position
-  // worklist (wlX/Y/Z, wlRmin) — so the break is a table lookup with NO runtime per-block geometry. The
+  // worklist (wlOff, wlRmin) — so the break is a table lookup with NO runtime per-block geometry. The
   // per-candidate `off >= secR2` cull is KEPT here (exactness independent of rmax); whole-block accept via
   // rmax is Phase B. Runs on the sorted (posS) point order, same as build_sorted.
   auto build_worklist = [&]() {
@@ -404,11 +406,12 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           bool radiusClosed = false;  // Phase C: did the rmin break fire before the worklist ran out?
           for (int g = 0; g < nOff; ++g) {
             if (wlRmin(base + g) > 2.0 * secR2) { radiusClosed = true; break; }  // sorted ⇒ rest are farther
-            int gx = cx + wlX(base + g); real_t dispx = 0;
+            const int packed = wlOff(base + g);  // Lever #3: one load, unpack (dx,dy,dz)
+            int gx = cx + ((packed & 0xFF) - OFFB); real_t dispx = 0;
             if (gx >= dimx) { gx -= dimx; dispx = Lx; } else if (gx < 0) { gx += dimx; dispx = -Lx; }
-            int gy = cy + wlY(base + g); real_t dispy = 0;
+            int gy = cy + (((packed >> 8) & 0xFF) - OFFB); real_t dispy = 0;
             if (gy >= dimy) { gy -= dimy; dispy = Ly; } else if (gy < 0) { gy += dimy; dispy = -Ly; }
-            int gz = cz + wlZ(base + g); real_t dispz = 0;
+            int gz = cz + (((packed >> 16) & 0xFF) - OFFB); real_t dispz = 0;
             if (gz >= dimz) { gz -= dimz; dispz = Lz; } else if (gz < 0) { gz += dimz; dispz = -Lz; }
             const real_t bx = dispx - pix, by = dispy - piy, bz = dispz - piz;
             int gc = (int)mortonEncode(gx, gy, gz);
