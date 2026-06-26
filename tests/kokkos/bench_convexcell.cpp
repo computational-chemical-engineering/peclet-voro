@@ -191,14 +191,16 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   // dist² (rmax). rmin gives a complete radius break with NO runtime per-block geometry (table lookup);
   // rmax (used in Phase B) gives cull-free whole-block accept. This mirrors voro++'s worklist.hh + radp[]
   // but as flat per-(sub-position,offset) dist² thresholds rather than its bit-packed permuted table.
-  // The worklist gather wins on CPU (≈voro++ parity, vs 0.89× for the sorted-offset walk) but the GPU is
-  // faster on the branchless sorted-offset path (beats the Liu-2020 SOTA), so default the worklist ON for
-  // host backends (OpenMP/Serial) and OFF for device (CUDA/HIP). CC_GATHER overrides either way.
+  // The worklist gather wins on BOTH backends — ≈voro++ parity on CPU (vs 0.89× for the sorted-offset
+  // walk) and +12–13% on GPU (7.85 vs 6.97 Mcells/s, 1.27× the Liu-2020 SOTA): it keeps the same branchless
+  // inner loop but walks a tighter presorted offset list, so the radius break fires sooner (less work AND
+  // less warp divergence). Default it ON everywhere; CC_GATHER overrides. The sub-grid optimum differs by
+  // backend — host S=3, device S=4 (the device tolerates a tighter bound / bigger table better).
   constexpr bool isHostBackend =
       Kokkos::SpaceAccessibility<Kokkos::HostSpace, typename Exec::memory_space>::accessible;
-  const int gatherMode =
-      std::getenv("CC_GATHER") ? std::atoi(std::getenv("CC_GATHER")) : (isHostBackend ? 1 : 0);
-  const int wlS = std::getenv("CC_WLS") ? std::max(1, std::atoi(std::getenv("CC_WLS"))) : 3;  // sub-grid/axis; S=3 beats voro++
+  const int gatherMode = std::getenv("CC_GATHER") ? std::atoi(std::getenv("CC_GATHER")) : 1;
+  const int wlS = std::getenv("CC_WLS") ? std::max(1, std::atoi(std::getenv("CC_WLS")))
+                                        : (isHostBackend ? 3 : 4);  // sub-grid/axis: host 3, device 4
   // Phase B finding: rmax whole-block-accept (CC_WBA=1) is a NET LOSS on this fine grid (≤~1 seed/block,
   // so it amortises over nothing while adding a per-block rmax branch) — measured ~3% slower than the
   // rmin-only walk at every density 0.3–4. Kept as an opt-in for the record; default OFF.

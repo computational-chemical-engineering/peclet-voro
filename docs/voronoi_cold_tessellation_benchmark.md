@@ -14,29 +14,34 @@ All "ours" numbers below are **machine-exact** (space-filling identity Σvol=box
 FP32). A long-standing gather bug (block radius compared to `secR2` instead of `2·secR2`, a √2 under-reach)
 had made the build silently inexact (~3.8e-5); fixing it made the build both exact **and** faster.
 
-**Serial CPU now matches/edges voro++ via a worklist gather (`CC_GATHER=1`).** The fine-grid sorted-offset
-walk (default, and the GPU path) trailed voro++ by 0.89× purely on neighbour-search efficiency. A
-voro++-style **worklist** — each grid cell subdivided into `S³` sub-regions (`CC_WLS`, default 3), with a
-per-sub-region list of block offsets sorted by nearest-corner dist² (`rmin`) — replaces the runtime
-per-block distance arithmetic with a table lookup, tightening the radius break. That alone closes the gap:
-worklist ≈ **0.074–0.075 M/s vs voro++ ≈ 0.071–0.076 M/s (≈1.0–1.05×)**, still machine-exact, with the clip
-and the GPU path untouched. Whole-block-accept via the farthest-corner dist² (`rmax`, `CC_WBA=1`) was tried
-and is a **net loss** on this fine grid (≤~1 seed/block ⇒ nothing to amortise); kept opt-in, default off.
+**A worklist gather is now the default on BOTH backends — it wins on each.** Each grid cell is subdivided
+into `S³` sub-regions (`CC_WLS`); for the sub-region a query lands in, a precomputed list of block offsets
+sorted by nearest-corner dist² (`rmin`) replaces the runtime per-block distance arithmetic with a table
+lookup, tightening the radius break (it fires sooner → fewer blocks walked → less work *and* less warp
+divergence). The same branchless inner loop as the old sorted-offset walk; only the offset sequence is new.
+- **Serial CPU** (S=3): worklist ≈ **0.074–0.075 M/s vs voro++ ≈ 0.071–0.076 (≈1.0–1.05×)**, up from the
+  sorted-offset walk's 0.89×.
+- **GPU FP32** (S=4, dens≈1.0): **7.82 M/s vs sorted-offset 6.99 (+12%)**, now **1.27× the Liu-2020 SOTA**
+  (was 1.13×). The earlier expectation that worklist branching would hurt the GPU was wrong — that concern
+  was about whole-block-accept (off); the gather itself just walks fewer blocks.
+
+Both machine-exact, clip untouched. Whole-block-accept via the farthest-corner dist² (`rmax`, `CC_WBA=1`)
+was tried and is a **net loss** on this fine grid (≤~1 seed/block ⇒ nothing to amortise); kept opt-in, off.
 
 ## Full build (gather + clip), Mcells/s
 
-"ours **serial**" = the worklist gather (`CC_GATHER=1`, CPU's best); the sorted-offset walk it replaces is
-in parentheses. 24-core/GPU use the sorted-offset path (the worklist is a CPU option).
+"ours" columns = the worklist gather (the default on both backends); the sorted-offset walk it replaces is
+in parentheses. Serial/24-core S=3 FP64 `dens=0.3`; GPU S=4 FP32 `dens=1.0`.
 
-| N | ours **serial** worklist (sorted) | **voro++** (serial, FP64) | ours **24-core** (48 thr, FP64) | ours **GPU** (FP32) | **SOTA** Liu GPU, full (FP32) |
+| N | ours **serial** worklist (sorted) | **voro++** (serial, FP64) | ours **24-core** (48 thr, FP64) | ours **GPU** worklist (sorted) | **SOTA** Liu GPU, full (FP32) |
 |------:|------:|------:|------:|------:|------:|
-| 10 k  | 0.074 (0.066) | 0.071 | 0.66 | 1.45 | — *(SOTA `n>14000` branch only)* |
-| 100 k | 0.075 (0.067) | 0.075 | 1.28 | 4.62 | 5.82 |
-| 1 M   | 0.075 (0.068) | 0.074 | 1.40 | **6.99** | 6.16 |
+| 10 k  | 0.074 (0.066) | 0.071 | 0.66 | 1.55 (1.45) | — *(SOTA `n>14000` branch only)* |
+| 100 k | 0.075 (0.067) | 0.075 | 1.28 | 5.07 (4.62) | 5.82 |
+| 1 M   | 0.075 (0.068) | 0.074 | 1.40 | **7.82** (6.99) | 6.16 |
 
 SOTA "full" = `N/(gather_ms+construct_ms)`; its two phases at 1 M are gather 17.5 Msites/s, construct
-9.5 Mcells/s. Our GPU at 1 M (6.99) now **beats the SOTA full build (1.13×)** — the correctness fix lifted
-it from 5.95 (inexact, tied) to 6.99 (exact, ahead).
+9.5 Mcells/s. Our GPU at 1 M (**7.82**) now **beats the SOTA full build (1.27×)** — the correctness fix took
+it from 5.95 (inexact) to 6.99 (exact, sorted-offset), and the worklist gather lifts it again to 7.82.
 
 ## Construct kernel only — clip from cached neighbours (GPU, FP32, 1 M)
 
@@ -78,33 +83,35 @@ goes silently inexact if its window is too small (e.g. at coarse `dens`).
   the accept amortises over nothing while adding a per-block branch (voro++'s win needs its coarse ~8-seed
   regions). The cell data structure and clip are untouched. **The win over voro++ is multicore (~18×) and
   GPU (~92×); serial CPU is now level.**
-- **GPU: ours beats the SOTA full build (1.13× at 1 M) and clip kernel (1.8×).** The branchless inner
-  gather (per-block ±L periodic shift) helps the GPU; whole-block-accept's branches would diverge, so the
-  CPU and GPU use different gathers (`#ifdef __CUDA_ARCH__`).
+- **GPU: the worklist wins here too — 7.82 M/s at 1 M, 1.27× the SOTA full build** (was 6.99 / 1.13× on
+  the sorted-offset path) and 1.8× the SOTA clip kernel. The worklist keeps the same branchless inner loop
+  (per-block ±L periodic shift), just walks a tighter offset list — so it cuts work *and* warp divergence;
+  the gain grows with density (its GPU optimum sits at a coarser `dens≈1.0, S=4`). Whole-block-accept's
+  branches *would* diverge, which is why that stays off. (`CC_GATHER` selects the gather on either backend.)
 - **Scaling:** CPU throughput is flat in N (memory-bandwidth-saturated above ~100 k); the GPU climbs with
-  N (1.45 → 6.99) as occupancy fills, needing ≥~300 k to near its ceiling. 24-core is bandwidth-bound
+  N (1.55 → 5.07 → 7.82) as occupancy fills, needing ≥~300 k to near its ceiling. 24-core is bandwidth-bound
   (~1.4 M/s, well under the ~2.75 M/s clip-only ceiling).
 
-**Headline:** our clip is SOTA everywhere; on GPU the full cold build now beats the Liu-2020 SOTA; on serial
-CPU the worklist gather (`CC_GATHER=1`) brings us to **voro++ parity** (was 0.89×) at machine-exact accuracy
-with a self-checked completeness guard, while we win decisively on multicore and GPU.
+**Headline:** our clip is SOTA everywhere; the worklist gather is now the default on both backends and wins
+on each — **serial CPU reaches voro++ parity** (was 0.89×) and **GPU reaches 1.27× the Liu-2020 SOTA** (7.82
+M/s, was 1.13×) — all machine-exact with a self-checked completeness guard, while we win decisively on
+multicore too.
 
 ## Reproduce
 
 ```bash
 cd vorflow
 NS="10000 100000 1000000"
-OMP_NUM_THREADS=1  CC_DENS=0.3 CC_GATHER=1 ./build/host-openmp/tests/kokkos/bench_convexcell $NS  # serial worklist + voro++
-OMP_NUM_THREADS=48 CC_NOVORO=1 CC_DENS=0.3 ./build/host-openmp/tests/kokkos/bench_convexcell $NS  # 24-core (sorted path)
-CC_NOVORO=1 CC_DENS=0.5 ./build/nvidia-cuda/tests/kokkos/bench_convexcell_f32          $NS  # GPU FP32
+OMP_NUM_THREADS=1  CC_DENS=0.3 ./build/host-openmp/tests/kokkos/bench_convexcell      $NS  # serial worklist + voro++
+OMP_NUM_THREADS=48 CC_NOVORO=1 CC_DENS=0.3 ./build/host-openmp/tests/kokkos/bench_convexcell $NS  # 24-core
+CC_NOVORO=1 CC_DENS=1.0 ./build/nvidia-cuda/tests/kokkos/bench_convexcell_f32          $NS  # GPU FP32 (worklist S=4)
 ./build/nvidia-cuda/tests/kokkos/bench_construct_f32                                        # construct-only
 extern_bench/build.sh && OMP_NUM_THREADS=1 extern_bench/bench_geogram 1000000               # clip: all 3
 # SOTA (extern_bench/voro_gpu; see voro_gpu_bench.md for build + timing patch):
 #   ./build/bin/VolumeVoronoiGPU box.tet box_sites_<N>.xyz 1 | grep '@@'
 ```
 `bench_convexcell` reports `convexcell` (unsorted) and `spatial-sort` (Morton sorted-offset) k/s plus the
-timed voro++ reference. The `worklist` line (serial-CPU headline, with its `exhausted=K` completeness guard)
-is **on by default on host backends** (OpenMP/Serial) and off on device (CUDA/HIP, which is faster on the
-sorted-offset path); `CC_GATHER=0/1` overrides either way. `CC_NOVORO=1` skips voro++; `CC_DENS` sets the
-grid density (CPU optimum 0.3, GPU 0.5); `CC_WLS` the worklist sub-grid (default 3); `CC_WBA=1` enables
-(opt-in) whole-block-accept; `CC_SW` overrides the search window.
+timed voro++ reference. The `worklist` line (the headline on both backends, with its `exhausted=K`
+completeness guard) is **on by default everywhere**; `CC_GATHER=0/1` overrides. `CC_NOVORO=1` skips voro++;
+`CC_DENS` sets the grid density (CPU optimum 0.3, GPU 1.0); `CC_WLS` the worklist sub-grid (default: host 3,
+device 4); `CC_WBA=1` enables (opt-in) whole-block-accept; `CC_SW` overrides the search window.
