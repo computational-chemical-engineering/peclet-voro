@@ -1,18 +1,32 @@
 # Project brief: voro++-style worklist gather for the cold Voronoi build (CPU)
 
-> **STATUS — DONE (2026-06-26).** Implemented in `bench_convexcell` behind `CC_GATHER=1` (commits
-> Phase A `a87e3d1`, Phase B `04a98cd`, Phase C `7ecba1e`). The worklist gather reaches **voro++ parity
-> (≈1.0–1.05×)** on serial CPU FP64 — worklist ≈0.074–0.075 M/s vs voro++ ≈0.071–0.076 — up from the
-> 0.89× the sorted-offset walk trailed by, machine-exact (Σvol err ~1e-14), clip and GPU path untouched.
-> - **Phase A** — per-sub-region worklist (`S³`, `CC_WLS`, default 3): block offsets sorted by nearest-corner
->   dist² (`rmin`), radius break is a table lookup (no runtime per-block geometry). Cut gather 6.3 → 4.6 µs/cell.
+> **STATUS — DONE (2026-06-26), pushed to main** (vorflow `0b26278`, umbrella `e36fb05`). The worklist
+> gather is now the **default on both backends** (`CC_GATHER` overrides) and **wins on each**:
+> - **Serial CPU FP64:** **voro++ parity (≈1.0–1.05×)** — worklist ≈0.074–0.075 M/s vs voro++ ≈0.071–0.076,
+>   up from the 0.89× the sorted-offset walk trailed by. Machine-exact (Σvol err ~1e-14), clip untouched.
+> - **GPU FP32:** **6.99 → 7.88 Mcells/s, 1.28× the Liu-2020 SOTA** (was 1.13×). The original "branching will
+>   hurt the GPU" worry was wrong — that was about whole-block-accept (off); the gather keeps the same
+>   branchless inner loop and just walks fewer blocks (less work *and* less warp divergence).
+>
+> **Phases A–C (CPU):**
+> - **Phase A** — per-sub-region worklist (`S³`, `CC_WLS`: host 3, device 4): block offsets sorted by
+>   nearest-corner dist² (`rmin`), radius break is a table lookup (no runtime per-block geometry). Gather 6.3 → 4.6 µs/cell.
 > - **Phase B** — `rmax` whole-block-accept (`CC_WBA=1`) tried; **net loss** on the fine grid (≤~1 seed/block,
->   nothing to amortise) → gated off by default. `S=3` is the config that beats voro++.
+>   nothing to amortise) → gated off by default.
 > - **Phase C** — completeness guard: `exhausted=K` counts cells that drained the worklist without the radius
 >   break; `K=0` over all operating-density N ⇒ provably complete (the sorted-offset walk has no such guard).
 >
-> Sections below are the original pre-work brief, kept for context. The deferred GPU/CPU-migration items in
-> the memory index are unaffected. **Not pushed** (per milestone-commit convention).
+> **GPU gather levers — ALL DONE (3 explored):**
+> - **#1 warp-shares-one-worklist** (sort queries by (sub-position, Morton) so a warp shares one worklist
+>   base): **NET LOSS −7%** — uniform table loads are negligible; sub-position grouping scatters each warp's
+>   neighbour reads, wrecking Morton locality. Reverted (note kept, commit `143b915`).
+> - **#3 packed offsets** `(dx,dy,dz)`→one int (`wlOff`, 8 bits each): small win **+1%**, kept (`0b26278`).
+> - **#2 warp-cooperative clip / shared-mem neighbour staging:** **NOT pursued (by decision).** The clip is
+>   inherently sequential (`ConvexCell` is one evolving polytope — can't split a cell's clip across a warp),
+>   and the #1/#3 evidence shows the gather is compute/latency-bound, not bandwidth-bound, so staging
+>   already-warm neighbour loads into scratch has a low ceiling against a large, exactness-risky rewrite.
+>
+> Sections below are the original pre-work brief, kept for context.
 
 Self-contained starting point for a fresh session. Goal: add a **worklist-based neighbour gather** as an
 **option** beside the current fine-grid sorted-offset gather in `bench_convexcell`, to beat voro++ on
