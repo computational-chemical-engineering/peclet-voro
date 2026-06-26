@@ -314,6 +314,12 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
         posS(3 * q + 1) = pos(3 * i + 1);
         posS(3 * q + 2) = pos(3 * i + 2);
       });
+  // Lever #1 (warp-shares-one-worklist: order queries by (sub-position, Morton) so a warp shares the same
+  // worklist base) was TESTED and is a NET LOSS on GPU (−7%: 7.82 → 7.28 Mcells/s). The uniform wlRmin/wlX
+  // loads it would buy are negligible (the table is tiny, L2-resident, effectively broadcast already), while
+  // grouping by sub-position SCATTERS each warp's neighbour reads across distant cells — wrecking the Morton
+  // locality that dominates memory traffic. Keep Morton order (thread q == Morton slot). Not implemented.
+
   Kokkos::View<real_t*, MemSpace> cellVolS("cellVolS", N);
   Kokkos::View<int*, MemSpace> cellFacesS("cellFacesS", N), cellOvfS("cellOvfS", N);
   Kokkos::View<real_t*, MemSpace> cellVolW("cellVolW", N);
