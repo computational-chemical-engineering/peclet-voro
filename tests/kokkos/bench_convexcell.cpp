@@ -75,6 +75,11 @@ struct Result {
   long faceSumS = 0;
   long overflowS = 0;
   double secsBestS = 0;
+  // Phase A worklist variant (CC_GATHER=1); secsBestW < 0 ⇒ not run
+  double volSumW = 0;
+  long faceSumW = 0;
+  long overflowW = 0;
+  double secsBestW = -1;
 };
 
 static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, const real_t L[3],
@@ -177,6 +182,65 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
     Kokkos::deep_copy(offD, hd);
   }
 
+  // --- Phase A: voro++-style worklist precompute (CPU gather option, CC_GATHER=1) -----------------
+  // The default sorted-offset gather bounds the query at its WHOLE home cell, so adjacent blocks have
+  // nearest-corner dist²=0 and are always walked (over-examination ~4×). A worklist tightens that bound
+  // by subdividing the home cell into S³ sub-regions: for the sub-region the query actually lands in, we
+  // precompute a list of block offsets sorted by nearest-corner dist² (rmin) AND the farthest-corner
+  // dist² (rmax). rmin gives a complete radius break with NO runtime per-block geometry (table lookup);
+  // rmax (used in Phase B) gives cull-free whole-block accept. This mirrors voro++'s worklist.hh + radp[]
+  // but as flat per-(sub-position,offset) dist² thresholds rather than its bit-packed permuted table.
+  const int gatherMode = std::getenv("CC_GATHER") ? std::atoi(std::getenv("CC_GATHER")) : 0;
+  const int wlS = std::getenv("CC_WLS") ? std::max(1, std::atoi(std::getenv("CC_WLS"))) : 2;  // sub-grid per axis
+  const int nSub = wlS * wlS * wlS;
+  Kokkos::View<int*, MemSpace> wlX("wlX", (size_t)nSub * nOff), wlY("wlY", (size_t)nSub * nOff),
+      wlZ("wlZ", (size_t)nSub * nOff);
+  Kokkos::View<real_t*, MemSpace> wlRmin("wlRmin", (size_t)nSub * nOff), wlRmax("wlRmax", (size_t)nSub * nOff);
+  if (gatherMode == 1) {
+    auto hwx = Kokkos::create_mirror_view(wlX), hwy = Kokkos::create_mirror_view(wlY),
+         hwz = Kokkos::create_mirror_view(wlZ);
+    auto hrmin = Kokkos::create_mirror_view(wlRmin), hrmax = Kokkos::create_mirror_view(wlRmax);
+    // axis box-to-box gap/far between query sub-interval [a0,a1] and target block [b0,b1] (local cell units)
+    auto axisGap = [](real_t a0, real_t a1, real_t b0, real_t b1) {
+      real_t g = std::max((real_t)0, std::max(b0 - a1, a0 - b1));
+      return g * g;
+    };
+    auto axisFar = [](real_t a0, real_t a1, real_t b0, real_t b1) {
+      real_t f = std::max(std::fabs(b1 - a0), std::fabs(a1 - b0));
+      return f * f;
+    };
+    std::vector<int> sub(nOff);
+    for (int sz = 0; sz < wlS; ++sz)
+      for (int sy = 0; sy < wlS; ++sy)
+        for (int sx = 0; sx < wlS; ++sx) {
+          const int p = sx + wlS * (sy + wlS * sz);
+          // query sub-region extent in local cell coords (per-axis cell size cszx/y/z)
+          const real_t ax0 = (real_t)sx / wlS * cszx, ax1 = (real_t)(sx + 1) / wlS * cszx;
+          const real_t ay0 = (real_t)sy / wlS * cszy, ay1 = (real_t)(sy + 1) / wlS * cszy;
+          const real_t az0 = (real_t)sz / wlS * cszz, az1 = (real_t)(sz + 1) / wlS * cszz;
+          std::vector<int> idx(nOff);
+          std::vector<real_t> rmn(nOff), rmx(nOff);
+          for (int k = 0; k < nOff; ++k) {
+            const int dx = oX[k], dy = oY[k], dz = oZ[k];
+            const real_t bx0 = dx * cszx, bx1 = (dx + 1) * cszx;
+            const real_t by0 = dy * cszy, by1 = (dy + 1) * cszy;
+            const real_t bz0 = dz * cszz, bz1 = (dz + 1) * cszz;
+            rmn[k] = axisGap(ax0, ax1, bx0, bx1) + axisGap(ay0, ay1, by0, by1) + axisGap(az0, az1, bz0, bz1);
+            rmx[k] = axisFar(ax0, ax1, bx0, bx1) + axisFar(ay0, ay1, by0, by1) + axisFar(az0, az1, bz0, bz1);
+            idx[k] = k;
+          }
+          std::sort(idx.begin(), idx.end(), [&](int a, int b) { return rmn[a] < rmn[b]; });
+          for (int g = 0; g < nOff; ++g) {
+            const int k = idx[g];
+            const size_t slot = (size_t)p * nOff + g;
+            hwx(slot) = oX[k]; hwy(slot) = oY[k]; hwz(slot) = oZ[k];
+            hrmin(slot) = rmn[k]; hrmax(slot) = rmx[k];
+          }
+        }
+    Kokkos::deep_copy(wlX, hwx); Kokkos::deep_copy(wlY, hwy); Kokkos::deep_copy(wlZ, hwz);
+    Kokkos::deep_copy(wlRmin, hrmin); Kokkos::deep_copy(wlRmax, hrmax);
+  }
+
   auto build = [&]() {
     Kokkos::parallel_for(
         "cc.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
@@ -239,6 +303,8 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
       });
   Kokkos::View<real_t*, MemSpace> cellVolS("cellVolS", N);
   Kokkos::View<int*, MemSpace> cellFacesS("cellFacesS", N), cellOvfS("cellOvfS", N);
+  Kokkos::View<real_t*, MemSpace> cellVolW("cellVolW", N);
+  Kokkos::View<int*, MemSpace> cellFacesW("cellFacesW", N), cellOvfW("cellOvfW", N);
   auto build_sorted = [&]() {
     Kokkos::parallel_for(
         "cc.build_sorted", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int q) {
@@ -292,8 +358,61 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
     Kokkos::fence();
   };
 
+  // --- Phase A: worklist gather (CC_GATHER=1). Same clip + per-block periodic displacement as the sorted
+  // gather, but the block-offset sequence and the radius break come from the precomputed per-sub-position
+  // worklist (wlX/Y/Z, wlRmin) — so the break is a table lookup with NO runtime per-block geometry. The
+  // per-candidate `off >= secR2` cull is KEPT here (exactness independent of rmax); whole-block accept via
+  // rmax is Phase B. Runs on the sorted (posS) point order, same as build_sorted.
+  auto build_worklist = [&]() {
+    Kokkos::parallel_for(
+        "cc.build_worklist", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int q) {
+          const real_t pix = posS(3 * q), piy = posS(3 * q + 1), piz = posS(3 * q + 2);
+          const real_t fxi = pix * icx, fyi = piy * icy, fzi = piz * icz;
+          const real_t flx = Kokkos::floor(fxi), fly = Kokkos::floor(fyi), flz = Kokkos::floor(fzi);
+          int cx = (((int)flx % dimx) + dimx) % dimx;
+          int cy = (((int)fly % dimy) + dimy) % dimy;
+          int cz = (((int)flz % dimz) + dimz) % dimz;
+          // query sub-position within its home cell (fractional offset → S-grid index)
+          int sx = (int)((fxi - flx) * wlS); sx = sx < 0 ? 0 : (sx >= wlS ? wlS - 1 : sx);
+          int sy = (int)((fyi - fly) * wlS); sy = sy < 0 ? 0 : (sy >= wlS ? wlS - 1 : sy);
+          int sz = (int)((fzi - flz) * wlS); sz = sz < 0 ? 0 : (sz >= wlS ? wlS - 1 : sz);
+          const size_t base = (size_t)(sx + wlS * (sy + wlS * sz)) * nOff;
+          const real_t Lxh = 0.5 * Lx, Lyh = 0.5 * Ly, Lzh = 0.5 * Lz;
+          (void)Lxh; (void)Lyh; (void)Lzh;
+          vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
+          c.initBox(Lx, Ly, Lz);
+          real_t secR2 = 2.0 * c.maxVertexRsq();
+          for (int g = 0; g < nOff; ++g) {
+            if (wlRmin(base + g) > 2.0 * secR2) break;  // sorted by rmin ⇒ all remaining are farther
+            int gx = cx + wlX(base + g); real_t dispx = 0;
+            if (gx >= dimx) { gx -= dimx; dispx = Lx; } else if (gx < 0) { gx += dimx; dispx = -Lx; }
+            int gy = cy + wlY(base + g); real_t dispy = 0;
+            if (gy >= dimy) { gy -= dimy; dispy = Ly; } else if (gy < 0) { gy += dimy; dispy = -Ly; }
+            int gz = cz + wlZ(base + g); real_t dispz = 0;
+            if (gz >= dimz) { gz -= dimz; dispz = Lz; } else if (gz < 0) { gz += dimz; dispz = -Lz; }
+            const real_t bx = dispx - pix, by = dispy - piy, bz = dispz - piz;
+            int gc = (int)mortonEncode(gx, gy, gz);
+            for (int q2 = cellStart(gc); q2 < cellStart(gc + 1); ++q2) {
+              if (q2 == q) continue;
+              const real_t axx = posS(3 * q2) + bx, ayy = posS(3 * q2 + 1) + by, azz = posS(3 * q2 + 2) + bz;
+              const real_t off = 0.5 * (axx * axx + ayy * ayy + azz * azz);
+              if (off >= secR2) continue;
+              real_t n[3] = {axx, ayy, azz};
+              if (c.clip(n, off, q2)) secR2 = 2.0 * c.maxVertexRsq();
+              if (c.overflow) break;
+            }
+            if (c.overflow) break;
+          }
+          cellVolW(q) = (c.overflow || !doVol) ? 0.0 : c.volumePerVertex();
+          cellFacesW(q) = c.overflow ? 0 : c.countFaces();
+          cellOvfW(q) = c.overflow ? 1 : 0;
+        });
+    Kokkos::fence();
+  };
+
   build();         // warm
   build_sorted();  // warm
+  if (gatherMode == 1) build_worklist();  // warm
   Result r;
   if (!timeOnly) {
     auto hv = Kokkos::create_mirror_view(cellVol);
@@ -322,8 +441,21 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
       r.faceSumS += hfs(i);
       r.overflowS += hos(i);
     }
+    if (gatherMode == 1) {
+      auto hvw = Kokkos::create_mirror_view(cellVolW);
+      auto hfw = Kokkos::create_mirror_view(cellFacesW);
+      auto how = Kokkos::create_mirror_view(cellOvfW);
+      Kokkos::deep_copy(hvw, cellVolW);
+      Kokkos::deep_copy(hfw, cellFacesW);
+      Kokkos::deep_copy(how, cellOvfW);
+      for (int i = 0; i < N; ++i) {
+        r.volSumW += hvw(i);
+        r.faceSumW += hfw(i);
+        r.overflowW += how(i);
+      }
+    }
   }
-  double best = 1e30, bestS = 1e30;
+  double best = 1e30, bestS = 1e30, bestW = 1e30;
   for (int rep = 0; rep < 3; ++rep) {
     auto t0 = clk::now();
     build();
@@ -333,9 +465,16 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
     build_sorted();
     auto t3 = clk::now();
     bestS = std::min(bestS, secs(t2, t3));
+    if (gatherMode == 1) {
+      auto t4 = clk::now();
+      build_worklist();
+      auto t5 = clk::now();
+      bestW = std::min(bestW, secs(t4, t5));
+    }
   }
   r.secsBest = best;
   r.secsBestS = bestS;
+  if (gatherMode == 1) r.secsBestW = bestW;
   return r;
 }
 
@@ -386,6 +525,11 @@ static void run(int N) {
   const double volErrS = std::fabs(r.volSumS - boxVol) / boxVol;
   std::printf("          spatial-sort %7.1f k/s (%.2fx) | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld\n",
               N / r.secsBestS / 1e3, r.secsBest / r.secsBestS, volErrS, (double)r.faceSumS / N, r.overflowS);
+  if (r.secsBestW >= 0) {
+    const double volErrW = std::fabs(r.volSumW - boxVol) / boxVol;
+    std::printf("          worklist     %7.1f k/s (%.2fx) | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld\n",
+                N / r.secsBestW / 1e3, r.secsBestS / r.secsBestW, volErrW, (double)r.faceSumW / N, r.overflowW);
+  }
 }
 
 int main(int argc, char** argv) {
