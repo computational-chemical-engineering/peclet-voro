@@ -129,6 +129,14 @@ if(TARGET voro++)
   target_compile_definitions(bench_convexcell_f32 PRIVATE VORFLOW_HAVE_VOROPP)
 endif()
 
+# SIMD cells-as-lanes prototype for the per-vertex geometry kernel (standalone, no Kokkos).
+# Needs -march=native for real AVX2 (the bootstrapped Kokkos was built without KOKKOS_ARCH_AVX2). See
+# docs/voronoi_simd_cells_prototype.md. Build the -ffast-math / -DNODIV variants by hand (doc has cmds).
+add_executable(bench_simd_cells bench_simd_cells.cpp)
+target_link_libraries(bench_simd_cells PRIVATE OpenMP::OpenMP_CXX)
+target_compile_options(bench_simd_cells PRIVATE -march=native)
+target_compile_features(bench_simd_cells PRIVATE cxx_std_20)
+
 # Per-cell cutter profiler (Phase 0): attributes cutCell2 time to its sub-phases.
 # Built with VORFLOW_CUTTER_PROFILE so cell_cutter.hpp bumps the host-only counters.
 add_executable(bench_cutter bench_cutter.cpp)
