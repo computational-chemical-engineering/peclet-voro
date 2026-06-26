@@ -1,5 +1,19 @@
 # Project brief: voro++-style worklist gather for the cold Voronoi build (CPU)
 
+> **STATUS — DONE (2026-06-26).** Implemented in `bench_convexcell` behind `CC_GATHER=1` (commits
+> Phase A `a87e3d1`, Phase B `04a98cd`, Phase C `7ecba1e`). The worklist gather reaches **voro++ parity
+> (≈1.0–1.05×)** on serial CPU FP64 — worklist ≈0.074–0.075 M/s vs voro++ ≈0.071–0.076 — up from the
+> 0.89× the sorted-offset walk trailed by, machine-exact (Σvol err ~1e-14), clip and GPU path untouched.
+> - **Phase A** — per-sub-region worklist (`S³`, `CC_WLS`, default 3): block offsets sorted by nearest-corner
+>   dist² (`rmin`), radius break is a table lookup (no runtime per-block geometry). Cut gather 6.3 → 4.6 µs/cell.
+> - **Phase B** — `rmax` whole-block-accept (`CC_WBA=1`) tried; **net loss** on the fine grid (≤~1 seed/block,
+>   nothing to amortise) → gated off by default. `S=3` is the config that beats voro++.
+> - **Phase C** — completeness guard: `exhausted=K` counts cells that drained the worklist without the radius
+>   break; `K=0` over all operating-density N ⇒ provably complete (the sorted-offset walk has no such guard).
+>
+> Sections below are the original pre-work brief, kept for context. The deferred GPU/CPU-migration items in
+> the memory index are unaffected. **Not pushed** (per milestone-commit convention).
+
 Self-contained starting point for a fresh session. Goal: add a **worklist-based neighbour gather** as an
 **option** beside the current fine-grid sorted-offset gather in `bench_convexcell`, to beat voro++ on
 **serial CPU** at exact accuracy. Nothing else changes — the cell data structure and the clip are SOTA and
