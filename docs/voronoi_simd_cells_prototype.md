@@ -101,6 +101,14 @@ no longer the wall. Next step for the full win is a fast reciprocal scoped to th
 of the clip-dominated construct, so the change is within run-to-run noise). The win is on the
 geometry-dominated **Part II re-eval / moving-points** path, where this kernel is ~100% of the work.
 
+**Extended (2026-06-27) to `facetAreasPerVertex`, `facetMomentsPerVertex`, `geometryPerVertex`** via a shared
+`edgeFeet3` helper that computes the three edge feet with one divide (same `inv = 1/(g1·g2·g3)` trick; the
+feet are kept because the moment scatter consumes them directly). Areas use the feet differenced
+(`f12−f31 = s2·c2 − s3·c3`, `v` cancels). All machine-exact — `test_pervertex_geometry` criteria (3) areas,
+(7) force/moments, (8) merged kernel pass on both batches (≤5e-13, unchanged). Note the area/moment kernels
+also carry a per-facet `sqrt(|n_i|)` (untouched), so their relative divide-win is smaller than pure volume.
+The derivative kernels (`geomVolumeGrad`/`geomVolumeArea`) are deliberately left as-is.
+
 ## Caveats (it's a prototype)
 - Synthetic cells (random non-degenerate triangles) — measures *arithmetic* throughput, not a real
   tessellation; the per-triangle op mix matches `volumePerVertex` exactly, which is what sets the ceiling.
