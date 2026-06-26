@@ -470,26 +470,6 @@ struct ConvexCell {
     const Real c2 = dot3(ck, ck), s = (c2 > Real(0)) ? dot3(v, ck) / c2 : Real(0);
     f[0] = v[0] - s * ck[0]; f[1] = v[1] - s * ck[1]; f[2] = v[2] - s * ck[2];
   }
-  /// The three edge feet edgeFoot(v,c1/c2/c3) with ONE divide instead of three: each s_k = (v·ck)/|ck|²
-  /// needs 1/|ck|², and the three reciprocals come from a single 1/(g1·g2·g3) (g_k=|c_k|²) via the
-  /// product-of-the-other-two trick — exact for a non-degenerate triangle (c1,c2,c3 nonzero). Falls back
-  /// to the per-edge edgeFoot (with its cc>0 guard) if degenerate. Used by the per-vertex area/moment/
-  /// geometry kernels, which were divide-bound (see docs/voronoi_simd_cells_prototype.md).
-  KOKKOS_INLINE_FUNCTION static void edgeFeet3(const Real v[3], const Real c1[3], const Real c2[3],
-                                               const Real c3[3], Real f1[3], Real f2[3], Real f3[3]) {
-    const Real g1 = dot3(c1, c1), g2 = dot3(c2, c2), g3 = dot3(c3, c3);
-    const Real D = g1 * g2 * g3;
-    if (!(D > Real(0))) { edgeFoot(v, c1, f1); edgeFoot(v, c2, f2); edgeFoot(v, c3, f3); return; }
-    const Real inv = Real(1) / D;
-    const Real s1 = dot3(v, c1) * (g2 * g3 * inv);
-    const Real s2 = dot3(v, c2) * (g1 * g3 * inv);
-    const Real s3 = dot3(v, c3) * (g1 * g2 * inv);
-    for (int a = 0; a < 3; ++a) {
-      f1[a] = v[a] - s1 * c1[a];
-      f2[a] = v[a] - s2 * c2[a];
-      f3[a] = v[a] - s3 * c3[a];
-    }
-  }
 
   /// Cell volume (G1) by the vertex-local flag/divergence sum — NO ordering, NO adjacency, NO atan2,
   /// NO findSharing. One pass over vertices; each contributes 3 signed determinants.
@@ -508,23 +488,13 @@ struct ConvexCell {
           tmp = c2[a]; c2[a] = c3[a]; c3[a] = tmp;
         }
       const Real v[3] = {vx[t], vy[t], vz[t]};
-      // det3(e, edgeFoot(v,ck), v) = (v·ck)(e·(v×ck))/(ck·ck): edgeFoot(v,ck)×v = (v·ck/|ck|²)(v×ck), so
-      // the foot drops out and each term carries one 1/|ck|². Fold the three reciprocals into ONE divide
-      // over the common denominator g1·g2·g3 (g_k = |c_k|²) — exact for a non-degenerate triangle (c1,c2,c3
-      // all nonzero), turning 3 divides/triangle into 1 (the per-vertex geometry kernel was divide-bound;
-      // see docs/voronoi_simd_cells_prototype.md). Pairing: edge (n1,n2)↔c3, (n2,n3)↔c1, (n3,n1)↔c2.
-      Real vc1[3], vc2[3], vc3[3];
-      xprod(v, c1, vc1); xprod(v, c2, vc2); xprod(v, c3, vc3);
-      Real e[3];
-      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2];
-      const Real numc3 = dot3(v, c3) * dot3(e, vc3);
-      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2];
-      const Real numc1 = dot3(v, c1) * dot3(e, vc1);
-      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2];
-      const Real numc2 = dot3(v, c2) * dot3(e, vc2);
-      const Real g1 = dot3(c1, c1), g2 = dot3(c2, c2), g3 = dot3(c3, c3);
-      const Real den = g1 * g2 * g3;
-      vol += (den > Real(0)) ? (numc3 * g1 * g2 + numc1 * g2 * g3 + numc2 * g1 * g3) / den : Real(0);
+      Real f12[3], f23[3], f31[3];
+      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      Real e[3], d = 0;
+      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; d += det3(e, f12, v);
+      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; d += det3(e, f23, v);
+      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2]; d += det3(e, f31, v);
+      vol += d;
     }
     return vol * (Real(1) / Real(6));
   }
@@ -546,7 +516,7 @@ struct ConvexCell {
       }
       const Real v[3] = {vx[t], vy[t], vz[t]};
       Real f12[3], f23[3], f31[3];
-      edgeFeet3(v, c1, c2, c3, f23, f31, f12);  // 3 divides → 1 (f23=foot c1, f31=foot c2, f12=foot c3)
+      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
       Real g[3];
       g[0] = f12[0] - f31[0]; g[1] = f12[1] - f31[1]; g[2] = f12[2] - f31[2];
       area[k1] += det3(n1, g, v) / (Real(2) * Kokkos::sqrt(dot3(n1, n1)));
@@ -589,7 +559,7 @@ struct ConvexCell {
       }
       const Real v[3] = {vx[t], vy[t], vz[t]};
       Real f12[3], f23[3], f31[3];
-      edgeFeet3(v, c1, c2, c3, f23, f31, f12);  // 3 divides → 1
+      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
       scatterFacetMoment(k1, n1, f12, f31, v, area, mx, my, mz);
       scatterFacetMoment(k2, n2, f23, f12, v, area, mx, my, mz);
       scatterFacetMoment(k3, n3, f31, f23, v, area, mx, my, mz);
@@ -882,7 +852,7 @@ struct ConvexCell {
       }
       const Real v[3] = {vx[t], vy[t], vz[t]};
       Real f12[3], f23[3], f31[3];
-      edgeFeet3(v, c1, c2, c3, f23, f31, f12);  // 3 divides → 1; feet kept for the moment scatter
+      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
       Real e[3];
       e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; V += det3(e, f12, v);
       e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; V += det3(e, f23, v);
