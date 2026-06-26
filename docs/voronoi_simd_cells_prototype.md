@@ -57,11 +57,12 @@ there FP32 ≡ FP64 and SIMD-width is irrelevant).
   compute-bound and dominate the moving-point workload (re-eval is 11.4× a rebuild on GPU; on CPU the
   topology-reuse path is where the throughput lives). Adopt **cells-as-lanes SoA + FP32 + fast reciprocal**
   there → ~7× per the matrix above, and it scales across cores.
-- **The reciprocal is THE lever.** Three options, increasing effort: (1) compile the geometry kernels with
-  `-ffast-math` / `-freciprocal-math -mrecip` (relaxes the FP64 machine-exactness, fine for FP32 physics —
-  the GPU already runs FP32); (2) hand-code `vrcpps` + one Newton step for FP32 (near-full precision, no
-  global fast-math); (3) **reformulate `edgeFoot`** so the per-edge `1/|ck|²` cancels in the divergence sum
-  (algebraic; removes the divide entirely and would speed the *scalar* path 3× too — the highest-value fix).
+- **The reciprocal looked like THE lever — but the obvious fixes don't survive contact (see the section
+  below).** Options considered: (1) `-ffast-math`/`-freciprocal-math` on the geometry TUs — relaxes the FP64
+  machine-exactness *and* its FP32 gain is mostly reassociation/vectorisation, not the reciprocal; (2) a
+  scoped `vrcpps`+Newton fast reciprocal — measured negligible once divides are already low; (3) reformulate
+  `edgeFoot` to fold 3 reciprocals → 1 — FP64-exact but **NaN in FP32** (Montgomery product overflows). So
+  the real path is the cells-as-lanes SIMD kernel itself, at FP32 accuracy, not a scalar reformulation.
 - **The cold-construct gather is a different problem** — latency/transaction-bound; SIMD cells-as-lanes
   won't help it (the per-lane neighbour walks diverge and the loads are scattered). Its lever is the
   worklist (already done) and locality, not vectorisation.
@@ -77,37 +78,45 @@ OMP_NUM_THREADS=24 OMP_PROC_BIND=spread OMP_PLACES=cores ./bsc_fast 131072 24 60
 # args: N cells, nt triangles/cell, reps
 ```
 
-## Implemented: the 1-divide reformulation in `convex_cell.hpp` (2026-06-27)
+## ATTEMPTED the 1-divide reformulation in `convex_cell.hpp` — REVERTED (FP32-unsafe)
 
-Applied option 3 to the real `volumePerVertex` — replaced `edgeFoot` + `det3` with the exact identity
-`det3(e, edgeFoot(v,ck), v) = (v·ck)(e·(v×ck))/|ck|²` and folded the three `1/|ck|²` into **one divide**
-over the common denominator `g1·g2·g3` (3 divides/triangle → 1). **Machine-exact:** `test_pervertex_geometry`
-passes all 8 criteria on both batches (isotropic + obtuse), `Vpv vs ordered` 3.8e-15 / 4.0e-15 — unchanged.
+Option 3 was implemented across `volumePerVertex` and (via a shared `edgeFeet3` helper)
+`facetAreasPerVertex` / `facetMomentsPerVertex` / `geometryPerVertex` / `geomVolumeGrad` / `geomVolumeArea`:
+the identity `det3(e, edgeFoot(v,ck), v) = (v·ck)(e·(v×ck))/|ck|²` lets the three `1/|ck|²` be folded into
+**one divide** over the common denominator `g1·g2·g3` (3 divides/triangle → 1). It was **FP64 machine-exact**
+— `test_pervertex_geometry` passed all criteria, `Vpv` 3.8e-15 unchanged — and the synthetic `bench_simd_cells`
+(`-DV1DIV`) showed +10–15% scalar.
 
-Measured on the isolated kernel (`bench_simd_cells`, build with `-DV1DIV`; 1 thread, scalar = the CPU path):
+**But it is NOT FP32-safe and was reverted (commit `a65d430`).** Reducing 3 reciprocals to 1 is a Montgomery
+batch inversion: it needs the product `g1·g2·g3` of the three `|c_k|²` (and numerator terms scaled by the
+other two `g`). Across cells the per-triangle scale of `|c_k|²` varies enough that those products leave FP32's
+narrow range → `bench_convexcell_f32` cold build produced **`Σvol err = NaN`**. The FP64-only acceptance test
+stayed exact and hid it (the deferred GPU-FP32 re-validation would have caught it). Since **FP32 is the
+GPU/production precision**, the fold is not viable; the divide stays at **3/triangle**.
 
-| | FP64 scalar | FP32 scalar |
+**The `-ffast-math` numbers below are a ceiling, not a shippable win.** On the synthetic kernel `-ffast-math`
+gave FP32 scalar 9.1 / SIMD 22 Mcell/s — but that is a *package* (reassociation + vectorisation + vectorised
+reciprocal), not the reciprocal alone: a *scoped* scalar fast-reciprocal (`vrcpps`+Newton) on the already-low-
+divide kernel measured **negligible**. And `-ffast-math` relaxes the very FP64 machine-exactness the per-vertex
+design exists to provide. So neither the fold nor a scoped fast-reciprocal is the path.
+
+| (synthetic, 1 thread) | FP64 scalar | FP32 scalar |
 |---|---:|---:|
-| 3-divide (old) | 2.0 | 2.0 |
-| **1-divide (the fix)** | **2.2 (+10%)** | **2.3 (+15%)** |
-| 1-divide **+ fast reciprocal** (`-ffast-math`) | **6.2 (3.1×)** | **9.1 (4.5×)** |
+| 3-divide (shipped) | 2.0 | 2.0 |
+| 1-divide fold (reverted) | 2.2 | 2.3 |
+| `-ffast-math` (ceiling, not shippable) | 6.2 | 9.1 |
 
-The exact fix alone is a modest +10–15% (one true `vdiv` still partly serialises), but it's the **enabler**:
-with a single reciprocal left, a fast-reciprocal lands the scalar kernel at **3.1× / 4.5×** — the divide is
-no longer the wall. Next step for the full win is a fast reciprocal scoped to the geometry kernels (option 2
-`vrcpps`+Newton for FP32, or `-freciprocal-math` on those TUs), now that there is only one per triangle.
+**What remains true:** the per-vertex geometry kernel is divide-bound, and on the geometry-dominated **Part II
+re-eval** path that matters (it's ~invisible in the clip-dominated cold construct). The viable lever is the
+genuine **cells-as-lanes SIMD kernel** (FP32, compiler-vectorised reciprocal accepted *within* the FP32 path),
+not a scalar reformulation — i.e. the real CPU-migration work, with FP32 (not FP64) accuracy as the bar.
 
-**End-to-end in the cold construct it's ~invisible** (`bench_construct` G1−G0: the volume kernel is only ~5%
-of the clip-dominated construct, so the change is within run-to-run noise). The win is on the
-geometry-dominated **Part II re-eval / moving-points** path, where this kernel is ~100% of the work.
-
-**Extended (2026-06-27) to `facetAreasPerVertex`, `facetMomentsPerVertex`, `geometryPerVertex`** via a shared
-`edgeFeet3` helper that computes the three edge feet with one divide (same `inv = 1/(g1·g2·g3)` trick; the
-feet are kept because the moment scatter consumes them directly). Areas use the feet differenced
-(`f12−f31 = s2·c2 − s3·c3`, `v` cancels). All machine-exact — `test_pervertex_geometry` criteria (3) areas,
-(7) force/moments, (8) merged kernel pass on both batches (≤5e-13, unchanged). Note the area/moment kernels
-also carry a per-facet `sqrt(|n_i|)` (untouched), so their relative divide-win is smaller than pure volume.
-The derivative kernels (`geomVolumeGrad`/`geomVolumeArea`) are deliberately left as-is.
+## On the sqrts (area vectors are sqrt-free)
+`facetAreasPerVertex` carries a per-facet `sqrt(|n_i|)` because it returns scalar area **magnitudes**. The
+area **VECTOR** (direction + magnitude) is sqrt-free: `A_k = S_a·n_k/(2·nn[k])` with `nn[k]=|n_k|²` cached —
+a pure reciprocal, no sqrt. `geomVolumeArea` / `geomVolumeGrad` already compute exactly this (the comment in
+the header says "fully SQRT-FREE"). So for physics (fluxes, momentum, forces) use the sqrt-free area-vector
+kernel; the sqrt only appears when a scalar magnitude is explicitly wanted.
 
 ## Caveats (it's a prototype)
 - Synthetic cells (random non-degenerate triangles) — measures *arithmetic* throughput, not a real
