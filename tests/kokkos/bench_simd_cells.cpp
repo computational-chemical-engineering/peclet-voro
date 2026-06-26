@@ -59,6 +59,18 @@ static inline Real cell_volume_scalar(const Real* n1, const Real* n2c, const Rea
     auto det3 = [&](const Real a[3], const Real b[3], const Real c[3]) {
       Real bc[3]; cross(b, c, bc); return dot(a, bc);
     };
+#ifdef V1DIV
+    // 1-divide identity (the convex_cell.hpp fix): det3(e,edgeFoot(v,ck),v)=(v·ck)(e·(v×ck))/|ck|²,
+    // three terms folded over the common denominator g1·g2·g3.
+    Real vc1[3], vc2[3], vc3[3];
+    cross(v, c1, vc1); cross(v, c2, vc2); cross(v, c3, vc3);
+    Real e[3];
+    e[0]=a1[0]-a2[0]; e[1]=a1[1]-a2[1]; e[2]=a1[2]-a2[2]; Real numc3 = dot(v,c3)*dot(e,vc3);
+    e[0]=a2[0]-a3[0]; e[1]=a2[1]-a3[1]; e[2]=a2[2]-a3[2]; Real numc1 = dot(v,c1)*dot(e,vc1);
+    e[0]=a3[0]-a1[0]; e[1]=a3[1]-a1[1]; e[2]=a3[2]-a1[2]; Real numc2 = dot(v,c2)*dot(e,vc2);
+    Real g1=dot(c1,c1), g2=dot(c2,c2), g3=dot(c3,c3), den=g1*g2*g3;
+    vol += (den > Real(0)) ? (numc3*g1*g2 + numc1*g2*g3 + numc2*g1*g3) / den : Real(0);
+#else
     Real f12[3], f23[3], f31[3];
     edgeFoot(c3, f12); edgeFoot(c1, f23); edgeFoot(c2, f31);
     Real e[3], d = 0;
@@ -66,6 +78,7 @@ static inline Real cell_volume_scalar(const Real* n1, const Real* n2c, const Rea
     e[0] = a2[0] - a3[0]; e[1] = a2[1] - a3[1]; e[2] = a2[2] - a3[2]; d += det3(e, f23, v);
     e[0] = a3[0] - a1[0]; e[1] = a3[1] - a1[1]; e[2] = a3[2] - a1[2]; d += det3(e, f31, v);
     vol += d;
+#endif
   }
   return vol * (Real(1) / Real(6));
 }
@@ -117,6 +130,17 @@ static void cell_volume_simd(const SoA<Real>& s) {
       Real u2y = c2y + m*(c3y-c2y), u3y = c3y + m*(c2y-c3y); c2y=u2y; c3y=u3y;
       Real u2z = c2z + m*(c3z-c2z), u3z = c3z + m*(c2z-c3z); c2z=u2z; c3z=u3z;
       Real vX = vxa[b+i], vY = vya[b+i], vZ = vza[b+i];
+#ifdef V1DIV
+      // 1-divide identity (the convex_cell.hpp fix): (v·ck)(e·(v×ck))/|ck|², folded over g1·g2·g3.
+      Real vc1x=vY*c1z-vZ*c1y, vc1y=vZ*c1x-vX*c1z, vc1z=vX*c1y-vY*c1x;
+      Real vc2x=vY*c2z-vZ*c2y, vc2y=vZ*c2x-vX*c2z, vc2z=vX*c2y-vY*c2x;
+      Real vc3x=vY*c3z-vZ*c3y, vc3y=vZ*c3x-vX*c3z, vc3z=vX*c3y-vY*c3x;
+      Real numc3 = (vX*c3x+vY*c3y+vZ*c3z) * ((a1x-a2x)*vc3x+(a1y-a2y)*vc3y+(a1z-a2z)*vc3z);
+      Real numc1 = (vX*c1x+vY*c1y+vZ*c1z) * ((a2x-a3x)*vc1x+(a2y-a3y)*vc1y+(a2z-a3z)*vc1z);
+      Real numc2 = (vX*c2x+vY*c2y+vZ*c2z) * ((a3x-a1x)*vc2x+(a3y-a1y)*vc2y+(a3z-a1z)*vc2z);
+      Real g1=c1x*c1x+c1y*c1y+c1z*c1z, g2=c2x*c2x+c2y*c2y+c2z*c2z, g3=c3x*c3x+c3y*c3y+c3z*c3z, den=g1*g2*g3;
+      Real d = (den > Real(0)) ? (numc3*g1*g2 + numc1*g2*g3 + numc2*g1*g3) / den : Real(0);
+#else
       // edgeFoot(v, ck) = v - (v.ck/ck.ck) ck ; guard ck.ck>0
       auto foot = [&](Real kx, Real ky, Real kz, Real& fx, Real& fy, Real& fz) {
         Real cc = kx*kx + ky*ky + kz*kz;
@@ -139,6 +163,7 @@ static void cell_volume_simd(const SoA<Real>& s) {
       Real d = det(a1x-a2x,a1y-a2y,a1z-a2z, f12x,f12y,f12z)
              + det(a2x-a3x,a2y-a3y,a2z-a3z, f23x,f23y,f23z)
              + det(a3x-a1x,a3y-a1y,a3z-a1z, f31x,f31y,f31z);
+#endif
       vol[i] += d;
       }
     }
@@ -210,10 +235,12 @@ int main(int argc, char** argv) {
   if (nt > 64) nt = 64;
   printf("per-vertex VOLUME kernel, N=%d cells, nt=%d tri/cell, reps=%d, threads=%d%s\n", N, nt, reps,
          omp_get_max_threads(),
-#ifdef NODIV
+#if defined(NODIV)
          "  [NODIV diagnostic]");
+#elif defined(V1DIV)
+         "  [V1DIV: 1-divide convex_cell.hpp fix]");
 #else
-         "");
+         "  [3-divide edgeFoot baseline]");
 #endif
   run<double>("FP64", N, nt, reps);
   run<float>("FP32", N, nt, reps);

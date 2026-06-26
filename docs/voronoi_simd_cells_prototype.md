@@ -77,6 +77,30 @@ OMP_NUM_THREADS=24 OMP_PROC_BIND=spread OMP_PLACES=cores ./bsc_fast 131072 24 60
 # args: N cells, nt triangles/cell, reps
 ```
 
+## Implemented: the 1-divide reformulation in `convex_cell.hpp` (2026-06-27)
+
+Applied option 3 to the real `volumePerVertex` — replaced `edgeFoot` + `det3` with the exact identity
+`det3(e, edgeFoot(v,ck), v) = (v·ck)(e·(v×ck))/|ck|²` and folded the three `1/|ck|²` into **one divide**
+over the common denominator `g1·g2·g3` (3 divides/triangle → 1). **Machine-exact:** `test_pervertex_geometry`
+passes all 8 criteria on both batches (isotropic + obtuse), `Vpv vs ordered` 3.8e-15 / 4.0e-15 — unchanged.
+
+Measured on the isolated kernel (`bench_simd_cells`, build with `-DV1DIV`; 1 thread, scalar = the CPU path):
+
+| | FP64 scalar | FP32 scalar |
+|---|---:|---:|
+| 3-divide (old) | 2.0 | 2.0 |
+| **1-divide (the fix)** | **2.2 (+10%)** | **2.3 (+15%)** |
+| 1-divide **+ fast reciprocal** (`-ffast-math`) | **6.2 (3.1×)** | **9.1 (4.5×)** |
+
+The exact fix alone is a modest +10–15% (one true `vdiv` still partly serialises), but it's the **enabler**:
+with a single reciprocal left, a fast-reciprocal lands the scalar kernel at **3.1× / 4.5×** — the divide is
+no longer the wall. Next step for the full win is a fast reciprocal scoped to the geometry kernels (option 2
+`vrcpps`+Newton for FP32, or `-freciprocal-math` on those TUs), now that there is only one per triangle.
+
+**End-to-end in the cold construct it's ~invisible** (`bench_construct` G1−G0: the volume kernel is only ~5%
+of the clip-dominated construct, so the change is within run-to-run noise). The win is on the
+geometry-dominated **Part II re-eval / moving-points** path, where this kernel is ~100% of the work.
+
 ## Caveats (it's a prototype)
 - Synthetic cells (random non-degenerate triangles) — measures *arithmetic* throughput, not a real
   tessellation; the per-triangle op mix matches `volumePerVertex` exactly, which is what sets the ceiling.

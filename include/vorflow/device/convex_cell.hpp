@@ -488,13 +488,23 @@ struct ConvexCell {
           tmp = c2[a]; c2[a] = c3[a]; c3[a] = tmp;
         }
       const Real v[3] = {vx[t], vy[t], vz[t]};
-      Real f12[3], f23[3], f31[3];
-      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
-      Real e[3], d = 0;
-      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; d += det3(e, f12, v);
-      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; d += det3(e, f23, v);
-      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2]; d += det3(e, f31, v);
-      vol += d;
+      // det3(e, edgeFoot(v,ck), v) = (v·ck)(e·(v×ck))/(ck·ck): edgeFoot(v,ck)×v = (v·ck/|ck|²)(v×ck), so
+      // the foot drops out and each term carries one 1/|ck|². Fold the three reciprocals into ONE divide
+      // over the common denominator g1·g2·g3 (g_k = |c_k|²) — exact for a non-degenerate triangle (c1,c2,c3
+      // all nonzero), turning 3 divides/triangle into 1 (the per-vertex geometry kernel was divide-bound;
+      // see docs/voronoi_simd_cells_prototype.md). Pairing: edge (n1,n2)↔c3, (n2,n3)↔c1, (n3,n1)↔c2.
+      Real vc1[3], vc2[3], vc3[3];
+      xprod(v, c1, vc1); xprod(v, c2, vc2); xprod(v, c3, vc3);
+      Real e[3];
+      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2];
+      const Real numc3 = dot3(v, c3) * dot3(e, vc3);
+      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2];
+      const Real numc1 = dot3(v, c1) * dot3(e, vc1);
+      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2];
+      const Real numc2 = dot3(v, c2) * dot3(e, vc2);
+      const Real g1 = dot3(c1, c1), g2 = dot3(c2, c2), g3 = dot3(c3, c3);
+      const Real den = g1 * g2 * g3;
+      vol += (den > Real(0)) ? (numc3 * g1 * g2 + numc1 * g2 * g3 + numc2 * g1 * g3) / den : Real(0);
     }
     return vol * (Real(1) / Real(6));
   }
