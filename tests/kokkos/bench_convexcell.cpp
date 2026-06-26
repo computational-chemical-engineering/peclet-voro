@@ -191,7 +191,13 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   // dist² (rmax). rmin gives a complete radius break with NO runtime per-block geometry (table lookup);
   // rmax (used in Phase B) gives cull-free whole-block accept. This mirrors voro++'s worklist.hh + radp[]
   // but as flat per-(sub-position,offset) dist² thresholds rather than its bit-packed permuted table.
-  const int gatherMode = std::getenv("CC_GATHER") ? std::atoi(std::getenv("CC_GATHER")) : 0;
+  // The worklist gather wins on CPU (≈voro++ parity, vs 0.89× for the sorted-offset walk) but the GPU is
+  // faster on the branchless sorted-offset path (beats the Liu-2020 SOTA), so default the worklist ON for
+  // host backends (OpenMP/Serial) and OFF for device (CUDA/HIP). CC_GATHER overrides either way.
+  constexpr bool isHostBackend =
+      Kokkos::SpaceAccessibility<Kokkos::HostSpace, typename Exec::memory_space>::accessible;
+  const int gatherMode =
+      std::getenv("CC_GATHER") ? std::atoi(std::getenv("CC_GATHER")) : (isHostBackend ? 1 : 0);
   const int wlS = std::getenv("CC_WLS") ? std::max(1, std::atoi(std::getenv("CC_WLS"))) : 3;  // sub-grid/axis; S=3 beats voro++
   // Phase B finding: rmax whole-block-accept (CC_WBA=1) is a NET LOSS on this fine grid (≤~1 seed/block,
   // so it amortises over nothing while adding a per-block rmax branch) — measured ~3% slower than the

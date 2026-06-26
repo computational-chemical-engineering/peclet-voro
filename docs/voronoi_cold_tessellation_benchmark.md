@@ -103,7 +103,8 @@ extern_bench/build.sh && OMP_NUM_THREADS=1 extern_bench/bench_geogram 1000000   
 #   ./build/bin/VolumeVoronoiGPU box.tet box_sites_<N>.xyz 1 | grep '@@'
 ```
 `bench_convexcell` reports `convexcell` (unsorted) and `spatial-sort` (Morton sorted-offset) k/s plus the
-timed voro++ reference; with `CC_GATHER=1` it also reports the `worklist` line (the serial-CPU headline,
-with its `exhausted=K` completeness guard). `CC_NOVORO=1` skips voro++; `CC_DENS` sets the grid density
-(CPU optimum 0.3, GPU 0.5); `CC_WLS` the worklist sub-grid (default 3); `CC_WBA=1` enables (opt-in)
-whole-block-accept; `CC_SW` overrides the search window.
+timed voro++ reference. The `worklist` line (serial-CPU headline, with its `exhausted=K` completeness guard)
+is **on by default on host backends** (OpenMP/Serial) and off on device (CUDA/HIP, which is faster on the
+sorted-offset path); `CC_GATHER=0/1` overrides either way. `CC_NOVORO=1` skips voro++; `CC_DENS` sets the
+grid density (CPU optimum 0.3, GPU 0.5); `CC_WLS` the worklist sub-grid (default 3); `CC_WBA=1` enables
+(opt-in) whole-block-accept; `CC_SW` overrides the search window.
