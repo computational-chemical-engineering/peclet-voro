@@ -191,7 +191,11 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   // rmax (used in Phase B) gives cull-free whole-block accept. This mirrors voro++'s worklist.hh + radp[]
   // but as flat per-(sub-position,offset) dist² thresholds rather than its bit-packed permuted table.
   const int gatherMode = std::getenv("CC_GATHER") ? std::atoi(std::getenv("CC_GATHER")) : 0;
-  const int wlS = std::getenv("CC_WLS") ? std::max(1, std::atoi(std::getenv("CC_WLS"))) : 2;  // sub-grid per axis
+  const int wlS = std::getenv("CC_WLS") ? std::max(1, std::atoi(std::getenv("CC_WLS"))) : 3;  // sub-grid/axis; S=3 beats voro++
+  // Phase B finding: rmax whole-block-accept (CC_WBA=1) is a NET LOSS on this fine grid (≤~1 seed/block,
+  // so it amortises over nothing while adding a per-block rmax branch) — measured ~3% slower than the
+  // rmin-only walk at every density 0.3–4. Kept as an opt-in for the record; default OFF.
+  const bool wholeBlockAccept = std::getenv("CC_WBA") && std::atoi(std::getenv("CC_WBA")) != 0;
   const int nSub = wlS * wlS * wlS;
   Kokkos::View<int*, MemSpace> wlX("wlX", (size_t)nSub * nOff), wlY("wlY", (size_t)nSub * nOff),
       wlZ("wlZ", (size_t)nSub * nOff);
@@ -392,14 +396,31 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
             if (gz >= dimz) { gz -= dimz; dispz = Lz; } else if (gz < 0) { gz += dimz; dispz = -Lz; }
             const real_t bx = dispx - pix, by = dispy - piy, bz = dispz - piz;
             int gc = (int)mortonEncode(gx, gy, gz);
-            for (int q2 = cellStart(gc); q2 < cellStart(gc + 1); ++q2) {
-              if (q2 == q) continue;
-              const real_t axx = posS(3 * q2) + bx, ayy = posS(3 * q2 + 1) + by, azz = posS(3 * q2 + 2) + bz;
-              const real_t off = 0.5 * (axx * axx + ayy * ayy + azz * azz);
-              if (off >= secR2) continue;
-              real_t n[3] = {axx, ayy, azz};
-              if (c.clip(n, off, q2)) secR2 = 2.0 * c.maxVertexRsq();
-              if (c.overflow) break;
+            const int lo = cellStart(gc), hi = cellStart(gc + 1);
+            // Phase B (opt-in, CC_WBA=1): whole-block accept. rmax = farthest-corner dist² from this query's
+            // sub-region to the block, so rmax < 2·secR2 ⇒ EVERY seed in the block has off < secR2 — the
+            // per-candidate cull can never fire, so drop it (branchless inner loop). secR2 only shrinks on a
+            // clip, so a candidate accepted here can at worst become a no-op clip after a mid-block cut
+            // (still exact). Measured a net loss on the fine grid (see CC_WBA note above) ⇒ default off.
+            if (wholeBlockAccept && wlRmax(base + g) < 2.0 * secR2) {
+              for (int q2 = lo; q2 < hi; ++q2) {
+                if (q2 == q) continue;
+                const real_t axx = posS(3 * q2) + bx, ayy = posS(3 * q2 + 1) + by, azz = posS(3 * q2 + 2) + bz;
+                const real_t off = 0.5 * (axx * axx + ayy * ayy + azz * azz);
+                real_t n[3] = {axx, ayy, azz};
+                if (c.clip(n, off, q2)) secR2 = 2.0 * c.maxVertexRsq();
+                if (c.overflow) break;
+              }
+            } else {
+              for (int q2 = lo; q2 < hi; ++q2) {
+                if (q2 == q) continue;
+                const real_t axx = posS(3 * q2) + bx, ayy = posS(3 * q2 + 1) + by, azz = posS(3 * q2 + 2) + bz;
+                const real_t off = 0.5 * (axx * axx + ayy * ayy + azz * azz);
+                if (off >= secR2) continue;
+                real_t n[3] = {axx, ayy, azz};
+                if (c.clip(n, off, q2)) secR2 = 2.0 * c.maxVertexRsq();
+                if (c.overflow) break;
+              }
             }
             if (c.overflow) break;
           }
