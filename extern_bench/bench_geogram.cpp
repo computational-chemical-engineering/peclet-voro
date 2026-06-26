@@ -9,6 +9,7 @@
  */
 #include <geogram/voronoi/convex_cell.h>      // VBW::ConvexCell (STANDALONE_CONVEX_CELL)
 #include "vorflow/device/convex_cell.hpp"      // vor::device::ConvexCell (via Kokkos shim)
+#include "voro++.hh"                            // voro++ voronoicell (clip-only, no container/gather)
 
 #include <algorithm>
 #include <array>
@@ -159,11 +160,24 @@ int main(int argc, char** argv) {
     return c.overflow ? 0.0 : c.volume();
   };
 
+  // --- voro++ voronoicell CLIP-ONLY (init box, plane() per neighbour; no container, no gather) ---
+  auto voro_one = [&](int i) -> double {
+    voro::voronoicell c;
+    c.init(-0.5, 0.5, -0.5, 0.5, -0.5, 0.5);  // unit box centred on the seed
+    const int k = ncand[i];
+    for (int t = 0; t < k; ++t) {
+      const real_t* r = &cand[(size_t)(i * KCAND + t) * 3];
+      c.plane(r[0], r[1], r[2], r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);  // bisector half-space
+    }
+    return c.volume();
+  };
+
   std::printf("construct-from-cache (clip all K, + volume):\n");
   const double g = bench("geogram clip_by_plane", geo_one);
   const double gf = bench("geogram clip_by_plane_fast", geo_fast_one);
+  const double vp = bench("voro++ voronoicell::plane", voro_one);
   const double o = bench("ours  vor::ConvexCell", our_one);
-  std::printf("  ratio ours/geogram(fast) = %.2fx\n", o / gf);
+  std::printf("  ratio ours/geogram(fast) = %.2fx   ours/voro++ = %.2fx\n", o / gf, o / vp);
   for (auto* p : geocells) delete p;
   return 0;
 }
