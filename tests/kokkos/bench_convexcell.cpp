@@ -110,6 +110,7 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   Kokkos::View<int*, MemSpace> cellOf("cellOf", N), counts("counts", ncell + 1);
   Kokkos::deep_copy(counts, 0);
   const real_t icx = icsz[0], icy = icsz[1], icz = icsz[2];
+  const real_t cszx = csz[0], cszy = csz[1], cszz = csz[2];  // cell sizes (for tight seed-to-block dist)
   Kokkos::parallel_for(
       "bin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         int gx = ((((int)Kokkos::floor(pos(3 * i) * icx)) % dimx) + dimx) % dimx;
@@ -255,20 +256,28 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           // off>=secR2). Comparing offD to secR2 under-reaches by √2 and silently drops neighbours — that
           // was the long-standing bug. The window (sw) is auto-sized above to cover this radius at the
           // chosen density, so the break always fires inside it.
+          // Sorted-offset gather. Per-block PERIODIC DISPLACEMENT (voro++'s trick): a block's periodic
+          // image needs the same ±L shift for ALL its seeds, so compute it ONCE per block from the grid
+          // wrap and fold it into the rel-pos — the inner candidate loop is then branchless (no per-seed
+          // min-image wrap, which was ~3 branches × ~65 candidates/cell). Branchless inner loop helps the
+          // GPU (no warp divergence) as well as the CPU, so one path serves both. The window (sw) is
+          // auto-sized < dim/2 so a single ±L wrap per axis suffices.
+          (void)cszx; (void)cszy; (void)cszz;
           real_t secR2 = 2.0 * c.maxVertexRsq();  // cached; only shrinks when a clip cuts
           for (int o = 0; o < nOff; ++o) {
             if (offD(o) > 2.0 * secR2) break;  // sorted ⇒ all remaining offsets are beyond the radius
-            int gx = cx + offX(o); gx = gx < 0 ? gx + dimx : (gx >= dimx ? gx - dimx : gx);
-            int gy = cy + offY(o); gy = gy < 0 ? gy + dimy : (gy >= dimy ? gy - dimy : gy);
-            int gz = cz + offZ(o); gz = gz < 0 ? gz + dimz : (gz >= dimz ? gz - dimz : gz);
+            int gx = cx + offX(o); real_t dispx = 0;
+            if (gx >= dimx) { gx -= dimx; dispx = Lx; } else if (gx < 0) { gx += dimx; dispx = -Lx; }
+            int gy = cy + offY(o); real_t dispy = 0;
+            if (gy >= dimy) { gy -= dimy; dispy = Ly; } else if (gy < 0) { gy += dimy; dispy = -Ly; }
+            int gz = cz + offZ(o); real_t dispz = 0;
+            if (gz >= dimz) { gz -= dimz; dispz = Lz; } else if (gz < 0) { gz += dimz; dispz = -Lz; }
+            const real_t bx = dispx - pix, by = dispy - piy, bz = dispz - piz;  // per-block rel-pos base
             int gc = (int)mortonEncode(gx, gy, gz);
             for (int q2 = cellStart(gc); q2 < cellStart(gc + 1); ++q2) {
               if (q2 == q) continue;
-              real_t ax = posS(3 * q2) - pix, ay = posS(3 * q2 + 1) - piy, az = posS(3 * q2 + 2) - piz;
-              ax = ax > Lxh ? ax - Lx : (ax < -Lxh ? ax + Lx : ax);
-              ay = ay > Lyh ? ay - Ly : (ay < -Lyh ? ay + Ly : ay);
-              az = az > Lzh ? az - Lz : (az < -Lzh ? az + Lz : az);
-              real_t off = 0.5 * (ax * ax + ay * ay + az * az);
+              const real_t ax = posS(3 * q2) + bx, ay = posS(3 * q2 + 1) + by, az = posS(3 * q2 + 2) + bz;
+              const real_t off = 0.5 * (ax * ax + ay * ay + az * az);
               if (off >= secR2) continue;
               real_t n[3] = {ax, ay, az};
               if (c.clip(n, off, q2)) secR2 = 2.0 * c.maxVertexRsq();  // recompute only on a cut
