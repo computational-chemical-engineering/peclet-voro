@@ -206,6 +206,31 @@ struct ConvexCell {
       if (alive[t]) computeVertex(t);
   }
 
+  /// Part II detection (D2 — the "convexity"/self-consistency certificate). After a re-eval on the FIXED
+  /// stored topology, the cell is the intersection of its half-spaces ONLY if every dual vertex still lies
+  /// inside every OTHER plane of the cell: n_k·v ≤ nn_k. If some vertex pokes out past a plane k (by more
+  /// than `tol`, an absolute distance), that plane should have cut it ⇒ the stored topology is stale (a face
+  /// was lost / an internal flip happened) ⇒ this cell needs a topology rebuild. This is purely cell-local
+  /// (no neighbour data): it catches LOST faces directly. A GAINED face (an external seed that has moved
+  /// close enough to cut this cell) is NOT visible here — the conjecture (to be tested empirically) is that
+  /// such an event makes the PARTNER cell self-inconsistent, so a global sweep of this test still flags it.
+  /// Exception: an SDF/boundary plane has no partner cell, so boundary cells need a separate boundary watch.
+  KOKKOS_INLINE_FUNCTION bool isSelfConsistent(Real tol) const {
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      for (int k = 0; k < np; ++k) {
+        if (t0[t] == k || t1[t] == k || t2[t] == k) continue;  // a plane that defines this vertex
+        const Real s = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
+        if (s > Real(0)) {  // v outside plane k; convert to a perpendicular distance for the tol test
+          const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
+          if (s * invlen > tol) return false;
+        }
+      }
+    }
+    return true;
+  }
+
   /// Largest squared dual-vertex radius over live triangles (drives the security radius).
   KOKKOS_INLINE_FUNCTION Real maxVertexRsq() const {
     Real m = 0;

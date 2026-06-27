@@ -164,6 +164,17 @@ target_include_directories(bench_incremental PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
 target_compile_features(bench_incremental PRIVATE cxx_std_20)
 
+# Part II: exhaustive comparison of moving-cell UPDATE STRATEGIES vs displacement (FP64 + FP32 variants).
+foreach(suffix "" "_f32")
+  add_executable(bench_update_strategies${suffix} bench_update_strategies.cpp)
+  target_link_libraries(bench_update_strategies${suffix} PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+  target_compile_definitions(bench_update_strategies${suffix} PRIVATE MORTON_ENABLE_KOKKOS=1)
+  target_include_directories(bench_update_strategies${suffix} PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+  target_compile_features(bench_update_strategies${suffix} PRIVATE cxx_std_20)
+endforeach()
+target_compile_definitions(bench_update_strategies_f32 PRIVATE CC_FLOAT=1)
+
 # F4: ArborX BVH (kNN) neighbour query vs the grid gather. ArborX is in the same prefix as Kokkos.
 find_package(ArborX CONFIG QUIET)
 if(ArborX_FOUND)
