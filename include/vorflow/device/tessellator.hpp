@@ -116,6 +116,17 @@ struct CellBuilder {
   bool useMorton, haveGid, withForceGeom;
   size_t facetCap;
   Sdf sdf;
+  // Optional Part-II (moving-points) outputs — emitted only when the views are sized (else left empty so
+  // existing callers are unaffected): the compact resident TOPOLOGY store (np/nt + pnbr/packed-triangles at
+  // kMaxP/kMaxT strides, written from the final clipped cell) and the per-cell CANDIDATE (skin) list = the
+  // neighbour ids this cell examined (within the worklist's security reach), capped at candCap. Together they
+  // let a later step re-evaluate geometry (ConvexCell::reevalGeometry) and locally repair off the skin list
+  // without re-gathering. See vorflow/docs/voronoi_dynamic_update_study.md.
+  Kokkos::View<int*, MemSpace> oNp, oNt, oTopoPnbr;
+  Kokkos::View<unsigned*, MemSpace> oTri;
+  Kokkos::View<int*, MemSpace> oCand, oCandCnt;
+  bool emitTopo, emitCand;
+  int candCap;
 
   /// Minimal-image relative vector from the seed at (pix,piy,piz) to sorted seed q.
   KOKKOS_INLINE_FUNCTION void relVec(int q, Real pix, Real piy, Real piz, Real pv[3]) const {
@@ -189,6 +200,16 @@ struct CellBuilder {
     if (incomplete) st |= kIncomplete;
     cellVol(i) = (empty || c.overflow) ? Real(0) : c.volumePerVertex();
 
+    // Part-II: persist the final (post-SDF-clip) topology so a later step can re-eval/repair without a rebuild.
+    if (emitTopo && !empty && !c.overflow) {
+      oNp(i) = c.np;
+      oNt(i) = c.nt;
+      for (int k = 0; k < c.np; ++k) oTopoPnbr[(size_t)i * kMaxP + k] = c.pnbr[k];
+      for (int t = 0; t < c.nt; ++t)
+        oTri[(size_t)i * kMaxT + t] = (unsigned)c.t0[t] | ((unsigned)c.t1[t] << 8) |
+                                      ((unsigned)c.t2[t] << 16) | ((c.alive[t] ? 1u : 0u) << 24);
+    }
+
     // Collect this cell's live faces (a plane with >=3 incident live triangles), then reserve
     // a contiguous CSR range with one atomic and write the per-facet geometry straight in.
     int faces[MAXF_TMP];
@@ -256,12 +277,15 @@ struct CellBuilder {
     // radius (4·rSqMax) every remaining block is too far to cut — break. The per-candidate
     // cull skips seeds past the radius; secR2 is recomputed only on a real cut.
     Real secR2 = Real(2) * c.maxVertexRsq();
+    int ncRec = 0;  // Part-II: count of recorded candidate (skin) ids for this cell
     for (int g = 0; g < nOff && !c.overflow; ++g) {
       if (wlRmin(base + g) > Real(2) * secR2) break;  // sorted ⇒ rest are farther; cell closed
       const int gc = worklistCell(base, g, cx, cy, cz);
       for (int q = cellStart(gc); q < cellStart(gc + 1) && !c.overflow; ++q) {
         if (q == pi) continue;
         if (haveGid && gidSorted(q) == gidSorted(pi)) continue;
+        // record the examined neighbour as a skin candidate (within the worklist's security reach), capped.
+        if (emitCand && ncRec < candCap) oCand[(size_t)i * candCap + ncRec++] = binned(q);
         Real pv[3];
         relVec(q, pix, piy, piz, pv);
         const Real off = Real(0.5) * (pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2]);
@@ -269,6 +293,7 @@ struct CellBuilder {
         if (c.clip(pv, off, binned(q))) secR2 = Real(2) * c.maxVertexRsq();
       }
     }
+    if (emitCand) oCandCnt(i) = ncRec;
     // Completeness uses the conservative inscribed-sphere coverage (sw·minCsz)², the same
     // criterion the legacy gather used: complete iff (sw·minCsz)² > 4·rSqMax.
     const Real covSq = Real(sw) * minCsz * Real(sw) * minCsz;
@@ -302,9 +327,20 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
                                           const Kokkos::View<Real*, tpx::MemSpace>& weight, int N,
                                           const Real L[3], int sw = 4, int densityCount = -1,
                                           Kokkos::View<long*, tpx::MemSpace> gid = {}, Sdf sdf = {},
-                                          bool withForceGeom = true, int nBuild = -1) {
+                                          bool withForceGeom = true, int nBuild = -1,
+                                          Kokkos::View<int*, tpx::MemSpace> outNp = {},
+                                          Kokkos::View<int*, tpx::MemSpace> outNt = {},
+                                          Kokkos::View<int*, tpx::MemSpace> outPnbr = {},
+                                          Kokkos::View<unsigned*, tpx::MemSpace> outTri = {},
+                                          Kokkos::View<int*, tpx::MemSpace> outCand = {},
+                                          Kokkos::View<int*, tpx::MemSpace> outCandCnt = {},
+                                          int candCap = 0) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
+  // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin list only
+  // when the caller supplies sized views (so existing callers, passing none, are byte-for-byte unaffected).
+  const bool emitTopo = outNp.extent(0) == static_cast<size_t>(N);
+  const bool emitCand = outCand.extent(0) > 0 && candCap > 0;
   // Optional global ids: skip a candidate sharing the cell's own id (its periodic
   // self-image, which can wrap exactly onto the seed -> a degenerate zero-distance
   // cut). Mirrors the legacy processNbrs `itr->id == m_id` guard. In the
@@ -554,7 +590,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
       binned, posSorted, wSorted, gidSorted, cellStart, wlOff, wlRmin,
       status, cellVol, facetCount, cellFacetBase, oNbr, oArea, oDV, oConn, facetCursor,
       icx, icy, icz, Lx, Ly, Lz, minCsz, dimx, dimy, dimz, sw, nOff, wlS,
-      useMorton, haveGid, withForceGeom, facetCap, sdf};
+      useMorton, haveGid, withForceGeom, facetCap, sdf,
+      outNp, outNt, outPnbr, outTri, outCand, outCandCnt, emitTopo, emitCand, candCap};
   const int nBuildL = nBuildEff;
   auto binnedV0 = binned;
   Kokkos::parallel_for(

@@ -2,244 +2,135 @@
 
 **What this is.** A controlled comparison of strategies for *updating* a periodic Voronoi tessellation as the
 seeds move — the moving-particle ("Part II") workload. It is purely about the tessellation update (topology +
-geometry / volumes); there are no forces or dynamics here. The aim is to find which update strategy is cheapest
-at a given per-step displacement, how accurate it is, whether the **convexity certificate** idea works, and to
-distil a selection heuristic (which turns out to be device- and precision-dependent).
+geometry / volumes); there are no forces or dynamics here. Goals: find which update strategy is cheapest at a
+given per-step displacement, how accurate it is, whether the **convexity certificate** idea works, and a
+selection heuristic (which turns out to be device-dependent).
 
-Harness: `tests/kokkos/bench_update_strategies.cpp` (FP64 + `_f32`). Primitives:
-`ConvexCell::reevalGeometry` / `ConvexCell::isSelfConsistent` (`include/vorflow/device/convex_cell.hpp`) and
-`TopologyStore` (`include/vorflow/device/topology_store.hpp`).
+All full rebuilds — and the ground-truth oracle — go through the **production worklist tessellator**
+`vor::device::buildTessellation`, which now (opt-in) also emits the resident `TopologyStore` (np/nt/pnbr/tri)
+and a per-cell candidate (skin) list. Re-eval runs `ConvexCell::reevalGeometry` over the store; local repair
+re-clips the stored skin list (no re-gather). Harness: `tests/kokkos/bench_update_strategies.cpp`.
 
 ## Workload & measure
 
-- Periodic box, `N` random seeds, each given a fixed Gaussian velocity (ballistic motion — no forces).
-- **Displacement is measured in cell-sizes**: `cellSize = cbrt(V/N)`. The per-step RMS displacement per seed is
-  `disp · cellSize`; `disp` is the swept control variable.
-- Integrate `nSteps`; each step: advance seeds → update the tessellation → compare per-cell volume to a
-  per-step **full-rebuild oracle**. Reported per strategy: steady-state update **ms/step**, **touch%** (cells
-  rebuilt/repaired per step ÷ N), **meanRelV / maxRelV** (cell-volume relative error vs oracle), and
-  **mism>1e-3** (count of cells off by >0.1%). `S0`/`S2` errors are *cumulative* over the run (they stop
-  rebuilding); the repair strategies reset each step.
+- Periodic box, `N` random seeds, each given a fixed Gaussian velocity (ballistic — no forces).
+- **Displacement is in cell-sizes**: `cellSize = cbrt(V/N)`; per-step RMS displacement is `disp · cellSize`.
+- Each step: advance seeds → update the tessellation → compare per-cell volume to a per-step
+  `buildTessellation` oracle. Per strategy: steady-state **ms/step**, **rebuild%** / **touch%**, cell-volume
+  **mean/max rel error**, **mism** (>0.1% vol error), and two diagnostics: **topoMism** (stored topology
+  differs from a fresh rebuild) and **listMiss** (a TRUE oracle neighbour absent from the cell's candidate list
+  = genuine list incompleteness).
 
 ## The strategies
 
 | id | detection | action |
 |----|-----------|--------|
-| **S0** pure-reeval     | none | `reevalGeometry` over the step-0 topology forever (speed ceiling; error grows) |
-| **S1** rebuild-each    | — | full rebuild every step (correctness/cost baseline = the oracle) |
-| **S2** disp-Verlet     | global max-displacement vs a skin | global rebuild when the skin is spent; pure re-eval between |
-| **S3** convex-local    | per-cell **D2 convexity** self-test | rebuild only flagged cells (independent, no propagation) |
-| **S4** convex-prop     | per-cell **D2** + symmetry | rebuild flagged, then **propagate** to asymmetric neighbours and iterate (star-splaying-style); fall back to a full rebuild if >30% are touched. *Re-gathers candidates from the grid every step (suboptimal — see S5).* |
-| **S5** combined        | **Verlet** skin + per-cell **D2** + symmetry | **the production design.** Each cell keeps the candidate (skin) list from the last full rebuild; while max-displacement < skin/2 the list is guaranteed complete, so local repair clips the **stored** list (no grid, no re-gather) — the S4 inner loop. When the Verlet criterion trips: rebuild grid, re-gather skin lists, full rebuild, reset reference. |
+| **S0** pure-reeval     | none | `reevalGeometry` over the store forever (speed ceiling; error grows) |
+| **S1** rebuild-each    | — | `buildTessellation` every step (baseline = oracle path) |
+| **S2** disp-Verlet     | global max-displacement vs skin | rebuild on trip; pure re-eval between |
+| **S3** convex-local    | per-cell **D2 convexity** self-test | rebuild flagged cells off the stored skin list (no propagation), Verlet rebuild on trip/fallback |
+| **S4** convex-prop     | **D2** + symmetry | rebuild flagged, **propagate** to asymmetric neighbours, iterate (star-splaying); Verlet rebuild on trip/fallback |
+| **S5** | = S4 swept over skin | the optimal-skin study |
 
-**Verlet list (S5).** S0–S4 do *not* keep a guaranteed neighbour list — S3/S4 re-gather the k-NN from a freshly
-rebuilt grid every step, which is wasteful. S5 fixes this: the per-cell candidate list (with skin) is gathered
-once per full rebuild and is provably complete while no seed has moved more than skin/2 (standard Verlet). Then
-local repair just re-clips the stored list. Because that list is distance-sorted and the clip keeps its
-security-radius early-out, the extra skin candidates sit past the security radius and are **never examined** — so
-a larger skin does not slow the repair clip; it only enlarges the (rarer) full-rebuild gather. The skin therefore
-trades full-rebuild *frequency* (∝ 1/skin) against full-rebuild *gather cost*, with an optimum near skin ≈ O(cell
-size), confirmed below.
+**D2 convexity certificate** (`ConvexCell::isSelfConsistent`): after re-eval on the fixed stored topology, the
+cell is still correct iff every dual vertex lies inside every *other* plane (`n_k·v ≤ nn_k`); the vertex's own 3
+defining planes are excluded (it lies on them). Catches **lost faces**; a **gained face** is invisible to the
+cell itself — **S4's propagation** carries the flag to the partner (after a rebuilt cell's neighbour set
+changes, any neighbour that doesn't list it back is re-flagged).
 
-**D2 convexity certificate** (`ConvexCell::isSelfConsistent`): after a re-eval on the fixed stored topology,
-the cell is still the correct half-space intersection iff every dual vertex lies inside every *other* plane of
-the cell (`n_k·v ≤ nn_k`). A genuine flip pushes a vertex outside a plane → flagged. A vertex is the meet of its
-own 3 planes and so lies *on* them (`n·v = nn`); those three are excluded from the test (`isSelfConsistent`
-skips `k ∈ {t0,t1,t2}`), so a valid cell never self-flags from round-off on its defining planes. This is purely cell-local
-and catches **lost faces**; a **gained face** (an external seed newly cutting the cell) is invisible to the cell
-itself — the conjecture is that the flip makes the *partner* cell inconsistent. **S4's propagation is exactly
-what carries the flag to the partner**: after a cell is rebuilt and its neighbour set actually changes, any
-neighbour that does not list it back is flagged for the next sweep.
+## Validation against ground truth
 
-## Validation against the production worklist tessellator
+The oracle and all rebuilds are the production `buildTessellation` (validated: space-filling 1e-9, voro++
+parity). So every number is against true Voronoi. The earlier self-contained harness builder was **bit-identical
+in FP64** (round-off in FP32) but **2.5× (host) – 11× (GPU) slower** than `buildTessellation` (its gather
+insertion-sorted a 128-NN list); routing rebuilds through the worklist both fixes the baseline and is the
+production path. With the candidate cap at 256 (covers the tail-cell examined count), **`listMiss = 0`**
+throughout: the candidate lists genuinely contain every true neighbour, so the residual is never list
+incompleteness.
 
-To rule out the harness's self-contained builder being a flawed shortcut, the oracle is the **production
-`vor::device::buildTessellation`** (the validated worklist gather — space-filling 1e-9, voro++ parity), and a
-static parity check compares the harness builder to it on the same point set:
+## Results — the rebuild baseline is the production worklist
 
-- **FP64: bit-identical** — `meanRelV = 1.4e-16`, `maxRelV = 1.1e-15`, `topoMism = 0`, `listMiss = 0`.
-  S1 (harness full-rebuild every step) matches the production oracle to 1e-16 at every displacement.
-- **FP32: agree to round-off** — `meanRelV = 7.9e-8`, exactly 1 marginal cell differs.
+The proper baseline is `buildTessellation` itself: **GPU RTX 5080 FP32 ~84 ms / 500k (~6 Mcell/s)**; host
+OpenMP FP64 ~230–320 ms / 120k (host is far slower per cell here — allocation + CSR pack dominate at this N).
+The speed-up of incremental updating is therefore **device-dependent: it scales with how expensive the full
+rebuild is**, and is modest on the (fast) GPU.
 
-Crucially, `listMiss` measured against the **true (production) neighbour sets** stays **0 (FP64) / 1 (FP32
-marginal)** through the whole dynamic sweep — it does *not* grow with displacement or skin. So the candidate
-lists genuinely contain every true Voronoi neighbour; the residual is not list incompleteness. Every number
-below is therefore validated against the real tessellator, and the conclusions are unchanged from the
-harness-builder oracle.
+### GPU RTX 5080, FP32, N=500k (baseline S1 = 84 ms/step)
 
-## Performance: the rebuild baseline (important correction)
+| disp | S0 reeval | S2 Verlet | S3 independent | S4 propagating |
+|------|-----------|-----------|----------------|----------------|
+| 0.001 | 3.2 ms (26×), grows | 8.3 ms (**10×**), mism 1666 | 22.5 ms (**3.7×**), mism 56 | 52 ms (1.6×), mism 16 |
+| 0.002 | 3.2 ms (26×) | 18.4 ms (4.6×), mism 48 | 35.6 ms (2.4×), mism 2 | 66.9 ms (1.3×), mism 0 |
+| 0.005 | 3.2 ms | ~84 ms (1×) — all rebuild | ~92 ms (1×) | ~92 ms (1×) |
 
-The harness's self-contained full-rebuild (used as the S1 baseline and for the strategies' rebuilds/re-gathers)
-is **much slower than the production worklist tessellator**, because its gather maintains a sorted k-NN list of
-128 via insertion-sort over a (2·sw+1)³ window, whereas `buildTessellation` clips ~70 candidates on the fly off
-a presorted block worklist with a security-radius break. Measured full-rebuild cost:
+### host OpenMP FP64, N=120k (baseline S1 ≈ 234–318 ms/step; shared-box timing, ±)
 
-| | harness (vol+topo only) | buildTessellation (+CSR+areas/dV) | buildTessellation (CSR, no geom) |
-|---|---|---|---|
-| GPU RTX 5080 FP32, N=500k | 873 ms | **80 ms** | 74 ms |
-| host OpenMP FP64, N=80k    | 902 ms | **360 ms** | 329 ms |
+| disp | S0 reeval | S2 Verlet | S3 independent | S4 propagating |
+|------|-----------|-----------|----------------|----------------|
+| 0.001 | 7.7 ms (30×) | 16.7 ms (**14×**), mism 403 | 37 ms (**6.3×**), mism 13 | 55 ms (4.2×), mism 2 |
+| 0.002 | 10 ms | 38.6 ms (8.2×), mism 18 | 74 ms (4.3×), mism 0 | 98.5 ms (3.2×), mism 0 |
 
-So **switching to `buildTessellation` is a 2.5× (host) – 11× (GPU) speed-up, not a drawback** — and it produces
-the facet CSR physics needs essentially for free (the gather dominates; force-geometry adds <10%).
+### S5 skin sweep (propagating), GPU FP32, disp 0.001
 
-**Consequence:** the correct full-rebuild baseline is the production number (80 ms GPU / 360 ms host), not the
-harness's. The speed-up ratios below that are stated "× vs full rebuild" used the slow harness baseline and are
-**inflated** (most on GPU). Corrected against the production rebuild:
+| skin | ms/step | rebuild% | mism |
+|------|---------|----------|------|
+| 0.05 | 51 | 18.8 | **0** |
+| 0.10 | 53 | 6.2 | 14 |
+| 0.20 | 54 | 0 | 47 |
+| 0.40 | 54 | 0 | 45 |
 
-- Pure re-eval (no gather, uncontaminated): GPU 2.9 ms → **27×**; host 4 ms → **90×**.
-- **S5 at skin ≥ 0.2** (no in-window full rebuild, repair off the stored list ⇒ *no gather*, so these times are
-  uncontaminated): GPU 23.7 ms → **3.4×**; host 17.7 ms → **20×** vs the production rebuild.
-- S5 configs that *do* rebuild in-window (small skin), and S3/S4 (re-gather every step), pay the slow harness
-  gather and are under-stated; with rebuilds routed through `buildTessellation` they collapse toward the same
-  ~3–4× (GPU) / ~20× (host) floor set by the per-step re-eval + detection + repair overhead.
-
-The qualitative conclusions (convexity certificate works, propagation essential, crossover by displacement,
-FP64 for topology) are unaffected. What changes is the **magnitude on GPU**: because the production cold rebuild
-is already fast (~6 Mcell/s), the per-step detection+repair overhead is a large fraction of it, so incremental
-updating buys ~3–4× on this GPU vs ~20× on the (relatively slower) host rebuild. The win grows with rebuild cost
-(density, polydispersity, larger cells, force-geometry).
-
-## Results
-
-Per-step `disp` is in cell-sizes. `ms/step` is the steady-state update cost; `S1` is the full-rebuild baseline
-on the same machine/build (the harness builder is not the production tessellator, but it is identical across all
-strategies, so the **ratios** are the result, not the absolute ms).
-
-### Host (OpenMP, 16 threads), FP64, N = 80k
-
-| strategy | disp 0.001 | 0.002 | 0.005 | 0.020 |
-|----------|-----------|-------|-------|-------|
-| S1 rebuild-each | 408 ms (1×) | 407 | 566 | 722 |
-| S0 / S2 reeval  | 3.9 ms (**105×**) | 4.0 | — | — |
-| S3 convex-local | 33 ms (12×), 5.6% touch, 7 mism | 91 ms, 19%, 331 mism | 366 ms, 40% | 346 ms, 82% |
-| S4 convex-prop  | **41 ms (10×), 7.2% touch, 2 mism** | 129 ms (3.2×), 28%, 22 mism | fallback | fallback |
-| S2 disp-Verlet  | (=reeval) | — | 66 ms (8.6×), 8% rebuild | **141 ms (5.1×), 33% rebuild, exact** |
-
-### GPU (RTX 5080), FP32, N = 500k
-
-| strategy | disp 0.001 | 0.005 | 0.020 |
-|----------|-----------|-------|-------|
-| S1 rebuild-each | 544 ms (1×) | 543 | 543 |
-| S0 / S2 reeval  | 2.9 ms (**187×**) | — | — |
-| S3 convex-local | **34 ms (16×), 9.2% touch, 462 mism** | 193 ms, 38% | 454 ms, 81% |
-| S4 convex-prop  | 90 ms (6×), 12.9% touch, 92 mism | fallback | fallback |
-| S2 disp-Verlet  | (=reeval) | 48 ms (11×), 8% rebuild | **183 ms (3×), 33% rebuild, exact** |
-
-### GPU (RTX 5080), FP64, N = 200k
-
-| strategy | disp 0.001 | 0.005 | 0.020 |
-|----------|-----------|-------|-------|
-| S1 rebuild-each | 324 ms (1×) | 324 | 324 |
-| S0 / S2 reeval  | 3.8 ms (**86×**) | — | — |
-| S3 convex-local | 32 ms (10×), 10% touch, 165 mism | 120 ms, 40% | 253 ms, 82% |
-| S4 convex-prop  | **104 ms (3.1×), 14% touch, 32 mism** | fallback | fallback |
-| S2 disp-Verlet  | (=reeval) | 30 ms (11×), 8% rebuild | **110 ms (2.9×), 33%, exact** |
-
-### S5 combined (persistent skin-list + Verlet), displacement × skin
-
-Skin in cell-sizes; `rebuild%` = fraction of steps doing a full rebuild (Verlet trip or >30% fallback);
-`wrong` = cells with >0.1% volume error vs the per-step rebuild oracle. The persistent list makes S5 markedly
-faster than S4's re-gather-every-step (disp 0.001: S5 **23×** vs S4 6×).
-
-GPU RTX 5080, FP32, N = 500k, baseline S1 = 544 ms/step (ms/step, speedup, wrong/500k):
-
-| disp \ skin | 0.05 | 0.10 | 0.20 | 0.40 |
-|-------------|------|------|------|------|
-| 0.0005 | 73 (7.5×), 11 | **20 (27×), 41** | 20 (27×), 41 | 20 (27×), 41 |
-| 0.0010 | 183 (3.0×), 0 | 76 (7.2×), 31 | **24 (23×), 165** | 24 (23×), 165 |
-| 0.0020 | 294 (1.8×), 1 | 188 (2.9×), 1 | 82 (6.6×), 97 | 30 (18×), 333 |
-| 0.0030 | 457 (1.2×), 0 | 245 (2.2×), 0 | 140 (3.9×), 35 | 87 (6.2×), 70 |
-| 0.0050 | ~885 (0.6×) all-fallback | — | — | — |
-
-Host FP64, N = 80k (timings noise-prone on the shared box; the accuracy/diagnostic columns are deterministic):
-at disp 0.001, `wrong` = 0 / 7 / 34 / 34 for skin 0.05 / 0.10 / 0.20 / 0.40 — the same shape as FP32 but ~5×
-fewer volume-significant misses (FP32 165 → FP64 34 at skin 0.20).
-
-Reading the table: **as displacement grows you need a smaller skin** (more frequent rebuilds) to hold accuracy,
-and the speedup achievable at a given accuracy falls; by disp ≈ 0.005 every step hits the fallback and local
-repair stops paying (hand off to S2). **skin 0.20 ≡ skin 0.40** wherever rebuild% = 0 (identical ms/touch/wrong):
-once the skin is large enough that no Verlet trip occurs in the window, extra skin is free — the sorted list +
-security-radius early-out never examines it.
-
-### Why are cells "missed"? (the `listMiss` / `topoMism` diagnostic)
-
-The harness reports two extra columns to localise the error source:
-- **`listMiss`** = cells where a true (oracle) neighbour is absent from the strategy's candidate list. **It is 0
-  in every row, FP32 and FP64.** So the missed cells are *not* a neighbour-completeness problem — with K=128
-  nearest vs ~15 actual neighbours, the Verlet list stays complete under the small drift. (A cell "not having all
-  potential neighbours" would show here; it never does.)
-- **`topoMism`** = cells whose stored topology differs from a fresh rebuild. This is *large* (~10–35%, and about
-  the same fraction in FP32 and FP64) while the volume error is tiny — because most of those differences are
-  **marginal, near-zero-area faces** that drift in/out under motion. D2 deliberately ignores them (its tolerance
-  is a perpendicular distance), and they do not move the volume. So `topoMism` measures bit-level topology drift,
-  not error; **volume error is the meaningful accuracy measure** (mean rel-V stays ~1e-6 throughout).
-
-So the handful of volume-significant misses are **detection misses** — D2+propagation didn't rebuild a cell whose
-topology change *did* matter — not missing neighbours. They are rare (≤0.03%), bounded, grow with skin (more
-drift between rebuilds), shrink with precision (FP64 ~5× fewer than FP32), and are wiped whenever a full rebuild
-is recent (skin 0.05). The periodic full rebuild any production loop runs caps this residual.
+On GPU the skin barely changes the time (~51–54 ms): the re-eval + detection + repair floor dominates and a full
+rebuild is cheap, so **a *smaller* skin (more frequent but cheap rebuilds) is strictly better** — exact (mism 0)
+at the same cost. On host (rebuild expensive) the opposite held: larger skin avoids the costly rebuild.
 
 ## Findings
 
-1. **Geometry re-eval is nearly free** — but the relevant baseline is the *production* rebuild (see the
-   correction above). Pure `reevalGeometry` is ~27× (GPU) / ~90× (host) cheaper than a `buildTessellation`
-   rebuild (and ~85–190× cheaper than the slow harness rebuild). The *entire* dynamic-update cost is the
-   **topology decision + repair**, not the geometry — but on a fast GPU rebuild that overhead is a big fraction,
-   so the realised whole-strategy speed-up is ~3–4× (GPU) / ~20× (host), not the raw re-eval ratio.
-
-2. **The convexity certificate works — but propagation is essential.** D2 alone (S3, independent repair) leaves
-   a volume residual that grows with displacement (host FP64: 7 → 331 → 1232 wrong cells as disp goes
-   0.001 → 0.002 → 0.005), because it never repairs the **gained-face partners**. Adding symmetry **propagation
-   (S4) drives the residual to near-zero** (2 / 22 wrong at disp 0.001 / 0.002, host FP64) for ~1–3% extra cells
-   touched. This is direct empirical support for the conjecture: *a topology change always shows up as a
-   convexity violation in at least one of the two cells, and propagation carries the repair to the other.* The
-   small remaining residual is healed by the periodic full rebuild that any production loop runs anyway.
-
-3. **Crossover by displacement** (per-step, in cell-sizes):
-   - **disp ≲ 0.002** (the DEM/CFL regime): **local repair wins.** S4 propagating is near-exact at ~3–10×; S3
-     independent is faster still (10–16×) if a small volume error per step is tolerable.
-   - **disp ~ 0.005–0.02**: topology churn exceeds the local-repair budget (S4 hits the 30% fallback and
-     degenerates to full rebuild). **S2 displacement-Verlet is the sweet spot** — rebuild every few steps, pure
-     re-eval between, ~3–11× and exact-to-bounded error.
-   - **disp ≳ 0.02** and up: just full-rebuild each step (S1).
-
-4. **Precision matters for the borderline flips, not for the marginal-face drift.** The D2 self-test needs a
-   precision-aware tolerance (`d2tol` = `1e-4·cellSize` FP64, `2e-3·cellSize` FP32) or FP32 vertex noise
-   over-flags. With that, the flagged/touched fraction is similar across precision, and so is `topoMism`
-   (marginal-face drift is ~precision-independent, ~24%). What FP32 *does* worsen is the **volume-significant
-   residual** on near-degenerate (borderline) flips — at disp 0.001 skin 0.20, FP64 leaves 34 wrong cells vs
-   FP32's 165 (~5×). This is the Sugihara topology-oriented-robustness regime: do the *topology* decision in
-   FP64 (or add area-thresholding to the certificate), even if the geometry/volume runs FP32.
+1. **Geometry re-eval is nearly free, but it is not the per-step cost.** Pure `reevalGeometry` is ~26× (GPU) /
+   ~30× (host) cheaper than a `buildTessellation` rebuild. But a usable strategy must also *detect* and *repair*
+   topology changes, and that overhead (D2 sweep + compaction + propagation + the repair clips) dominates the
+   per-step cost — so the realised whole-strategy speed-up is far below the raw re-eval ratio.
+2. **The convexity certificate works; propagation makes it exact.** D2 alone (S3) leaves a small residual that
+   grows with displacement; propagation (S4) drives it to ~0 (mism 0–16) with `listMiss = 0`. Empirical support
+   for the conjecture: a topology flip is a convexity violation in ≥1 of the two cells, and propagation carries
+   the repair to the partner.
+3. **The net win is modest and device-dependent — this is the key correction.** Against the *fast production
+   rebuild*, incremental updating buys, at disp 0.001: GPU **10× (S2) / 3.7× (S3) / 1.6× (S4)**; host **14× /
+   6.3× / 4.2×**. It scales with rebuild cost, so the GPU (≈6 Mcell/s cold) gains least. By disp ≈ 0.005 every
+   step rebuilds and the benefit is gone. (The earlier "23×" was an artifact of a too-slow harness baseline.)
+4. **Independent vs propagating is a device-dependent trade-off.** Propagation buys exactness but costs ~2–3×
+   the time of independent repair. On the GPU, where the rebuild is cheap, that cost isn't worth it —
+   **independent repair (S3, near-exact, 3.7×)** or even just **Verlet (S2, 10×, moderate error)** dominate; and
+   a small skin makes the cheap rebuilds frequent enough to stay exact. On host (expensive rebuild) propagation
+   is worthwhile (4.2× exact).
+5. **Precision:** D2 needs a precision-aware tolerance (`1e-4·cellSize` FP64, `2e-3·cellSize` FP32); with it,
+   touch% and topoMism are ~precision-independent (topoMism ~10–35% is marginal-face drift D2 ignores by
+   design — volume-irrelevant, not error). FP32 only worsens the borderline-flip residual (~5×). Do the topology
+   decision in FP64; geometry/volume can be FP32.
 
 ## Recommended heuristic
 
-**S5 is the production strategy** — a persistent Verlet skin-list with a propagating-repair inner loop. It
-unifies the others: pure re-eval each step, a cheap D2 sweep as the trigger, propagating local repair off the
-**stored** list while the touched fraction stays small, and a full rebuild (with worklist/skin-list regather)
-when the Verlet criterion trips or too many cells are flagged. It dominates the per-step-re-gather variants
-(GPU FP32 disp 0.001: 23× vs S4's 6×).
+The right strategy depends on the **rebuild cost** (device/N/density) and the **per-step displacement**:
 
-Tuning, per the measured behaviour:
+- **Fast rebuild (GPU, ~6 Mcell/s) + small disp (≲0.002):** prefer **S3 independent repair** (near-exact,
+  ~3–4×) or **S2 Verlet** (~10×) if a small volume error is acceptable; use a *small* skin so the cheap rebuilds
+  keep it exact. Full propagation (S4) is rarely worth its overhead here.
+- **Expensive rebuild (host / large cells / polydisperse / with force-geometry) + small disp:** **S4 propagating
+  repair** pays off (exact, 4×+), and a *larger* skin avoids the costly rebuild.
+- **disp ≳ 0.005 (any device):** just rebuild every step (`buildTessellation`); incremental updating no longer
+  wins.
+- Do the topology decision in FP64; FP32 for geometry/volume.
 
-- **disp ≲ 0.002 (the DEM/CFL regime):** S5 with **skin ≈ 0.1–0.2 cell-sizes**. skin 0.1 → ~6% of steps
-  rebuild, near-exact; skin 0.2 → no rebuilds in-window, ~23×, with a ~0.03% volume residual healed at the next
-  rebuild. Choose along that curve by the accuracy budget. (Larger skin never hurts the repair clip, only the
-  rebuild gather and memory.)
-- **disp ~ 0.005–0.02:** topology churn exceeds the local-repair budget (S5's fallback would fire every step);
-  use **S2 displacement-Verlet** (rebuild every few steps, exact-to-bounded, ~3–11×).
-- **disp ≳ 0.02:** S1 full rebuild each step.
-- Do the **topology decision in FP64** (FP32 marginal-face flicker inflates the flagged set and the residual);
-  FP32 is fine for the geometry/volume re-eval.
-
-An adaptive controller can pick the regime live from the measured D2 flag-fraction (small → S5 local; moderate →
-S2; large → S1) and auto-tune the skin toward the rebuild-fraction that minimises measured ms/step.
+The production-faithful implementation is **S2/S3 with a Verlet skin + buildTessellation rebuilds** (now wired:
+`buildTessellation` emits the topology store + skin list); S4 propagation is an opt-in exactness mode for the
+expensive-rebuild regime.
 
 ## Caveats & future axes
 
-- The harness builder is a fixed-window grid gather, not the production worklist tessellator; absolute ms are
-  not production throughput, but the cross-strategy ratios are valid (shared builder).
-- Studied: random Poisson seeds, single density. Not yet swept: density / polydispersity, much larger N,
-  multi-hop-per-step displacement, and **SDF boundary cells** — a boundary plane has no partner cell, so the
-  convexity-symmetry argument needs an explicit boundary watch there (noted, not yet measured).
-- Production wiring (re-eval + the chosen strategy into the stepper, with aux-map/CSR reuse) is deliberately out
-  of scope here — this study is about the cell update only.
+- Host timings are noise-prone on the shared box (S1 varied 113–369 ms between runs); GPU numbers are the
+  reliable quantitative ones, host is indicative.
+- Studied: random Poisson seeds, single density, cells-only (no forces). Not swept: density / polydispersity,
+  much larger N, multi-hop displacement, and **SDF boundary cells** — a boundary plane has no partner cell, so
+  the convexity-symmetry argument needs an explicit boundary watch there.
+- The per-step detection/repair overhead (compaction + per-sweep deep-copies) is not fully optimised; fusing it
+  would raise the GPU speed-ups somewhat, but the qualitative device-dependence (cheap rebuild ⇒ modest win)
+  stands.
