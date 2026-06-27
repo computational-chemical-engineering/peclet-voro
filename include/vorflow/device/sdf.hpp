@@ -23,7 +23,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "tpx/common/view.hpp"
-#include "vorflow/device/cell_cutter.hpp"
+#include "vorflow/device/convex_cell.hpp"
 
 namespace vor {
 namespace device {
@@ -147,22 +147,18 @@ KOKKOS_INLINE_FUNCTION void sdfGradient(const Sdf& s, Real x, Real y, Real z, Re
  * @param seed  seed world position (the cell's vpos are relative to it).
  * @return true if the cell was emptied (seed inside solid).
  */
-template <class Real, int CAP, class Sdf>
-KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ScratchCell<Real, CAP>& c, const Real seed[3],
-                                               const Sdf& sdf, bool* ovf) {
+template <class Real, int MAXP, int MAXT, class Sdf>
+KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ConvexCell<Real, MAXP, MAXT>& c, const Real seed[3],
+                                               const Sdf& sdf) {
   const Real tol = Real(1e-8);
   const int maxCuts = 24;
   const Real phiCenter = sdf.eval(seed[0], seed[1], seed[2]);
   if (phiCenter <= Real(0)) {  // seed inside solid -> no cell
-    c.resetV(0);
-    c.resetF(0);
+    for (int t = 0; t < c.nt; ++t) c.alive[t] = false;
     return true;
   }
-  // cell circumradius (vpos are seed-relative)
-  Real maxRsq = 0;
-  for (int i = 0; i < c.numAllocV; ++i)
-    if (c.aliveV[i] && c.rsq[i] > maxRsq)
-      maxRsq = c.rsq[i];
+  // cell circumradius (dual vertices are seed-relative)
+  const Real maxRsq = c.maxVertexRsq();
   const Real radius = Kokkos::sqrt(maxRsq > 0 ? maxRsq : Real(0));
   if (phiCenter > radius + tol)
     return false;  // cell fully in fluid
@@ -173,10 +169,10 @@ KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ScratchCell<Real, CAP>& c, const 
     Real probePhi = phiCenter;
     if (seedPlaneApplied) {
       bool found = false;
-      for (int i = 0; i < c.numAllocV; ++i) {
-        if (!c.aliveV[i])
+      for (int t = 0; t < c.nt; ++t) {
+        if (!c.alive[t])
           continue;
-        Real x = seed[0] + c.vpos[i][0], y = seed[1] + c.vpos[i][1], z = seed[2] + c.vpos[i][2];
+        Real x = seed[0] + c.vx[t], y = seed[1] + c.vy[t], z = seed[2] + c.vz[t];
         Real phi = sdf.eval(x, y, z);
         if (!found || phi < probePhi) {
           probe[0] = x;
@@ -215,9 +211,9 @@ KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ScratchCell<Real, CAP>& c, const 
     Real pv[3] = {-normal[0], -normal[1], -normal[2]};
     Real off =
         pv[0] * (surf[0] - seed[0]) + pv[1] * (surf[1] - seed[1]) + pv[2] * (surf[2] - seed[2]);
-    c.cutCell2(pv, off, kBoundaryFacet, ovf);
+    c.clip(pv, off, kBoundaryFacet);
     seedPlaneApplied = true;
-    if (c.emptyV())
+    if (c.empty())
       break;
   }
   return false;

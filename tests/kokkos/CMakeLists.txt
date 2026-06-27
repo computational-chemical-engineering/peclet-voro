@@ -23,9 +23,6 @@ add_vorflow_kokkos_test(test_kokkos_smoke)
 # Phase 1: published data-layer round-trip (legacy <-> CSR <-> device view).
 add_vorflow_kokkos_test(test_tessellation_view)
 
-# Phase 2: device-callable cutter vs legacy topology (per-cell parallel_for).
-add_vorflow_kokkos_test(test_cell_cutter)
-
 # Phase 3: full-system device tessellation (grid + cutter + CSR) vs legacy.
 add_vorflow_kokkos_test(test_tessellator)
 
@@ -50,13 +47,13 @@ add_vorflow_kokkos_test(test_viscous_device)
 
 # De-legacy Phase 3: device interface-tension energy vs legacy IntfDyn.
 add_vorflow_kokkos_test(test_interface_energy)
-add_vorflow_kokkos_test(test_interface_force)
+# test_interface_force / test_incremental_device RETIRED with ScratchCell (half-edge cutter):
+# the interface FORCE (gradFacetAreaSq) and the CPU incremental path were half-edge-only.
+# The ConvexCell replacements are geomVolumeAreaGrad (interface force) and reevalGeometry
+# (incremental re-eval) — to be wired into the device path.
 
 # De-legacy Phase 4: device-native Euler trajectory vs legacy ExplicitEuler.
 add_vorflow_kokkos_test(test_device_step)
-
-# De-legacy Phase 6: CPU incremental update on the new cutter vs full rebuild.
-add_vorflow_kokkos_test(test_incremental_device)
 
 # Throughput benchmark (device vs legacy) — a plain executable, not a ctest.
 # The legacy side MUST be compiled with VORONOI_USE_OPENMP so its per-thread
@@ -136,15 +133,6 @@ add_executable(bench_simd_cells bench_simd_cells.cpp)
 target_link_libraries(bench_simd_cells PRIVATE OpenMP::OpenMP_CXX)
 target_compile_options(bench_simd_cells PRIVATE -march=native)
 target_compile_features(bench_simd_cells PRIVATE cxx_std_20)
-
-# Per-cell cutter profiler (Phase 0): attributes cutCell2 time to its sub-phases.
-# Built with VORFLOW_CUTTER_PROFILE so cell_cutter.hpp bumps the host-only counters.
-add_executable(bench_cutter bench_cutter.cpp)
-target_link_libraries(bench_cutter PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
-target_compile_definitions(bench_cutter PRIVATE VORFLOW_CUTTER_PROFILE MORTON_ENABLE_KOKKOS=1)
-target_include_directories(bench_cutter PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
-target_compile_features(bench_cutter PRIVATE cxx_std_20)
 
 # F2/F3: isolate cell construction from cached candidate planes (B+G, no gather), per tier.
 foreach(suffix "" "_f32")
