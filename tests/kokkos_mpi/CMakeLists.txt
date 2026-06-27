@@ -46,3 +46,10 @@ foreach(t voronoi_mpi sdf_mpi)
     set_tests_properties(${t}_np${np} PROPERTIES ENVIRONMENT "OMP_PROC_BIND=false")
   endforeach()
 endforeach()
+
+# Distributed cold-build throughput benchmark (run manually under mpirun -np <R> [N]).
+add_executable(bench_voronoi_mpi bench_voronoi_mpi.cpp)
+target_include_directories(bench_voronoi_mpi PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include ${MORTON_INCLUDE})
+target_compile_definitions(bench_voronoi_mpi PRIVATE VORFLOW_MPI MORTON_ENABLE_KOKKOS=1)
+target_link_libraries(bench_voronoi_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX)
