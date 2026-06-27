@@ -29,11 +29,23 @@ Harness: `tests/kokkos/bench_update_strategies.cpp` (FP64 + `_f32`). Primitives:
 | **S1** rebuild-each    | — | full rebuild every step (correctness/cost baseline = the oracle) |
 | **S2** disp-Verlet     | global max-displacement vs a skin | global rebuild when the skin is spent; pure re-eval between |
 | **S3** convex-local    | per-cell **D2 convexity** self-test | rebuild only flagged cells (independent, no propagation) |
-| **S4** convex-prop     | per-cell **D2** + symmetry | rebuild flagged, then **propagate** to asymmetric neighbours and iterate (star-splaying-style); fall back to a full rebuild if >30% are touched |
+| **S4** convex-prop     | per-cell **D2** + symmetry | rebuild flagged, then **propagate** to asymmetric neighbours and iterate (star-splaying-style); fall back to a full rebuild if >30% are touched. *Re-gathers candidates from the grid every step (suboptimal — see S5).* |
+| **S5** combined        | **Verlet** skin + per-cell **D2** + symmetry | **the production design.** Each cell keeps the candidate (skin) list from the last full rebuild; while max-displacement < skin/2 the list is guaranteed complete, so local repair clips the **stored** list (no grid, no re-gather) — the S4 inner loop. When the Verlet criterion trips: rebuild grid, re-gather skin lists, full rebuild, reset reference. |
+
+**Verlet list (S5).** S0–S4 do *not* keep a guaranteed neighbour list — S3/S4 re-gather the k-NN from a freshly
+rebuilt grid every step, which is wasteful. S5 fixes this: the per-cell candidate list (with skin) is gathered
+once per full rebuild and is provably complete while no seed has moved more than skin/2 (standard Verlet). Then
+local repair just re-clips the stored list. Because that list is distance-sorted and the clip keeps its
+security-radius early-out, the extra skin candidates sit past the security radius and are **never examined** — so
+a larger skin does not slow the repair clip; it only enlarges the (rarer) full-rebuild gather. The skin therefore
+trades full-rebuild *frequency* (∝ 1/skin) against full-rebuild *gather cost*, with an optimum near skin ≈ O(cell
+size), confirmed below.
 
 **D2 convexity certificate** (`ConvexCell::isSelfConsistent`): after a re-eval on the fixed stored topology,
 the cell is still the correct half-space intersection iff every dual vertex lies inside every *other* plane of
-the cell (`n_k·v ≤ nn_k`). A genuine flip pushes a vertex outside a plane → flagged. This is purely cell-local
+the cell (`n_k·v ≤ nn_k`). A genuine flip pushes a vertex outside a plane → flagged. A vertex is the meet of its
+own 3 planes and so lies *on* them (`n·v = nn`); those three are excluded from the test (`isSelfConsistent`
+skips `k ∈ {t0,t1,t2}`), so a valid cell never self-flags from round-off on its defining planes. This is purely cell-local
 and catches **lost faces**; a **gained face** (an external seed newly cutting the cell) is invisible to the cell
 itself — the conjecture is that the flip makes the *partner* cell inconsistent. **S4's propagation is exactly
 what carries the flag to the partner**: after a cell is rebuilt and its neighbour set actually changes, any
@@ -75,6 +87,35 @@ strategies, so the **ratios** are the result, not the absolute ms).
 | S4 convex-prop  | **104 ms (3.1×), 14% touch, 32 mism** | fallback | fallback |
 | S2 disp-Verlet  | (=reeval) | 30 ms (11×), 8% rebuild | **110 ms (2.9×), 33%, exact** |
 
+### S5 combined (persistent skin-list + Verlet), skin sweep at disp = 0.001
+
+Skin in cell-sizes. `rebuild%` = fraction of steps that did a full rebuild (Verlet trip or >30% fallback).
+The persistent list makes S5 markedly faster than S4's re-gather-every-step (GPU FP32 disp 0.001: S5 **23×** vs
+S4 6×).
+
+GPU RTX 5080, FP32, N = 500k (baseline S1 = 544 ms/step):
+
+| skin | ms/step | speedup | rebuild% | touch% | mism/500k |
+|------|---------|---------|----------|--------|-----------|
+| 0.05 | 181 | 3.0× | 18.8 | 27.2 | 0 (exact) |
+| 0.10 | 76  | **7.2×** | 6.2 | 17.4 | 31 |
+| 0.20 | 23.7 | **23×** | 0 | 12.8 | 165 |
+| 0.40 | 23.7 | 23× | 0 | 12.8 | 165 |
+
+Host OpenMP (16 thr), FP64, N = 80k (baseline S1 ≈ 408 ms/step):
+
+| skin | ms/step | speedup | rebuild% | touch% | mism/80k |
+|------|---------|---------|----------|--------|----------|
+| 0.05 | 121 | 3.4× | 18.8 | 29.5 | 0 (exact) |
+| 0.10 | 50  | **8.2×** | 6.2 | 19.2 | 7 |
+| 0.20 | 17.7 | **23×** | 0 | 14.3 | 34 |
+| 0.40 | 17.6 | 23× | 0 | 14.3 | 34 |
+
+At disp ≥ 0.005 S5 rebuilds every step (the >30% fallback fires) and reverts to the full-rebuild baseline — the
+same regime boundary as S4. Note **skin 0.20 ≡ skin 0.40** (identical ms/touch/mism on both devices): once the
+skin is large enough that no Verlet trip occurs in the window, more skin is free (sorted list + security-radius
+early-out) — exactly as predicted.
+
 ## Findings
 
 1. **Geometry re-eval is nearly free.** `reevalGeometry` over a fixed topology runs ~85–190× faster than a full
@@ -105,17 +146,26 @@ strategies, so the **ratios** are the result, not the absolute ms).
 
 ## Recommended heuristic
 
-Select per step from the per-step displacement (or, adaptively, the measured D2 flag-fraction):
+**S5 is the production strategy** — a persistent Verlet skin-list with a propagating-repair inner loop. It
+unifies the others: pure re-eval each step, a cheap D2 sweep as the trigger, propagating local repair off the
+**stored** list while the touched fraction stays small, and a full rebuild (with worklist/skin-list regather)
+when the Verlet criterion trips or too many cells are flagged. It dominates the per-step-re-gather variants
+(GPU FP32 disp 0.001: 23× vs S4's 6×).
 
-- **flag-fraction small (≲ ~10%, disp ≲ 0.002):** S4 convex + propagating repair (near-exact) — or S3 if a
-  ~1e-4 volume error/step is acceptable for a further ~2× speed.
-- **flag-fraction moderate (disp ~ 0.005–0.02):** S2 displacement-Verlet (skin ≈ 0.1–0.15 cellSize).
-- **flag-fraction large (disp ≳ 0.02):** S1 full rebuild each step.
-- Do the topology decision in FP64; FP32 is fine for the geometry/volume re-eval.
+Tuning, per the measured behaviour:
 
-The natural production design is **S2-with-an-S4-inner-loop**: pure re-eval each step, a cheap D2 sweep as the
-trigger, propagating local repair while the touched fraction stays small, and a global rebuild (Verlet skin /
-fallback) when it does not.
+- **disp ≲ 0.002 (the DEM/CFL regime):** S5 with **skin ≈ 0.1–0.2 cell-sizes**. skin 0.1 → ~6% of steps
+  rebuild, near-exact; skin 0.2 → no rebuilds in-window, ~23×, with a ~0.03% volume residual healed at the next
+  rebuild. Choose along that curve by the accuracy budget. (Larger skin never hurts the repair clip, only the
+  rebuild gather and memory.)
+- **disp ~ 0.005–0.02:** topology churn exceeds the local-repair budget (S5's fallback would fire every step);
+  use **S2 displacement-Verlet** (rebuild every few steps, exact-to-bounded, ~3–11×).
+- **disp ≳ 0.02:** S1 full rebuild each step.
+- Do the **topology decision in FP64** (FP32 marginal-face flicker inflates the flagged set and the residual);
+  FP32 is fine for the geometry/volume re-eval.
+
+An adaptive controller can pick the regime live from the measured D2 flag-fraction (small → S5 local; moderate →
+S2; large → S1) and auto-tune the skin toward the rebuild-fraction that minimises measured ms/step.
 
 ## Caveats & future axes
 

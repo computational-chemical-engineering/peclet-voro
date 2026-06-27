@@ -124,7 +124,8 @@ struct Grid {
   }
 };
 
-static constexpr int KCAND = 96;  // per-cell k-NN candidate list (security ball holds ~70 for random)
+static constexpr int KCAND = 128;  // per-cell k-NN candidate list; sized for skin headroom (S5 Verlet
+                                   // list): the security ball holds ~70, the extra entries are the skin.
 
 /// Gather seed i's KCAND nearest neighbours from the grid window, SORTED by ascending distance, into
 /// candId[i*KCAND..]. Closest-first order is what keeps the clip's committed-plane count bounded (a far
@@ -235,6 +236,7 @@ int main(int argc, char** argv) {
     Kokkos::View<int*, Mem> candId(Kokkos::view_alloc(std::string("candId"), Kokkos::WithoutInitializing),
                                    (size_t)N * KCAND);
     Kokkos::View<int*, Mem> ncand("ncand", N);
+    Kokkos::View<real_t*, Mem> xRef("xRef", 3 * N);  // positions at the last full rebuild (S5 Verlet ref)
 
     // k-NN gather (sorted) from the current grid, for all cells or a masked subset.
     auto gatherAll = [&] {
@@ -431,6 +433,57 @@ int main(int argc, char** argv) {
       Kokkos::fence();
     };
 
+    // S5 local repair: rebuild the `cnt` work-list cells from their EXISTING (skin) candidate list — NO grid,
+    // NO re-gather. Valid while the Verlet criterion holds (every true neighbour is already in the stored
+    // list). The sorted list + security early-out means extra skin candidates are never examined.
+    auto repairFromList = [&](int cnt, bool markChanged) {
+      auto P = pos;
+      auto cId = candId;
+      auto nc = ncand;
+      auto Vv = vol;
+      auto WL = workList;
+      auto Ch = changed;
+      Store st = store;
+      Kokkos::parallel_for(
+          "repairFromList", Kokkos::RangePolicy<Exec>(0, cnt), KOKKOS_LAMBDA(int s) {
+            const int i = WL(s);
+            int onp = st.np(i);
+            long osum = 0;
+            for (int k = 6; k < onp; ++k) osum += st.pnbr((size_t)i * CMAXP + k);
+            Cell c = buildFromCand(i, P.data(), cId.data(), nc(i), L);
+            if (c.overflow) return;
+            Vv(i) = c.volumePerVertex();
+            if (markChanged) {
+              long nsum = 0;
+              for (int k = 6; k < c.np; ++k) nsum += c.pnbr[k];
+              Ch(i) = (c.np != onp || nsum != osum) ? 1 : 0;
+            }
+            st.save(i, c);
+          });
+      Kokkos::fence();
+    };
+
+    // max per-seed displacement since xRef (min-image), in cell-sizes — the Verlet criterion.
+    auto maxDispCells = [&]() -> real_t {
+      auto P = pos;
+      auto XR = xRef;
+      const real_t Ll = L, Lh = real_t(0.5) * L;
+      real_t m2 = 0;
+      Kokkos::parallel_reduce(
+          "maxDisp", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(int i, real_t& lm) {
+            real_t dx = P(3 * i) - XR(3 * i), dy = P(3 * i + 1) - XR(3 * i + 1),
+                   dz = P(3 * i + 2) - XR(3 * i + 2);
+            dx = dx > Lh ? dx - Ll : (dx < -Lh ? dx + Ll : dx);
+            dy = dy > Lh ? dy - Ll : (dy < -Lh ? dy + Ll : dy);
+            dz = dz > Lh ? dz - Ll : (dz < -Lh ? dz + Ll : dz);
+            const real_t d2 = dx * dx + dy * dy + dz * dz;
+            if (d2 > lm) lm = d2;
+          },
+          Kokkos::Max<real_t>(m2));
+      return Kokkos::sqrt(m2) / spacing;
+    };
+
     std::printf("\n%-26s %8s %8s %10s %10s %9s\n", "strategy / disp", "ms/step", "touch%",
                 "meanRelV", "maxRelV", "mism>1e-3");
 
@@ -560,6 +613,61 @@ int main(int argc, char** argv) {
         std::printf("%-18s %5.3f %8.2f %8.1f %10.2e %10.2e %9ld  (fb=%ld)\n", "S4 convex-prop",
                     (double)disp, 1e3 * t / nSteps, 100.0 * touch / ((double)nSteps * N), meanRel,
                     maxRel, mism, fellBack);
+      }
+    }
+
+    // ================= S5: persistent skin-list + Verlet trigger + S4 inner loop =================
+    // The combined strategy. Each cell keeps the candidate (skin) list gathered at the last FULL rebuild;
+    // while max-displacement < skin/2 (Verlet) the list is guaranteed to contain every true neighbour, so
+    // local repair clips the STORED list (no grid, no re-gather). When the criterion trips: rebuild the grid,
+    // re-gather the lists (with skin), full rebuild, reset the reference. Sweep skin to find the optimum.
+    std::printf("\n--- S5 combined (persistent skin-list + Verlet + propagating repair); skin in cell-sizes ---\n");
+    std::printf("%-14s %6s %8s %8s %8s %10s %10s %9s\n", "disp", "skin", "ms/step", "rebld%", "touch%",
+                "meanRelV", "maxRelV", "mism>1e-3");
+    const int fallbackN5 = (int)(0.30 * N);
+    for (real_t disp : disps) {
+      const real_t scale = scaleFor(disp);
+      for (real_t skin : {(real_t)0.05, (real_t)0.1, (real_t)0.2, (real_t)0.4}) {
+        P_at(scale, 0);
+        rebuildAll();
+        Kokkos::deep_copy(xRef, pos);
+        double t = 0, meanRel = 0, maxRel = 0;
+        long mism = 0, touch = 0, rebuilds = 0;
+        for (int s = 1; s <= nSteps; ++s) {
+          P_at(scale, s);
+          auto a = clk::now();
+          if (maxDispCells() > real_t(0.5) * skin) {
+            rebuildAll();  // grid + re-gather skin lists + full rebuild (worklist recreation)
+            Kokkos::deep_copy(xRef, pos);
+            ++rebuilds;
+            touch += N;
+          } else {
+            reevalFlagD2();  // reeval from store + D2 flag; NO grid
+            Kokkos::deep_copy(active, flag);
+            for (int sweep = 0; sweep < 12; ++sweep) {
+              const int cnt = compact(active);
+              if (cnt == 0) break;
+              if (cnt > fallbackN5) {
+                rebuildAll();
+                Kokkos::deep_copy(xRef, pos);
+                ++rebuilds;
+                touch += N;
+                break;
+              }
+              touch += cnt;
+              Kokkos::deep_copy(changed, 0);
+              repairFromList(cnt, true);   // clip the STORED skin list — no grid, no gather
+              Kokkos::deep_copy(nextA, 0);
+              propagateWork(cnt, nextA);
+              Kokkos::deep_copy(active, nextA);
+            }
+          }
+          t += secs(a, clk::now());
+          if (s == nSteps) { buildOracle(); accuracy(meanRel, maxRel, mism); }
+        }
+        std::printf("%-10.3f %6.2f %8.2f %8.1f %8.1f %10.2e %10.2e %9ld\n", (double)disp, (double)skin,
+                    1e3 * t / nSteps, 100.0 * rebuilds / nSteps, 100.0 * touch / ((double)nSteps * N),
+                    meanRel, maxRel, mism);
       }
     }
 
