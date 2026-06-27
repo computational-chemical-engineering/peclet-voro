@@ -67,6 +67,38 @@ lists genuinely contain every true Voronoi neighbour; the residual is not list i
 below is therefore validated against the real tessellator, and the conclusions are unchanged from the
 harness-builder oracle.
 
+## Performance: the rebuild baseline (important correction)
+
+The harness's self-contained full-rebuild (used as the S1 baseline and for the strategies' rebuilds/re-gathers)
+is **much slower than the production worklist tessellator**, because its gather maintains a sorted k-NN list of
+128 via insertion-sort over a (2·sw+1)³ window, whereas `buildTessellation` clips ~70 candidates on the fly off
+a presorted block worklist with a security-radius break. Measured full-rebuild cost:
+
+| | harness (vol+topo only) | buildTessellation (+CSR+areas/dV) | buildTessellation (CSR, no geom) |
+|---|---|---|---|
+| GPU RTX 5080 FP32, N=500k | 873 ms | **80 ms** | 74 ms |
+| host OpenMP FP64, N=80k    | 902 ms | **360 ms** | 329 ms |
+
+So **switching to `buildTessellation` is a 2.5× (host) – 11× (GPU) speed-up, not a drawback** — and it produces
+the facet CSR physics needs essentially for free (the gather dominates; force-geometry adds <10%).
+
+**Consequence:** the correct full-rebuild baseline is the production number (80 ms GPU / 360 ms host), not the
+harness's. The speed-up ratios below that are stated "× vs full rebuild" used the slow harness baseline and are
+**inflated** (most on GPU). Corrected against the production rebuild:
+
+- Pure re-eval (no gather, uncontaminated): GPU 2.9 ms → **27×**; host 4 ms → **90×**.
+- **S5 at skin ≥ 0.2** (no in-window full rebuild, repair off the stored list ⇒ *no gather*, so these times are
+  uncontaminated): GPU 23.7 ms → **3.4×**; host 17.7 ms → **20×** vs the production rebuild.
+- S5 configs that *do* rebuild in-window (small skin), and S3/S4 (re-gather every step), pay the slow harness
+  gather and are under-stated; with rebuilds routed through `buildTessellation` they collapse toward the same
+  ~3–4× (GPU) / ~20× (host) floor set by the per-step re-eval + detection + repair overhead.
+
+The qualitative conclusions (convexity certificate works, propagation essential, crossover by displacement,
+FP64 for topology) are unaffected. What changes is the **magnitude on GPU**: because the production cold rebuild
+is already fast (~6 Mcell/s), the per-step detection+repair overhead is a large fraction of it, so incremental
+updating buys ~3–4× on this GPU vs ~20× on the (relatively slower) host rebuild. The win grows with rebuild cost
+(density, polydispersity, larger cells, force-geometry).
+
 ## Results
 
 Per-step `disp` is in cell-sizes. `ms/step` is the steady-state update cost; `S1` is the full-rebuild baseline
@@ -149,9 +181,11 @@ is recent (skin 0.05). The periodic full rebuild any production loop runs caps t
 
 ## Findings
 
-1. **Geometry re-eval is nearly free.** `reevalGeometry` over a fixed topology runs ~85–190× faster than a full
-   rebuild. The *entire* dynamic-update cost is therefore the **topology decision + repair**, not the geometry.
-   Any viable strategy must avoid touching most cells' topology.
+1. **Geometry re-eval is nearly free** — but the relevant baseline is the *production* rebuild (see the
+   correction above). Pure `reevalGeometry` is ~27× (GPU) / ~90× (host) cheaper than a `buildTessellation`
+   rebuild (and ~85–190× cheaper than the slow harness rebuild). The *entire* dynamic-update cost is the
+   **topology decision + repair**, not the geometry — but on a fast GPU rebuild that overhead is a big fraction,
+   so the realised whole-strategy speed-up is ~3–4× (GPU) / ~20× (host), not the raw re-eval ratio.
 
 2. **The convexity certificate works — but propagation is essential.** D2 alone (S3, independent repair) leaves
    a volume residual that grows with displacement (host FP64: 7 → 331 → 1232 wrong cells as disp goes

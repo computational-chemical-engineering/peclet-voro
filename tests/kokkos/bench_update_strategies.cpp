@@ -538,6 +538,42 @@ int main(int argc, char** argv) {
                   meanRel, maxRel, mism, topoMism, listMiss);
     }
 
+    // ---- full-rebuild cost: harness builder (vol+topology only) vs production buildTessellation ----
+    // buildTessellation does MORE: it also emits + packs the full facet CSR (neighbour/area/dV/connector) that
+    // physics needs; the harness rebuild only computes volume + saves the compact topology. withForceGeom=false
+    // skips the per-facet area/dV but still emits the neighbour CSR + the pack.
+    {
+      P_at(scaleFor(disps[0]), 0);
+      const real_t Larr[3] = {L, L, L};
+      Kokkos::View<real_t*, Mem> wdummy;
+      Kokkos::View<long*, Mem> gdummy;
+      auto timeIt = [&](auto fn) {
+        fn(); fn();  // warm
+        double t = 1e30;
+        for (int r = 0; r < 5; ++r) {
+          Kokkos::fence();
+          auto a = clk::now();
+          fn();
+          Kokkos::fence();
+          t = std::min(t, secs(a, clk::now()));
+        }
+        return 1e3 * t;
+      };
+      const double tH = timeIt([&] { rebuildAll(); });
+      const double tPg = timeIt([&] {
+        auto r = vor::device::buildTessellation<real_t, false>(pos, wdummy, N, Larr, 4, N, gdummy,
+                                                               vor::device::NoSdf{}, true);
+        (void)r;
+      });
+      const double tPn = timeIt([&] {
+        auto r = vor::device::buildTessellation<real_t, false>(pos, wdummy, N, Larr, 4, N, gdummy,
+                                                               vor::device::NoSdf{}, false);
+        (void)r;
+      });
+      std::printf("[full-rebuild cost] harness(vol+topo)=%.1f ms   buildTessellation(+CSR+areas/dV)=%.1f ms"
+                  "   buildTessellation(CSR,no geom)=%.1f ms\n", tH, tPg, tPn);
+    }
+
     std::printf("\n%-26s %8s %8s %10s %10s %9s\n", "strategy / disp", "ms/step", "touch%",
                 "meanRelV", "maxRelV", "mism>1e-3");
 
