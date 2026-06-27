@@ -55,10 +55,10 @@ std::vector<real_t> flatten1(py::array_t<V, py::array::c_style | py::array::forc
 }
 
 // Device-driven compressible-Euler / Navier-Stokes simulation.
-class DeviceSim {
+class Sim {
  public:
-  DeviceSim() { live().insert(this); }
-  ~DeviceSim() { live().erase(this); }
+  Sim() { live().insert(this); }
+  ~Sim() { live().erase(this); }
 
   // Drop all Kokkos Views (so they free BEFORE Kokkos::finalize at shutdown).
   void release() {
@@ -69,12 +69,12 @@ class DeviceSim {
     visc_.clear();
     bulk_.clear();
   }
-  static std::set<DeviceSim*>& live() {
-    static std::set<DeviceSim*> s;
+  static std::set<Sim*>& live() {
+    static std::set<Sim*> s;
     return s;
   }
   static void releaseAll() {
-    for (DeviceSim* d : live())
+    for (Sim* d : live())
       d->release();
   }
 
@@ -155,7 +155,7 @@ PYBIND11_MODULE(vorflow, m) {
   if (!Kokkos::is_initialized())
     Kokkos::initialize();
   auto shutdown = []() {
-    DeviceSim::releaseAll();  // free Views before Kokkos shuts down
+    Sim::releaseAll();  // free Views before Kokkos shuts down
     if (Kokkos::is_initialized() && !Kokkos::is_finalized())
       Kokkos::finalize();
   };
@@ -163,27 +163,27 @@ PYBIND11_MODULE(vorflow, m) {
   py::module_::import("atexit").attr("register")(py::cpp_function(shutdown));
   m.attr("execution_space") = py::str(Kokkos::DefaultExecutionSpace::name());
 
-  py::class_<DeviceSim>(m, "Simulation",
+  py::class_<Sim>(m, "Simulation",
                         "Device-native compressible-Euler / Navier-Stokes Voronoi simulation.")
       .def(py::init<>())
-      .def("set_l", &DeviceSim::set_l, py::arg("L"), "Set the periodic box (Lx,Ly,Lz).")
-      .def("set_positions", &DeviceSim::set_positions, py::arg("positions"), "Positions (N,3).")
-      .def("set_velocities", &DeviceSim::set_velocities, py::arg("velocities"), "Velocities (N,3).")
-      .def("set_masses", &DeviceSim::set_masses, py::arg("masses"), "Masses (N,).")
-      .def("set_pressure", &DeviceSim::set_pressure, py::arg("pressure"), "EOS pressure constant.")
-      .def("set_viscosities", &DeviceSim::set_viscosities, py::arg("viscosities"),
+      .def("set_l", &Sim::set_l, py::arg("L"), "Set the periodic box (Lx,Ly,Lz).")
+      .def("set_positions", &Sim::set_positions, py::arg("positions"), "Positions (N,3).")
+      .def("set_velocities", &Sim::set_velocities, py::arg("velocities"), "Velocities (N,3).")
+      .def("set_masses", &Sim::set_masses, py::arg("masses"), "Masses (N,).")
+      .def("set_pressure", &Sim::set_pressure, py::arg("pressure"), "EOS pressure constant.")
+      .def("set_viscosities", &Sim::set_viscosities, py::arg("viscosities"),
            "Per-particle shear viscosity (N,) — enables the viscous Navier-Stokes term.")
-      .def("set_bulk_viscosities", &DeviceSim::set_bulk_viscosities, py::arg("viscosities"),
+      .def("set_bulk_viscosities", &Sim::set_bulk_viscosities, py::arg("viscosities"),
            "Per-particle bulk viscosity (N,).")
-      .def("init", &DeviceSim::init, "Build the first tessellation and forces.")
-      .def("step", &DeviceSim::step, py::arg("num_steps"), py::arg("dt"),
+      .def("init", &Sim::init, "Build the first tessellation and forces.")
+      .def("step", &Sim::step, py::arg("num_steps"), py::arg("dt"),
            "Advance the velocity-Verlet dynamics by num_steps steps of size dt.")
-      .def("get_positions", &DeviceSim::get_positions, "Return positions (N,3).")
-      .def("get_velocities", &DeviceSim::get_velocities, "Return velocities (N,3).")
-      .def("get_kinetic_energy", &DeviceSim::get_kinetic_energy, "Total kinetic energy.")
-      .def("get_internal_energy", &DeviceSim::get_internal_energy, "Total internal (EOS) energy.")
-      .def("get_time", &DeviceSim::get_time, "Current simulation time.")
-      .def("get_volumes", &DeviceSim::get_volumes, "Per-particle Voronoi cell volume (N,).")
-      .def("get_num_neighbors", &DeviceSim::get_num_neighbors,
+      .def("get_positions", &Sim::get_positions, "Return positions (N,3).")
+      .def("get_velocities", &Sim::get_velocities, "Return velocities (N,3).")
+      .def("get_kinetic_energy", &Sim::get_kinetic_energy, "Total kinetic energy.")
+      .def("get_internal_energy", &Sim::get_internal_energy, "Total internal (EOS) energy.")
+      .def("get_time", &Sim::get_time, "Current simulation time.")
+      .def("get_volumes", &Sim::get_volumes, "Per-particle Voronoi cell volume (N,).")
+      .def("get_num_neighbors", &Sim::get_num_neighbors,
            "Per-particle Voronoi neighbour (facet) count (N,).");
 }
