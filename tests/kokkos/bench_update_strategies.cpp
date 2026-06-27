@@ -38,6 +38,7 @@
 
 #include "tpx/common/view.hpp"
 #include "vorflow/device/convex_cell.hpp"
+#include "vorflow/device/tessellator.hpp"  // production worklist tessellation = the ground-truth oracle
 #include "vorflow/device/topology_store.hpp"
 
 #ifdef CC_FLOAT
@@ -227,8 +228,6 @@ int main(int argc, char** argv) {
     grid.alloc(N, dim, csz, L);
     Store store;
     store.alloc(N);            // strategy's resident topology
-    Store oracleStore;
-    oracleStore.alloc(N);      // oracle topology (for false-negative accounting)
     Kokkos::View<real_t*, Mem> vol("vol", N), volOra("volOra", N);
     Kokkos::View<int*, Mem> flag("flag", N), active("active", N), nextA("nextA", N);
     Kokkos::View<int*, Mem> changed("changed", N), workList("workList", N);
@@ -271,22 +270,16 @@ int main(int argc, char** argv) {
     // scale s.t. RMS per-step displacement (over 3N comps, var=1) == disp*spacing  => scale = disp*spacing
     auto scaleFor = [&](real_t disp) { return disp * spacing; };
 
-    // Build the oracle (full rebuild from current grid) into volOra + oracleStore.
+    // GROUND-TRUTH oracle = the PRODUCTION worklist tessellator (vor::device::buildTessellation), NOT the
+    // harness builder. This is the validated path (space-filling 1e-9, voro++ parity), so comparing the
+    // strategy to it tests the result against true Voronoi, not against the harness's own simplified gather.
+    vor::TessellationView<real_t> prodView;
     auto buildOracle = [&] {
-      grid.build(pos, N);
-      gatherAll();
-      auto P = pos;
-      auto cId = candId;
-      auto nc = ncand;
-      auto Vo = volOra;
-      Store st = oracleStore;
-      Kokkos::parallel_for(
-          "oracle", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-            Cell c = buildFromCand(i, P.data(), cId.data(), nc(i), L);
-            Vo(i) = c.overflow ? real_t(0) : c.volumePerVertex();
-            if (!c.overflow) st.save(i, c);
-          });
-      Kokkos::fence();
+      const real_t Larr[3] = {L, L, L};
+      Kokkos::View<real_t*, Mem> wdummy;  // empty; Weighted=false ignores it
+      auto res = vor::device::buildTessellation<real_t, false>(pos, wdummy, N, Larr);
+      prodView = res.view;
+      Kokkos::deep_copy(volOra, prodView.cellVolume);  // production volume per cell (cell i == seed i)
     };
 
     // reeval one cell from `store` -> vol(i)
@@ -348,7 +341,8 @@ int main(int argc, char** argv) {
     //   listMiss = cells where a true oracle neighbour is ABSENT from the strategy's candidate list
     //              (i.e. "the cell did not have all potential neighbours" — list incompleteness)
     auto topoDiag = [&](long& topoMism, long& listMiss) {
-      Store st = store, ost = oracleStore;
+      Store st = store;
+      auto pv = prodView;  // ground-truth neighbours from the production tessellator CSR
       auto cs = candIdSnap;
       auto ncs = ncandSnap;
       Kokkos::View<long, Mem> tm("tm"), lm("lm");
@@ -356,16 +350,16 @@ int main(int argc, char** argv) {
       Kokkos::deep_copy(lm, 0);
       Kokkos::parallel_for(
           "topoDiag", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-            const int onp = ost.np(i), snp = st.np(i);
-            bool diff = (onp != snp), miss = false;
-            for (int k = 6; k < onp; ++k) {
-              const int j = ost.pnbr((size_t)i * CMAXP + k);
-              if (j < 0) continue;
-              bool inStore = false;
+            const int snp = st.np(i);
+            bool diff = false, miss = false;
+            for (int g = pv.facetBegin(i); g < pv.facetEnd(i); ++g) {
+              const int j = (int)pv.facetNbr(g);
+              if (j < 0) continue;  // boundary
+              bool inStore = false;  // is this TRUE neighbour in the strategy's stored topology?
               for (int m = 6; m < snp; ++m)
                 if (st.pnbr((size_t)i * CMAXP + m) == j) { inStore = true; break; }
               if (!inStore) diff = true;
-              bool inList = false;
+              bool inList = false;  // is this TRUE neighbour in the strategy's candidate list?
               const int nc = ncs(i);
               for (int t = 0; t < nc; ++t)
                 if (cs((size_t)i * KCAND + t) == j) { inList = true; break; }
@@ -525,6 +519,24 @@ int main(int argc, char** argv) {
           Kokkos::Max<real_t>(m2));
       return Kokkos::sqrt(m2) / spacing;
     };
+
+    // ---- static parity: harness builder vs the production worklist tessellator on the SAME point set ----
+    // If these disagree, the harness oracle was not ground truth and every "miss" is suspect. They should
+    // agree to ~marginal-face level (volume ~1e-6, listMiss=0).
+    {
+      P_at(scaleFor(disps[0]), 0);
+      rebuildAll();  // harness builder -> vol, store, candId
+      Kokkos::deep_copy(candIdSnap, candId);
+      Kokkos::deep_copy(ncandSnap, ncand);
+      buildOracle();  // production worklist -> volOra, prodView
+      double meanRel = 0, maxRel = 0;
+      long mism = 0, topoMism = 0, listMiss = 0;
+      accuracy(meanRel, maxRel, mism);
+      topoDiag(topoMism, listMiss);
+      std::printf("\n[static parity] harness-builder vs production worklist (same seeds): meanRelV=%.2e "
+                  "maxRelV=%.2e  vol-mism>1e-3=%ld  topoMism=%ld  listMiss=%ld\n",
+                  meanRel, maxRel, mism, topoMism, listMiss);
+    }
 
     std::printf("\n%-26s %8s %8s %10s %10s %9s\n", "strategy / disp", "ms/step", "touch%",
                 "meanRelV", "maxRelV", "mism>1e-3");

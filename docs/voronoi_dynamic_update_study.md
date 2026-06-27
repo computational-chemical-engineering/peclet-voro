@@ -51,6 +51,22 @@ itself — the conjecture is that the flip makes the *partner* cell inconsistent
 what carries the flag to the partner**: after a cell is rebuilt and its neighbour set actually changes, any
 neighbour that does not list it back is flagged for the next sweep.
 
+## Validation against the production worklist tessellator
+
+To rule out the harness's self-contained builder being a flawed shortcut, the oracle is the **production
+`vor::device::buildTessellation`** (the validated worklist gather — space-filling 1e-9, voro++ parity), and a
+static parity check compares the harness builder to it on the same point set:
+
+- **FP64: bit-identical** — `meanRelV = 1.4e-16`, `maxRelV = 1.1e-15`, `topoMism = 0`, `listMiss = 0`.
+  S1 (harness full-rebuild every step) matches the production oracle to 1e-16 at every displacement.
+- **FP32: agree to round-off** — `meanRelV = 7.9e-8`, exactly 1 marginal cell differs.
+
+Crucially, `listMiss` measured against the **true (production) neighbour sets** stays **0 (FP64) / 1 (FP32
+marginal)** through the whole dynamic sweep — it does *not* grow with displacement or skin. So the candidate
+lists genuinely contain every true Voronoi neighbour; the residual is not list incompleteness. Every number
+below is therefore validated against the real tessellator, and the conclusions are unchanged from the
+harness-builder oracle.
+
 ## Results
 
 Per-step `disp` is in cell-sizes. `ms/step` is the steady-state update cost; `S1` is the full-rebuild baseline
