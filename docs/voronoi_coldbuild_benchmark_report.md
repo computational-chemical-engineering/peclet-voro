@@ -133,6 +133,24 @@ the heavier distributed tessellator kernel, not MPI overhead.
 
 ---
 
+## Update — worklist port + ghost-skip (2026-06-27)
+
+The two distributed levers identified below were applied.
+
+1. **Worklist gather ported into `buildTessellation`.** The per-sub-position rmin worklist (proven in
+   `bench_convexcell`) replaced the adaptive shell-offset walk; the serial path now clips on the fly (no
+   candidate buffer). Serial cold build **48.8 → 66.7 kcell/s (1.37×)** at N=200k, single-thread — matching
+   the standalone worklist's 1.31–1.32× win. test_tessellator / test_voronoi_mpi / the FP32 guard all PASS.
+2. **Ghost cells are no longer built** (`nBuild` = nOwned). Profiling showed the grid is negligible (~0.2%)
+   and ~25% of the build was tessellating ghost cells that are then discarded — ghosts are only needed as
+   cutting candidates. Skipping them (still using every seed as a candidate) removes that cost; the bench
+   ghost radius was also tightened 5·sp → 3·sp (the worklist closes Poisson cells by ~2.6·sp).
+
+Result (weak, 100k owned/rank, host-OpenMP, 1 thread/rank): per-core is now **~83 kcell/s and FLAT** across
+np=1,2,4 (82.9 / 83.1 / 81.2) — the ghost-bound strong-scaling penalty is gone. np=2 N=200k: the old
+**42.8 → 83.1 kcell/s = 1.94×**. (The "local-density grid" lever was dropped: the grid is already ~0.2% of
+the build, so it buys nothing.)
+
 ## 6. Findings & summary
 
 | platform | cold-build throughput (1 M) | vs reference |
