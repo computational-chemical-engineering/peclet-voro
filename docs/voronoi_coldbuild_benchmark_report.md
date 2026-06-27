@@ -151,6 +151,14 @@ np=1,2,4 (82.9 / 83.1 / 81.2) — the ghost-bound strong-scaling penalty is gone
 **42.8 → 83.1 kcell/s = 1.94×**. (The "local-density grid" lever was dropped: the grid is already ~0.2% of
 the build, so it buys nothing.)
 
+**GPU note (worklist is host-only).** An A/B on the GPU (RTX 5080, CUDA 13.2, FP64) found the worklist gather
+REGRESSES the production force-geometry path: pure tessellation sped up (geom-off 2.5 → 3.8 Mcell/s) but the
+geom-on build dropped ~15–35%. The device cut is fused with the register/occupancy-bound geometry kernel
+(cells are register-resident — the geometry can't be split into a second pass), so the worklist's heavier
+gather steals occupancy from geometry, a pure-tess win the geom path can't use. The GPU therefore keeps the
+legacy expanding-shell gather (geom-on 2.12 Mcell/s, bit-identical to pre-port — zero regression); the
+worklist is applied on the CPU only. `nBuild` + the tighter `rcut` are backend-agnostic and apply everywhere.
+
 ## 6. Findings & summary
 
 | platform | cold-build throughput (1 M) | vs reference |
