@@ -4,7 +4,7 @@
  *
  * Every rank holds the same global seed set (for the oracle). Each rank:
  *   1. selects the seeds it owns (BlockDecomposer / ParticleMigrator.ownerOf);
- *   2. gathers ghost seeds within rcut via transport-core's ParticleHalo
+ *   2. gathers ghost seeds within rcut via transport-core's ParticleHaloTopology
  *      (VoronoiHalo), forwarding their global ids;
  *   3. tessellates the owned+ghost subset with the device tessellator in the
  *      full periodic box and keeps its owned cells.

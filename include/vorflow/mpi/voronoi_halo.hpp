@@ -13,7 +13,7 @@
  * mpi/validate_voronoi.py recipe:
  *   - tpx::decomp::BlockDecomposer<3> : ORB block ownership;
  *   - tpx::halo::ParticleMigrator<3>  : ownerOf() + periodic wrap;
- *   - tpx::halo::ParticleHalo<3>      : gather ghost seeds within rcut and
+ *   - tpx::halo::ParticleHaloTopology<3>      : gather ghost seeds within rcut and
  *                                       forward owner fields (global id, weight)
  *                                       onto the ghost copies.
  *
@@ -28,7 +28,7 @@
 
 #include "tpx/common/mpi.hpp"
 #include "tpx/decomp/block_decomposer.hpp"
-#include "tpx/halo/particle_halo.hpp"
+#include "tpx/halo/particle_halo_topology.hpp"
 #include "tpx/halo/particle_migrator.hpp"
 
 namespace vor {
@@ -126,7 +126,7 @@ class VoronoiHalo {
   int rank_ = 0;
   tpx::decomp::BlockDecomposer<3> dec_;
   tpx::halo::ParticleMigrator<3> mig_;
-  tpx::halo::ParticleHalo<3> halo_;
+  tpx::halo::ParticleHaloTopology<3> halo_;
 };
 
 }  // namespace mpi
