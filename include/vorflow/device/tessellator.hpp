@@ -105,7 +105,6 @@ struct CellBuilder {
   using MemSpace = tpx::MemSpace;
   static constexpr int MAXCAND = 1024;  // full-sphere candidate cap (see docs/performance.md)
   static constexpr int MAXF_TMP = 50;   // max facets one cell may publish
-  static constexpr int kTeamChunk = 64;  // worklist offsets gathered per team barrier round
 
   // Grid-sorted inputs (read).
   Kokkos::View<int*, MemSpace> binned;
@@ -113,10 +112,15 @@ struct CellBuilder {
   Kokkos::View<Real*, MemSpace> wSorted;
   Kokkos::View<gid_t*, MemSpace> gidSorted;
   Kokkos::View<int*, MemSpace> cellStart;
-  // Per-sub-position worklist: for each of the wlS³ sub-regions of a home cell, the
-  // (2sw+1)³ block offsets (packed (dx,dy,dz), `kWlOffBias`) sorted by nearest-corner
-  // dist² (`wlRmin`, absolute). The build walks this presorted list and breaks once
-  // wlRmin exceeds the security radius — a table lookup, no per-block geometry.
+  // Legacy shell offsets (DEVICE gather): the sphere offsets grouped by expanding shell.
+  // The device keeps these because its cut is fused with the register/occupancy-bound
+  // force-geometry kernel — the worklist's heavier gather steals occupancy from geometry
+  // (~15% slower on the production geom path), while the leaner shell gather does not.
+  Kokkos::View<int*, MemSpace> offX, offY, offZ, shellStart;
+  // Per-sub-position worklist (HOST gather): for each of the wlS³ sub-regions of a home
+  // cell, the (2sw+1)³ block offsets (packed (dx,dy,dz), `kWlOffBias`) sorted by
+  // nearest-corner dist² (`wlRmin`, absolute). The host walks this presorted list and
+  // breaks once wlRmin exceeds the security radius — a table lookup, no per-block geometry.
   Kokkos::View<int*, MemSpace> wlOff;
   Kokkos::View<Real*, MemSpace> wlRmin;
   // Published outputs (write).
@@ -129,7 +133,7 @@ struct CellBuilder {
   Kokkos::View<int*, MemSpace> facetCursor;
   // Grid scalars.
   Real icx, icy, icz, Lx, Ly, Lz, minCsz;
-  int dimx, dimy, dimz, sw, nOff, wlS;
+  int dimx, dimy, dimz, sw, swInit, nOff, wlS;
   bool useMorton, haveGid, withForceGeom;
   size_t facetCap;
   Sdf sdf;
@@ -154,19 +158,22 @@ struct CellBuilder {
     return useMorton ? morton3(gx, gy, gz) : (gx + gy * dimx + gz * dimx * dimy);
   }
 
-  /// Home grid cell (cx,cy,cz) of seed (pix,piy,piz) and the flat base offset into the
-  /// worklist tables for the wlS³ sub-region the seed lands in. The worklist for a
-  /// sub-region p occupies [base, base+nOff); base = p*nOff with p = sx + wlS·(sy + wlS·sz).
-  KOKKOS_INLINE_FUNCTION int homeCellBase(Real pix, Real piy, Real piz, int& cx, int& cy,
-                                          int& cz) const {
+  /// Home grid cell index (cx,cy,cz) of seed (pix,piy,piz).
+  KOKKOS_INLINE_FUNCTION void homeCell(Real pix, Real piy, Real piz, int& cx, int& cy,
+                                       int& cz) const {
+    cx = ((((int)Kokkos::floor(pix * icx)) % dimx) + dimx) % dimx;
+    cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
+    cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
+  }
+
+  /// Flat base offset into the worklist tables for the wlS³ sub-region the seed lands in:
+  /// the worklist occupies [base, base+nOff), base = p*nOff with p = sx + wlS·(sy + wlS·sz).
+  /// (Host/Power gather only; the device Voronoi path uses the legacy shells and skips this.)
+  KOKKOS_INLINE_FUNCTION int subBase(Real pix, Real piy, Real piz) const {
     const Real fxi = pix * icx, fyi = piy * icy, fzi = piz * icz;
-    const Real flx = Kokkos::floor(fxi), fly = Kokkos::floor(fyi), flz = Kokkos::floor(fzi);
-    cx = (((int)flx % dimx) + dimx) % dimx;
-    cy = (((int)fly % dimy) + dimy) % dimy;
-    cz = (((int)flz % dimz) + dimz) % dimz;
-    int sx = (int)((fxi - flx) * Real(wlS));
-    int sy = (int)((fyi - fly) * Real(wlS));
-    int sz = (int)((fzi - flz) * Real(wlS));
+    int sx = (int)((fxi - Kokkos::floor(fxi)) * Real(wlS));
+    int sy = (int)((fyi - Kokkos::floor(fyi)) * Real(wlS));
+    int sz = (int)((fzi - Kokkos::floor(fzi)) * Real(wlS));
     sx = sx < 0 ? 0 : (sx >= wlS ? wlS - 1 : sx);
     sy = sy < 0 ? 0 : (sy >= wlS ? wlS - 1 : sy);
     sz = sz < 0 ? 0 : (sz >= wlS ? wlS - 1 : sz);
@@ -256,19 +263,27 @@ struct CellBuilder {
   }
 
   /// Build the cell owning grid-sorted slot `pi` into scratch `c`, writing the published
-  /// outputs at the original seed index binned(pi). Worklist gather: the cut clips the
-  /// neighbour seeds on the fly (no candidate buffer) in nearest-block-first order, which
-  /// for a convex clip yields the same cell as closest-first; the per-block `wlRmin` break
-  /// and the per-candidate security cull touch only the blocks/seeds that can actually cut.
+  /// outputs at the original seed index binned(pi). The Voronoi gather differs by backend:
+  ///   * CPU: voro++-style worklist clipped ON THE FLY (no candidate buffer) — fastest where
+  ///     the gather is memory-latency bound (≈1.4× the legacy shell walk).
+  ///   * GPU: the legacy expanding-shell gather (candidate buffer + per-shell heap, cut
+  ///     closest-first). Kept because the cut is FUSED with the register/occupancy-bound
+  ///     force-geometry kernel — the worklist's heavier gather steals occupancy from
+  ///     geometry (~15% slower on the production geom path) for a pure-tess gain the geom
+  ///     path can't use. The published cell (a convex polytope) is identical either way; the
+  ///     completeness verdict (covSq vs 4·rSqMax) is the same conservative inscribed sphere
+  ///     on both. Power applies every candidate (no security early-out), on the worklist.
   template <int CAP>
   KOKKOS_INLINE_FUNCTION void buildCell(ScratchCell<Real, CAP>& c, int pi) const {
+    constexpr bool kHostBackend =
+        Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible;
     // pi is the grid-sorted slot; i = binned(pi) the original seed index that owns this
     // cell. Positions/weights/ids are read from the reordered (cache-local) arrays;
     // outputs are written back at the original index i.
     const int i = binned(pi);
     const Real pix = posSorted(3 * pi + 0), piy = posSorted(3 * pi + 1), piz = posSorted(3 * pi + 2);
     int cx, cy, cz;
-    const int base = homeCellBase(pix, piy, piz, cx, cy, cz);
+    homeCell(pix, piy, piz, cx, cy, cz);
     const Real wi = Weighted ? wSorted(pi) : Real(0);
     bool ovf = false;
     const Real Larr[3] = {Lx, Ly, Lz};
@@ -280,6 +295,7 @@ struct CellBuilder {
     if constexpr (Weighted) {
       // Power has no security early-out (a distant heavy seed can still cut), so walk the
       // whole worklist and apply every candidate; the cut is order-independent.
+      const int base = subBase(pix, piy, piz);
       for (int g = 0; g < nOff && !ovf; ++g) {
         const int gc = worklistCell(base, g, cx, cy, cz);
         for (int q = cellStart(gc); q < cellStart(gc + 1) && !ovf; ++q) {
@@ -293,17 +309,15 @@ struct CellBuilder {
         }
       }
       covSq = Real(sw) * minCsz * Real(sw) * minCsz;
-    } else {
-      // Voronoi: the worklist is sorted by nearest-corner dist², so once wlRmin exceeds
-      // the security radius (4·rSqMax) every remaining block is too far to cut — break.
-      // radiusClosed ⇒ provably complete (the exhausted=K guard: a drained worklist that
-      // never hit the break may have a neighbour outside the window, so flag it).
-      bool radiusClosed = false;
+    } else if constexpr (kHostBackend) {
+      // Voronoi, CPU: worklist clipped on the fly (no candidate buffer). The list is sorted
+      // by nearest-corner dist², so once wlRmin exceeds the security radius (4·rSqMax) every
+      // remaining block is too far to cut — break (a table lookup, no per-block geometry).
+      // The per-candidate cull skips seeds past the radius. Completeness uses the same
+      // conservative inscribed-sphere coverage as the device, so the verdict is identical.
+      const int base = subBase(pix, piy, piz);
       for (int g = 0; g < nOff && !ovf; ++g) {
-        if (wlRmin(base + g) > Real(4) * c.rsq[c.vRsqMax]) {
-          radiusClosed = true;
-          break;
-        }
+        if (wlRmin(base + g) > Real(4) * c.rsq[c.vRsqMax]) break;
         const int gc = worklistCell(base, g, cx, cy, cz);
         for (int q = cellStart(gc); q < cellStart(gc + 1) && !ovf; ++q) {
           if (q == pi) continue;
@@ -315,7 +329,58 @@ struct CellBuilder {
           c.cutCell2(pv, off, binned(q), &ovf);
         }
       }
-      covSq = radiusClosed ? Real(1e30) : Real(0);
+      covSq = Real(sw) * minCsz * Real(sw) * minCsz;
+    } else {
+      // Voronoi, GPU: legacy expanding shell search (cumulative candidate buffer, per-shell
+      // min-heap, cut closest-first with the security early-out). Kept on the device because
+      // the cut is fused with the register/occupancy-bound force-geometry kernel — the
+      // worklist gather's extra registers steal occupancy from geometry (~15% slower on the
+      // production geom path), whereas this leaner shell gather does not.
+      Real ckey[MAXCAND];
+      int cjid[MAXCAND];
+      int nc = 0;
+      auto gatherGrid = [&](int rgx, int rgy, int rgz) {
+        const int gc = gridCell(rgx, rgy, rgz);
+        for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
+          if (q == pi) continue;
+          if (haveGid && gidSorted(q) == gidSorted(pi)) continue;
+          Real pv[3];
+          relVec(q, pix, piy, piz, pv);
+          const Real off = Real(0.5) * (pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2]);
+          if (nc < MAXCAND) {
+            ckey[nc] = off;
+            cjid[nc] = q;
+            ++nc;
+          } else {
+            ovf = true;
+          }
+        }
+      };
+      int swUsed = swInit;
+      for (int swl = swInit; swl <= sw && !ovf; ++swl) {
+        const int shellBase = nc;
+        for (int o = shellStart(swl); o < shellStart(swl + 1); ++o)
+          gatherGrid(cx + offX(o), cy + offY(o), cz + offZ(o));
+        Real* k = ckey + shellBase;
+        int* idp = cjid + shellBase;
+        int hn = nc - shellBase;
+        for (int s = hn / 2 - 1; s >= 0; --s) heapSiftDown(k, idp, s, hn);
+        while (hn > 0 && !ovf) {
+          if (k[0] >= Real(2) * c.rsq[c.vRsqMax]) break;
+          const Real topKey = k[0];
+          const int topId = idp[0];
+          --hn;
+          k[0] = k[hn];
+          idp[0] = idp[hn];
+          heapSiftDown(k, idp, 0, hn);
+          Real pv[3];
+          relVec(topId, pix, piy, piz, pv);
+          c.cutCell2(pv, topKey, binned(topId), &ovf);
+        }
+        swUsed = swl;
+        if (Real(swl) * minCsz * Real(swl) * minCsz > Real(4) * c.rsq[c.vRsqMax]) break;
+      }
+      covSq = Real(swUsed) * minCsz * Real(swUsed) * minCsz;
     }
 
     finishCell(c, i, pix, piy, piz, covSq, ovf);
@@ -339,25 +404,25 @@ struct CellBuilder {
     const int i = binned(pi);
     const Real pix = posSorted(3 * pi + 0), piy = posSorted(3 * pi + 1), piz = posSorted(3 * pi + 2);
     int cx, cy, cz;
-    const int base = homeCellBase(pix, piy, piz, cx, cy, cz);
+    homeCell(pix, piy, piz, cx, cy, cz);
     const Real wi = Weighted ? wSorted(pi) : Real(0);
 
-    // sh[0]=nc, sh[1]=ovf, sh[2]=stop, sh[3]=radiusClosed. Leader seeds the cuboid + counters.
+    // sh[0]=nc, sh[1]=ovf, sh[2]=stop, sh[3]=swUsed. Leader seeds the cuboid + counters.
     Kokkos::single(Kokkos::PerTeam(team), [&]() {
       const Real Larr[3] = {Lx, Ly, Lz};
       c.initCuboid(Larr);
       sh[0] = 0;
       sh[1] = 0;
       sh[2] = 0;
-      sh[3] = 0;
+      sh[3] = swInit;
     });
     team.team_barrier();
 
-    // Parallel gather of worklist offsets [a,b): each lane scans its grid cells and
+    // Parallel gather of shell offsets [a,b): each lane scans its grid cells and
     // atomically appends candidates to the shared ckey/cjid (slot from sh[0]).
     auto gatherRange = [&](int a, int b) {
-      Kokkos::parallel_for(Kokkos::TeamThreadRange(team, a, b), [&](const int g) {
-        const int gc = worklistCell(base, g, cx, cy, cz);
+      Kokkos::parallel_for(Kokkos::TeamThreadRange(team, a, b), [&](const int o) {
+        const int gc = gridCell(cx + offX(o), cy + offY(o), cz + offZ(o));
         for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
           if (q == pi) continue;
           if (haveGid && gidSorted(q) == gidSorted(pi)) continue;
@@ -378,42 +443,45 @@ struct CellBuilder {
 
     Real covSq;
     if constexpr (Weighted) {
-      // Power: gather + apply on the leader, in worklist order (no security early-out).
+      // Power: gather + apply on the leader, in array order (bit-identical to buildCell).
       Kokkos::single(Kokkos::PerTeam(team), [&]() {
+        int nc = 0;
         bool ovf = false;
-        for (int g = 0; g < nOff && !ovf; ++g) {
-          const int gc = worklistCell(base, g, cx, cy, cz);
-          for (int q = cellStart(gc); q < cellStart(gc + 1) && !ovf; ++q) {
+        for (int o = 0; o < nOff; ++o) {
+          const int gc = gridCell(cx + offX(o), cy + offY(o), cz + offZ(o));
+          for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
             if (q == pi) continue;
             if (haveGid && gidSorted(q) == gidSorted(pi)) continue;
             Real pv[3];
             relVec(q, pix, piy, piz, pv);
             const Real rSqHalf = Real(0.5) * (pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2]);
             const Real off = rSqHalf + Real(0.5) * (wi - wSorted(q));
-            c.cutCell2(pv, off, binned(q), &ovf);
+            if (nc < maxCand) {
+              ckey[nc] = off;
+              cjid[nc] = q;
+              ++nc;
+            } else {
+              ovf = true;
+            }
           }
+        }
+        for (int s = 0; s < nc && !ovf; ++s) {
+          Real pv[3];
+          relVec(cjid[s], pix, piy, piz, pv);
+          c.cutCell2(pv, ckey[s], binned(cjid[s]), &ovf);
         }
         sh[1] = ovf ? 1 : 0;
       });
       team.team_barrier();
       covSq = Real(sw) * minCsz * Real(sw) * minCsz;
     } else {
-      // Voronoi: process the worklist in chunks. The list is rmin-sorted, so if a chunk's
-      // first (nearest) offset is already past the security radius, every remaining block
-      // is too — stop (radiusClosed). Otherwise gather the chunk in parallel, then the
-      // leader heap-sorts it and cuts closest-first with the security early-out. The
-      // candidate buffer is reset per chunk (sh[0] back to 0), so it only holds one chunk.
-      for (int a = 0; a < nOff; a += kTeamChunk) {
-        Kokkos::single(Kokkos::PerTeam(team), [&]() {
-          if (wlRmin(base + a) > Real(4) * c.rsq[c.vRsqMax]) {
-            sh[2] = 1;
-            sh[3] = 1;
-          }
-        });
-        team.team_barrier();
-        if (sh[2]) break;
-        const int b = (a + kTeamChunk < nOff) ? a + kTeamChunk : nOff;
-        gatherRange(a, b);  // appends from sh[0] == 0
+      // Voronoi: per shell, gather in parallel then the leader heap-sorts that shell and
+      // cuts closest-first with the security early-out. The candidate buffer is reset per
+      // shell (sh[0] back to 0); each shell's candidates are heap-processed then discarded
+      // (any left by the early-out are abandoned, as the serial buffer abandons them), so the
+      // buffer only needs to hold one shell. All lanes break together on the leader's flags.
+      for (int swl = swInit; swl <= sw; ++swl) {
+        gatherRange(shellStart(swl), shellStart(swl + 1));  // appends from sh[0] == 0
         team.team_barrier();
         Kokkos::single(Kokkos::PerTeam(team), [&]() {
           int nc = sh[0];
@@ -435,13 +503,16 @@ struct CellBuilder {
             relVec(topId, pix, piy, piz, pv);
             c.cutCell2(pv, topKey, binned(topId), &ovf);
           }
-          sh[0] = 0;  // reset candidate buffer for the next chunk
+          sh[0] = 0;  // reset candidate buffer for the next shell
           sh[1] = ovf ? 1 : 0;
+          sh[3] = swl;  // swUsed
+          if (Real(swl) * minCsz * Real(swl) * minCsz > Real(4) * c.rsq[c.vRsqMax]) sh[2] = 1;
         });
         team.team_barrier();
-        if (sh[1]) break;  // overflow -> all lanes stop
+        if (sh[1] || sh[2]) break;  // overflow or security met -> all lanes stop
       }
-      covSq = sh[3] ? Real(1e30) : Real(0);  // radiusClosed ⇒ provably complete
+      const int swUsed = sh[3];
+      covSq = Real(swUsed) * minCsz * Real(swUsed) * minCsz;
     }
 
     // Force-geometry, parallelised across the team: zero the per-facet accumulators
@@ -665,37 +736,68 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
                                       facetCap * 3);
   Kokkos::View<int*, MemSpace> facetCursor("facetCursor", 1);  // zero-initialised
 
-  // --- per-sub-position worklist (computed once) ---
-  // voro++-style gather: split each home grid cell into wlS³ sub-regions; for the
-  // sub-region a seed lands in, store the (2sw+1)³ block offsets sorted by nearest-corner
-  // distance² (`wlRmin`, absolute, from that sub-region to the block). The per-cell build
-  // walks this presorted list and BREAKS once wlRmin exceeds the security radius (4·rSqMax)
-  // — a table lookup, no runtime per-block geometry — so it touches only the blocks that
-  // can cut, a tighter bound than a whole-cell shell sphere. wlS = host 3 / device 4
-  // (the device tolerates the tighter bound / bigger table better); ported from
-  // bench_convexcell's build_worklist. The full cube of offsets is kept (the rmin break
-  // makes the far tail free); the build's radiusClosed flag is the exact completeness guard.
-  const int wlS = kHostBackend ? 3 : 4;
-  const int side = 2 * sw + 1;
-  const int nOff = side * side * side;
+  // --- gather offsets: one set, two orderings ---
+  // The (dx,dy,dz) grid offsets inside the coverage sphere (nearest-corner dist² ≤ sw²),
+  // generated grouped by expanding shell. Two presentations of this SAME set drive the two
+  // gathers (chosen by backend in CellBuilder::buildCell):
+  //   * offX/offY/offZ + shellStart — shell-grouped order for the legacy device gather.
+  //   * wlOff/wlRmin — per-sub-position, sorted by nearest-corner dist², for the host
+  //     voro++-style worklist (each home cell split into wlS³ sub-regions; the build walks
+  //     the presorted list and breaks once wlRmin exceeds 4·rSqMax — a table lookup).
+  const int swInit = sw < 2 ? sw : 2;
+  std::vector<int> offHx, offHy, offHz;
+  std::vector<int> shellStartH(sw + 2, 0);
+  {
+    const int sw2 = sw * sw;
+    for (int swl = swInit; swl <= sw; ++swl) {
+      shellStartH[swl] = (int)offHx.size();
+      const int lo2 = (swl == swInit) ? -1 : (swl - 1) * (swl - 1);
+      const int hi2 = swl * swl;
+      for (int dz = -(swl + 1); dz <= swl + 1; ++dz) {
+        const int ez = dz < -1 ? -dz - 1 : (dz > 1 ? dz - 1 : 0);
+        for (int dy = -(swl + 1); dy <= swl + 1; ++dy) {
+          const int ey = dy < -1 ? -dy - 1 : (dy > 1 ? dy - 1 : 0);
+          for (int dx = -(swl + 1); dx <= swl + 1; ++dx) {
+            const int ex = dx < -1 ? -dx - 1 : (dx > 1 ? dx - 1 : 0);
+            const int d2 = ex * ex + ey * ey + ez * ez;
+            if (d2 <= lo2 || d2 > hi2 || d2 > sw2) continue;
+            offHx.push_back(dx);
+            offHy.push_back(dy);
+            offHz.push_back(dz);
+          }
+        }
+      }
+    }
+    shellStartH[sw + 1] = (int)offHx.size();
+  }
+  const int nOff = (int)offHx.size();
+  const int wlS = 3;  // host worklist sub-grid per axis (device uses the shell path)
   const int nSub = wlS * wlS * wlS;
+  Kokkos::View<int*, MemSpace> offX(view_alloc(std::string("offX"), WithoutInitializing), nOff);
+  Kokkos::View<int*, MemSpace> offY(view_alloc(std::string("offY"), WithoutInitializing), nOff);
+  Kokkos::View<int*, MemSpace> offZ(view_alloc(std::string("offZ"), WithoutInitializing), nOff);
+  Kokkos::View<int*, MemSpace> shellStart(view_alloc(std::string("shellStart"), WithoutInitializing),
+                                          sw + 2);
   Kokkos::View<int*, MemSpace> wlOff(view_alloc(std::string("wlOff"), WithoutInitializing),
                                      (size_t)nSub * nOff);
   Kokkos::View<Real*, MemSpace> wlRmin(view_alloc(std::string("wlRmin"), WithoutInitializing),
                                        (size_t)nSub * nOff);
   {
-    std::vector<int> oX(nOff), oY(nOff), oZ(nOff);
-    {
-      int t = 0;
-      for (int dz = -sw; dz <= sw; ++dz)
-        for (int dy = -sw; dy <= sw; ++dy)
-          for (int dx = -sw; dx <= sw; ++dx) {
-            oX[t] = dx;
-            oY[t] = dy;
-            oZ[t] = dz;
-            ++t;
-          }
+    auto hX = Kokkos::create_mirror_view(offX);
+    auto hY = Kokkos::create_mirror_view(offY);
+    auto hZ = Kokkos::create_mirror_view(offZ);
+    auto hS = Kokkos::create_mirror_view(shellStart);
+    for (int k = 0; k < nOff; ++k) {
+      hX(k) = offHx[k];
+      hY(k) = offHy[k];
+      hZ(k) = offHz[k];
     }
+    for (int s = 0; s < sw + 2; ++s) hS(s) = shellStartH[s];
+    Kokkos::deep_copy(offX, hX);
+    Kokkos::deep_copy(offY, hY);
+    Kokkos::deep_copy(offZ, hZ);
+    Kokkos::deep_copy(shellStart, hS);
+
     auto hOff = Kokkos::create_mirror_view(wlOff);
     auto hRmin = Kokkos::create_mirror_view(wlRmin);
     const Real cszx = csz[0], cszy = csz[1], cszz = csz[2];
@@ -714,9 +816,9 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           const Real ay0 = (Real)sy / wlS * cszy, ay1 = (Real)(sy + 1) / wlS * cszy;
           const Real az0 = (Real)sz / wlS * cszz, az1 = (Real)(sz + 1) / wlS * cszz;
           for (int k = 0; k < nOff; ++k) {
-            const Real bx0 = oX[k] * cszx, bx1 = (oX[k] + 1) * cszx;
-            const Real by0 = oY[k] * cszy, by1 = (oY[k] + 1) * cszy;
-            const Real bz0 = oZ[k] * cszz, bz1 = (oZ[k] + 1) * cszz;
+            const Real bx0 = offHx[k] * cszx, bx1 = (offHx[k] + 1) * cszx;
+            const Real by0 = offHy[k] * cszy, by1 = (offHy[k] + 1) * cszy;
+            const Real bz0 = offHz[k] * cszz, bz1 = (offHz[k] + 1) * cszz;
             rmn[k] = axisGap(ax0, ax1, bx0, bx1) + axisGap(ay0, ay1, by0, by1) +
                      axisGap(az0, az1, bz0, bz1);
             idx[k] = k;
@@ -725,8 +827,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
           for (int g = 0; g < nOff; ++g) {
             const int k = idx[g];
             const size_t slot = (size_t)p * nOff + g;
-            hOff(slot) = (oX[k] + kWlOffBias) | ((oY[k] + kWlOffBias) << 8) |
-                         ((oZ[k] + kWlOffBias) << 16);
+            hOff(slot) = (offHx[k] + kWlOffBias) | ((offHy[k] + kWlOffBias) << 8) |
+                         ((offHz[k] + kWlOffBias) << 16);
             hRmin(slot) = rmn[k];
           }
         }
@@ -748,9 +850,9 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   //     once the gather and geometry are parallelised across the team; this is the
   //     in-progress redesign and stays behind the env flag until it beats the default.
   CellBuilder<Real, Weighted, Sdf> op{
-      binned, posSorted, wSorted, gidSorted, cellStart, wlOff, wlRmin,
-      status, cellVol, facetCount, cellFacetBase, oNbr, oArea, oDV, oConn, facetCursor,
-      icx, icy, icz, Lx, Ly, Lz, minCsz, dimx, dimy, dimz, sw, nOff, wlS,
+      binned, posSorted, wSorted, gidSorted, cellStart, offX, offY, offZ, shellStart,
+      wlOff, wlRmin, status, cellVol, facetCount, cellFacetBase, oNbr, oArea, oDV, oConn,
+      facetCursor, icx, icy, icz, Lx, Ly, Lz, minCsz, dimx, dimy, dimz, sw, swInit, nOff, wlS,
       useMorton, haveGid, withForceGeom, facetCap, sdf};
   using Builder = CellBuilder<Real, Weighted, Sdf>;
   // Team-per-cell shared footprint: a shrunk cell + candidate arrays so more teams fit
