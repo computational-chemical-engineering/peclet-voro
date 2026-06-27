@@ -483,13 +483,20 @@ struct CellBuilder {
  *                 mean spacing). Defaults to N. In the distributed case the seeds
  *                 are a clustered owned+ghost subset, so pass the GLOBAL count to
  *                 keep the grid at the true local density.
+ * @param nBuild   build a cell only for seeds whose ORIGINAL index is < nBuild;
+ *                 the rest are still used as cut candidates (neighbours) but their own
+ *                 cell is skipped. Defaults to N (build all). In the distributed case
+ *                 the ghosts are appended after the nOwned owned seeds, so passing
+ *                 nOwned tessellates only the kept (owned) cells — the ghost cells are
+ *                 needed only as cutting seeds, so building them is wasted work (~the
+ *                 ghost fraction of the cold build).
  */
 template <class Real, bool Weighted, class Sdf = NoSdf>
 TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
                                           const Kokkos::View<Real*, tpx::MemSpace>& weight, int N,
                                           const Real L[3], int sw = 4, int densityCount = -1,
                                           Kokkos::View<long*, tpx::MemSpace> gid = {}, Sdf sdf = {},
-                                          bool withForceGeom = true) {
+                                          bool withForceGeom = true, int nBuild = -1) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
   constexpr int MAXF = ScratchCell<Real>::CAP;
@@ -498,6 +505,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   // cut). Mirrors the legacy processNbrs `itr->id == m_id` guard. In the
   // single-domain case (gid empty) only the same local index is skipped.
   const bool haveGid = gid.extent(0) == static_cast<size_t>(N);
+  // Seeds with original index >= nBuildEff are candidate-only (their cell is skipped).
+  const int nBuildEff = (nBuild >= 0 && nBuild < N) ? nBuild : N;
 
   // --- grid dimensions: ~kSeedsPerCell seeds per cell ---
   // A coarser grid than 1 seed/cell makes the neighbour gather touch fewer, denser
@@ -754,9 +763,12 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   // runtime for re-tuning on other GPUs (only the cell CAP is compile-time).
   constexpr int kCapShared = 52;
   constexpr int kMaxCandShared = 256;
+  const int nBuildL = nBuildEff;
+  auto binnedV0 = binned;
   auto rangeBuild = [&]() {
     Kokkos::parallel_for(
         "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int pi) {
+          if (binnedV0(pi) >= nBuildL) return;  // candidate-only seed: skip its cell
           ScratchCell<Real> c;
           op.buildCell(c, pi);
         });
@@ -793,6 +805,7 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
       policy.set_scratch_size(0, Kokkos::PerTeam((int)shBytes));
       Kokkos::parallel_for(
           "tess.build", policy, KOKKOS_LAMBDA(const Member& team) {
+            if (binnedV0(team.league_rank()) >= nBuildL) return;  // candidate-only: skip
             auto sc = team.team_scratch(0);
             auto* cp = (SharedCell*)sc.get_shmem_aligned(sizeof(SharedCell), alignof(SharedCell));
             Real* ckey =

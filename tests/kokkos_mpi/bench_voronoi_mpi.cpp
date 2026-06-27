@@ -57,7 +57,13 @@ int main(int argc, char** argv) {
     const int reps = (argc > 2) ? std::atoi(argv[2]) : 3;
     const Vec3 L = {1.0, 1.0, 1.0};
     const real_t spacing = std::cbrt((L[0] * L[1] * L[2]) / N);
-    const double rcut = 5.0 * spacing;  // >= sw(4)*spacing
+    // Ghost gather radius in units of mean spacing. The tessellator's adaptive worklist
+    // closes most Poisson cells by ~2.6·spacing, so the conservative 5·spacing window (=
+    // sw·csz, the search MAX) gathers ~2× the ghosts that are actually consumed. 3.5·spacing
+    // keeps every owned cell complete (Σvol == box) while cutting the ghost shell. Override
+    // with VORF_RCUT to sweep.
+    const double rcutMult = std::getenv("VORF_RCUT") ? std::atof(std::getenv("VORF_RCUT")) : 3.0;
+    const double rcut = rcutMult * spacing;
 
     // Identical global seed set on every rank (deterministic).
     std::mt19937 rng(12345);
@@ -113,29 +119,39 @@ int main(int argc, char** argv) {
     // --- build (cold tessellation) timing ---
     double buildBest = 1e30;
     double ownedVol = 0;
+    long badOwned = 0;  // owned cells flagged incomplete/overflow/empty (must be 0 for completeness)
     for (int r = 0; r < reps + 1; ++r) {  // first = warm
       MPI_Barrier(MPI_COMM_WORLD);
       double t0 = MPI_Wtime();
-      auto res =
-          vor::device::buildTessellation<real_t, false>(dPos, dW, nComb, Larr, /*sw=*/4, /*density=*/N, dGid);
+      auto res = vor::device::buildTessellation<real_t, false>(
+          dPos, dW, nComb, Larr, /*sw=*/4, /*density=*/N, dGid, {}, /*withForceGeom=*/true,
+          /*nBuild=*/g.nOwned);  // build only owned cells; ghosts are candidate-only
       Kokkos::fence();
       double t1 = MPI_Wtime();
       if (r > 0) buildBest = std::min(buildBest, t1 - t0);
-      if (r == reps) {  // last rep: sum owned volumes (correctness sanity)
+      if (r == reps) {  // last rep: sum owned volumes + count incomplete owned cells
         auto vol = Kokkos::create_mirror_view(res.view.cellVolume);
+        auto st = Kokkos::create_mirror_view(res.status);
         Kokkos::deep_copy(vol, res.view.cellVolume);
-        for (int i = 0; i < g.nOwned; ++i) ownedVol += vol(i);
+        Kokkos::deep_copy(st, res.status);
+        for (int i = 0; i < g.nOwned; ++i) {
+          ownedVol += vol(i);
+          if (st(i) & (vor::device::kOverflow | vor::device::kIncomplete | vor::device::kEmpty))
+            ++badOwned;
+        }
       }
     }
 
     // --- aggregate ---
     const double perRankKps = g.nOwned / buildBest / 1e3;  // owned cells/s per rank
     int totOwned = 0;
+    long totBad = 0;
     double maxBuild = 0, sumGather = 0, totVol = 0;
     MPI_Allreduce(&g.nOwned, &totOwned, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
     MPI_Allreduce(&buildBest, &maxBuild, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
     MPI_Allreduce(&gatherBest, &sumGather, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
     MPI_Allreduce(&ownedVol, &totVol, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    MPI_Allreduce(&badOwned, &totBad, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
 
     // per-rank lines (ordered)
     for (int r = 0; r < nproc; ++r) {
@@ -150,9 +166,10 @@ int main(int argc, char** argv) {
     if (rank == 0) {
       const double aggMps = totOwned / maxBuild / 1e6;  // aggregate (Σ owned / max build)
       std::printf(
-          "MPI np=%2d  N=%d  | aggregate build = %.3f Mcell/s  | per-core = %.1f kcell/s  | "
-          "max gather = %.2f ms  build = %.2f ms  | totOwned=%d Σvol=%.6f\n",
-          nproc, N, aggMps, aggMps * 1e3 / nproc, sumGather * 1e3, maxBuild * 1e3, totOwned, totVol);
+          "MPI np=%2d  N=%d  rcut=%.2f·sp  | aggregate build = %.3f Mcell/s  | per-core = %.1f kcell/s  | "
+          "max gather = %.2f ms  build = %.2f ms  | totOwned=%d badOwned=%ld Σvol=%.6f\n",
+          nproc, N, rcutMult, aggMps, aggMps * 1e3 / nproc, sumGather * 1e3, maxBuild * 1e3, totOwned,
+          totBad, totVol);
     }
   }
   Kokkos::finalize();

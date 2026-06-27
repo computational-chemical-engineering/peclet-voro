@@ -124,8 +124,9 @@ int main(int argc, char** argv) {
       Kokkos::deep_copy(dGid, hg);
     }
     const real_t Larr[3] = {L[0], L[1], L[2]};
-    auto res = vor::device::buildTessellation<real_t, false>(dPos, dW, nComb, Larr, /*sw=*/4,
-                                                             /*densityCount=*/N, dGid);
+    auto res = vor::device::buildTessellation<real_t, false>(
+        dPos, dW, nComb, Larr, /*sw=*/4, /*densityCount=*/N, dGid, {}, /*withForceGeom=*/true,
+        /*nBuild=*/g.nOwned);  // build only owned cells (ghosts are candidate-only)
     auto vol = Kokkos::create_mirror_view(res.view.cellVolume);
     auto off = Kokkos::create_mirror_view(res.view.cellFacetOffset);
     auto cnt = Kokkos::create_mirror_view(res.view.cellFacetCount);
