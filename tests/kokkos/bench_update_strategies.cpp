@@ -237,6 +237,11 @@ int main(int argc, char** argv) {
                                    (size_t)N * KCAND);
     Kokkos::View<int*, Mem> ncand("ncand", N);
     Kokkos::View<real_t*, Mem> xRef("xRef", 3 * N);  // positions at the last full rebuild (S5 Verlet ref)
+    // snapshot of the strategy's candidate list, taken before the oracle re-gathers (clobbers candId), so the
+    // diagnostic can test whether the list the strategy ACTUALLY USED still contained every true neighbour.
+    Kokkos::View<int*, Mem> candIdSnap(
+        Kokkos::view_alloc(std::string("candIdSnap"), Kokkos::WithoutInitializing), (size_t)N * KCAND);
+    Kokkos::View<int*, Mem> ncandSnap("ncandSnap", N);
 
     // k-NN gather (sorted) from the current grid, for all cells or a masked subset.
     auto gatherAll = [&] {
@@ -334,6 +339,43 @@ int main(int argc, char** argv) {
       meanRel = s / N;
       maxRel = mx;
       mism = m;
+    };
+
+    // Diagnose WHY a cell is wrong: compare the strategy's stored topology to the oracle's, and check whether
+    // the strategy's candidate-list SNAPSHOT still contained every true (oracle) neighbour. Call after the
+    // oracle build (oracleStore valid) with candIdSnap/ncandSnap holding the pre-oracle strategy list.
+    //   topoMism = cells whose stored neighbour set differs from the oracle's (the real error)
+    //   listMiss = cells where a true oracle neighbour is ABSENT from the strategy's candidate list
+    //              (i.e. "the cell did not have all potential neighbours" — list incompleteness)
+    auto topoDiag = [&](long& topoMism, long& listMiss) {
+      Store st = store, ost = oracleStore;
+      auto cs = candIdSnap;
+      auto ncs = ncandSnap;
+      Kokkos::View<long, Mem> tm("tm"), lm("lm");
+      Kokkos::deep_copy(tm, 0);
+      Kokkos::deep_copy(lm, 0);
+      Kokkos::parallel_for(
+          "topoDiag", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+            const int onp = ost.np(i), snp = st.np(i);
+            bool diff = (onp != snp), miss = false;
+            for (int k = 6; k < onp; ++k) {
+              const int j = ost.pnbr((size_t)i * CMAXP + k);
+              if (j < 0) continue;
+              bool inStore = false;
+              for (int m = 6; m < snp; ++m)
+                if (st.pnbr((size_t)i * CMAXP + m) == j) { inStore = true; break; }
+              if (!inStore) diff = true;
+              bool inList = false;
+              const int nc = ncs(i);
+              for (int t = 0; t < nc; ++t)
+                if (cs((size_t)i * KCAND + t) == j) { inList = true; break; }
+              if (!inList) miss = true;
+            }
+            if (diff) Kokkos::atomic_inc(&tm());
+            if (miss) Kokkos::atomic_inc(&lm());
+          });
+      Kokkos::deep_copy(topoMism, tm);
+      Kokkos::deep_copy(listMiss, lm);
     };
 
     // D2 convexity flag (reeval + self-consistency) -> flag(i), vol(i). tol scaled to cell size and to the
@@ -622,8 +664,10 @@ int main(int argc, char** argv) {
     // local repair clips the STORED list (no grid, no re-gather). When the criterion trips: rebuild the grid,
     // re-gather the lists (with skin), full rebuild, reset the reference. Sweep skin to find the optimum.
     std::printf("\n--- S5 combined (persistent skin-list + Verlet + propagating repair); skin in cell-sizes ---\n");
-    std::printf("%-14s %6s %8s %8s %8s %10s %10s %9s\n", "disp", "skin", "ms/step", "rebld%", "touch%",
-                "meanRelV", "maxRelV", "mism>1e-3");
+    std::printf("  (topoMism = cells whose topology differs from oracle; listMiss = cells missing a true "
+                "neighbour from their candidate list)\n");
+    std::printf("%-10s %6s %8s %7s %7s %10s %10s %9s %9s %9s\n", "disp", "skin", "ms/step", "rebld%",
+                "touch%", "meanRelV", "maxRelV", "mism>1e3", "topoMism", "listMiss");
     const int fallbackN5 = (int)(0.30 * N);
     for (real_t disp : disps) {
       const real_t scale = scaleFor(disp);
@@ -663,11 +707,18 @@ int main(int argc, char** argv) {
             }
           }
           t += secs(a, clk::now());
-          if (s == nSteps) { buildOracle(); accuracy(meanRel, maxRel, mism); }
+          if (s == nSteps) {
+            Kokkos::deep_copy(candIdSnap, candId);  // snapshot the list the strategy used, pre-oracle
+            Kokkos::deep_copy(ncandSnap, ncand);
+            buildOracle();
+            accuracy(meanRel, maxRel, mism);
+          }
         }
-        std::printf("%-10.3f %6.2f %8.2f %8.1f %8.1f %10.2e %10.2e %9ld\n", (double)disp, (double)skin,
-                    1e3 * t / nSteps, 100.0 * rebuilds / nSteps, 100.0 * touch / ((double)nSteps * N),
-                    meanRel, maxRel, mism);
+        long topoMism = 0, listMiss = 0;
+        topoDiag(topoMism, listMiss);
+        std::printf("%-10.4f %6.2f %8.2f %7.1f %7.1f %10.2e %10.2e %9ld %9ld %9ld\n", (double)disp,
+                    (double)skin, 1e3 * t / nSteps, 100.0 * rebuilds / nSteps,
+                    100.0 * touch / ((double)nSteps * N), meanRel, maxRel, mism, topoMism, listMiss);
       }
     }
 

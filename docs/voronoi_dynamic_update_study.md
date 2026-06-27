@@ -87,34 +87,49 @@ strategies, so the **ratios** are the result, not the absolute ms).
 | S4 convex-prop  | **104 ms (3.1×), 14% touch, 32 mism** | fallback | fallback |
 | S2 disp-Verlet  | (=reeval) | 30 ms (11×), 8% rebuild | **110 ms (2.9×), 33%, exact** |
 
-### S5 combined (persistent skin-list + Verlet), skin sweep at disp = 0.001
+### S5 combined (persistent skin-list + Verlet), displacement × skin
 
-Skin in cell-sizes. `rebuild%` = fraction of steps that did a full rebuild (Verlet trip or >30% fallback).
-The persistent list makes S5 markedly faster than S4's re-gather-every-step (GPU FP32 disp 0.001: S5 **23×** vs
-S4 6×).
+Skin in cell-sizes; `rebuild%` = fraction of steps doing a full rebuild (Verlet trip or >30% fallback);
+`wrong` = cells with >0.1% volume error vs the per-step rebuild oracle. The persistent list makes S5 markedly
+faster than S4's re-gather-every-step (disp 0.001: S5 **23×** vs S4 6×).
 
-GPU RTX 5080, FP32, N = 500k (baseline S1 = 544 ms/step):
+GPU RTX 5080, FP32, N = 500k, baseline S1 = 544 ms/step (ms/step, speedup, wrong/500k):
 
-| skin | ms/step | speedup | rebuild% | touch% | mism/500k |
-|------|---------|---------|----------|--------|-----------|
-| 0.05 | 181 | 3.0× | 18.8 | 27.2 | 0 (exact) |
-| 0.10 | 76  | **7.2×** | 6.2 | 17.4 | 31 |
-| 0.20 | 23.7 | **23×** | 0 | 12.8 | 165 |
-| 0.40 | 23.7 | 23× | 0 | 12.8 | 165 |
+| disp \ skin | 0.05 | 0.10 | 0.20 | 0.40 |
+|-------------|------|------|------|------|
+| 0.0005 | 73 (7.5×), 11 | **20 (27×), 41** | 20 (27×), 41 | 20 (27×), 41 |
+| 0.0010 | 183 (3.0×), 0 | 76 (7.2×), 31 | **24 (23×), 165** | 24 (23×), 165 |
+| 0.0020 | 294 (1.8×), 1 | 188 (2.9×), 1 | 82 (6.6×), 97 | 30 (18×), 333 |
+| 0.0030 | 457 (1.2×), 0 | 245 (2.2×), 0 | 140 (3.9×), 35 | 87 (6.2×), 70 |
+| 0.0050 | ~885 (0.6×) all-fallback | — | — | — |
 
-Host OpenMP (16 thr), FP64, N = 80k (baseline S1 ≈ 408 ms/step):
+Host FP64, N = 80k (timings noise-prone on the shared box; the accuracy/diagnostic columns are deterministic):
+at disp 0.001, `wrong` = 0 / 7 / 34 / 34 for skin 0.05 / 0.10 / 0.20 / 0.40 — the same shape as FP32 but ~5×
+fewer volume-significant misses (FP32 165 → FP64 34 at skin 0.20).
 
-| skin | ms/step | speedup | rebuild% | touch% | mism/80k |
-|------|---------|---------|----------|--------|----------|
-| 0.05 | 121 | 3.4× | 18.8 | 29.5 | 0 (exact) |
-| 0.10 | 50  | **8.2×** | 6.2 | 19.2 | 7 |
-| 0.20 | 17.7 | **23×** | 0 | 14.3 | 34 |
-| 0.40 | 17.6 | 23× | 0 | 14.3 | 34 |
+Reading the table: **as displacement grows you need a smaller skin** (more frequent rebuilds) to hold accuracy,
+and the speedup achievable at a given accuracy falls; by disp ≈ 0.005 every step hits the fallback and local
+repair stops paying (hand off to S2). **skin 0.20 ≡ skin 0.40** wherever rebuild% = 0 (identical ms/touch/wrong):
+once the skin is large enough that no Verlet trip occurs in the window, extra skin is free — the sorted list +
+security-radius early-out never examines it.
 
-At disp ≥ 0.005 S5 rebuilds every step (the >30% fallback fires) and reverts to the full-rebuild baseline — the
-same regime boundary as S4. Note **skin 0.20 ≡ skin 0.40** (identical ms/touch/mism on both devices): once the
-skin is large enough that no Verlet trip occurs in the window, more skin is free (sorted list + security-radius
-early-out) — exactly as predicted.
+### Why are cells "missed"? (the `listMiss` / `topoMism` diagnostic)
+
+The harness reports two extra columns to localise the error source:
+- **`listMiss`** = cells where a true (oracle) neighbour is absent from the strategy's candidate list. **It is 0
+  in every row, FP32 and FP64.** So the missed cells are *not* a neighbour-completeness problem — with K=128
+  nearest vs ~15 actual neighbours, the Verlet list stays complete under the small drift. (A cell "not having all
+  potential neighbours" would show here; it never does.)
+- **`topoMism`** = cells whose stored topology differs from a fresh rebuild. This is *large* (~10–35%, and about
+  the same fraction in FP32 and FP64) while the volume error is tiny — because most of those differences are
+  **marginal, near-zero-area faces** that drift in/out under motion. D2 deliberately ignores them (its tolerance
+  is a perpendicular distance), and they do not move the volume. So `topoMism` measures bit-level topology drift,
+  not error; **volume error is the meaningful accuracy measure** (mean rel-V stays ~1e-6 throughout).
+
+So the handful of volume-significant misses are **detection misses** — D2+propagation didn't rebuild a cell whose
+topology change *did* matter — not missing neighbours. They are rare (≤0.03%), bounded, grow with skin (more
+drift between rebuilds), shrink with precision (FP64 ~5× fewer than FP32), and are wiped whenever a full rebuild
+is recent (skin 0.05). The periodic full rebuild any production loop runs caps this residual.
 
 ## Findings
 
@@ -138,11 +153,13 @@ early-out) — exactly as predicted.
      re-eval between, ~3–11× and exact-to-bounded error.
    - **disp ≳ 0.02** and up: just full-rebuild each step (S1).
 
-4. **Precision matters for the topology decision.** In FP32, marginal (tiny-area) faces flicker in/out across
-   rebuilds, which (a) trips the D2 self-test unless its tolerance is loosened (`d2tol` is precision-aware:
-   `1e-4·cellSize` FP64, `2e-3·cellSize` FP32) and (b) inflates the propagated set and leaves a larger residual
-   (GPU FP32 S4: 92 wrong vs FP64 32). This is the Sugihara topology-oriented-robustness regime: do the
-   *topology* decision in FP64 (or add area-thresholding to the certificate), even if geometry runs FP32.
+4. **Precision matters for the borderline flips, not for the marginal-face drift.** The D2 self-test needs a
+   precision-aware tolerance (`d2tol` = `1e-4·cellSize` FP64, `2e-3·cellSize` FP32) or FP32 vertex noise
+   over-flags. With that, the flagged/touched fraction is similar across precision, and so is `topoMism`
+   (marginal-face drift is ~precision-independent, ~24%). What FP32 *does* worsen is the **volume-significant
+   residual** on near-degenerate (borderline) flips — at disp 0.001 skin 0.20, FP64 leaves 34 wrong cells vs
+   FP32's 165 (~5×). This is the Sugihara topology-oriented-robustness regime: do the *topology* decision in
+   FP64 (or add area-thresholding to the certificate), even if the geometry/volume runs FP32.
 
 ## Recommended heuristic
 
