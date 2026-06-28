@@ -93,15 +93,6 @@ add_vorflow_kokkos_test(test_convexcell_geometry)
 # Vertex-local sort-free geometry (design note): acceptance criteria in FP64.
 add_vorflow_kokkos_test(test_pervertex_geometry)
 
-# Phase 0 of the GPU-Voronoi-for-physics program: characterise the moving-point workload
-# (topology-stable fraction vs per-step displacement). Uses the half-edge device tessellator.
-add_executable(phase0_incremental phase0_incremental.cpp)
-target_link_libraries(phase0_incremental PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
-target_compile_definitions(phase0_incremental PRIVATE MORTON_ENABLE_KOKKOS=1)
-target_include_directories(phase0_incremental PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
-target_compile_features(phase0_incremental PRIVATE cxx_std_20)
-
 # Option-A prototype: compact ConvexCell (dual-triangle) one-cell-per-thread benchmark.
 add_executable(bench_convexcell bench_convexcell.cpp)
 target_link_libraries(bench_convexcell PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
@@ -164,16 +155,22 @@ target_include_directories(bench_incremental PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
 target_compile_features(bench_incremental PRIVATE cxx_std_20)
 
-# Part II: exhaustive comparison of moving-cell UPDATE STRATEGIES vs displacement (FP64 + FP32 variants).
+# Part II: consolidated moving-point UPDATE driver — Phase-0 validators (invariants + oracle diff) +
+# benchmark foundation (strategy sweep, distributions, phase-0 characterization) AND the Phase-1
+# repair-primitive gates (subset gather == oracle, certificate partner extraction, Verlet skin).
+# Replaces bench_update_strategies.cpp + phase0_incremental.cpp. FP64 + FP32 variants.
 foreach(suffix "" "_f32")
-  add_executable(bench_update_strategies${suffix} bench_update_strategies.cpp)
-  target_link_libraries(bench_update_strategies${suffix} PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
-  target_compile_definitions(bench_update_strategies${suffix} PRIVATE MORTON_ENABLE_KOKKOS=1)
-  target_include_directories(bench_update_strategies${suffix} PRIVATE
+  add_executable(bench_dynamic_update${suffix} bench_dynamic_update.cpp)
+  target_link_libraries(bench_dynamic_update${suffix} PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+  target_compile_definitions(bench_dynamic_update${suffix} PRIVATE MORTON_ENABLE_KOKKOS=1)
+  target_include_directories(bench_dynamic_update${suffix} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
-  target_compile_features(bench_update_strategies${suffix} PRIVATE cxx_std_20)
+  target_compile_features(bench_dynamic_update${suffix} PRIVATE cxx_std_20)
 endforeach()
-target_compile_definitions(bench_update_strategies_f32 PRIVATE CC_FLOAT=1)
+target_compile_definitions(bench_dynamic_update_f32 PRIVATE CC_FLOAT=1)
+# Phase-1 gates double as a self-test (GATE 0 corruption catch, GATE 1 subset/partner/skin).
+add_test(NAME bench_dynamic_update_gates COMMAND bench_dynamic_update 20000 4 --gates)
+set_tests_properties(bench_dynamic_update_gates PROPERTIES ENVIRONMENT "OMP_PROC_BIND=false")
 
 # F4: ArborX BVH (kNN) neighbour query vs the grid gather. ArborX is in the same prefix as Kokkos.
 find_package(ArborX CONFIG QUIET)

@@ -29,7 +29,7 @@ plus the box/SDF boundary. Two quantities, **very different update rates**:
   re-evaluation — no clip, no neighbour search.
 
 **The figure of merit is the per-step update, not the cold rebuild.** Phase-0 measurement
-(`phase0_incremental.cpp`, RTX 5080, N-independent): at realistic per-step displacement (0.002–0.01 of the mean
+(`bench_dynamic_update --phase0`, RTX 5080, N-independent): at realistic per-step displacement (0.002–0.01 of the mean
 spacing) **73–94 % of cells keep their exact neighbour set**, and cells that *do* change flip ≈ **one** face.
 So the steady state is dominated by (a) a cheap "needs-reclip?" test, (b) a geometry+derivative re-evaluation
 over fixed topology, and (c) a *local* repair of the few changed cells.
@@ -383,8 +383,10 @@ that must not regress: **derivatives + momentum conservation + robustness**, and
 - **Legacy:** `include/vorflow/nbrlist.hpp` (cell list), `include/vorflow/voronoi.hpp` (legacy CPU half-edge
   CellMaker oracle), `docs/update_and_repair_redesign.md` (wave-BFS + ConnectivityArena).
 - **Benches/tests (`tests/kokkos/`):** `bench_convexcell[_f32]` (cold build + voro++), `bench_incremental`
-  (re-eval vs rebuild), `bench_update_strategies[_f32]` (the strategy study S0–S6), `phase0_incremental`
-  (topology-stability vs displacement), `test_pervertex_geometry` / `test_device_geometry` / `test_tessellator`.
+  (re-eval vs rebuild), `bench_dynamic_update[_f32]` (the consolidated moving-point driver: `--gates`
+  Phase-0/1 validators+primitives, `--sweep` strategy study S0–S4 over distributions × disp, `--phase0`
+  topology-stability vs displacement; replaced `bench_update_strategies` + `phase0_incremental`),
+  `test_pervertex_geometry` / `test_device_geometry` / `test_tessellator`.
   `extern_bench/` builds geogram + Liu-2020 for head-to-head. Build: `cmake -S . -B build/<cfg> -DVORFLOW_KOKKOS=ON
   -DCMAKE_PREFIX_PATH=…/extern/install/<backend>`; CUDA on PATH for the GPU build.
 - **Key knobs (env):** `CC_DENS`, `CC_GATHER`, `CC_WLS`, `VORFLOW_TEAM`, `VORFLOW_PROFILE`, `VORFLOW_NOFORCEGEOM`.

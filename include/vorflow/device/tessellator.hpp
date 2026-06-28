@@ -40,6 +40,7 @@
 #include "tpx/common/view.hpp"
 #include "vorflow/device/convex_cell.hpp"
 #include "vorflow/device/sdf.hpp"
+#include "vorflow/device/tess_grid.hpp"  // counting-sort grid + worklist (kWlOffBias, morton3, TessGrid)
 #include "vorflow/tessellation_view.hpp"
 
 namespace vor {
@@ -47,24 +48,6 @@ namespace device {
 
 /// Per-cell status bits written by the build pass.
 enum StatusBit { kOk = 0, kOverflow = 1, kEmpty = 2, kIncomplete = 4 };
-
-/// Bias added to each signed block offset (dx,dy,dz) so it packs into one int (8 bits
-/// per axis) in the worklist table — a single load + bit-unpack in the hot gather loop
-/// instead of three scattered loads. Block offsets stay within [-sw,sw], sw << 128.
-constexpr int kWlOffBias = 128;
-
-/// 3D Morton (Z-order) code of a grid cell, via the suite's morton library
-/// (`Morton<3,21>`, software bit path on device — no BMI2; bit-identical to the
-/// former hand-rolled magic-bits spread). Used to order the cell grid so a cell's
-/// spatial neighbourhood is near it in memory — the gather then reads
-/// near-contiguous cellStart/posSorted instead of chasing z-neighbours dimx*dimy
-/// entries apart. Good to 21 bits/axis (grid indices are far below that).
-KOKKOS_INLINE_FUNCTION int morton3(int x, int y, int z) {
-  return static_cast<int>(morton::Morton<3, 21>::encode(static_cast<std::uint32_t>(x),
-                                                        static_cast<std::uint32_t>(y),
-                                                        static_cast<std::uint32_t>(z))
-                              .code());
-}
 
 template <class Real>
 struct TessellatorResult {
@@ -349,122 +332,19 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   // Seeds with original index >= nBuildEff are candidate-only (their cell is skipped).
   const int nBuildEff = (nBuild >= 0 && nBuild < N) ? nBuild : N;
 
-  // --- grid dimensions: ~kSeedsPerCell seeds per cell ---
-  // A coarser grid than 1 seed/cell makes the neighbour gather touch fewer, denser
-  // grid cells whose seeds are contiguous in the grid-sorted arrays — far fewer
-  // scattered cellStart/posSorted lookups (the gather is memory-latency bound, the
-  // dominant serial cost; voro++ packs ~8 particles/block for the same reason). ~2/cell
-  // measured the best correct trade-off (coarser over-gathers per cell). The expanding
-  // search + the `sw` cap keep cells complete regardless. This is a HOST (CPU) win
-  // only: on a GPU the gather is bandwidth/latency-hidden, not cache-bound, so a coarser
-  // grid just adds per-thread candidate work — GPUs keep 1/cell. Power also keeps 1/cell
-  // (its no-early-out full-sphere gather would blow past MAXCAND at 2/cell).
-  constexpr bool kHostBackend =
-      Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible;
-  constexpr Real kSeedsPerCell = (!Weighted && kHostBackend) ? Real(2) : Real(1);
-  const int dens = densityCount > 0 ? densityCount : N;
-  const Real vol = L[0] * L[1] * L[2];
-  const Real spacing = std::cbrt(kSeedsPerCell * vol / Real(dens > 0 ? dens : 1));
-  int dim[3];
-  Real csz[3], invcsz[3];
-  for (int k = 0; k < 3; ++k) {
-    dim[k] = (int)Kokkos::floor(L[k] / spacing);
-    if (dim[k] < 1)
-      dim[k] = 1;
-    csz[k] = L[k] / dim[k];
-    invcsz[k] = Real(1) / csz[k];
-  }
-  const int dimx = dim[0], dimy = dim[1], dimz = dim[2];
-  const int ncell = dimx * dimy * dimz;
-
-  // Morton (Z-order) cell indexing clusters each cell's spatial neighbourhood in memory.
-  // GPU ONLY: the spatial order improves the gather's memory coalescing (measured +2.5%
-  // pure / +18% with force geometry on an RTX 5080), and the per-cell encode is hidden by
-  // spare ALU. On the CPU it is a net loss — the encode in the hot gather loop is not
-  // hidden and the ~2-seeds/cell density already supplies the cache locality — so the CPU
-  // keeps the compact linear index. Morton needs a power-of-two-padded range (2^mbits per
-  // axis); also fall back to linear if that padding would inflate the cell array too much
-  // (very rectangular boxes / huge grids).
-  int mbits = 1;
-  {
-    int md = dimx > dimy ? dimx : dimy;
-    md = md > dimz ? md : dimz;
-    while ((1 << mbits) < md) ++mbits;
-  }
-  const size_t mortonNcell = (size_t)1 << (3 * mbits);
-  const bool useMorton = !kHostBackend && mortonNcell <= (size_t)8 * (size_t)ncell;
-  const int ncellEff = useMorton ? (int)mortonNcell : ncell;
-
-  const Real Lx = L[0], Ly = L[1], Lz = L[2];
-  const Real icx = invcsz[0], icy = invcsz[1], icz = invcsz[2];
-  Real minCsz = csz[0] < csz[1] ? csz[0] : csz[1];
-  minCsz = minCsz < csz[2] ? minCsz : csz[2];
-
   const bool prof = std::getenv("VORFLOW_PROFILE") != nullptr;
   Kokkos::Timer ptimer;
   double tGrid = 0, tBuild = 0, tCsr = 0;
 
-  // --- counting sort: bin seeds into grid cells (Morton- or linear-indexed) ---
-  Kokkos::View<int*, MemSpace> cellOf("cellOf", N);
-  Kokkos::View<int*, MemSpace> counts("counts", ncellEff + 1);
-  Kokkos::deep_copy(counts, 0);
-  Kokkos::parallel_for(
-      "tess.bin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
-        int gx = (int)Kokkos::floor(posFlat(3 * i + 0) * icx);
-        int gy = (int)Kokkos::floor(posFlat(3 * i + 1) * icy);
-        int gz = (int)Kokkos::floor(posFlat(3 * i + 2) * icz);
-        gx = ((gx % dimx) + dimx) % dimx;
-        gy = ((gy % dimy) + dimy) % dimy;
-        gz = ((gz % dimz) + dimz) % dimz;
-        int c = useMorton ? morton3(gx, gy, gz) : (gx + gy * dimx + gz * dimx * dimy);
-        cellOf(i) = c;
-        Kokkos::atomic_inc(&counts(c));
-      });
-
-  Kokkos::View<int*, MemSpace> cellStart("cellStart", ncellEff + 1);
-  Kokkos::parallel_scan(
-      "tess.scan", Kokkos::RangePolicy<Exec>(0, ncellEff + 1),
-      KOKKOS_LAMBDA(const int c, int& acc, const bool fin) {
-        int v = (c < ncellEff) ? counts(c) : 0;
-        if (fin)
-          cellStart(c) = acc;
-        acc += v;
-      });
-
-  Kokkos::View<int*, MemSpace> cursor("cursor", ncellEff);
-  Kokkos::parallel_for(
-      "tess.cursor", Kokkos::RangePolicy<Exec>(0, ncellEff),
-      KOKKOS_LAMBDA(const int c) { cursor(c) = cellStart(c); });
-  Kokkos::View<int*, MemSpace> binned("binned", N);
-  Kokkos::parallel_for(
-      "tess.scatter", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
-        int slot = Kokkos::atomic_fetch_add(&cursor(cellOf(i)), 1);
-        binned(slot) = i;
-      });
-
-  // Reorder seed data into grid (binned) order. The build then gathers neighbours
-  // from contiguous memory instead of chasing scattered original indices through
-  // posFlat — the large-N cache-locality win (voro++ processes points block-by-block
-  // for the same reason). Outputs are still written back to the original cell index
-  // (= binned(p)), so the cell i == particle i contract is unchanged.
-  Kokkos::View<Real*, MemSpace> posSorted(
-      Kokkos::view_alloc(std::string("posSorted"), Kokkos::WithoutInitializing), (size_t)N * 3);
-  Kokkos::View<gid_t*, MemSpace> gidSorted(
-      Kokkos::view_alloc(std::string("gidSorted"), Kokkos::WithoutInitializing), haveGid ? N : 0);
-  Kokkos::View<Real*, MemSpace> wSorted(
-      Kokkos::view_alloc(std::string("wSorted"), Kokkos::WithoutInitializing), Weighted ? N : 0);
-  {
-    const bool haveGidL = haveGid;
-    Kokkos::parallel_for(
-        "tess.reorder", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int p) {
-          int o = binned(p);
-          posSorted(3 * p + 0) = posFlat(3 * o + 0);
-          posSorted(3 * p + 1) = posFlat(3 * o + 1);
-          posSorted(3 * p + 2) = posFlat(3 * o + 2);
-          if (haveGidL) gidSorted(p) = gid(o);
-          if (Weighted) wSorted(p) = weight(o);
-        });
-  }
+  // Counting-sort grid + presorted worklist. Factored into buildTessGrid so the SAME grid backs
+  // both this cold build and the moving-point subset gather (device/subset_gather.hpp); pure code
+  // motion, so the cold-build output is byte-for-byte unchanged.
+  auto grid = buildTessGrid<Real, Weighted>(posFlat, weight, N, L, sw, densityCount, gid);
+  const Real Lx = grid.Lx, Ly = grid.Ly, Lz = grid.Lz;
+  const Real icx = grid.icx, icy = grid.icy, icz = grid.icz, minCsz = grid.minCsz;
+  const int dimx = grid.dimx, dimy = grid.dimy, dimz = grid.dimz;
+  const int nOff = grid.nOff, wlS = grid.wlS;
+  const bool useMorton = grid.useMorton;
 
   if (prof) {
     Kokkos::fence();
@@ -505,95 +385,19 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   Kokkos::View<Real*, MemSpace> oConn(view_alloc(std::string("oConn"), WithoutInitializing),
                                       facetCap * 3);
   Kokkos::View<int*, MemSpace> facetCursor("facetCursor", 1);  // zero-initialised
-
-  // --- per-sub-position worklist (computed once) ---
-  // The (dx,dy,dz) grid offsets inside the coverage sphere (nearest-corner dist² ≤ sw²). For
-  // the wlS³ sub-region a seed lands in, they are sorted by nearest-corner dist² (wlRmin,
-  // absolute) and packed (kWlOffBias). The Voronoi build walks this presorted list and breaks
-  // once wlRmin exceeds the security radius (4·rSqMax) — a table lookup, no per-block geometry.
-  // The cut runs on the compact ConvexCell, whose geometry pass is cheap, so the worklist is
-  // used on both backends (no GPU occupancy penalty).
-  std::vector<int> offHx, offHy, offHz;
-  {
-    const int swInit = sw < 2 ? sw : 2;
-    const int sw2 = sw * sw;
-    for (int swl = swInit; swl <= sw; ++swl) {
-      const int lo2 = (swl == swInit) ? -1 : (swl - 1) * (swl - 1);
-      const int hi2 = swl * swl;
-      for (int dz = -(swl + 1); dz <= swl + 1; ++dz) {
-        const int ez = dz < -1 ? -dz - 1 : (dz > 1 ? dz - 1 : 0);
-        for (int dy = -(swl + 1); dy <= swl + 1; ++dy) {
-          const int ey = dy < -1 ? -dy - 1 : (dy > 1 ? dy - 1 : 0);
-          for (int dx = -(swl + 1); dx <= swl + 1; ++dx) {
-            const int ex = dx < -1 ? -dx - 1 : (dx > 1 ? dx - 1 : 0);
-            const int d2 = ex * ex + ey * ey + ez * ez;
-            if (d2 <= lo2 || d2 > hi2 || d2 > sw2) continue;
-            offHx.push_back(dx);
-            offHy.push_back(dy);
-            offHz.push_back(dz);
-          }
-        }
-      }
-    }
-  }
-  const int nOff = (int)offHx.size();
-  const int wlS = 3;  // worklist sub-grid per axis
-  const int nSub = wlS * wlS * wlS;
-  Kokkos::View<int*, MemSpace> wlOff(view_alloc(std::string("wlOff"), WithoutInitializing),
-                                     (size_t)nSub * nOff);
-  Kokkos::View<Real*, MemSpace> wlRmin(view_alloc(std::string("wlRmin"), WithoutInitializing),
-                                       (size_t)nSub * nOff);
-  {
-    auto hOff = Kokkos::create_mirror_view(wlOff);
-    auto hRmin = Kokkos::create_mirror_view(wlRmin);
-    const Real cszx = csz[0], cszy = csz[1], cszz = csz[2];
-    // axis-aligned gap² between query sub-interval [a0,a1] and target block [b0,b1].
-    auto axisGap = [](Real a0, Real a1, Real b0, Real b1) {
-      Real g = std::max(Real(0), std::max(b0 - a1, a0 - b1));
-      return g * g;
-    };
-    std::vector<int> idx(nOff);
-    std::vector<Real> rmn(nOff);
-    for (int sz = 0; sz < wlS; ++sz)
-      for (int sy = 0; sy < wlS; ++sy)
-        for (int sx = 0; sx < wlS; ++sx) {
-          const int p = sx + wlS * (sy + wlS * sz);
-          const Real ax0 = (Real)sx / wlS * cszx, ax1 = (Real)(sx + 1) / wlS * cszx;
-          const Real ay0 = (Real)sy / wlS * cszy, ay1 = (Real)(sy + 1) / wlS * cszy;
-          const Real az0 = (Real)sz / wlS * cszz, az1 = (Real)(sz + 1) / wlS * cszz;
-          for (int k = 0; k < nOff; ++k) {
-            const Real bx0 = offHx[k] * cszx, bx1 = (offHx[k] + 1) * cszx;
-            const Real by0 = offHy[k] * cszy, by1 = (offHy[k] + 1) * cszy;
-            const Real bz0 = offHz[k] * cszz, bz1 = (offHz[k] + 1) * cszz;
-            rmn[k] = axisGap(ax0, ax1, bx0, bx1) + axisGap(ay0, ay1, by0, by1) +
-                     axisGap(az0, az1, bz0, bz1);
-            idx[k] = k;
-          }
-          std::sort(idx.begin(), idx.end(), [&](int a, int b) { return rmn[a] < rmn[b]; });
-          for (int g = 0; g < nOff; ++g) {
-            const int k = idx[g];
-            const size_t slot = (size_t)p * nOff + g;
-            hOff(slot) = (offHx[k] + kWlOffBias) | ((offHy[k] + kWlOffBias) << 8) |
-                         ((offHz[k] + kWlOffBias) << 16);
-            hRmin(slot) = rmn[k];
-          }
-        }
-    Kokkos::deep_copy(wlOff, hOff);
-    Kokkos::deep_copy(wlRmin, hRmin);
-  }
-  if (prof) std::fprintf(stderr, "[worklist] sw=%d nOff=%d nSub=%d\n", sw, nOff, nSub);
+  if (prof) std::fprintf(stderr, "[worklist] sw=%d nOff=%d\n", sw, nOff);
 
   // Build each cell: one thread per cell (RangePolicy), the compact ConvexCell in the
   // per-thread frame, the cut applied on the fly. Same path on every backend (ConvexCell is
   // lean enough that the worklist + geometry run well on the GPU without a team variant).
   CellBuilder<Real, Weighted, Sdf> op{
-      binned, posSorted, wSorted, gidSorted, cellStart, wlOff, wlRmin,
+      grid.binned, grid.posSorted, grid.wSorted, grid.gidSorted, grid.cellStart, grid.wlOff, grid.wlRmin,
       status, cellVol, facetCount, cellFacetBase, oNbr, oArea, oDV, oConn, facetCursor,
       icx, icy, icz, Lx, Ly, Lz, minCsz, dimx, dimy, dimz, sw, nOff, wlS,
       useMorton, haveGid, withForceGeom, facetCap, sdf,
       outNp, outNt, outPnbr, outTri, outCand, outCandCnt, emitTopo, emitCand, candCap};
   const int nBuildL = nBuildEff;
-  auto binnedV0 = binned;
+  auto binnedV0 = grid.binned;
   Kokkos::parallel_for(
       "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int pi) {
         if (binnedV0(pi) >= nBuildL) return;  // candidate-only seed: skip its cell

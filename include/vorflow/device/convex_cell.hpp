@@ -231,6 +231,50 @@ struct ConvexCell {
     return true;
   }
 
+  /// Part-II repair signal (Phase 1): the convexity/in-sphere certificate above, additionally emitting
+  /// the **violated-plane partner seed(s)** — the `pnbr` id of each stored plane k a re-evaluated vertex
+  /// pokes past. By the §1 analysis (dynamic_update_decision_and_plan.md) these partners are exactly the
+  /// *gaining* cells of a 2→3 flip (cells i,m that never flag themselves), so they are the cheap, local,
+  /// connectivity-free signal that reaches them — necessary for a complete one-pass repair. Partners are
+  /// deduplicated into outPartners[0..nPartners) (capped at maxPartners; the rare overflow just truncates —
+  /// the periodic oracle is the backstop). A violated plane with pnbr<0 (box/SDF wall) has no partner cell:
+  /// it still marks the cell inconsistent (so the cell itself is rebuilt) but emits no partner — the SDF
+  /// boundary-contact trigger (Risk 1d) is the deferred complement that catches *gained* wall faces.
+  /// Returns true iff the cell is self-consistent (no violation past `tol`).
+  ///
+  /// WEIGHTED/POWER (deferred, see [[vorflow-power-cells-deferred]]): for a Laguerre cell the in-sphere
+  /// test `n_k·v ≤ nn_k` must become the empty-**orthosphere** (power-distance) predicate so completeness
+  /// carries to the regular triangulation. The ConvexCell device path is Voronoi-only today
+  /// (no radical-plane geometry), so only the unweighted form is implemented; the orthosphere form plugs
+  /// in here when the Power policy lands.
+  KOKKOS_INLINE_FUNCTION bool isSelfConsistent(Real tol, int* outPartners, int maxPartners,
+                                               int& nPartners) const {
+    nPartners = 0;
+    bool consistent = true;
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      for (int k = 0; k < np; ++k) {
+        if (t0[t] == k || t1[t] == k || t2[t] == k) continue;  // a plane that defines this vertex
+        const Real s = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
+        if (s > Real(0)) {  // v outside plane k; perpendicular distance vs tol
+          const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
+          if (s * invlen > tol) {
+            consistent = false;
+            const int part = pnbr[k];
+            if (part >= 0) {  // box/SDF planes (pnbr<0) have no partner cell
+              bool seen = false;
+              for (int q = 0; q < nPartners; ++q)
+                if (outPartners[q] == part) { seen = true; break; }
+              if (!seen && nPartners < maxPartners) outPartners[nPartners++] = part;
+            }
+          }
+        }
+      }
+    }
+    return consistent;
+  }
+
   /// Largest squared dual-vertex radius over live triangles (drives the security radius).
   KOKKOS_INLINE_FUNCTION Real maxVertexRsq() const {
     Real m = 0;
