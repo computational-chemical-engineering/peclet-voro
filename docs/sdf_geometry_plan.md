@@ -1,12 +1,14 @@
 # Plan — SDF-defined geometry for the tessellation (device + suite SDF)
 
-> **Status (2026-06-21): implemented on `suite-integration`** (Phases 1–2 + distributed).
-> Device providers `SdfSphere`/`SdfBox`/`SdfHollowCylinder` (analytic) and `SdfGrid`
-> (VTI / sampled) + `clipCellAgainstSdf` reproduce the legacy `SignedDistanceBoundary`
-> build to **machine precision** (`tests/kokkos/test_sdf_boundary_device`), and the
-> distributed clip matches serial owned-cells at np=1,2,4 (`tests/kokkos_mpi/test_sdf_mpi`).
-> Python exposure (Phase 3) is **deferred** — the device tessellator has no Python
-> surface yet, so it is a separate device-binding effort.
+> **Status:** the device clip now lives in `include/vorflow/device/sdf.hpp` and operates on the
+> **ConvexCell** tessellator (`clipCellAgainstSdf(ConvexCell&, …)`). Device providers
+> `SdfSphere`/`SdfBox`/`SdfHollowCylinder` (analytic) and `SdfGrid` (VTI / sampled) port the
+> legacy `SignedDistanceBoundary` build. Originally validated to machine precision against the
+> half-edge oracle, but the **ConvexCell SDF re-port is still pending re-validation**: the boundary
+> device test (`tests/kokkos/test_sdf_boundary_device`) is **currently disabled** while it is
+> re-implemented on ConvexCell (see `voronoi_cpu_migration_discussion.md`). The distributed clip
+> test (`tests/kokkos_mpi/test_sdf_mpi`) follows the same path. Python exposure (Phase 3) is on the
+> device `vorflow` module surface but does not yet expose SDF geometry — a separate binding effort.
 
 **Goal.** Embed a solid geometry defined by a signed-distance field into the Voronoi/power
 tessellation: a cell that would extend into the solid is clipped by a plane located at the
@@ -52,7 +54,7 @@ behind one tiny policy (mirrors the `Weighting` policy):
 
 ### B. Device boundary clip (faithful port of `clipCellAgainstBoundary`)
 Add an optional SDF-clip stage to the per-cell build in `device/tessellator.hpp`, after the Voronoi
-cuts, operating on the same `ScratchCell`:
+cuts, operating on the same `ConvexCell`:
 1. φ_center = sdf(seed); if φ_center ≤ 0 → mark cell empty (seed in solid), done.
 2. if φ_center > cell circumradius + tol → no boundary interaction, done.
 3. iterate ≤ `maxCuts`: scan the cell's vertices (in world coords = seed + vertexPos) for the most
@@ -73,7 +75,7 @@ a few planar facets approximating the curve.
 - **Distributed:** the SDF is read-only geometry replicated on every rank (analytic params, or the
   same VTI grid), so the Phase-6 path needs **no extra exchange** — each rank clips its owned+ghost
   cells against the same field. Seeds inside the solid simply have no owned cell.
-- **Python:** expose geometry on the `vordyn` surface (set an analytic shape, or load a VTI) so the
+- **Python:** expose geometry on the `vorflow` surface (set an analytic shape, or load a VTI) so the
   SDF-bounded tessellation is drivable from Python, matching the suite's geometry-from-Python pattern.
 
 ## Phases
@@ -82,13 +84,13 @@ a few planar facets approximating the curve.
    central-diff grad over a `tpx::Field3D`) + analytic `KOKKOS_INLINE_FUNCTION` shapes; host helper
    to sample/upload a `tpx::geom` shape or a VTI. *Accept:* device eval/grad match `tpx::geom` on a
    point cloud to interpolation tolerance.
-2. **Device boundary clip.** Port `clipCellAgainstBoundary` into a `ScratchCell` method + a clip
+2. **Device boundary clip.** Port `clipCellAgainstBoundary` into a `ConvexCell` method + a clip
    stage in `buildTessellation` (sentinel `kBoundary`, empty-on-φ≤0). *Accept:* device SDF-clipped
    cells match the legacy `SignedDistanceBoundary` build (volume + boundary-facet count) on the
    `test_sdf_boundary` geometries (slab / sphere-hole / cylinder); space-filling over the fluid
    region; seed-in-solid ⇒ empty.
 3. **Distributed + Python.** Replicated SDF across ranks (owned cells == serial with the boundary);
-   `vordyn` geometry setters (analytic + VTI). *Accept:* distributed SDF tessellation == single-rank;
+   `vorflow` geometry setters (analytic + VTI). *Accept:* distributed SDF tessellation == single-rank;
    a Python smoke test bounds a packing by a sphere/box.
 
 ## Critical files

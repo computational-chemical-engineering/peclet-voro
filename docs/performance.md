@@ -1,5 +1,13 @@
 # Tessellation performance — analysis, current state, and the road past voro++
 
+> **Status (current):** the compact **ConvexCell** tessellator with the sort-free **per-vertex
+> geometry** is now the **production** engine on both backends; the retired half-edge
+> "ScratchCell" path survives only as a CPU oracle for cross-checking. Wherever the sections
+> below label the half-edge / ScratchCell path "production" (e.g. the throughput tables and the
+> "keep the per-thread path as production" recommendation), read that as the **historical** state
+> at the time of writing — it is exactly the comparison that led to adopting ConvexCell. The
+> historical numbers are kept intact as the record of that decision.
+
 This note is the durable record of the device tessellator's performance work: how the
 serial/parallel costs were measured, what was optimised, where we stand against
 **voro++**, and whether the remaining serial gap can be closed by memory layout while

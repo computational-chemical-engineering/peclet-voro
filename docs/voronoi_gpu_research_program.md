@@ -46,6 +46,10 @@ as the clip.** It is also the natural place a GPU wins, because both are data-pa
 
 ## 2. Requirements vs. what we have (status)
 
+> **Outcome (since this was written): ConvexCell was adopted as the production engine** (the gaps below —
+> derivatives, per-vertex geometry, the GPU worklist gather — were closed); the half-edge engine is now a
+> CPU oracle only. The table below is kept as the origin record of that decision.
+
 | requirement | half-edge (production) | ConvexCell prototype | gap to close |
 |---|---|---|---|
 | GPU rebuild, pure tess | 2.49 M cells/s (occupancy-bound, 32 KB frame) | **5.4 M/s FP32** (3.5 KB frame, 2.18× half-edge) | neighbour query (BVH+directional) → SOTA ~7–12 M/s |

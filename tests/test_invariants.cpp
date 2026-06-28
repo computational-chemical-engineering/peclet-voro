@@ -9,7 +9,7 @@
  * the legacy CPU build here (Phase 0), establishing the oracle that the ported
  * device kernels are later validated against.
  *
- * Checks (cf. docs/update_to_kokkos_plan.md §5):
+ * Checks (tessellation invariants):
  *   1. Space-filling     : Sum of cell volumes == box volume (periodic).
  *   2. Positive volumes  : every cell volume > 0.
  *   3. Min facets        : every cell has >= 4 facets (tetrahedron minimum).

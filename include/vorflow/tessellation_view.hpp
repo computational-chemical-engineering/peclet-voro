@@ -15,7 +15,7 @@
  * The legacy CellComplex -> HostTessellation converter (buildHostTessellation)
  * lives in tessellation_build.hpp so view consumers need not include the engine.
  *
- * Storage matches docs/update_to_kokkos_plan.md §3: an exclusive-scan facet
+ * Storage is an exclusive-scan facet
  * offset (mean cell ~15 facets, so CSR, not the 128 cap) plus packed facet
  * arrays. Per-facet 3-vectors are stored flat (3*f + c) so the layout is
  * unambiguous across backends; coalescing layout is retuned in Phase 7.

@@ -16,7 +16,13 @@ method change with a backend change.
 
 ## Where we are
 
-**Already on Kokkos (CPU+GPU), validated:** device cutter (`ScratchCell`), full
+> **Status update:** Phases **1–4 and 7 are DONE** (the device cutter is now the compact
+> **`ConvexCell`**, not the retired half-edge `ScratchCell`; viscous + interface physics, the
+> device integrator/`Simulation` facade, and the **nanobind** `vorflow` module all exist). The
+> genuine remaining work is **Phase 5** (the incompressible elliptic solver — deferred, new-method)
+> and **Phase 8** (literal deletion of the legacy oracle).
+
+**Already on Kokkos (CPU+GPU), validated:** device cutter (`ConvexCell`), full
 tessellator (grid + CSR + SDF clip), `TessellationView`, reciprocal-facet
 transpose, distributed halo (transport-core), and **one** reference physics — the
 atomic-free Euler pressure force.
@@ -32,23 +38,23 @@ atomic-free Euler pressure force.
 
 ## Phases
 
-**1. Publish the remaining geometry.** Extend `TessellationView` (and the
+**1. Publish the remaining geometry. (DONE)** Extend `TessellationView` (and the
 tessellator write-out) with the **vertex CSR** (`cellVertexOffset`, `vertexPos`)
 and a per-cell **velocity-gradient** operator (the least-squares facet stencil),
 behind the existing "publish only what a consumer requests" field set. *Accept:*
 vertex CSR + gradient reproduce legacy `CellGeometry` to machine precision.
 
-**2. Viscous force (NavierStokes).** Port `NavierStokes::computeForces` as a
+**2. Viscous force (NavierStokes). (DONE)** Port `NavierStokes::computeForces` as a
 `TessellationView`-only kernel: per-cell velocity gradient → viscous stress →
 atomic-free gather (same form as the Euler reference). *Accept:* matches legacy to
 ~1e-12; zero atomics; view-only dependency.
 
-**3. Interface tension (IntfDyn).** Port the multiphase surface-tension force; it
+**3. Interface tension (IntfDyn). (DONE)** Port the multiphase surface-tension force; it
 couples a facet to the *other* facets of the same cell and lands on neighbours, so
 use the **`NbrsToFacets` transpose** already built (plan §2.5). *Accept:* matches
 legacy; zero atomics.
 
-**4. Integrator + energies + driver.** A device `Stepper` (velocity-Verlet, the
+**4. Integrator + energies + driver. (DONE)** A device `Stepper` (velocity-Verlet, the
 force/integrate split for the distributed scheme-C path) and the energies as device
 reductions; a thin device `Simulation` facade orchestrating
 tessellate → publish → force → integrate. *Accept:* a full trajectory matches the
@@ -68,13 +74,13 @@ ported when that solver is written.
 
 **6. CPU incremental update on the new cutter.** A host (OpenMP/Threads) worklist
 driver that, each step, uses `SkinRefresh` to find cells whose neighbourhood moved
-past the skin and **re-runs the `ScratchCell` cutter** on just those cells (it
+past the skin and **re-runs the `ConvexCell` cutter** on just those cells (it
 already rebuilds a single cell), with the local-repair / full-rebuild fallback —
 replacing legacy `CellComplex::update`. GPU keeps full rebuild. *Accept:*
 incremental == full rebuild over a moving trajectory; measured incremental-vs-full
 (CPU) and CPU-incremental-vs-GPU-full crossovers.
 
-**7. `vorflow` Python module + rename.** A pybind11 module **`vorflow`** over the
+**7. `vorflow` Python module + rename. (DONE)** A **nanobind** module **`vorflow`** over the
 device tessellator + ported physics (the `Stepper`/`Simulation` facade), exposing
 the same verbs as `vordyn` plus geometry/SDF setters; **rename `vordyn` → `vorflow`**
 and port `python/test_vordyn.py`, `mpi/validate_*.py`, and the benchmarks to it.

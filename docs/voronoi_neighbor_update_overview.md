@@ -236,12 +236,13 @@ only. It is the GPU analogue of "process only the cells whose natural-neighbour 
 kinetic-Delaunay literature (§5.3). The current device study's S4 "propagating repair" is a *cruder* version of
 this (it re-gathers a geometric skin and propagates by neighbour-set asymmetry, not a maintained 2-ring).
 
-### 4.4 Other legacy DOD reports
+### 4.4 Legacy DOD-storage precedent
 
-`data_oriented_implementation.md` + `chunked_memory.md` (the arena/chunked storage), `CELL_ARENA_BLOCK_STUDY.md`
-(per-cell capacity tuning: vertex≈28/facet≈20 near-optimal), `STUDY_PROTOCOL.md` (the benchmarking protocol).
-The DOD storage (separate Topology/Connectivity/Geometry arenas) is the structural precedent for keeping a
-*resident, compact, connectivity-only* representation between steps (the R2 idea in §6).
+The retired data-oriented-design (DOD) storage experiments (separate Topology/Connectivity/Geometry arenas, a
+chunked/arena pool, and per-cell capacity tuning around vertex≈28/facet≈20) are the structural precedent for
+keeping a *resident, compact, connectivity-only* representation between steps (the R2 idea in §6). Those
+standalone reports have since been removed; the idea now lives in the ConvexCell `TopologyStore`
+(`include/vorflow/device/topology_store.hpp`).
 
 ---
 

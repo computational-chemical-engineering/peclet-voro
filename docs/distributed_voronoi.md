@@ -4,14 +4,14 @@ Suite roadmap Phase 5: decompose the periodic domain into blocks across MPI rank
 **ghost particles** one interaction radius deep so the Voronoi cells touching its block boundary close
 correctly; validate the owned cells against the serial tessellation. The Lagrangian halo (migration +
 ghost particles) is reused from `transport-core` via its `tpx_mpi` Python shim, exactly as in
-`packing-gpu`. The per-cell observables (`vorflow.get_volumes()` / `get_num_neighbors()`) give the
-serial-vs-distributed comparison.
+`dem`. The per-cell observables (`vorflow.get_volumes()` / `get_num_neighbors()`, the latter reading the
+`cellFacetCount` view) give the serial-vs-distributed comparison.
 
 **Status: implemented and validated.**
 - *Tessellation* (`mpi/validate_voronoi.py`): owned-cell **volumes and neighbour counts** match the
   serial full-box tessellation to **machine precision** (max ~1e-15, 0 neighbour mismatches) at
   np=1/2/4; owned volumes sum exactly to the box (perfect partition).
-- *Dynamics* (`mpi/validate_vorflow.py`): 6 steps of compressible-Euler dynamics distributed
+- *Dynamics* (`mpi/validate_voronoi_dynamics.py`): 6 steps of compressible-Euler dynamics distributed
   vs serial match to **machine precision** (~4e-15) at np=1/2/4.
 
 ### Halo depth: 1 ring for the tessellation, 2 rings for the dynamics

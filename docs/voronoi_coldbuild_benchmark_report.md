@@ -151,7 +151,9 @@ np=1,2,4 (82.9 / 83.1 / 81.2) — the ghost-bound strong-scaling penalty is gone
 **42.8 → 83.1 kcell/s = 1.94×**. (The "local-density grid" lever was dropped: the grid is already ~0.2% of
 the build, so it buys nothing.)
 
-**GPU note (worklist is host-only).** An A/B on the GPU (RTX 5080, CUDA 13.2, FP64) found the worklist gather
+**GPU note (worklist is host-only).** **[SUPERSEDED — retiring the half-edge ScratchCell for the compact
+ConvexCell removed the occupancy penalty, so the worklist gather now runs on the GPU too and is the default on
+BOTH backends; see `voronoi_cold_tessellation_benchmark.md`.]** An A/B on the GPU (RTX 5080, CUDA 13.2, FP64) found the worklist gather
 REGRESSES the production force-geometry path: pure tessellation sped up (geom-off 2.5 → 3.8 Mcell/s) but the
 geom-on build dropped ~15–35%. The device cut is fused with the register/occupancy-bound geometry kernel
 (cells are register-resident — the geometry can't be split into a second pass), so the worklist's heavier
@@ -173,7 +175,8 @@ worklist is applied on the CPU only. `nBuild` + the tighter `rcut` are backend-a
    SOTA (1.28×). All machine-exact.
 2. **The distributed path is correct but under-optimised.** It scales (8.3× strong / clean weak per-core
    plateau) and communication is cheap, but two things hold it back, both fixable:
-   - it uses the **device tessellator's older grid gather**, not the worklist — porting the worklist gather
+   - **[SUPERSEDED — the worklist gather is now the default on both backends.]** it uses the **device
+     tessellator's older grid gather**, not the worklist — porting the worklist gather
      into `buildTessellation` should lift the per-core rate toward the §1–2 numbers;
    - **strong-scaling ghost overhead** (surface/volume) — expected; weak scaling shows the real per-core
      story (~30 kcell/s, memory-bound).
