@@ -127,14 +127,14 @@ if(VORFLOW_KOKKOS)
 
   # Device-native Python module `vorflow` (the de-legacy surface over the device
   # tessellator + ExplicitEulerDevice). Opt-in; shares the name with the legacy
-  # python/ module (build only one). pybind11 is fetched, no install needed.
+  # python/ module (build only one). nanobind is found via the active interpreter
+  # (cmake/SuiteNanobind.cmake at the suite root); arrays use the transport-core bridge.
   option(VORFLOW_BUILD_PYTHON "Build the device-native vorflow Python module" OFF)
   if(VORFLOW_BUILD_PYTHON)
-    include(FetchContent)
-    FetchContent_Declare(pybind11
-      GIT_REPOSITORY https://github.com/pybind/pybind11.git GIT_TAG v2.13.6)
-    FetchContent_MakeAvailable(pybind11)
-    pybind11_add_module(vorflow_device NO_EXTRAS src/vorflow_bindings.cpp)
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
+    include(SuiteNanobind)
+    suite_require_nanobind()
+    nanobind_add_module(vorflow_device NB_STATIC src/vorflow_bindings.cpp)
     set_target_properties(vorflow_device PROPERTIES OUTPUT_NAME vorflow)
     target_include_directories(vorflow_device PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
