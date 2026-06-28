@@ -31,6 +31,7 @@ re-clips the stored skin list (no re-gather). Harness: `tests/kokkos/bench_updat
 | **S3** convex-local    | per-cell **D2 convexity** self-test | rebuild flagged cells off the stored skin list (no propagation), Verlet rebuild on trip/fallback |
 | **S4** convex-prop     | **D2** + symmetry | rebuild flagged, **propagate** to asymmetric neighbours, iterate (star-splaying); Verlet rebuild on trip/fallback |
 | **S5** | = S4 swept over skin | the optimal-skin study |
+| **S6** reclip-all      | none (no detection) | **re-clip EVERY cell each step off its stored skin list** (no re-gather); Verlet rebuild on trip. The canonical Verlet usage + the exact "is detection worth it?" control |
 
 **D2 convexity certificate** (`ConvexCell::isSelfConsistent`): after re-eval on the fixed stored topology, the
 cell is still correct iff every dual vertex lies inside every *other* plane (`n_k·v ≤ nn_k`); the vertex's own 3
@@ -57,18 +58,18 @@ rebuild is**, and is modest on the (fast) GPU.
 
 ### GPU RTX 5080, FP32, N=500k (baseline S1 = 84 ms/step)
 
-| disp | S0 reeval | S2 Verlet | S3 independent | S4 propagating |
-|------|-----------|-----------|----------------|----------------|
-| 0.001 | 3.2 ms (26×), grows | 8.3 ms (**10×**), mism 1666 | 22.5 ms (**3.7×**), mism 56 | 52 ms (1.6×), mism 16 |
-| 0.002 | 3.2 ms (26×) | 18.4 ms (4.6×), mism 48 | 35.6 ms (2.4×), mism 2 | 66.9 ms (1.3×), mism 0 |
-| 0.005 | 3.2 ms | ~84 ms (1×) — all rebuild | ~92 ms (1×) | ~92 ms (1×) |
+| disp | S0 reeval | S2 Verlet | S3 independent | S4 propagating | S6 reclip-all (exact) |
+|------|-----------|-----------|----------------|----------------|------------------------|
+| 0.001 | 3.2 ms (26×), grows | 8.3 ms (**10×**), mism 1666 | 22.5 ms (**3.7×**), mism 56 | 52 ms (1.6×), mism 16 | 80 ms (1.05×), mism 0 |
+| 0.002 | 3.2 ms (26×) | 18.4 ms (4.6×), mism 48 | 35.6 ms (2.4×), mism 2 | 66.9 ms (1.3×), mism 0 | 81 ms (1.04×), mism 0 |
+| 0.005 | 3.2 ms | ~84 ms (1×) — all rebuild | ~92 ms (1×) | ~92 ms (1×) | 82 ms (1×), mism 0 |
 
 ### host OpenMP FP64, N=120k (baseline S1 ≈ 234–318 ms/step; shared-box timing, ±)
 
-| disp | S0 reeval | S2 Verlet | S3 independent | S4 propagating |
-|------|-----------|-----------|----------------|----------------|
-| 0.001 | 7.7 ms (30×) | 16.7 ms (**14×**), mism 403 | 37 ms (**6.3×**), mism 13 | 55 ms (4.2×), mism 2 |
-| 0.002 | 10 ms | 38.6 ms (8.2×), mism 18 | 74 ms (4.3×), mism 0 | 98.5 ms (3.2×), mism 0 |
+| disp | S0 reeval | S2 Verlet | S3 independent | S4 propagating | S6 reclip-all (exact) |
+|------|-----------|-----------|----------------|----------------|------------------------|
+| 0.001 | 7.7 ms (30×) | 16.9 ms (**20×**), mism 403 | 37.9 ms (**9×**), mism 14 | 60.6 ms (5.7×), mism 4 | 113 ms (3.0×), mism 0 |
+| 0.002 | 10 ms | 38.8 ms (6.1×), mism 18 | 65 ms (3.7×), mism 0 | 96 ms (2.5×), mism 0 | 122 ms (1.9×), mism 0 |
 
 ### S5 skin sweep (propagating), GPU FP32, disp 0.001
 
@@ -102,7 +103,17 @@ at the same cost. On host (rebuild expensive) the opposite held: larger skin avo
    **independent repair (S3, near-exact, 3.7×)** or even just **Verlet (S2, 10×, moderate error)** dominate; and
    a small skin makes the cheap rebuilds frequent enough to stay exact. On host (expensive rebuild) propagation
    is worthwhile (4.2× exact).
-5. **Precision:** D2 needs a precision-aware tolerance (`1e-4·cellSize` FP64, `2e-3·cellSize` FP32); with it,
+5. **Detection earns its keep — the Verlet list pays off via *gated* reclip, not blanket reclip.** S6
+   reclip-all (re-clip every cell off the stored skin list, no detection) is the canonical Verlet usage and is
+   exact (mism 0, listMiss 0). But it only buys 3.0× (host) / **1.05× (GPU)** over a full rebuild — on GPU
+   almost nothing, because the production worklist is *clip-bound* (its gather is already cheap), so re-clipping
+   every cell still pays ~the whole per-cell cost. The real win is to **reclip only the changed cells**: D2
+   detection (S3) reclips ~15% and gets 9× (host) / 3.7× (GPU). So the persistent Verlet list is worthwhile, but
+   its leverage comes from combining it with cheap re-eval + a change detector, not from reclipping everyone.
+   At high displacement (≳0.005), most cells change, the detector flags ~everything, and its overhead stops
+   paying — there S6/Verlet-rebuild win. (Ordering at disp 0.001 by speed: S2 > S3 > S4 > S6 ≈ S1; by accuracy:
+   S6 = S4 > S3 > S2.)
+6. **Precision:** D2 needs a precision-aware tolerance (`1e-4·cellSize` FP64, `2e-3·cellSize` FP32); with it,
    touch% and topoMism are ~precision-independent (topoMism ~10–35% is marginal-face drift D2 ignores by
    design — volume-irrelevant, not error). FP32 only worsens the borderline-flip residual (~5×). Do the topology
    decision in FP64; geometry/volume can be FP32.
@@ -116,8 +127,11 @@ The right strategy depends on the **rebuild cost** (device/N/density) and the **
   keep it exact. Full propagation (S4) is rarely worth its overhead here.
 - **Expensive rebuild (host / large cells / polydisperse / with force-geometry) + small disp:** **S4 propagating
   repair** pays off (exact, 4×+), and a *larger* skin avoids the costly rebuild.
-- **disp ≳ 0.005 (any device):** just rebuild every step (`buildTessellation`); incremental updating no longer
-  wins.
+- **Need exactness without a detector:** S6 reclip-all (re-clip all off the stored list) is exact and simple;
+  worthwhile on an expensive rebuild (host 3×) but pointless on the cheap GPU rebuild (1.05×).
+- **disp ≳ 0.005 (any device):** most cells change each step, so detection/propagation overhead stops paying —
+  just rebuild every step (`buildTessellation`) or fall back to S2 Verlet / S6; incremental updating no longer
+  wins much.
 - Do the topology decision in FP64; FP32 for geometry/volume.
 
 The production-faithful implementation is **S2/S3 with a Verlet skin + buildTessellation rebuilds** (now wired:

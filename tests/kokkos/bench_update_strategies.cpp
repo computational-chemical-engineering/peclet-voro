@@ -234,6 +234,26 @@ int main(int argc, char** argv) {
       Kokkos::fence();
     };
 
+    // Canonical Verlet usage: RE-CLIP EVERY cell each step from its stored skin list (no re-gather, no D2
+    // detection). Exact while the Verlet criterion holds (listMiss=0). This is the control that asks whether
+    // the D2 convexity detection earns its keep vs simply reclipping everyone off the persistent list.
+    auto reclipAll = [&] {
+      auto P = pos;
+      auto cId = candId;
+      auto nc = ncand;
+      auto Vv = vol;
+      Store st = store;
+      Kokkos::parallel_for(
+          "reclipAll", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+            Cell c = repairCell(i, P.data(), cId.data(), nc(i), L);
+            if (!c.overflow) {
+              Vv(i) = c.volumePerVertex();
+              st.save(i, c);
+            }
+          });
+      Kokkos::fence();
+    };
+
     auto propagateWork = [&](int cnt, Kokkos::View<int*, Mem> outNext) {
       Store st = store;
       auto WL = workList;
@@ -365,6 +385,9 @@ int main(int argc, char** argv) {
           touch += N;
         } else if (mode == 0) {
           reevalAll();
+        } else if (mode == 3) {
+          reclipAll();  // reclip every cell off the stored skin list (no gather, no detection)
+          touch += N;
         } else {
           reevalFlagD2();
           Kokkos::deep_copy(active, flag);
@@ -427,6 +450,7 @@ int main(int argc, char** argv) {
         row("S1 rebuild-each", disp, 0, 1e3 * t / nSteps, 100, 100, meanRel, maxRel, mism, topoM, listM);
       }
       runVerlet("S2 disp-verlet", disp, mainSkin, 0);
+      runVerlet("S6 reclip-all", disp, mainSkin, 3);
       runVerlet("S3 convex-local", disp, mainSkin, 1);
       runVerlet("S4 convex-prop", disp, mainSkin, 2);
     }
