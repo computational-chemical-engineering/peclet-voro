@@ -1,0 +1,36 @@
+# Python packaging for the device-native `vorflow` module (moving-particle Voronoi dynamics on Kokkos).
+#
+# `pip install .` builds the Kokkos device extension via scikit-build-core and installs it as the
+# top-level `vorflow` module. The Kokkos prefix is NOT pulled from PyPI (it is GPU-arch / backend
+# specific): point the build at a prefix you bootstrapped once with ../tools/bootstrap_deps.sh by
+# exporting CMAKE_PREFIX_PATH, and the morton sibling must be checked out alongside (../morton).
+#
+#   # CPU / multicore (OpenMP):
+#   CMAKE_PREFIX_PATH=/path/to/extern/install/host-openmp pip install .
+#   # NVIDIA GPU — put nvcc on PATH first:
+#   CMAKE_PREFIX_PATH=/path/to/extern/install/nvidia-cuda pip install .
+#
+# The backend (Serial / OpenMP / CUDA / HIP) is whatever that prefix was built for — one source,
+# every environment. nanobind is added automatically as a build requirement.
+
+[build-system]
+requires = ["scikit-build-core>=0.8", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "vorflow"
+version = "0.1.0"
+description = "Device-native (Kokkos) moving-particle Voronoi dynamics: compressible Euler / Navier-Stokes"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.20"]
+
+[tool.scikit-build]
+minimum-version = "0.8"
+cmake.version = ">=3.24"
+# Build the device Python module (the install rule for vorflow_device is guarded by SKBUILD).
+cmake.define = { VORFLOW_KOKKOS = "ON", VORFLOW_BUILD_PYTHON = "ON" }
+wheel.install-dir = "."
+# Note: SuiteNanobind.cmake lives in the umbrella (../cmake), so `pip install .` resolves it from a
+# suite checkout; a standalone sdist of just this repo is not self-contained (by design).
+sdist.include = ["src", "include", "CMakeLists.txt", "README.md"]

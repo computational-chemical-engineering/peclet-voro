@@ -141,6 +141,11 @@ if(VORFLOW_KOKKOS)
     target_compile_definitions(vorflow_device PRIVATE MORTON_ENABLE_KOKKOS=1)
     target_link_libraries(vorflow_device PRIVATE Kokkos::kokkos)
     target_compile_features(vorflow_device PRIVATE cxx_std_20)
+    # `pip install .` (scikit-build-core, via pyproject.toml) installs the module as top-level
+    # `vorflow`. Inert for a plain `cmake --build`, so the developer workflow is unchanged.
+    if(DEFINED SKBUILD)
+      install(TARGETS vorflow_device LIBRARY DESTINATION . COMPONENT python)
+    endif()
   endif()
 endif()
 
