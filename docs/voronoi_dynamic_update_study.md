@@ -84,6 +84,21 @@ On GPU the skin barely changes the time (~51–54 ms): the re-eval + detection +
 rebuild is cheap, so **a *smaller* skin (more frequent but cheap rebuilds) is strictly better** — exact (mism 0)
 at the same cost. On host (rebuild expensive) the opposite held: larger skin avoids the costly rebuild.
 
+### S6 reclip-all skin sweep (the Verlet list pushed to its limit)
+
+| | GPU FP32 N=500k | host FP64 N=120k |
+|---|---|---|
+| disp 0.001, skin 0.05 → 0.8 | 80.7 → 79.7 ms (flat), exact | 249 → 183 ms (falls), exact |
+| disp 0.002, skin 0.05 → 0.8 | 81 → 79.8 ms (flat); listMiss 0→26 by skin 0.4 | 286 → 209 ms; listMiss 0→6 by skin 0.4 |
+
+Two effects: (a) **on GPU the time is flat in skin** (~80 ms, ≈ full rebuild) — reclip-all touches 100% of cells
+every step and the GPU rebuild is so cheap that lowering its frequency saves nothing; on host the time *falls*
+with skin (fewer expensive rebuilds) to the reclip-all-every-step floor (~183 ms ≈ 1.3× rebuild). (b) the
+**skin budget**: the emitted candidate list captures faces + only a thin skin, so once cumulative drift exceeds
+**~0.03 cell-sizes** (e.g. disp 0.002 with no rebuild for 16 steps) a gained neighbour falls outside the list
+(`listMiss` > 0) and reclip-all becomes inexact. A larger exact budget would need `buildTessellation` to record
+a wider skin (examine a larger security reach when emitting the candidate list).
+
 ## Findings
 
 1. **Geometry re-eval is nearly free, but it is not the per-step cost.** Pure `reevalGeometry` is ~26× (GPU) /

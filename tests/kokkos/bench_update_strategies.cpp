@@ -460,6 +460,14 @@ int main(int argc, char** argv) {
       for (real_t skin : {(real_t)0.05, (real_t)0.1, (real_t)0.2, (real_t)0.4})
         runVerlet("S5 prop", disp, skin, 2);
 
+    // S6 reclip-all swept over skin: larger skin -> fewer (Verlet) rebuilds -> faster, until the stored skin
+    // list no longer contains a gained neighbour (listMiss>0 -> the reclip becomes inexact). This maps how far
+    // the persistent Verlet list can be pushed (its whole point) for the exact no-detection reclip.
+    std::printf("\n--- S6 reclip-all swept over skin (cell-sizes); watch listMiss for the skin budget ---\n");
+    for (real_t disp : disps)
+      for (real_t skin : {(real_t)0.05, (real_t)0.1, (real_t)0.2, (real_t)0.4, (real_t)0.8})
+        runVerlet("S6 reclip", disp, skin, 3);
+
     // space-filling sanity (oracle Σvol ≈ L^3)
     P_at(scaleFor(disps[0]), 0);
     buildOracle();
