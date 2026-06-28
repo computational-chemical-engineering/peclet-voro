@@ -104,11 +104,14 @@ class Sim {
   }
 
   nb::ndarray<nb::numpy, int> get_num_neighbors() {
-    auto off = Kokkos::create_mirror_view(sim_.view().cellFacetOffset);
-    Kokkos::deep_copy(off, sim_.view().cellFacetOffset);
+    // Per-cell facet (neighbour) count is the explicit cellFacetCount view. NOTE: the device
+    // cellFacetOffset is a per-cell *base* into the facet buffer in cell-finish order, NOT a CSR
+    // prefix sum (see tessellation_view.hpp), so off(i+1)-off(i) is meaningless — read the count.
+    auto cnt = Kokkos::create_mirror_view(sim_.view().cellFacetCount);
+    Kokkos::deep_copy(cnt, sim_.view().cellFacetCount);
     const std::size_t N = static_cast<std::size_t>(sim_.numParticles());
     std::vector<int> out(N);
-    for (std::size_t i = 0; i < N; ++i) out[i] = off(i + 1) - off(i);
+    for (std::size_t i = 0; i < N; ++i) out[i] = cnt(i);
     return tpx::python::vector_to_ndarray(std::move(out), {N}, {1});
   }
 
@@ -136,16 +139,19 @@ NB_MODULE(vorflow, m) {
   m.attr("__doc__") = "vorflow (device/Kokkos): moving-particle Voronoi dynamics on the device path.";
   if (!Kokkos::is_initialized())
     Kokkos::initialize();
-  // finalize() frees every live Simulation's Views then finalizes Kokkos (deterministic teardown).
-  // No atexit hook: a Simulation (or a returned array's owning capsule) can outlive it, and finalizing
-  // first aborts ("deallocated after Kokkos::finalize"). Matches sdflow/dem/tpx_amr.
-  m.def("finalize",
-        []() {
-          Sim::releaseAll();
-          if (Kokkos::is_initialized() && !Kokkos::is_finalized())
-            Kokkos::finalize();
-        },
-        "Release all live Simulations and finalize Kokkos (deterministic teardown).");
+  // Teardown order matters on CUDA: releaseAll() drops every live Simulation's Views FIRST (so none
+  // outlive finalize -> no "deallocated after Kokkos::finalize"), THEN Kokkos::finalize() runs from a
+  // Python atexit hook while the CUDA driver is still up (so no cudaErrorCudartUnloading). Doing only
+  // one of the two aborts on CUDA. Returned arrays are backed by host std::vectors (no device Views),
+  // so they need no special handling.
+  auto shutdown = []() {
+    Sim::releaseAll();
+    if (Kokkos::is_initialized() && !Kokkos::is_finalized())
+      Kokkos::finalize();
+  };
+  m.def("finalize", shutdown,
+        "Release all live Simulations and finalize Kokkos (deterministic teardown; also run at exit).");
+  nb::module_::import_("atexit").attr("register")(nb::cpp_function(shutdown));
   m.attr("execution_space") = nb::str(Kokkos::DefaultExecutionSpace::name());
 
   nb::class_<Sim>(m, "Simulation",

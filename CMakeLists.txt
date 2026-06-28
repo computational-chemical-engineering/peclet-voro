@@ -134,7 +134,9 @@ if(VORFLOW_KOKKOS)
     list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
     include(SuiteNanobind)
     suite_require_nanobind()
-    nanobind_add_module(vorflow_device NB_STATIC src/vorflow_bindings.cpp)
+    # NOMINSIZE: nanobind's default -Os size optimization is rejected by nvcc ("'s': expected a
+    # number") since Kokkos device sources compile as CXX through the launch compiler.
+    nanobind_add_module(vorflow_device NB_STATIC NOMINSIZE src/vorflow_bindings.cpp)
     set_target_properties(vorflow_device PROPERTIES OUTPUT_NAME vorflow)
     target_include_directories(vorflow_device PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
