@@ -60,7 +60,10 @@ struct MovingTessellation {
   using Cell = ConvexCell<Real, MAXP, MAXT>;
   using Store = TopologyStore<MAXP, MAXT>;
 
-  int N = 0, sw = 4, densityCount = -1;
+  int N = 0;       ///< total cells in the resident arrays (single-domain: all; MPI: owned+ghost)
+  int nProc = 0;   ///< cells this instance MAINTAINS (single-domain: N; MPI: owned, [0,nProc)). The grid
+                   ///< + gather candidates always span all N (ghosts are cut candidates, not maintained).
+  int sw = 4, densityCount = -1;
   Real L[3] = {1, 1, 1};
   Real tol = 0;   ///< certificate tolerance (absolute distance); ~1e-4·spacing FP64, ~2e-3·spacing FP32
   Real skin = 0;  ///< Verlet skin width (absolute); a particle moving > skin/2 is a Pass-1 mover
@@ -73,8 +76,12 @@ struct MovingTessellation {
   Kokkos::View<int*, Mem> mask, mask2, mover, rebuilt, wl1, wl2, wlM;
   Kokkos::View<int, Mem> counter;
 
-  void alloc(int n, const Real Lbox[3], Real tol_, Real skin_, int sw_ = 4, int densityCount_ = -1) {
-    N = n; sw = sw_; densityCount = densityCount_ < 0 ? n : densityCount_;
+  /// @param nProc_  cells to maintain (default n = single-domain). For the distributed driver pass the
+  ///                owned count: cells [0,nProc) are repaired, [nProc,N) are ghost cut-candidates only.
+  void alloc(int n, const Real Lbox[3], Real tol_, Real skin_, int sw_ = 4, int densityCount_ = -1,
+             int nProc_ = -1) {
+    N = n; nProc = (nProc_ < 0) ? n : nProc_;
+    sw = sw_; densityCount = densityCount_ < 0 ? n : densityCount_;
     tol = tol_; skin = skin_;
     for (int k = 0; k < 3; ++k) L[k] = Lbox[k];
     store.alloc(n);
@@ -95,18 +102,19 @@ struct MovingTessellation {
   /// reset the Verlet reference. This is the oracle, the fallback, and the initial build.
   void rebuild(const Kokkos::View<Real*, Mem>& pos) {
     Kokkos::View<Real*, Mem> wd; Kokkos::View<long*, Mem> gd;
+    const int nBuild = (nProc == N) ? -1 : nProc;  // build only the owned cells; ghosts are candidates
     auto res = buildTessellation<Real, false>(pos, wd, N, L, sw, densityCount, gd, NoSdf{},
-                                              /*withForceGeom=*/false, -1, store.np, store.nt,
+                                              /*withForceGeom=*/false, nBuild, store.np, store.nt,
                                               store.pnbr, store.tri);
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(xRef, pos);
   }
 
-  /// Compact `m` (nonzero entries) into `wl`, returning the count.
+  /// Compact the nonzero entries of `m[0..nProc)` into `wl`, returning the count.
   int compact(const Kokkos::View<int*, Mem>& m, const Kokkos::View<int*, Mem>& wl) {
     Kokkos::deep_copy(counter, 0);
     auto M = m; auto W = wl; auto c = counter;
-    Kokkos::parallel_for("mt.compact", Kokkos::RangePolicy<Exec>(0, N),
+    Kokkos::parallel_for("mt.compact", Kokkos::RangePolicy<Exec>(0, nProc),
                          KOKKOS_LAMBDA(int i) { if (M(i)) W(Kokkos::atomic_fetch_add(&c(), 1)) = i; });
     int h = 0; Kokkos::deep_copy(h, counter); return h;
   }
@@ -128,8 +136,9 @@ struct MovingTessellation {
     const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
     const Real tolL = tol, half2 = Real(0.25) * skin * skin;
     const bool skinOn = useSkin;
+    const int nP_ = nProc;
     Kokkos::parallel_for(
-        "mt.certify", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+        "mt.certify", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
           Cell c; st.load(i, c, Lx, Ly, Lz);
           c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
           Vv(i) = c.volumePerVertex();
@@ -145,7 +154,8 @@ struct MovingTessellation {
             if (mover) Mv(i) = 1;
           }
           if (!ok || mover) M(i) = 1;
-          for (int q = 0; q < nP; ++q) Kokkos::atomic_exchange(&M(partners[q]), 1);
+          // only mark partners we MAINTAIN (owned); a ghost partner is the owning rank's responsibility.
+          for (int q = 0; q < nP; ++q) if (partners[q] < nP_) Kokkos::atomic_exchange(&M(partners[q]), 1);
         });
   }
 
@@ -171,14 +181,14 @@ struct MovingTessellation {
   void collectNewNbrs(const Kokkos::View<int*, Mem>& wl, int n, const Kokkos::View<int*, Mem>& outMask) {
     Kokkos::deep_copy(outMask, 0);
     if (n <= 0) return;
-    Store st = store; auto rb = rebuilt; auto M = outMask;
+    Store st = store; auto rb = rebuilt; auto M = outMask; const int nP_ = nProc;
     Kokkos::parallel_for(
         "mt.collectNbrs", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
           const int i = wl(s);
           const int np = st.np(i), nt = st.nt(i);
           for (int k = 6; k < np; ++k) {
             const int j = st.pnbr((size_t)i * MAXP + k);
-            if (j < 0 || rb(j)) continue;
+            if (j < 0 || j >= nP_ || rb(j)) continue;  // only expand neighbours we MAINTAIN (owned)
             int cnt = 0;  // face = ≥3 incident live triangles
             for (int t = 0; t < nt; ++t) {
               const unsigned w = st.tri((size_t)i * MAXT + t);

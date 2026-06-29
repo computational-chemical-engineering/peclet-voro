@@ -47,9 +47,11 @@ foreach(t voronoi_mpi sdf_mpi)
   endforeach()
 endforeach()
 
-# Distributed cold-build throughput benchmark (run manually under mpirun -np <R> [N]).
-add_executable(bench_voronoi_mpi bench_voronoi_mpi.cpp)
-target_include_directories(bench_voronoi_mpi PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include ${MORTON_INCLUDE})
-target_compile_definitions(bench_voronoi_mpi PRIVATE VORFLOW_MPI MORTON_ENABLE_KOKKOS=1)
-target_link_libraries(bench_voronoi_mpi PRIVATE Kokkos::kokkos MPI::MPI_CXX)
+# Distributed benchmarks (run manually under mpirun -np <R> [N ...]).
+foreach(b bench_voronoi_mpi bench_repair_mpi)
+  add_executable(${b} ${b}.cpp)
+  target_include_directories(${b} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include ${MORTON_INCLUDE})
+  target_compile_definitions(${b} PRIVATE VORFLOW_MPI MORTON_ENABLE_KOKKOS=1)
+  target_link_libraries(${b} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
+endforeach()
