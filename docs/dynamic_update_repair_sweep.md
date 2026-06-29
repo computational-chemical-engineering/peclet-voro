@@ -145,6 +145,40 @@ MPI halo exchange is common to both paths and is not the bottleneck at these siz
    default-tol `maxRelV ~ 1e-4` is the certificate-tolerance accuracy, not error). The far-jump
    teleport stays exact via Pass 2.
 
+## Cheapening the certificate: the local-Delaunay test
+
+The sweep above showed the per-step floor at small δ/h is the **convexity certificate**
+(`isSelfConsistent`), not the geometry re-eval — a flop count confirms the brute test (every live
+vertex vs every plane, O(nt·np) ≈ 540 dot-products/cell) is several× the re-eval. So we replaced it with
+a **local-Delaunay test**: a Voronoi vertex `v=(a,b,c)` is the circumcenter of the Delaunay tet
+`(i,a,b,c)`; by Delaunay's lemma it can only be poked across one of that tet's **four faces**, so each
+vertex is tested against just **four "poke" planes** (the three in-seed faces = the edge-opposite
+planes, plus the fourth face `(a,b,c)` = the nearest non-defining plane at the build config). The poke
+planes are stored per dual-triangle in the `TopologyStore` (computed once per (re)build/gather; pure
+topology + the cached vertex), so the per-step cost drops from O(nt·np) to O(nt·4).
+
+`GATE 2` validates it flags the **same cells** as the brute test: identical at the operating regime
+(0 mismatches at δ/h ≤ 0.001), with a handful per 10⁴ as δ/h grows (the build-config 4th-face goes
+stale) — and the Phase-3 gate rebuilds that regime anyway. The repair's exactness gate stays green
+(machine-exact at `VORF_TOL=1e-7`). It is maintained adaptively: a gate-rebuild keeps the brute test for
+one step (no poke cost in a high-churn regime), and a low-churn streak builds the poke once and then
+maintains it incrementally, so the local path is never slower than brute.
+
+![local vs brute certificate](figs/repair_cert_speedup.png)
+
+| device | δ/h=0.0001 brute → local | speedup of the repair |
+|---|---|---|
+| **multicore (8c)** | 6.0× → **12.9×** | **2.1×** |
+| **GPU (RTX 5080)** | 2.9× → **3.4×** | 1.17× |
+| **serial** | 4.1× → 4.0× | ~1.0× (neutral) |
+
+The win is biggest on **multicore**, where the brute scan's scattered plane-memory access is
+bandwidth-bound across threads and the 4-plane test relieves it; **moderate on GPU** (fewer per-thread
+iterations); and **neutral on serial**, where a single thread is dominated by the cell load + re-eval
+rather than the convexity scan. (The graph is the pure two-pass / gate-off path, so its large-δ/h tail
+shows the poke-maintenance overhead; with the production gate on, that regime rebuilds and the local and
+brute curves coincide there.) `VORF_BRUTECERT=1` forces the brute test for A/B.
+
 ## Reproduce
 
 ```

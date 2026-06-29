@@ -39,6 +39,8 @@ struct TopologyStore {
   Kokkos::View<int*, MemSpace> nt;        // N
   Kokkos::View<int*, MemSpace> pnbr;      // N*MAXP : neighbour seed id per plane (<0 = box)
   Kokkos::View<unsigned*, MemSpace> tri;  // N*MAXT : t0 | t1<<8 | t2<<16 | alive<<24
+  Kokkos::View<unsigned*, MemSpace> poke; // N*MAXT : per-triangle 3 edge-opposite plane indices (local
+                                          // certificate; allocated only when allocPoke() is called)
 
   void alloc(int n) {
     using Kokkos::view_alloc;
@@ -50,6 +52,13 @@ struct TopologyStore {
                                         (size_t)n * MAXP);
     tri = Kokkos::View<unsigned*, MemSpace>(view_alloc(std::string("topo.tri"), WithoutInitializing),
                                             (size_t)n * MAXT);
+  }
+
+  /// Allocate the per-triangle poke-plane store (the local-Delaunay certificate; opt-in so callers that
+  /// don't use it pay no memory). N*MAXT unsigned ≈ MAXT·4 bytes/cell.
+  void allocPoke() {
+    poke = Kokkos::View<unsigned*, MemSpace>(
+        Kokkos::view_alloc(std::string("topo.poke"), Kokkos::WithoutInitializing), (size_t)N * MAXT);
   }
 
   /// Persist cell `c` at slot i (call after the cell is finalised — clipped + complete).

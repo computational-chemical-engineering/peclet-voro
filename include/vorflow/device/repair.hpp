@@ -98,6 +98,15 @@ struct MovingTessellation {
   // the implemented experiment behind this flag; the production path is the Phase-3 gated two-pass gather.
   bool surgical = false;     ///< repair flip cells by re-clipping known candidates instead of gathering
   static constexpr int kExtraCap = 8;  ///< per-cell capacity for partner-discovered new neighbours
+  // ---- local-Delaunay certificate (the cheap convexity test) ----
+  bool localCert = true;     ///< use ConvexCell::isSelfConsistentLocal (test each vertex vs its 4 poke
+                             ///< planes, O(nt·4)) instead of the brute O(nt·np) form. The poke planes are
+                             ///< maintained incrementally during low-churn streaks; on a gate-rebuild the
+                             ///< whole store changes, so the certificate falls back to brute for one step
+                             ///< and the poke is rebuilt only if that step stays low-churn (pokeFresh).
+  bool pokeFresh = false;    ///< the poke-plane store is valid for the current topology (set after a full
+                             ///< computePokeAll on a low-churn step; cleared by a full rebuild)
+  bool useLocalNow = false;  ///< this step's certify uses the local test (= localCert && pokeFresh)
 
   Store store;
   Kokkos::View<Real*, Mem> vol;   // N : cell volumes (the published geometry scalar)
@@ -118,6 +127,7 @@ struct MovingTessellation {
     tol = tol_; skin = skin_;
     for (int k = 0; k < 3; ++k) L[k] = Lbox[k];
     store.alloc(n);
+    if (localCert) store.allocPoke();
     using Kokkos::view_alloc; using Kokkos::WithoutInitializing;
     vol = Kokkos::View<Real*, Mem>("mt.vol", n);
     xRef = Kokkos::View<Real*, Mem>(view_alloc(std::string("mt.xRef"), WithoutInitializing), (size_t)n * 3);
@@ -141,7 +151,11 @@ struct MovingTessellation {
 
   /// Full cold (re)build: the production tessellator emitting the resident topology + volume, then
   /// reset the Verlet reference. This is the oracle, the fallback, and the initial build.
-  void rebuild(const Kokkos::View<Real*, Mem>& pos) {
+  /// @param eagerPoke  build the poke store now (default; the cheap initial/explicit rebuild → next step
+  ///                   is local). A GATE-rebuild passes false: in a high-churn regime we keep rebuilding,
+  ///                   so paying computePokeAll every step is wasted — fall back to the brute certificate
+  ///                   until churn drops, then maybeBuildPoke rebuilds the poke once.
+  void rebuild(const Kokkos::View<Real*, Mem>& pos, bool eagerPoke = true) {
     Kokkos::View<Real*, Mem> wd; Kokkos::View<long*, Mem> gd;
     const int nBuild = (nProc == N) ? -1 : nProc;  // build only the owned cells; ghosts are candidates
     auto res = buildTessellation<Real, false>(pos, wd, N, L, sw, densityCount, gd, NoSdf{},
@@ -149,6 +163,8 @@ struct MovingTessellation {
                                               store.pnbr, store.tri);
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(xRef, pos);
+    pokeFresh = false;
+    if (eagerPoke) maybeBuildPoke(pos);  // the whole topology changed -> refresh poke (unless gating)
   }
 
   /// Compact the nonzero entries of `m[0..nProc)` into `wl`, returning the count.
@@ -181,11 +197,12 @@ struct MovingTessellation {
     auto EN = extraNbr; auto EC = extraCnt;
     constexpr int kCap = kExtraCap;
     auto P = pos; auto XR = xRef; auto Vv = vol; auto M = outMask; auto Mv = outMover;
-    Store st = store;
+    Store st = store; auto Pk = store.poke;
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
     const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
     const Real tolL = tol, half2 = Real(0.25) * skin * skin;
     const bool skinOn = useSkin;
+    const bool useLocal = useLocalNow;
     const int nP_ = nProc;
     Kokkos::parallel_for(
         "mt.certify", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
@@ -193,7 +210,8 @@ struct MovingTessellation {
           c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
           Vv(i) = c.volumePerVertex();
           int partners[32]; int nP = 0;
-          const bool ok = c.isSelfConsistent(tolL, partners, 32, nP);
+          const bool ok = useLocal ? c.isSelfConsistentLocal(&Pk((size_t)i * MAXT), tolL, partners, 32, nP)
+                                   : c.isSelfConsistent(tolL, partners, 32, nP);
           bool mover = false;
           if (skinOn) {
             Real dx = P(3 * i) - XR(3 * i), dy = P(3 * i + 1) - XR(3 * i + 1), dz = P(3 * i + 2) - XR(3 * i + 2);
@@ -234,17 +252,53 @@ struct MovingTessellation {
                    const Kokkos::View<int*, Mem>& outMask) {
     Kokkos::deep_copy(outMask, 0);
     if (n <= 0) return;
-    auto P = pos; auto Vv = vol; auto M = outMask; Store st = store;
+    auto P = pos; auto Vv = vol; auto M = outMask; Store st = store; auto Pk = store.poke;
     const Real Lx = L[0], Ly = L[1], Lz = L[2]; const Real tolL = tol; const int nP_ = nProc;
+    const bool useLocal = useLocalNow;
     Kokkos::parallel_for("mt.certifyList", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
       const int i = list(s);
       Cell c; st.load(i, c, Lx, Ly, Lz);
       c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
       Vv(i) = c.volumePerVertex();
       int partners[32]; int nP = 0;
-      if (!c.isSelfConsistent(tolL, partners, 32, nP)) M(i) = 1;
+      const bool ok = useLocal ? c.isSelfConsistentLocal(&Pk((size_t)i * MAXT), tolL, partners, 32, nP)
+                               : c.isSelfConsistent(tolL, partners, 32, nP);
+      if (!ok) M(i) = 1;
       for (int q = 0; q < nP; ++q) if (partners[q] < nP_) Kokkos::atomic_exchange(&M(partners[q]), 1);
     });
+  }
+
+  /// Recompute the poke-plane store (local-Delaunay certificate inputs) for the cells in wl[0..n) (or all
+  /// owned cells if wl is empty) from the resident topology — pure topology, no geometry. Run after a
+  /// (re)build/gather changes a cell's triangulation; cheap because the store persists across many
+  /// re-eval steps between rebuilds.
+  void computePoke(const Kokkos::View<int*, Mem>& wl, int n, const Kokkos::View<Real*, Mem>& pos) {
+    if (!localCert || n <= 0) return;
+    Store st = store; auto Pk = store.poke; auto W = wl; auto P = pos;
+    const Real Lx = L[0], Ly = L[1], Lz = L[2];
+    Kokkos::parallel_for("mt.computePoke", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
+      const int i = W(s);
+      Cell c; st.load(i, c, Lx, Ly, Lz);
+      c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);  // 4th poke plane needs vertices
+      c.computePokePlanes(&Pk((size_t)i * MAXT));
+    });
+  }
+  void computePokeAll(const Kokkos::View<Real*, Mem>& pos) {
+    if (!localCert) return;
+    Store st = store; auto Pk = store.poke; auto P = pos;
+    const Real Lx = L[0], Ly = L[1], Lz = L[2];
+    Kokkos::parallel_for("mt.computePokeAll", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
+      Cell c; st.load(i, c, Lx, Ly, Lz);
+      c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
+      c.computePokePlanes(&Pk((size_t)i * MAXT));
+    });
+  }
+  /// Lazily (re)build the full poke store on a low-churn step so later steps use the cheap local
+  /// certificate. A gate-rebuild clears pokeFresh; gating steps return before this runs, so a sustained
+  /// high-churn regime keeps falling back to the brute certificate (no poke overhead), and a low-churn
+  /// streak pays the full computePokeAll exactly once (then gathers maintain it incrementally).
+  void maybeBuildPoke(const Kokkos::View<Real*, Mem>& pos) {
+    if (localCert && !pokeFresh) { computePokeAll(pos); pokeFresh = true; useLocalNow = true; }
   }
 
   /// Gather the `n` cells listed in `wl[0..n)` off `grid` (updating store + vol in place), mark them
@@ -262,6 +316,7 @@ struct MovingTessellation {
       rb(i) = 1;
       XR(3 * i) = P(3 * i); XR(3 * i + 1) = P(3 * i + 1); XR(3 * i + 2) = P(3 * i + 2);
     });
+    if (pokeFresh) computePoke(wl, n, pos);  // keep poke valid for the cells whose triangulation changed
   }
 
   /// Collect into `outMask` the face-neighbours (planes with ≥3 incident live triangles) of the `n`
@@ -384,6 +439,9 @@ struct MovingTessellation {
     auto grid = buildTessGrid<Real, false>(pos, Kokkos::View<Real*, Mem>(), N, L, sw, densityCount,
                                            Kokkos::View<long*, Mem>());
     Kokkos::deep_copy(rebuilt, 0);
+    // Use the cheap local certificate this step only if its poke store is valid for the current topology
+    // (it is invalidated by a full rebuild and rebuilt lazily on the first low-churn step below).
+    useLocalNow = localCert && pokeFresh;
 
     // Pass 1: detect (flagged ∪ partners ∪ skin-movers). flagged-commons + their violated-plane partners
     // (the gaining cells) fully cover an isolated flip — no Pass 2 for flips.
@@ -396,14 +454,14 @@ struct MovingTessellation {
     // flags some cell, so n1==0 ⇒ the stored topology is still Voronoi on the new positions — the
     // re-eval already refreshed every volume, so publish with NO gather and NO verify pass. This is the
     // "almost no cells invalidated" regime: the per-step cost collapses to one re-eval + the grid.
-    if (n1 == 0) return s;
+    if (n1 == 0) { maybeBuildPoke(pos); return s; }
 
     // Phase-3 adaptive gate (decided here, after the FREE certificate, before any gather):
     //   high global churn  -> a full rebuild is cheaper than repairing this many cells;
     //   dense local cluster -> dilate the Pass-1 set by a grid-cell buffer (one regional gather);
     //   else (sparse)       -> the two-pass repair below.
     if (useGate && (double)n1 / (nProc > 0 ? nProc : 1) > churnThresh) {
-      rebuild(pos);
+      rebuild(pos, /*eagerPoke=*/false);  // high-churn regime: stay on brute, don't pay poke maintenance
       s.route = RepairStats::kRebuildGate;
       return s;
     }
@@ -435,6 +493,7 @@ struct MovingTessellation {
     int n2 = compact(mask2, wl2);
     s.pass2 = n2;
     gatherSet(grid, wl2, n2, pos);
+    maybeBuildPoke(pos);  // first low-churn step after a rebuild: build poke so the verify + next steps go local
 
     // Verify (scoped): re-certify only the GATHERED cells (every non-gathered cell is provably unchanged
     // — see certifyList). Clean ⇒ publish; else gather the still-flagged ∪ partners (residual coupled

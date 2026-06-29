@@ -275,6 +275,85 @@ struct ConvexCell {
     return consistent;
   }
 
+  /// Local-Delaunay acceleration of the certificate. For each live dual-triangle (= Voronoi vertex)
+  /// compute its three **poke planes**: the "fourth" plane of the triangle sharing each of its three
+  /// edges. By Delaunay's lemma a cell is non-Voronoi iff some shared facet is locally non-Delaunay,
+  /// and that failure pokes a vertex past one of THESE edge-opposite planes — so the certificate only
+  /// needs to test each vertex against its three poke planes, not all `np` planes (O(nt·3) vs O(nt·np)).
+  /// `out[t]` packs the three plane indices (one byte each; 0xff = no neighbour / degenerate edge); a
+  /// dead triangle gets all-0xff. Pure topology (uses t0/t1/t2/alive + findSharing) — no geometry, so it
+  /// can be precomputed once per (re)build and reused across the cheap re-eval steps. `out` has MAXT
+  /// entries. NOTE: an edge-opposite plane is never a defining plane of its own triangle, so the local
+  /// test does not need the defining-plane skip the brute-force form has.
+  KOKKOS_INLINE_FUNCTION void computePokePlanes(unsigned* out) const {
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) { out[t] = 0xffffffffu; continue; }
+      const int vtx[3] = {t0[t], t1[t], t2[t]};
+      unsigned packed = 0;
+      for (int e = 0; e < 3; ++e) {  // bytes 0,1,2: the three EDGE-opposite planes (the in-seed faces of
+        const int x = vtx[e], y = vtx[(e + 1) % 3];          // the dual Delaunay tet)
+        const int other = findSharing(t, x, y);
+        int p = 0xff;
+        if (other >= 0) {
+          const int a = t0[other], b = t1[other], c = t2[other];
+          p = (a != x && a != y) ? a : (b != x && b != y) ? b : c;
+          if (p < 0 || p > 0xfe) p = 0xff;
+        }
+        packed |= (unsigned)(p & 0xff) << (e * 8);
+      }
+      // byte 3: the FOURTH face of the Delaunay tet (the one NOT containing the seed). A neighbour across
+      // it can poke this vertex without being one of the three in-cell edge neighbours, so the 3-edge test
+      // alone is incomplete. At the (Delaunay) build config that fourth neighbour is the non-defining plane
+      // the vertex is nearest to from inside (smallest positive slack); record it as the fourth candidate.
+      // Requires the cached vertex (computeVertex / reevalGeometry must have run).
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      Real best = Real(3.4e38);
+      int g = 0xff;
+      const int b0 = (int)(packed & 0xff), b1 = (int)((packed >> 8) & 0xff), b2 = (int)((packed >> 16) & 0xff);
+      for (int k = 0; k < np; ++k) {
+        if (k == vtx[0] || k == vtx[1] || k == vtx[2]) continue;  // defining
+        if (k == b0 || k == b1 || k == b2) continue;              // already an edge-opposite
+        const Real slack = nn[k] - (n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2]);
+        if (slack >= Real(0) && slack < best) { best = slack; g = k; }
+      }
+      packed |= (unsigned)(g & 0xff) << 24;
+      out[t] = packed;
+    }
+  }
+
+  /// Local certificate: same result as `isSelfConsistent(tol, partners…)` but tests each live vertex
+  /// only against its three precomputed poke planes (computePokePlanes) — complete by Delaunay's lemma,
+  /// ~np/3× fewer plane tests. `poke[t]` is the packed triple for triangle t. Returns true iff consistent.
+  KOKKOS_INLINE_FUNCTION bool isSelfConsistentLocal(const unsigned* poke, Real tol, int* outPartners,
+                                                    int maxPartners, int& nPartners) const {
+    nPartners = 0;
+    bool consistent = true;
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      const unsigned pk = poke[t];
+      for (int e = 0; e < 4; ++e) {  // 3 edge-opposite + the 4th-face plane (byte 3)
+        const int k = (int)((pk >> (e * 8)) & 0xffu);
+        if (k == 0xff) continue;  // sentinel
+        const Real s = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
+        if (s > Real(0)) {
+          const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
+          if (s * invlen > tol) {
+            consistent = false;
+            const int part = pnbr[k];
+            if (part >= 0) {
+              bool seen = false;
+              for (int q = 0; q < nPartners; ++q)
+                if (outPartners[q] == part) { seen = true; break; }
+              if (!seen && nPartners < maxPartners) outPartners[nPartners++] = part;
+            }
+          }
+        }
+      }
+    }
+    return consistent;
+  }
+
   /// Largest squared dual-vertex radius over live triangles (drives the security radius).
   KOKKOS_INLINE_FUNCTION Real maxVertexRsq() const {
     Real m = 0;
