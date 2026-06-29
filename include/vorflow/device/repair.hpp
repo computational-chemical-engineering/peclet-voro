@@ -44,10 +44,15 @@ namespace device {
 
 /// Per-step repair telemetry.
 struct RepairStats {
-  int pass1 = 0;       ///< cells gathered in Pass 1 (flagged ∪ partners ∪ skin-movers)
-  int pass2 = 0;       ///< cells gathered in Pass 2 (new face-neighbours of Pass-1 cells)
+  /// Which path the Phase-3 adaptive gate took this step.
+  enum Route { kTwoPass = 0, kDilated = 1, kRebuildGate = 2 };
+  int pass1 = 0;       ///< cells gathered in Pass 1 (flagged ∪ partners ∪ skin-movers, after dilation)
+  int pass1Raw = 0;    ///< flagged count BEFORE dilation (the gate signal: pass1Raw/nProc = churn)
+  int pass2 = 0;       ///< cells gathered in Pass 2 (new face-neighbours of the movers)
   int extra = 0;       ///< cells gathered across the verify extra-passes
+  int surgical = 0;    ///< Pass-1 cells repaired surgically (Phase 4, no grid gather)
   int verifyPasses = 0;///< number of verify iterations run
+  Route route = kTwoPass;
   bool fellBack = false;///< true if the cold-build fallback was triggered (repair did not close)
 };
 
@@ -69,12 +74,40 @@ struct MovingTessellation {
   Real skin = 0;  ///< Verlet skin width (absolute); a particle moving > skin/2 is a Pass-1 mover
   int verifyCap = 2;  ///< max verify extra-passes before falling back to a full rebuild
 
+  // ---- Phase 3: adaptive three-way gate (decided after the free certificate, before any gather) ----
+  bool useGate = true;        ///< high-churn → rebuild routing (the "never slower than rebuild" guard)
+  bool useDilation = false;   ///< dense-cluster regional dilation branch. DEFAULT OFF: on Poisson/lattice
+                              ///< workloads there are no genuine clusters, the verify loop already closes
+                              ///< the rare cascade, and the per-step count/mark scan is pure overhead. Turn
+                              ///< on for strongly clustered inputs (the regime it is meant for).
+  double churnThresh = 0.55;  ///< flagged-fraction above which a full rebuild is cheaper than repairing
+                              ///< (per-backend, set in alloc — GPU rebuild is cheap so it gives up sooner).
+  double dilateMaxChurn = 0.15;///< only consider dilation when GLOBAL churn is low (a real local cluster,
+                              ///< not a uniformly-moderate field where every neighbourhood looks "dense").
+  int clusterNbhd = 18;       ///< a cell whose 27-grid-cell neighbourhood has > this many flagged seeds is
+                              ///< "dense" (≈ a region far above the field average) and gets dilated.
+  // ---- Phase 4: single-face surgical repair (no grid gather; gated, default OFF — see note) ----
+  // NEGATIVE RESULT (measured): on this engine surgical re-clip is BOTH slower and not robustly exact,
+  // so it stays off. (1) Slower: the cold gather clips closest-first with the security-radius early-out
+  // (the cell tightens fast, few live triangles per clip), whereas re-clipping the stored+partner
+  // candidates unsorted keeps the cell large and costs more O(#tri) horizon scans — the gather wins.
+  // (2) Not exact: a surgically-rebuilt cell that GAINS a neighbour absent from its candidate set stays
+  // convex, so the certificate can't see the gain (§1c) and the verify loop can't catch it; the small
+  // per-step error then COMPOUNDS in the resident store (maxRelV grew to ~0.5 over a sweep). Making it
+  // exact needs the maintained 1-/2-ring candidate set (the ConnectivityArena the plan parks). Kept as
+  // the implemented experiment behind this flag; the production path is the Phase-3 gated two-pass gather.
+  bool surgical = false;     ///< repair flip cells by re-clipping known candidates instead of gathering
+  static constexpr int kExtraCap = 8;  ///< per-cell capacity for partner-discovered new neighbours
+
   Store store;
   Kokkos::View<Real*, Mem> vol;   // N : cell volumes (the published geometry scalar)
   Kokkos::View<Real*, Mem> xRef;  // 3N : positions at the last (re)build (Verlet reference)
   // scratch
   Kokkos::View<int*, Mem> mask, mask2, mover, rebuilt, wl1, wl2, wlM;
+  Kokkos::View<int*, Mem> cellFlag;        // per linear grid-cell flagged-seed count (dilation)
+  Kokkos::View<int*, Mem> extraNbr, extraCnt;  // Phase-4 partner-discovered candidate neighbours
   Kokkos::View<int, Mem> counter;
+  int gridNcell = 0;
 
   /// @param nProc_  cells to maintain (default n = single-domain). For the distributed driver pass the
   ///                owned count: cells [0,nProc) are repaired, [nProc,N) are ghost cut-candidates only.
@@ -95,7 +128,15 @@ struct MovingTessellation {
     wl1 = Kokkos::View<int*, Mem>(view_alloc(std::string("mt.wl1"), WithoutInitializing), n);
     wl2 = Kokkos::View<int*, Mem>(view_alloc(std::string("mt.wl2"), WithoutInitializing), n);
     wlM = Kokkos::View<int*, Mem>(view_alloc(std::string("mt.wlM"), WithoutInitializing), n);
+    extraNbr = Kokkos::View<int*, Mem>(view_alloc(std::string("mt.extraNbr"), WithoutInitializing),
+                                       (size_t)n * kExtraCap);
+    extraCnt = Kokkos::View<int*, Mem>("mt.extraCnt", n);
     counter = Kokkos::View<int, Mem>("mt.counter");
+    // Per-backend gate threshold: rebuild is cheap + clip-bound on GPU (repair loses past ~50% flagged),
+    // expensive on the CPU paths (repair pays out to ~85%). Hand-set from the cross-device sweep; the
+    // plan's Phase-3 tuning would fit these from logged (signals vs verify-clean) per backend.
+    constexpr bool host = Kokkos::SpaceAccessibility<Kokkos::HostSpace, Mem>::accessible;
+    churnThresh = host ? 0.70 : 0.50;
   }
 
   /// Full cold (re)build: the production tessellator emitting the resident topology + volume, then
@@ -130,6 +171,15 @@ struct MovingTessellation {
                const Kokkos::View<int*, Mem>& outMover, bool useSkin) {
     Kokkos::deep_copy(outMask, 0);
     if (useSkin) Kokkos::deep_copy(outMover, 0);
+    // Phase-4: in the Pass-1 certify, also record partner-discovered new neighbours for the surgical
+    // path. The gaining cells of a flip are the violated-plane partners; each pair gains the other, so
+    // scatter every other partner of a flagging cell onto each partner's extra-candidate list (no dedup
+    // — duplicates are harmless no-op clips; overflow past kExtraCap just truncates and the cell falls
+    // back to a full gather at verify). Only in Pass 1 (useSkin), and only when surgical is enabled.
+    const bool doExtra = surgical && useSkin;
+    if (doExtra) Kokkos::deep_copy(extraCnt, 0);
+    auto EN = extraNbr; auto EC = extraCnt;
+    constexpr int kCap = kExtraCap;
     auto P = pos; auto XR = xRef; auto Vv = vol; auto M = outMask; auto Mv = outMover;
     Store st = store;
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
@@ -156,6 +206,19 @@ struct MovingTessellation {
           if (!ok || mover) M(i) = 1;
           // only mark partners we MAINTAIN (owned); a ghost partner is the owning rank's responsibility.
           for (int q = 0; q < nP; ++q) if (partners[q] < nP_) Kokkos::atomic_exchange(&M(partners[q]), 1);
+          if (doExtra) {  // each pair of gaining cells gains the other -> seed the surgical candidate lists
+            for (int q = 0; q < nP; ++q) {
+              const int cell = partners[q];
+              if (cell < 0 || cell >= nP_) continue;
+              for (int r = 0; r < nP; ++r) {
+                if (r == q) continue;
+                const int nb = partners[r];
+                if (nb < 0) continue;
+                const int slot = Kokkos::atomic_fetch_add(&EC(cell), 1);
+                if (slot < kCap) EN((size_t)cell * kCap + slot) = nb;
+              }
+            }
+          }
         });
   }
 
@@ -201,6 +264,95 @@ struct MovingTessellation {
         });
   }
 
+  /// Phase-4 single-face surgical repair: rebuild each flip cell in wl[0..n) by re-clipping the box with
+  /// its KNOWN candidate set — stored neighbours ∪ partner-discovered extras (extraNbr) — at the current
+  /// positions, with NO grid gather (the clip is order-independent and only commits planes that cut, so
+  /// stale/lost-face neighbours are harmless no-ops). Updates store + vol, marks rebuilt, resets the
+  /// Verlet reference. A cell whose candidate set is incomplete comes out wrong and is caught + re-gathered
+  /// by the verify loop (the exact fallback) — so surgical is safe by construction. Used only for FLIP
+  /// cells; far-mover insertions keep the full gather (their new neighbours aren't in any candidate list).
+  void surgicalRepair(const Kokkos::View<int*, Mem>& wl, int n, const Kokkos::View<Real*, Mem>& pos) {
+    if (n <= 0) return;
+    auto W = wl; auto P = pos; auto rb = rebuilt; auto XR = xRef; auto Vv = vol;
+    auto EN = extraNbr; auto EC = extraCnt; constexpr int kCap = kExtraCap;
+    Store st = store;
+    const Real Lx = L[0], Ly = L[1], Lz = L[2];
+    const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
+    Kokkos::parallel_for("mt.surgical", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
+      const int i = W(s);
+      Cell c; c.initBox(Lx, Ly, Lz);
+      const Real sx = P(3 * i), sy = P(3 * i + 1), sz = P(3 * i + 2);
+      const int npi = st.np(i);
+      for (int k = 6; k < npi && !c.overflow; ++k) {  // stored neighbours, current positions
+        const int j = st.pnbr((size_t)i * MAXP + k);
+        if (j < 0) continue;
+        Real rx = P(3 * j) - sx, ry = P(3 * j + 1) - sy, rz = P(3 * j + 2) - sz;
+        rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
+        ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
+        rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
+        const Real nrm[3] = {rx, ry, rz};
+        c.clip(nrm, Real(0.5) * (rx * rx + ry * ry + rz * rz), j);
+      }
+      const int ne = EC(i) < kCap ? EC(i) : kCap;
+      for (int e = 0; e < ne && !c.overflow; ++e) {  // partner-discovered new neighbours
+        const int j = EN((size_t)i * kCap + e);
+        if (j < 0 || j == i) continue;
+        Real rx = P(3 * j) - sx, ry = P(3 * j + 1) - sy, rz = P(3 * j + 2) - sz;
+        rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
+        ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
+        rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
+        const Real nrm[3] = {rx, ry, rz};
+        c.clip(nrm, Real(0.5) * (rx * rx + ry * ry + rz * rz), j);
+      }
+      if (!c.overflow) { st.save(i, c); Vv(i) = c.volumePerVertex(); }
+      rb(i) = 1;
+      XR(3 * i) = sx; XR(3 * i + 1) = sy; XR(3 * i + 2) = sz;
+    });
+  }
+
+  /// Dense-cluster dilation (Phase 3): bin the flagged cells into the linear grid, then add every owned
+  /// cell whose 27-grid-cell neighbourhood holds > clusterNbhd flagged seeds to the Pass-1 mask. This
+  /// over-covers a local cascade in ONE regional gather instead of paying a kernel-launch per verify
+  /// iteration. Over-coverage is always safe (a gathered cell is just re-clipped correctly). Returns
+  /// true if it added any cell. Uses the linear grid index (independent of the grid's Morton ordering).
+  bool dilate(const TessGrid<Real>& grid, const Kokkos::View<Real*, Mem>& pos) {
+    const int dimx = grid.dimx, dimy = grid.dimy, dimz = grid.dimz;
+    const int ncell = dimx * dimy * dimz;
+    if ((int)cellFlag.extent(0) < ncell)
+      cellFlag = Kokkos::View<int*, Mem>(Kokkos::view_alloc(std::string("mt.cellFlag"),
+                                                            Kokkos::WithoutInitializing), ncell);
+    Kokkos::deep_copy(cellFlag, 0);
+    const Real icx = grid.icx, icy = grid.icy, icz = grid.icz;
+    auto P = pos; auto M = mask; auto CF = cellFlag;
+    Kokkos::parallel_for("mt.dilate.count", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
+      if (!M(i)) return;
+      const int gx = ((int)Kokkos::floor(P(3 * i) * icx) % dimx + dimx) % dimx;
+      const int gy = ((int)Kokkos::floor(P(3 * i + 1) * icy) % dimy + dimy) % dimy;
+      const int gz = ((int)Kokkos::floor(P(3 * i + 2) * icz) % dimz + dimz) % dimz;
+      Kokkos::atomic_inc(&CF(gx + gy * dimx + gz * dimx * dimy));
+    });
+    const int thr = clusterNbhd;
+    long added = 0;
+    Kokkos::parallel_reduce(
+        "mt.dilate.mark", Kokkos::RangePolicy<Exec>(0, nProc),
+        KOKKOS_LAMBDA(int i, long& a) {
+          if (M(i)) return;
+          const int gx = ((int)Kokkos::floor(P(3 * i) * icx) % dimx + dimx) % dimx;
+          const int gy = ((int)Kokkos::floor(P(3 * i + 1) * icy) % dimy + dimy) % dimy;
+          const int gz = ((int)Kokkos::floor(P(3 * i + 2) * icz) % dimz + dimz) % dimz;
+          int sum = 0;
+          for (int dz = -1; dz <= 1; ++dz)
+            for (int dy = -1; dy <= 1; ++dy)
+              for (int dx = -1; dx <= 1; ++dx) {
+                const int nx = (gx + dx + dimx) % dimx, ny = (gy + dy + dimy) % dimy, nz = (gz + dz + dimz) % dimz;
+                sum += CF(nx + ny * dimx + nz * dimx * dimy);
+              }
+          if (sum > thr) { M(i) = 1; ++a; }
+        },
+        added);
+    return added > 0;
+  }
+
   /// One moving-point update step. Updates store + vol in place from `pos`.
   RepairStats step(const Kokkos::View<Real*, Mem>& pos) {
     RepairStats s;
@@ -208,17 +360,45 @@ struct MovingTessellation {
                                            Kokkos::View<long*, Mem>());
     Kokkos::deep_copy(rebuilt, 0);
 
-    // Pass 1: detect (flagged ∪ partners ∪ skin-movers) and gather them. flagged-commons + their
-    // violated-plane partners (the gaining cells) fully cover an isolated flip — no Pass 2 for flips.
+    // Pass 1: detect (flagged ∪ partners ∪ skin-movers). flagged-commons + their violated-plane partners
+    // (the gaining cells) fully cover an isolated flip — no Pass 2 for flips.
     certify(pos, mask, mover, /*useSkin=*/true);
     int n1 = compact(mask, wl1);
+    s.pass1Raw = n1;
+
+    // Phase-3 adaptive gate (decided here, after the FREE certificate, before any gather):
+    //   high global churn  -> a full rebuild is cheaper than repairing this many cells;
+    //   dense local cluster -> dilate the Pass-1 set by a grid-cell buffer (one regional gather);
+    //   else (sparse)       -> the two-pass repair below.
+    if (useGate && (double)n1 / (nProc > 0 ? nProc : 1) > churnThresh) {
+      rebuild(pos);
+      s.route = RepairStats::kRebuildGate;
+      return s;
+    }
+    if (useGate && useDilation && n1 > 0 && (double)n1 / nProc < dilateMaxChurn && dilate(grid, pos)) {
+      n1 = compact(mask, wl1);
+      s.route = RepairStats::kDilated;
+    }
     s.pass1 = n1;
-    gatherSet(grid, wl1, n1, pos);
+    // Pass 1 gather. Phase 4: FLIP cells (flagged non-movers) are repaired SURGICALLY (re-clip known
+    // candidates, no grid gather); far-mover insertions keep the full gather (their new neighbours are
+    // in no candidate list). Default (surgical off): the whole Pass-1 set goes through the full gather.
+    int nM = compact(mover, wlM);
+    if (surgical) {
+      auto Msk = mask; auto Mv = mover; auto M2 = mask2;
+      Kokkos::parallel_for("mt.surgMask", Kokkos::RangePolicy<Exec>(0, nProc),
+                           KOKKOS_LAMBDA(int i) { M2(i) = (Msk(i) && !Mv(i)) ? 1 : 0; });
+      int nS = compact(mask2, wl1);  // wl1's Pass-1 list no longer needed -> reuse for the flip list
+      s.surgical = nS;
+      surgicalRepair(wl1, nS, pos);     // flips: no gather
+      gatherSet(grid, wlM, nM, pos);    // movers: full gather
+    } else {
+      gatherSet(grid, wl1, n1, pos);
+    }
 
     // Pass 2: ONLY the new face-neighbours of the skin-MOVERS (the insertion side §1c — those neighbours
     // never flag and are never partners). Expanding every Pass-1 cell would re-clip ~all neighbours of
     // every flip cluster for nothing; movers are the only cells whose rebuild reveals an unflagged gainer.
-    int nM = compact(mover, wlM);
     collectNewNbrs(wlM, nM, mask2);
     int n2 = compact(mask2, wl2);
     s.pass2 = n2;

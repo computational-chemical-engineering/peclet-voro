@@ -458,6 +458,8 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
                                                  : (sizeof(real_t) == 4 ? 2e-3 : 1e-4);
   const real_t tol = (real_t)tolMult * spacing;
   const real_t skin = real_t(0.25) * spacing;  // repair Verlet skin (per-cell, reset on gather)
+  const bool surgical = std::getenv("VORF_SURGICAL") != nullptr;  // Phase-4 single-face surgical repair
+  if (surgical) std::printf("[Phase 4] single-face surgical repair ENABLED (VORF_SURGICAL)\n");
   const real_t dt = 1;
 
   Kokkos::View<real_t*, Mem> x0d("x0", 3 * N), veld("vel", 3 * N), pos("pos", 3 * N);
@@ -484,8 +486,8 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
 
   const std::vector<real_t> disps = {real_t(0.001), real_t(0.002), real_t(0.005),
                                      real_t(0.01),  real_t(0.02),  real_t(0.05)};
-  std::printf("%-12s %6s %9s %9s %8s %7s %7s %7s %8s %9s %10s\n", "dist", "disp", "cold_ms", "repair_ms",
-              "speedup", "p1%", "p2%", "extra%", "fellbk%", "missedNbr", "maxRelV");
+  std::printf("%-12s %6s %9s %9s %8s %7s %6s %7s %8s %9s %10s\n", "dist", "disp", "cold_ms", "repair_ms",
+              "speedup", "p1%", "surg%", "gate%", "fellbk%", "missedNbr", "maxRelV");
 
   long exactFail = 0;
   for (int dist = 0; dist < kNumDist; ++dist) {
@@ -514,15 +516,18 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
       // --- repair timing over the same trajectory ---
       vor::device::MovingTessellation<real_t, CMAXP, CMAXT> mt;
       mt.alloc(N, Larr, tol, skin, 4, N);
+      mt.surgical = surgical;
       advance(scale, 0);
       mt.rebuild(pos);
-      double tRep = 0; long p1 = 0, p2 = 0, ex = 0, fb = 0;
+      double tRep = 0; long p1 = 0, p2 = 0, ex = 0, fb = 0, gate = 0, surg = 0;
       for (int s = 1; s <= nSteps; ++s) {
         advance(scale, s);
         Kokkos::fence(); auto a = clk::now();
         auto st = mt.step(pos);
         Kokkos::fence(); tRep += secs(a, clk::now());
         p1 += st.pass1; p2 += st.pass2; ex += st.extra; fb += st.fellBack ? 1 : 0;
+        gate += (st.route == vor::device::RepairStats::kRebuildGate) ? 1 : 0;
+        surg += st.surgical;
       }
       double maxRelV = 0; long missed = 0;
       exactness(mt, maxRelV, missed);
@@ -531,9 +536,9 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
       // speed. So the exactness gate catches real divergence (>1e-2), not tol-marginal accuracy.
       if (maxRelV > 1e-2) ++exactFail;
       const double coldMs = 1e3 * tCold / nSteps, repMs = 1e3 * tRep / nSteps;
-      std::printf("%-12s %6.3f %9.2f %9.2f %8.2f %7.1f %7.1f %7.1f %8.1f %9ld %10.2e\n", distName(dist),
+      std::printf("%-12s %6.3f %9.2f %9.2f %8.2f %7.1f %6.1f %7.1f %8.1f %9ld %10.2e\n", distName(dist),
                   (double)disp, coldMs, repMs, coldMs / repMs, 100.0 * p1 / ((double)nSteps * N),
-                  100.0 * p2 / ((double)nSteps * N), 100.0 * ex / ((double)nSteps * N),
+                  100.0 * surg / ((double)nSteps * N), 100.0 * gate / nSteps,
                   100.0 * fb / nSteps, missed, maxRelV);
     }
 
@@ -542,6 +547,7 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
       const real_t scale = real_t(0.002) * spacing;
       vor::device::MovingTessellation<real_t, CMAXP, CMAXT> mt;
       mt.alloc(N, Larr, tol, skin, 4, N);
+      mt.surgical = surgical;
       advance(scale, 0);
       mt.rebuild(pos);
       advance(scale, 1);
