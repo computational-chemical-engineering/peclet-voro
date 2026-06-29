@@ -30,13 +30,12 @@
 namespace vor {
 namespace device {
 
-/// Output bundle of a subset gather: the resident topology store + per-cell volume, addressed by
-/// ORIGINAL seed index (size N, only the requested subset is written). The status flags the rare
-/// overflow/incomplete cell exactly as the cold build does.
+/// Output bundle of a subset gather: the per-cell StatusBit mask, addressed by ORIGINAL seed index
+/// (size N, only the requested subset is written; the topology store + the caller's cellVol view are
+/// written in place). Flags the rare overflow/incomplete cell exactly as the cold build does.
 template <class Real>
 struct SubsetGatherResult {
   Kokkos::View<int*, tpx::MemSpace> status;  // N : per-cell StatusBit mask (subset entries written)
-  Kokkos::View<Real*, tpx::MemSpace> cellVol;  // N : volume (subset entries written)
 };
 
 /**
@@ -48,6 +47,7 @@ struct SubsetGatherResult {
  * @param nSubset  number of indices to process.
  * @param outNp,outNt,outPnbr,outTri  topology store views, each sized as in TopologyStore::alloc(N)
  *                 (N, N, N*MAXP, N*MAXT) with MAXP=CellBuilder::kMaxP, MAXT=CellBuilder::kMaxT.
+ * @param cellVol  N-sized view; the volume of each rebuilt cell is written at its original index.
  * @param withForceGeom  if true also compute the per-facet area/dV/connector (kept for parity with
  *                 the cold build); the facet CSR itself is not published here (the store is). Default
  *                 false: the store + volume are what Phase-1 needs (geometry is re-derived on reload).
@@ -59,6 +59,7 @@ SubsetGatherResult<Real> subsetGather(const TessGrid<Real>& grid,
                                       const Kokkos::View<int*, tpx::MemSpace>& outNt,
                                       const Kokkos::View<int*, tpx::MemSpace>& outPnbr,
                                       const Kokkos::View<unsigned*, tpx::MemSpace>& outTri,
+                                      const Kokkos::View<Real*, tpx::MemSpace>& cellVol,
                                       Sdf sdf = {}, bool withForceGeom = false) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
@@ -70,7 +71,6 @@ SubsetGatherResult<Real> subsetGather(const TessGrid<Real>& grid,
 
   SubsetGatherResult<Real> res;
   res.status = Kokkos::View<int*, MemSpace>("subset.status", N);   // zero-init (unwritten = kOk)
-  res.cellVol = Kokkos::View<Real*, MemSpace>("subset.cellVol", N);  // zero-init
 
   // Throwaway facet over-buffer: buildCell reserves a contiguous CSR range per cell and writes the
   // neighbour id (+ optional geometry) there. Sized for the subset (mean ~15.5 faces/cell + headroom);
@@ -91,7 +91,7 @@ SubsetGatherResult<Real> subsetGather(const TessGrid<Real>& grid,
 
   Builder op{
       grid.binned, grid.posSorted, noW, grid.gidSorted, grid.cellStart, grid.wlOff, grid.wlRmin,
-      res.status, res.cellVol, facetCount, cellFacetBase, oNbr, oArea, oDV, oConn, facetCursor,
+      res.status, cellVol, facetCount, cellFacetBase, oNbr, oArea, oDV, oConn, facetCursor,
       grid.icx, grid.icy, grid.icz, grid.Lx, grid.Ly, grid.Lz, grid.minCsz,
       grid.dimx, grid.dimy, grid.dimz, grid.sw, grid.nOff, grid.wlS,
       grid.useMorton, grid.haveGid, withForceGeom, facetCap, sdf,

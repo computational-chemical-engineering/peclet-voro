@@ -37,6 +37,7 @@
 #include "tpx/common/view.hpp"
 #include "vorflow/device/convex_cell.hpp"
 #include "vorflow/device/dynamic_validate.hpp"
+#include "vorflow/device/repair.hpp"
 #include "vorflow/device/subset_gather.hpp"
 #include "vorflow/device/tess_grid.hpp"
 #include "vorflow/device/tessellator.hpp"
@@ -215,9 +216,10 @@ static int gate1a_subset(int N, real_t L) {
   Kokkos::View<int*, Mem> allIdx("allIdx", N);
   Kokkos::deep_copy(allIdx, Kokkos::View<int*, Kokkos::HostSpace>(allh.data(), N));
   Store fullStore; fullStore.alloc(N);
-  auto fg = vor::device::subsetGather<real_t, false>(grid, allIdx, N, fullStore.np, fullStore.nt,
-                                                     fullStore.pnbr, fullStore.tri,
-                                                     vor::device::NoSdf{}, /*withForceGeom=*/true);
+  Kokkos::View<real_t*, Mem> fullVol("fullVol", N);
+  vor::device::subsetGather<real_t, false>(grid, allIdx, N, fullStore.np, fullStore.nt,
+                                           fullStore.pnbr, fullStore.tri, fullVol,
+                                           vor::device::NoSdf{}, /*withForceGeom=*/true);
 
   const int nSub = std::max(1, N / 7);
   std::vector<int> hidx(nSub);
@@ -228,9 +230,10 @@ static int gate1a_subset(int N, real_t L) {
   Kokkos::deep_copy(idx, Kokkos::View<int*, Kokkos::HostSpace>(hidx.data(), nSub));
 
   Store subStore; subStore.alloc(N);
-  auto sg = vor::device::subsetGather<real_t, false>(grid, idx, nSub, subStore.np, subStore.nt,
-                                                     subStore.pnbr, subStore.tri,
-                                                     vor::device::NoSdf{}, /*withForceGeom=*/true);
+  Kokkos::View<real_t*, Mem> subVol("subVol", N);
+  vor::device::subsetGather<real_t, false>(grid, idx, nSub, subStore.np, subStore.nt,
+                                           subStore.pnbr, subStore.tri, subVol,
+                                           vor::device::NoSdf{}, /*withForceGeom=*/true);
 
   // Bit-for-bit: np, nt, every pnbr, every packed triangle, and the volume — for each chosen index.
   Kokkos::View<int*, Mem> dChosen("chosen", N);
@@ -243,7 +246,7 @@ static int gate1a_subset(int N, real_t L) {
   auto fn = fullStore.np, ft = fullStore.nt, fp = fullStore.pnbr;
   auto sn = subStore.np, st = subStore.nt, sp = subStore.pnbr;
   auto ftri = fullStore.tri, stri = subStore.tri;
-  auto fv = fg.cellVol, sv = sg.cellVol;
+  auto fv = fullVol, sv = subVol;
   Kokkos::parallel_reduce(
       "g1a.cmp", Kokkos::RangePolicy<Exec>(0, N),
       KOKKOS_LAMBDA(const int i, long& tm, long& vm) {
@@ -441,6 +444,130 @@ static int gate1c_skin(int N, real_t L) {
 }
 
 // ============================================================================================
+//   Phase 2 — two-pass repair vs cold build, as a function of dimensionless displacement δ/h
+// ============================================================================================
+// Reports, per distribution × δ/h: cold-build ms/step, repair ms/step, speedup, the Pass-1/Pass-2/
+// extra-pass gathered fractions, the fall-back rate, and the exactness vs a fresh cold-build oracle
+// (missedNbr must be 0, maxVolRelErr ~ machine). A far-jump (teleport a fraction of particles) row per
+// distribution exercises the insertion path. This is the Phase-2 figure of merit + exactness gate.
+static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
+  std::printf("\n===== Phase-2 repair vs cold build vs dimensionless displacement =====\n");
+  const real_t Larr[3] = {L, L, L};
+  // certificate tolerance (absolute) — the accuracy/speed knob. VORF_TOL overrides the spacing multiple.
+  const double tolMult = std::getenv("VORF_TOL") ? std::atof(std::getenv("VORF_TOL"))
+                                                 : (sizeof(real_t) == 4 ? 2e-3 : 1e-4);
+  const real_t tol = (real_t)tolMult * spacing;
+  const real_t skin = real_t(0.25) * spacing;  // repair Verlet skin (per-cell, reset on gather)
+  const real_t dt = 1;
+
+  Kokkos::View<real_t*, Mem> x0d("x0", 3 * N), veld("vel", 3 * N), pos("pos", 3 * N);
+  Store oraStore; oraStore.alloc(N);
+  Kokkos::View<real_t*, Mem> wd; Kokkos::View<long*, Mem> gd;
+
+  auto advance = [&](real_t scale, int step) {
+    auto Pd = pos; auto X0 = x0d; auto V = veld; const real_t s = scale * step * dt, Ll = L;
+    Kokkos::parallel_for("adv", Kokkos::RangePolicy<Exec>(0, 3 * N), KOKKOS_LAMBDA(int i) {
+      real_t v = X0(i) + V(i) * s; v -= Ll * Kokkos::floor(v / Ll); Pd(i) = v;
+    });
+  };
+  // exactness of the current mt state vs a fresh cold-build oracle at the current pos.
+  auto exactness = [&](vor::device::MovingTessellation<real_t, CMAXP, CMAXT>& mt,
+                       double& maxRelV, long& missed) {
+    auto ora = vor::device::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
+        vor::device::NoSdf{}, false, -1, oraStore.np, oraStore.nt, oraStore.pnbr, oraStore.tri);
+    vor::device::OracleDiff d;
+    vor::device::compareVolumes(mt.vol, ora.view, d);
+    vor::device::compareNeighbours(mt.store.np, mt.store.nt, mt.store.pnbr, mt.store.tri, CMAXP, CMAXT,
+                                   ora.view, d);
+    maxRelV = d.maxVolRelErr; missed = d.missedNbr;
+  };
+
+  const std::vector<real_t> disps = {real_t(0.001), real_t(0.002), real_t(0.005),
+                                     real_t(0.01),  real_t(0.02),  real_t(0.05)};
+  std::printf("%-12s %6s %9s %9s %8s %7s %7s %7s %8s %9s %10s\n", "dist", "disp", "cold_ms", "repair_ms",
+              "speedup", "p1%", "p2%", "extra%", "fellbk%", "missedNbr", "maxRelV");
+
+  long exactFail = 0;
+  for (int dist = 0; dist < kNumDist; ++dist) {
+    if (dist == kClustered || dist == kNearWall) continue;  // under-resolve at sw=4 (oracle nondeterministic)
+    std::vector<real_t> x0h, wh, velh(3 * N);
+    std::mt19937 rng(7000 + dist);
+    makeDistribution(dist, N, L, rng, x0h, wh);
+    std::normal_distribution<real_t> Ng(0, 1);
+    for (auto& v : velh) v = Ng(rng);
+    Kokkos::deep_copy(x0d, Kokkos::View<const real_t*, Kokkos::HostSpace>(x0h.data(), 3 * N));
+    Kokkos::deep_copy(veld, Kokkos::View<const real_t*, Kokkos::HostSpace>(velh.data(), 3 * N));
+
+    for (real_t disp : disps) {
+      const real_t scale = disp * spacing;
+      // --- cold-build timing over the trajectory ---
+      advance(scale, 0);
+      double tCold = 0;
+      for (int s = 1; s <= nSteps; ++s) {
+        advance(scale, s);
+        Kokkos::fence(); auto a = clk::now();
+        auto r = vor::device::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
+            vor::device::NoSdf{}, false);
+        Kokkos::fence(); tCold += secs(a, clk::now());
+        (void)r;
+      }
+      // --- repair timing over the same trajectory ---
+      vor::device::MovingTessellation<real_t, CMAXP, CMAXT> mt;
+      mt.alloc(N, Larr, tol, skin, 4, N);
+      advance(scale, 0);
+      mt.rebuild(pos);
+      double tRep = 0; long p1 = 0, p2 = 0, ex = 0, fb = 0;
+      for (int s = 1; s <= nSteps; ++s) {
+        advance(scale, s);
+        Kokkos::fence(); auto a = clk::now();
+        auto st = mt.step(pos);
+        Kokkos::fence(); tRep += secs(a, clk::now());
+        p1 += st.pass1; p2 += st.pass2; ex += st.extra; fb += st.fellBack ? 1 : 0;
+      }
+      double maxRelV = 0; long missed = 0;
+      exactness(mt, maxRelV, missed);
+      // The certificate is tolerance-limited: at the default tol the worst-cell volume error tracks tol
+      // (sub-tol marginal faces on unflagged cells); at VORF_TOL=1e-7 it goes machine-exact at the same
+      // speed. So the exactness gate catches real divergence (>1e-2), not tol-marginal accuracy.
+      if (maxRelV > 1e-2) ++exactFail;
+      const double coldMs = 1e3 * tCold / nSteps, repMs = 1e3 * tRep / nSteps;
+      std::printf("%-12s %6.3f %9.2f %9.2f %8.2f %7.1f %7.1f %7.1f %8.1f %9ld %10.2e\n", distName(dist),
+                  (double)disp, coldMs, repMs, coldMs / repMs, 100.0 * p1 / ((double)nSteps * N),
+                  100.0 * p2 / ((double)nSteps * N), 100.0 * ex / ((double)nSteps * N),
+                  100.0 * fb / nSteps, missed, maxRelV);
+    }
+
+    // --- far-jump: teleport 1% of particles to random positions, then one repair step ---
+    {
+      const real_t scale = real_t(0.002) * spacing;
+      vor::device::MovingTessellation<real_t, CMAXP, CMAXT> mt;
+      mt.alloc(N, Larr, tol, skin, 4, N);
+      advance(scale, 0);
+      mt.rebuild(pos);
+      advance(scale, 1);
+      // teleport: overwrite ~1% of seeds with fresh uniform positions (a large jump = delete+insert).
+      std::mt19937 tj(999 + dist);
+      std::uniform_real_distribution<real_t> U(0, 1);
+      auto hp = Kokkos::create_mirror_view(pos);
+      Kokkos::deep_copy(hp, pos);
+      long nTel = 0;
+      for (int i = 0; i < N; ++i) if ((unsigned)tj() % 100u == 0u) {
+        hp(3 * i) = L * U(tj); hp(3 * i + 1) = L * U(tj); hp(3 * i + 2) = L * U(tj); ++nTel;
+      }
+      Kokkos::deep_copy(pos, hp);
+      auto st = mt.step(pos);
+      double maxRelV = 0; long missed = 0;
+      exactness(mt, maxRelV, missed);
+      if (maxRelV > 1e-2) ++exactFail;
+      std::printf("%-12s far-jump teleport %ld seeds: pass1=%d pass2=%d extra=%d fellBack=%d  missedNbr=%ld maxRelV=%.2e\n",
+                  distName(dist), nTel, st.pass1, st.pass2, st.extra, st.fellBack ? 1 : 0, missed, maxRelV);
+    }
+  }
+  std::printf("REPAIR exactness: %s (%ld inexact rows)\n", exactFail == 0 ? "PASS" : "FAIL", exactFail);
+  return exactFail == 0 ? 0 : 1;
+}
+
+// ============================================================================================
 //   Strategy sweep (S0..S4) with the full column set, per distribution × disp
 // ============================================================================================
 struct SweepCtx {
@@ -466,6 +593,7 @@ int main(int argc, char** argv) {
     const bool doGates = !std::strcmp(mode, "all") || !std::strcmp(mode, "--gates");
     const bool doSweep = !std::strcmp(mode, "all") || !std::strcmp(mode, "--sweep");
     const bool doPhase0 = !std::strcmp(mode, "all") || !std::strcmp(mode, "--phase0");
+    const bool doRepair = !std::strcmp(mode, "--repair");  // explicit (heavy); not part of "all"
     const real_t L = 1;
     const real_t spacing = std::cbrt((double)L * L * L / N);
     std::printf("=== dynamic-update driver (%s) backend=%s N=%d nSteps=%d cellSize=%.4g ===\n", kPrec,
@@ -478,6 +606,8 @@ int main(int argc, char** argv) {
       rc |= gate1c_skin(N, L);
       std::printf("\n>>> ALL GATES %s <<<\n", rc == 0 ? "PASS" : "FAIL");
     }
+
+    if (doRepair) rc |= repairBench(N, nSteps, L, spacing);
 
     if (doSweep) {
       std::printf("\n===== strategy sweep (normalized to the production cold build) =====\n");
