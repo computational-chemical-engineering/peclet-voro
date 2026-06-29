@@ -52,6 +52,11 @@ class ExplicitEulerDevice {
     visc_ = visc;
     bulkVisc_ = bulkVisc;
     viscous_ = true;
+    // Persistent viscous scratch (9*N each), allocated once here rather than every buildAndForce (E4).
+    viscGrad_ = DView(Kokkos::view_alloc("visc.grad", Kokkos::WithoutInitializing),
+                      static_cast<std::size_t>(9) * N_);
+    viscStress_ = DView(Kokkos::view_alloc("visc.stress", Kokkos::WithoutInitializing),
+                        static_cast<std::size_t>(9) * N_);
     buildAndForce();
   }
 
@@ -125,14 +130,21 @@ class ExplicitEulerDevice {
  private:
   void buildAndForce() {
     const Real Larr[3] = {L_[0], L_[1], L_[2]};
-    auto res = device::buildTessellation<Real, false>(pos_, w_, N_, Larr);
+    // Pass the persistent worklist cache (last arg) so the step-invariant worklist table is built once
+    // and reused across steps (E3). All intermediate args are the buildTessellation defaults; the Sdf
+    // template arg is named explicitly because a defaulted `{}` Sdf cannot be deduced.
+    auto res = device::buildTessellation<Real, false, device::NoSdf>(
+        pos_, w_, N_, Larr, /*sw=*/4, /*densityCount=*/-1, /*gid=*/{}, device::NoSdf{},
+        /*withForceGeom=*/true, /*nBuild=*/-1, /*outNp=*/{}, /*outNt=*/{}, /*outPnbr=*/{},
+        /*outTri=*/{}, /*outCand=*/{}, /*outCandCnt=*/{}, /*candCap=*/0, &wlCache_);
     view_ = res.view;
     aux_ = device::buildAuxMaps(view_);
     volAvg_ = (L_[0] * L_[1] * L_[2]) / static_cast<Real>(N_);
     Kokkos::deep_copy(force_, Real(0));
     eulerPressureForce(view_, aux_.recip, aux_.cellOfFacet, pressEq_, volAvg_, force_);
     if (viscous_)
-      viscousForce(view_, aux_.recip, aux_.cellOfFacet, vel_, visc_, bulkVisc_, force_);
+      viscousForce(view_, aux_.recip, aux_.cellOfFacet, vel_, visc_, bulkVisc_, force_, viscGrad_,
+                   viscStress_);
   }
 
   int N_ = 0;
@@ -140,6 +152,8 @@ class ExplicitEulerDevice {
   Real pressEq_ = 0, volAvg_ = 0, time_ = 0;
   bool viscous_ = false;
   DView pos_, vel_, invMass_, w_, force_, visc_, bulkVisc_;
+  DView viscGrad_, viscStress_;  // persistent 9*N viscous scratch (E4)
+  device::WorklistCache<Real> wlCache_;  // step-invariant worklist table, reused across steps (E3)
   TessellationView<Real> view_;
   device::AuxMaps<Real> aux_;
 };

@@ -112,8 +112,25 @@ void addViscousForce(const TessellationView<Real>& view,
       });
 }
 
-/// Full viscous force: gradient -> stress -> gather (ADDED to force). Allocates
-/// two 9*N scratch Views.
+/// Full viscous force: gradient -> stress -> gather (ADDED to force), into caller-provided
+/// `grad`/`stress` scratch (each ≥ 9*N). Lets a stepper hoist the scratch out of the per-step path
+/// (E4) instead of reallocating two 9*N Views every call.
+template <class Real>
+void viscousForce(const TessellationView<Real>& view,
+                  const Kokkos::View<int*, tpx::MemSpace>& recip,
+                  const Kokkos::View<int*, tpx::MemSpace>& cellOfFacet,
+                  const Kokkos::View<Real*, tpx::MemSpace>& vel,
+                  const Kokkos::View<Real*, tpx::MemSpace>& visc,
+                  const Kokkos::View<Real*, tpx::MemSpace>& bulkVisc,
+                  const Kokkos::View<Real*, tpx::MemSpace>& force,
+                  const Kokkos::View<Real*, tpx::MemSpace>& grad,
+                  const Kokkos::View<Real*, tpx::MemSpace>& stress) {
+  velocityGradient(view, recip, cellOfFacet, vel, grad);
+  viscousStress(grad, visc, bulkVisc, stress);
+  addViscousForce(view, stress, force);
+}
+
+/// Convenience overload that allocates the two 9*N scratch Views itself (tests / one-shot callers).
 template <class Real>
 void viscousForce(const TessellationView<Real>& view,
                   const Kokkos::View<int*, tpx::MemSpace>& recip,
@@ -125,9 +142,7 @@ void viscousForce(const TessellationView<Real>& view,
   const int N = view.numCells();
   Kokkos::View<Real*, tpx::MemSpace> grad("visc.grad", (size_t)9 * N);
   Kokkos::View<Real*, tpx::MemSpace> stress("visc.stress", (size_t)9 * N);
-  velocityGradient(view, recip, cellOfFacet, vel, grad);
-  viscousStress(grad, visc, bulkVisc, stress);
-  addViscousForce(view, stress, force);
+  viscousForce(view, recip, cellOfFacet, vel, visc, bulkVisc, force, grad, stress);
 }
 
 }  // namespace physics

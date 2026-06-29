@@ -71,16 +71,38 @@ struct TessGrid {
   bool useMorton = false, haveGid = false;
 };
 
+/// Cache for the step-invariant presorted worklist table (E3). The table depends only on the grid
+/// dimensions, the search width `sw`, and the cell sizes `csz` — none of which change as the seeds
+/// move — so a stepper that rebuilds the tessellation every step can reuse it instead of redoing the
+/// host std::sort + two H2D copies each time. Held by value in the simulation (Views are
+/// reference-counted handles); passed by pointer into buildTessGrid/buildTessellation. Holding the
+/// Views in the owning object (not a function-local static) keeps them freed before Kokkos::finalize.
+template <class Real>
+struct WorklistCache {
+  Kokkos::View<int*, tpx::MemSpace> wlOff;
+  Kokkos::View<Real*, tpx::MemSpace> wlRmin;
+  int nOff = 0, wlS = 0, dimx = -1, dimy = -1, dimz = -1, sw = -1;
+  Real cszx = 0, cszy = 0, cszz = 0;
+  bool valid = false;
+  bool matches(int dx, int dy, int dz, int s, Real cx, Real cy, Real cz) const {
+    return valid && dimx == dx && dimy == dy && dimz == dz && sw == s && cszx == cx &&
+           cszy == cy && cszz == cz;
+  }
+};
+
 /**
  * Build the counting-sort grid + worklist for the Voronoi gather (the first half of the old
  * buildTessellation, unchanged). `Weighted` only affects the grid density (Power keeps 1 seed/cell;
  * unweighted host uses 2/cell for cache locality). See buildTessellation for the argument semantics.
+ * `wlc` (optional) reuses/fills the step-invariant worklist table across calls (E3); nullptr rebuilds
+ * it every call (the original behaviour, byte-for-byte).
  */
 template <class Real, bool Weighted>
 TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
                              const Kokkos::View<Real*, tpx::MemSpace>& weight, int N,
                              const Real L[3], int sw = 4, int densityCount = -1,
-                             Kokkos::View<long*, tpx::MemSpace> gid = {}) {
+                             Kokkos::View<long*, tpx::MemSpace> gid = {},
+                             WorklistCache<Real>* wlc = nullptr) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
   TessGrid<Real> grid;
@@ -251,6 +273,13 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
   const int nSub = wlS * wlS * wlS;
   grid.nOff = nOff;
   grid.wlS = wlS;
+  // E3: the worklist table is a pure function of (grid dims, sw, cell sizes). If the cache already
+  // holds it for this key, reuse the device Views and skip the host sort + two H2D copies entirely.
+  if (wlc && wlc->matches(grid.dimx, grid.dimy, grid.dimz, sw, csz[0], csz[1], csz[2])) {
+    grid.wlOff = wlc->wlOff;
+    grid.wlRmin = wlc->wlRmin;
+    return grid;
+  }
   Kokkos::View<int*, MemSpace> wlOff(view_alloc(std::string("wlOff"), WithoutInitializing),
                                      (size_t)nSub * nOff);
   Kokkos::View<Real*, MemSpace> wlRmin(view_alloc(std::string("wlRmin"), WithoutInitializing),
@@ -295,6 +324,20 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
   }
   grid.wlOff = wlOff;
   grid.wlRmin = wlRmin;
+  if (wlc) {  // populate the cache for subsequent same-key calls (E3)
+    wlc->wlOff = wlOff;
+    wlc->wlRmin = wlRmin;
+    wlc->nOff = nOff;
+    wlc->wlS = wlS;
+    wlc->dimx = grid.dimx;
+    wlc->dimy = grid.dimy;
+    wlc->dimz = grid.dimz;
+    wlc->sw = sw;
+    wlc->cszx = csz[0];
+    wlc->cszy = csz[1];
+    wlc->cszz = csz[2];
+    wlc->valid = true;
+  }
   return grid;
 }
 

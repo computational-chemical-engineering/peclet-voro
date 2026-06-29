@@ -49,6 +49,7 @@ class Sim {
   // Drop all Kokkos Views (so they free BEFORE Kokkos::finalize at shutdown).
   void release() {
     sim_ = vor::physics::ExplicitEulerDevice<real_t>{};
+    dmass_ = DView{};
     pos_.clear();
     vel_.clear();
     mass_.clear();
@@ -79,6 +80,7 @@ class Sim {
       invm[i] = real_t(1) / mass_[i];
     sim_.init(tpx::toDevice<real_t>(pos_, "pos"), tpx::toDevice<real_t>(vel_, "vel"),
               tpx::toDevice<real_t>(invm, "im"), L_, pressEq_);
+    dmass_ = tpx::toDevice<real_t>(mass_, "mass");  // resident; kinetic-energy reads it each call (E4b)
     if (!visc_.empty()) {
       if (bulk_.empty())
         bulk_.assign(N, 0.0);
@@ -90,46 +92,36 @@ class Sim {
 
   nb::ndarray<nb::numpy, real_t> get_positions() { return from3(sim_.positions()); }
   nb::ndarray<nb::numpy, real_t> get_velocities() { return from3(sim_.velocities()); }
-  real_t get_kinetic_energy() { return sim_.kineticEnergy(tpx::toDevice<real_t>(mass_, "m")); }
+  real_t get_kinetic_energy() { return sim_.kineticEnergy(dmass_); }
   real_t get_internal_energy() { return sim_.internalEnergy(); }
   real_t get_time() { return sim_.time(); }
 
   nb::ndarray<nb::numpy, real_t> get_volumes() {
-    auto v = Kokkos::create_mirror_view(sim_.view().cellVolume);
-    Kokkos::deep_copy(v, sim_.view().cellVolume);
     const std::size_t N = static_cast<std::size_t>(sim_.numParticles());
-    std::vector<real_t> out(N);
-    for (std::size_t i = 0; i < N; ++i) out[i] = v(i);
-    return tpx::python::vector_to_ndarray(std::move(out), {N}, {1});
+    auto cell = Kokkos::subview(sim_.view().cellVolume, Kokkos::make_pair(std::size_t(0), N));
+    return tpx::python::vector_to_ndarray(tpx::toVector(cell), {N}, {1});
   }
 
   nb::ndarray<nb::numpy, int> get_num_neighbors() {
     // Per-cell facet (neighbour) count is the explicit cellFacetCount view. NOTE: the device
     // cellFacetOffset is a per-cell *base* into the facet buffer in cell-finish order, NOT a CSR
     // prefix sum (see tessellation_view.hpp), so off(i+1)-off(i) is meaningless — read the count.
-    auto cnt = Kokkos::create_mirror_view(sim_.view().cellFacetCount);
-    Kokkos::deep_copy(cnt, sim_.view().cellFacetCount);
     const std::size_t N = static_cast<std::size_t>(sim_.numParticles());
-    std::vector<int> out(N);
-    for (std::size_t i = 0; i < N; ++i) out[i] = cnt(i);
-    return tpx::python::vector_to_ndarray(std::move(out), {N}, {1});
+    auto cnt = Kokkos::subview(sim_.view().cellFacetCount, Kokkos::make_pair(std::size_t(0), N));
+    return tpx::python::vector_to_ndarray(tpx::toVector(cnt), {N}, {1});
   }
 
  private:
-  // Flat (3N,) host-or-device view -> (N,3) float64 numpy array (host copy; matches the prior path).
+  // Flat (3N,) host-or-device view -> (N,3) float64 numpy array (single D2H, no host loop — S2a).
   static nb::ndarray<nb::numpy, real_t> from3(const DView& d) {
-    auto h = Kokkos::create_mirror_view(d);
-    Kokkos::deep_copy(h, d);
-    const std::size_t M = static_cast<std::size_t>(d.extent(0));
-    std::vector<real_t> out(M);
-    for (std::size_t i = 0; i < M; ++i) out[i] = h(i);
-    const std::size_t N = M / 3;
-    return tpx::python::vector_to_ndarray(std::move(out), {N, std::size_t(3)}, {3, 1});
+    const std::size_t N = static_cast<std::size_t>(d.extent(0)) / 3;
+    return tpx::python::vector_to_ndarray(tpx::toVector(d), {N, std::size_t(3)}, {3, 1});
   }
 
   std::array<real_t, 3> L_{1, 1, 1};
   real_t pressEq_ = 0;
   std::vector<real_t> pos_, vel_, mass_, visc_, bulk_;
+  DView dmass_;  // device-resident masses, uploaded once in init() (E4b)
   vor::physics::ExplicitEulerDevice<real_t> sim_;
 };
 

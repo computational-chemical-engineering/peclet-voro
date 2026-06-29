@@ -317,7 +317,7 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
                                           Kokkos::View<unsigned*, tpx::MemSpace> outTri = {},
                                           Kokkos::View<int*, tpx::MemSpace> outCand = {},
                                           Kokkos::View<int*, tpx::MemSpace> outCandCnt = {},
-                                          int candCap = 0) {
+                                          int candCap = 0, WorklistCache<Real>* wlc = nullptr) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
   // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin list only
@@ -339,7 +339,7 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   // Counting-sort grid + presorted worklist. Factored into buildTessGrid so the SAME grid backs
   // both this cold build and the moving-point subset gather (device/subset_gather.hpp); pure code
   // motion, so the cold-build output is byte-for-byte unchanged.
-  auto grid = buildTessGrid<Real, Weighted>(posFlat, weight, N, L, sw, densityCount, gid);
+  auto grid = buildTessGrid<Real, Weighted>(posFlat, weight, N, L, sw, densityCount, gid, wlc);
   const Real Lx = grid.Lx, Ly = grid.Ly, Lz = grid.Lz;
   const Real icx = grid.icx, icy = grid.icy, icz = grid.icz, minCsz = grid.minCsz;
   const int dimx = grid.dimx, dimy = grid.dimy, dimz = grid.dimz;
