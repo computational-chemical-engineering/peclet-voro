@@ -222,6 +222,31 @@ struct MovingTessellation {
         });
   }
 
+  /// Scoped re-certify: reeval + certificate over ONLY the `n` cells in `list` (refresh their vol), set
+  /// outMask(i)=1 for any inconsistent + OR-mark their partners. The verify uses this instead of a full
+  /// re-certify: after the gathers, every NON-gathered cell's reeval is bit-identical to the Pass-1
+  /// certify (its store + its neighbours' positions are unchanged), and every gained edge has BOTH
+  /// endpoints gathered (a flip's partner endpoints in Pass 1, a mover's new neighbours in Pass 2), so
+  /// only the gathered cells can differ — re-checking just them is provably equivalent to a full
+  /// re-certify at a fraction of the cost (this is what lets the small-displacement speedup rise instead
+  /// of being pinned by a second full-N reeval).
+  void certifyList(const Kokkos::View<Real*, Mem>& pos, const Kokkos::View<int*, Mem>& list, int n,
+                   const Kokkos::View<int*, Mem>& outMask) {
+    Kokkos::deep_copy(outMask, 0);
+    if (n <= 0) return;
+    auto P = pos; auto Vv = vol; auto M = outMask; Store st = store;
+    const Real Lx = L[0], Ly = L[1], Lz = L[2]; const Real tolL = tol; const int nP_ = nProc;
+    Kokkos::parallel_for("mt.certifyList", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
+      const int i = list(s);
+      Cell c; st.load(i, c, Lx, Ly, Lz);
+      c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
+      Vv(i) = c.volumePerVertex();
+      int partners[32]; int nP = 0;
+      if (!c.isSelfConsistent(tolL, partners, 32, nP)) M(i) = 1;
+      for (int q = 0; q < nP; ++q) if (partners[q] < nP_) Kokkos::atomic_exchange(&M(partners[q]), 1);
+    });
+  }
+
   /// Gather the `n` cells listed in `wl[0..n)` off `grid` (updating store + vol in place), mark them
   /// rebuilt, and RESET their Verlet reference to the current position (their neighbourhood is now
   /// fresh, so the skin/2 mover test for these cells restarts from here — proper per-cell Verlet).
@@ -366,6 +391,13 @@ struct MovingTessellation {
     int n1 = compact(mask, wl1);
     s.pass1Raw = n1;
 
+    // Small-displacement fast path: the certificate found every cell consistent and no skin-mover (n1
+    // counts flagged ∪ partners ∪ movers). By the §1 completeness argument a stale topology always
+    // flags some cell, so n1==0 ⇒ the stored topology is still Voronoi on the new positions — the
+    // re-eval already refreshed every volume, so publish with NO gather and NO verify pass. This is the
+    // "almost no cells invalidated" regime: the per-step cost collapses to one re-eval + the grid.
+    if (n1 == 0) return s;
+
     // Phase-3 adaptive gate (decided here, after the FREE certificate, before any gather):
     //   high global churn  -> a full rebuild is cheaper than repairing this many cells;
     //   dense local cluster -> dilate the Pass-1 set by a grid-cell buffer (one regional gather);
@@ -404,16 +436,18 @@ struct MovingTessellation {
     s.pass2 = n2;
     gatherSet(grid, wl2, n2, pos);
 
-    // Verify: re-run the certificate over all cells (no skin — movers already handled). Clean ⇒ publish;
-    // else gather the still-flagged ∪ partners (residual coupled flips) and re-verify, bounded.
+    // Verify (scoped): re-certify only the GATHERED cells (every non-gathered cell is provably unchanged
+    // — see certifyList). Clean ⇒ publish; else gather the still-flagged ∪ partners (residual coupled
+    // flips / tol-degenerate cells) and re-verify, bounded.
     for (int vp = 0; vp < verifyCap + 1; ++vp) {
-      certify(pos, mask, mover, /*useSkin=*/false);
-      int nv = compact(mask, wl1);
+      const int ng = compact(rebuilt, wl1);   // all cells gathered so far this step
+      certifyList(pos, wl1, ng, mask);
+      int nv = compact(mask, wl2);
       s.verifyPasses = vp + 1;
       if (nv == 0) return s;            // clean — done
       if (vp == verifyCap) break;       // out of budget — fall back
       s.extra += nv;
-      gatherSet(grid, wl1, nv, pos);
+      gatherSet(grid, wl2, nv, pos);
     }
 
     // Still dirty after the verify budget: cold rebuild (always exact). Rare; the data point that says

@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <random>
+#include <sstream>
 #include <vector>
 
 #include <Kokkos_Core.hpp>
@@ -116,7 +117,11 @@ int main(int argc, char** argv) {
       return std::sqrt(m2);
     };
 
-    const std::vector<real_t> disps = {real_t(0.001), real_t(0.002), real_t(0.005), real_t(0.01)};
+    std::vector<real_t> disps = {real_t(1e-4), real_t(2e-4), real_t(5e-4), real_t(1e-3),
+                                 real_t(2e-3), real_t(5e-3), real_t(1e-2)};
+    if (const char* e = std::getenv("VORF_DISPS")) {
+      disps.clear(); std::stringstream ss(e); double d; while (ss >> d) disps.push_back((real_t)d);
+    }
     if (rank == 0)
       std::printf("%6s %10s %10s %8s %8s %9s %9s %10s\n", "disp", "cold_ms", "repair_ms", "speedup",
                   "regath%", "p1%", "p2%", "maxRelV");

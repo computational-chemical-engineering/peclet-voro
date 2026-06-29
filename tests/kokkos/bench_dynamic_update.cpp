@@ -31,6 +31,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <random>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -484,14 +485,27 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
     maxRelV = d.maxVolRelErr; missed = d.missedNbr;
   };
 
-  const std::vector<real_t> disps = {real_t(0.001), real_t(0.002), real_t(0.005),
-                                     real_t(0.01),  real_t(0.02),  real_t(0.05)};
-  std::printf("%-12s %6s %9s %9s %8s %7s %6s %7s %8s %9s %10s\n", "dist", "disp", "cold_ms", "repair_ms",
-              "speedup", "p1%", "surg%", "gate%", "fellbk%", "missedNbr", "maxRelV");
+  // Fine displacement sweep starting VERY small (where almost no cell is invalidated -> the speedup
+  // ceiling) up to where two-pass repair loses to a rebuild. Override with VORF_DISPS="d1 d2 ...".
+  std::vector<real_t> disps = {real_t(1e-4), real_t(2e-4), real_t(5e-4), real_t(1e-3), real_t(2e-3),
+                               real_t(5e-3), real_t(1e-2), real_t(2e-2), real_t(5e-2)};
+  if (const char* e = std::getenv("VORF_DISPS")) {
+    disps.clear(); std::stringstream ss(e); double d; while (ss >> d) disps.push_back((real_t)d);
+  }
+  // VORF_NOGATE: disable the Phase-3 gate to measure the PURE two-pass gather across the whole range
+  // (so the high-δ/h tail shows the raw two-pass cost + p1/p2 fractions, not a routed rebuild).
+  const bool noGate = std::getenv("VORF_NOGATE") != nullptr;
+  // Distribution: default uniform Poisson (the canonical reference). VORF_DIST=poly adds polydisperse.
+  const bool allDist = std::getenv("VORF_ALLDIST") != nullptr;
+  std::printf("# backend=%s N=%d nSteps=%d gate=%s surgical=%s\n", Kokkos::DefaultExecutionSpace::name(),
+              N, nSteps, noGate ? "off" : "on", surgical ? "on" : "off");
+  std::printf("%-12s %9s %9s %9s %8s %8s %8s %7s %8s %9s %10s\n", "dist", "disp", "cold_ms", "repair_ms",
+              "speedup", "p1%", "p2%", "gate%", "fellbk%", "missedNbr", "maxRelV");
 
   long exactFail = 0;
   for (int dist = 0; dist < kNumDist; ++dist) {
     if (dist == kClustered || dist == kNearWall) continue;  // under-resolve at sw=4 (oracle nondeterministic)
+    if (!allDist && dist != kUniform) continue;  // default: uniform only (clean, device-comparable)
     std::vector<real_t> x0h, wh, velh(3 * N);
     std::mt19937 rng(7000 + dist);
     makeDistribution(dist, N, L, rng, x0h, wh);
@@ -517,6 +531,7 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
       vor::device::MovingTessellation<real_t, CMAXP, CMAXT> mt;
       mt.alloc(N, Larr, tol, skin, 4, N);
       mt.surgical = surgical;
+      mt.useGate = !noGate;
       advance(scale, 0);
       mt.rebuild(pos);
       double tRep = 0; long p1 = 0, p2 = 0, ex = 0, fb = 0, gate = 0, surg = 0;
@@ -536,9 +551,10 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
       // speed. So the exactness gate catches real divergence (>1e-2), not tol-marginal accuracy.
       if (maxRelV > 1e-2) ++exactFail;
       const double coldMs = 1e3 * tCold / nSteps, repMs = 1e3 * tRep / nSteps;
-      std::printf("%-12s %6.3f %9.2f %9.2f %8.2f %7.1f %6.1f %7.1f %8.1f %9ld %10.2e\n", distName(dist),
+      (void)surg;
+      std::printf("%-12s %9.4f %9.3f %9.3f %8.2f %8.3f %8.3f %7.1f %8.1f %9ld %10.2e\n", distName(dist),
                   (double)disp, coldMs, repMs, coldMs / repMs, 100.0 * p1 / ((double)nSteps * N),
-                  100.0 * surg / ((double)nSteps * N), 100.0 * gate / nSteps,
+                  100.0 * p2 / ((double)nSteps * N), 100.0 * gate / nSteps,
                   100.0 * fb / nSteps, missed, maxRelV);
     }
 
