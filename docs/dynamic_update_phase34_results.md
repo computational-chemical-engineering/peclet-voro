@@ -58,10 +58,43 @@ box, with **no grid gather**. Implemented behind `surgical` (env `VORF_SURGICAL`
    scatter covers flips where a common neighbour reports both gainers, but cannot guarantee completeness
    for every gain.
 
-The fix is exactly the structure the plan **parks**: a maintained 1-/2-ring candidate set
-(`ConnectivityArena`) would give surgical a complete, sorted candidate list — making it both fast and
-exact. Without it, on this clip-bound engine the gated two-pass gather (Phase 3) is the better
-production choice, and surgical stays off as the documented experiment.
+### Phase 4 retry — with a ConnectivityArena 2-ring candidate set (also a negative result)
+
+The natural fix is to feed surgical the **2-ring** (a cell's 1-ring ∪ its neighbours' 1-rings, read on
+demand from the resident store) instead of the stored∪partner set, since by the Delaunay property a
+flip's new neighbour is a neighbour-of-a-neighbour. Implemented and measured (`buildRing` +
+ring-based `surgicalRepair`). It does **not** rescue Phase 4 — three independent obstacles, now
+understood:
+
+1. **Gains are invisible to the certificate, so any *almost*-complete candidate set still compounds.**
+   The 2-ring contains the new neighbour *almost* always, not always (the Delaunay 2-ring property has
+   exceptions, and 2-ring membership is read from the *pre-step* store). A surgical cell that misses its
+   gain stays convex → the verify certificate can't flag it → the error persists in the store and
+   **compounds** (measured maxRelV grew to ~4e4 over a 10-step sweep — *worse* than the stored∪partner
+   set, since more cells are surgically touched). The only candidate source that is *guaranteed*
+   complete is the grid gather itself — which is the cold build. So an exact repair fundamentally needs
+   the gather; a candidate-re-clip cannot be made exact via the (gain-blind) verify.
+2. **Unsorted re-clip overflows the cell.** Re-clipping the ~60-candidate 2-ring in arbitrary order
+   commits *transient* planes (a plane that cuts when the cell is still large stays committed even after
+   later cuts make it redundant — `clip` never removes planes), so `ConvexCell`'s plane cap overflows
+   for ~2% of cells *at step 1* from an exact store. The cold build avoids this entirely with its
+   **precomputed distance-sorted worklist + security-radius early-out** (each committed plane is a real
+   contributor); the 2-ring has no such order.
+3. **Fixing (2) is GPU-hostile and still not faster.** Overflow-safety needs per-cell closest-first
+   ordering of ~60–128 candidates; a per-thread sort of that many entries blows up GPU local memory
+   (the grid gather sidesteps this with a *global* precomputed sorted worklist), and the 2-ring is not
+   smaller than the gather's candidate set — so even a correct sorted 2-ring re-clip would not beat the
+   SOTA grid gather. Measured (overflow-forced-to-gather variant): 2.05× vs the gated gather's 2.98× at
+   δ/h=0.001 — slower.
+
+**Conclusion (both attempts).** On this clip-bound `ConvexCell` engine, candidate-set surgical re-clip
+— with stored∪partner *or* the 2-ring — is a dead end: exactness requires the gather (the only complete
++ ordered candidate source), and re-clip is not faster than the heavily-optimized grid gather anyway.
+The only Phase-4 variant that could win is **true O(1) dual-triangle single-face surgery**
+(drop-one/insert-one on the dual triangulation, not re-clip-from-candidates) — which needs robust
+exact predicates (avenue G) to not silently corrupt topology, and is high-risk/out-of-scope. Phase 4
+stays parked; the production path is the Phase-3 gated two-pass gather (exact via the gather, never much
+slower than rebuild).
 
 ## Bottom line
 
