@@ -164,7 +164,15 @@ int main(int argc, char** argv) {
         advanceOwned(scale, s, owned);
         MPI_Barrier(MPI_COMM_WORLD);
         double t0 = MPI_Wtime();
-        if (maxOwnedDispFrom(owned, refPos) > real_t(0.5) * skin) {
+        // The re-gather vs refresh paths are BOTH collective (gather rebuilds the halo topology via NBX;
+        // refreshPositions forwards on the established topology) — every rank must take the SAME one or the
+        // two patterns mismatch and deadlock. The skin trip is a LOCAL test, so reduce it to a GLOBAL
+        // decision: if ANY rank tripped, ALL ranks re-gather. (This is the distributed-Verlet invariant;
+        // without it the run deadlocks at np>=4 once ranks diverge on the trip at larger displacement.)
+        int localTrip = (maxOwnedDispFrom(owned, refPos) > real_t(0.5) * skin) ? 1 : 0;
+        int anyTrip = 0;
+        MPI_Allreduce(&localTrip, &anyTrip, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+        if (anyTrip) {
           // skin trip: re-gather (re-establish topology) + cold rebuild — the distributed fallback.
           g = halo.gather(owned, ownedGid, ownedW, rcut);
           nComb = (int)g.pos.size();
