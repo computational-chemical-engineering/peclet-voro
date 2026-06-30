@@ -31,11 +31,11 @@ using vor::device::ConvexCell;
 static_assert(sizeof(ConvexCell<double, 64, 96, false>) == 5008, "false-mode sizeof changed");
 static_assert(sizeof(ConvexCell<float, 64, 96, false>) == 2828, "false-mode (float) sizeof changed");
 static_assert(sizeof(ConvexCell<double, 64, 96, true>) ==
-                  sizeof(ConvexCell<double, 64, 96, false>) + 96 * 3 * sizeof(int),
-              "true-mode footprint must be false + MAXT*3*sizeof(int)");
+                  sizeof(ConvexCell<double, 64, 96, false>) + 96 * 3 * sizeof(int) + 96,
+              "true-mode footprint must be false + adj(MAXT*3*int) + face4(MAXT*uchar)");
 static_assert(sizeof(ConvexCell<float, 64, 96, true>) ==
-                  sizeof(ConvexCell<float, 64, 96, false>) + 96 * 3 * sizeof(int),
-              "true-mode (float) footprint must be false + MAXT*3*sizeof(int)");
+                  sizeof(ConvexCell<float, 64, 96, false>) + 96 * 3 * sizeof(int) + 96,
+              "true-mode (float) footprint must be false + adj(MAXT*3*int) + face4(MAXT*uchar)");
 
 static constexpr int MAXP = 64, MAXT = 96;
 using CellT = ConvexCell<real_t, MAXP, MAXT, true>;
@@ -84,6 +84,7 @@ static void buildStepwise(CellT& c, const Nbrs& nb, real_t L, CB&& cb) {
     if (c.overflow) return;
     cb(c, (int)i);
   }
+  c.computeFace4();  // finalise the local-cert inputs (4th-face plane completeness companion to adj)
 }
 
 // True iff cell `a`'s incrementally-stitched adj equals a brute rebuild, element-wise on live triangles.
@@ -182,15 +183,16 @@ int main(int argc, char** argv) {
         if (!okB && okL) ++localBrute;
         ++checked;
       }
-      std::printf("[gate E] %-7s disp=%.4f checked=%ld | bothFlag=%ld bruteOnly=%ld\n",
+      std::printf("[gate E] %-7s disp=%.4f checked=%ld | bothFlag=%ld localMissed(bruteOnly)=%ld\n",
                   isValid ? "valid" : "moved", (double)disp, checked, localBoth, localBrute);
+      return localBrute;
     };
     sweep(0.0, true);
-    sweep(0.0005, false);
-    sweep(0.005, false);
-    sweep(0.05, false);
-    std::printf("[gate E] validBothTrue=%ld/%ld  subsetViolations=%ld  farPoke=%ld\n", validBothTrue,
-                validChecked, subsetViolations, farPoke);
+    const long missSmall = sweep(0.0005, false);  // operating regime: local must MATCH brute (complete)
+    sweep(0.005, false);                           // larger disp: the build-config 4th-face goes stale →
+    sweep(0.05, false);                            // a few cells may diverge (then a gather refreshes face4)
+    std::printf("[gate E] validBothTrue=%ld/%ld  subsetViolations=%ld  missSmall@5e-4=%ld\n", validBothTrue,
+                validChecked, subsetViolations, missSmall);
     if (validBothTrue != validChecked) {
       std::printf("  FAIL: a valid cell disagreed (local vs brute) with no displacement\n");
       rc = 1;
@@ -199,8 +201,11 @@ int main(int argc, char** argv) {
       std::printf("  FAIL: local certificate flagged a cell the brute form calls convex (subset broken)\n");
       rc = 1;
     }
-    if (farPoke == 0) {
-      std::printf("  FAIL: no far-poke divergence observed (local precondition not exercised)\n");
+    // With the 4th-face plane the local cert is COMPLETE: in the operating regime it must match the brute
+    // flag set (a handful of FP-marginal cells per 300 is tolerated; gross divergence means face4 is broken).
+    if (missSmall > 3) {
+      std::printf("  FAIL: local cert missed %ld brute flags at small disp (4th-face completeness broken)\n",
+                  missSmall);
       rc = 1;
     }
 

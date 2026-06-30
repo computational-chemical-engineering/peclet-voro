@@ -112,17 +112,11 @@ struct MovingTessellation {
                              ///< incrementally (TrackAdj clip + outAdj); a cold buildTessellation does NOT
                              ///< emit adj, so it clears this and maybeBuildAdj repopulates lazily (skipped
                              ///< on a gate-rebuild so a sustained high-churn regime stays on the brute cert).
-  bool useLocalNow = false;  ///< this step's certify uses the local cert (= localCert && adjFresh && !farStep)
-  Real certDispLimit = 0;    ///< per-step max-displacement above which the local cert is invalid (it can
-                             ///< miss a far-poke: a non-adjacent plane crossing a vertex — §5b). Set in
-                             ///< alloc to a fraction of the mean spacing; a step exceeding it falls back to
-                             ///< the complete brute certificate (also covers teleports). Exact + keeps the
-                             ///< local fast path in the small-per-step-displacement regime real CFD lives in.
+  bool useLocalNow = false;  ///< this step's certify uses the local cert (= localCert && adjFresh)
 
   Store store;
   Kokkos::View<Real*, Mem> vol;   // N : cell volumes (the published geometry scalar)
   Kokkos::View<Real*, Mem> xRef;  // 3N : positions at the last (re)build (Verlet reference)
-  Kokkos::View<Real*, Mem> xPrev; // 3N : positions at the PREVIOUS step (per-step displacement gate)
   // scratch
   Kokkos::View<int*, Mem> mask, mask2, mover, rebuilt, wl1, wl2, wlM;
   Kokkos::View<int*, Mem> cellFlag;        // per linear grid-cell flagged-seed count (dilation)
@@ -143,12 +137,6 @@ struct MovingTessellation {
     using Kokkos::view_alloc; using Kokkos::WithoutInitializing;
     vol = Kokkos::View<Real*, Mem>("mt.vol", n);
     xRef = Kokkos::View<Real*, Mem>(view_alloc(std::string("mt.xRef"), WithoutInitializing), (size_t)n * 3);
-    xPrev = Kokkos::View<Real*, Mem>(view_alloc(std::string("mt.xPrev"), WithoutInitializing), (size_t)n * 3);
-    // Local-cert validity bound on the per-step displacement: ~0.6% of the mean spacing. Below this the
-    // Lawson edge-flip detector is exact (measured); above it a single move can far-poke past a non-adjacent
-    // plane, so the step uses the brute certificate. Past this the repair is near break-even vs rebuild anyway.
-    { const double spacing = std::cbrt((double)L[0] * L[1] * L[2] / (n > 0 ? n : 1));
-      certDispLimit = (Real)(0.0015 * spacing); }
     mask = Kokkos::View<int*, Mem>("mt.mask", n);
     mask2 = Kokkos::View<int*, Mem>("mt.mask2", n);
     mover = Kokkos::View<int*, Mem>("mt.mover", n);
@@ -181,7 +169,6 @@ struct MovingTessellation {
                                               store.pnbr, store.tri);
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(xRef, pos);
-    if (xPrev.extent(0) == pos.extent(0)) Kokkos::deep_copy(xPrev, pos);  // seed the per-step reference
     adjFresh = false;  // the cold build does not emit adjacency
     if (eagerAdj) maybeBuildAdj(pos);  // the whole topology changed -> repopulate store.adj (unless gating)
   }
@@ -299,9 +286,11 @@ struct MovingTessellation {
     Store st = store; auto P = pos;
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
     Kokkos::parallel_for("mt.rebuildAdjAll", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
-      Cell c; st.load(i, c, Lx, Ly, Lz);  // load brings topology; adj is (re)derived below
+      Cell c; st.load(i, c, Lx, Ly, Lz);  // load brings topology; adj + face4 are (re)derived below
+      c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);  // computeFace4 needs vertices
       c.rebuildAdjacency();
-      st.save(i, c);  // writes back topology (unchanged) + the freshly built adj
+      c.computeFace4();
+      st.save(i, c);  // writes back topology (unchanged) + the freshly built adj + face4
     });
   }
   /// Lazily repopulate store.adj on a low-churn step so later steps use the cheap local certificate. A
@@ -322,7 +311,7 @@ struct MovingTessellation {
     // TrackAdj gather: clip stitches the edge adjacency incrementally and subsetGather persists it into
     // store.adj, so the local certificate stays valid for the gathered cells with no separate pass.
     subsetGather<Real, false, true>(grid, wl, n, store.np, store.nt, store.pnbr, store.tri, vol, store.adj,
-                                    NoSdf{}, /*withForceGeom=*/false);
+                                    store.face4, NoSdf{}, /*withForceGeom=*/false);
     auto W = wl; auto rb = rebuilt; auto P = pos; auto XR = xRef;
     Kokkos::parallel_for("mt.markRebuilt", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
       const int i = W(s);
@@ -465,28 +454,11 @@ struct MovingTessellation {
     auto grid = buildTessGrid<Real, false>(pos, Kokkos::View<Real*, Mem>(), N, L, sw, densityCount,
                                            Kokkos::View<long*, Mem>());
     Kokkos::deep_copy(rebuilt, 0);
-    // Per-step displacement gate for the Lawson local certificate (§5b precondition): the local edge-flip
-    // detector is exact only when every seed moved less than certDispLimit this step; a larger move can
-    // far-poke past a non-adjacent plane (a moderate drift OR a teleport) that the local form misses. The
-    // max per-step displacement is a cert-independent signal, so we decide local vs brute BEFORE detecting.
-    Real maxStepSq = 0;
-    if (localCert && adjFresh) {
-      auto P = pos; auto XP = xPrev;
-      const Real Lx = L[0], Ly = L[1], Lz = L[2];
-      const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
-      Kokkos::parallel_reduce("mt.maxStep", Kokkos::RangePolicy<Exec>(0, nProc),
-          KOKKOS_LAMBDA(int i, Real& m) {
-            Real dx = P(3 * i) - XP(3 * i), dy = P(3 * i + 1) - XP(3 * i + 1), dz = P(3 * i + 2) - XP(3 * i + 2);
-            dx = dx > Lxh ? dx - Lx : (dx < -Lxh ? dx + Lx : dx);
-            dy = dy > Lyh ? dy - Ly : (dy < -Lyh ? dy + Ly : dy);
-            dz = dz > Lzh ? dz - Lz : (dz < -Lzh ? dz + Lz : dz);
-            const Real d2 = dx * dx + dy * dy + dz * dz;
-            if (d2 > m) m = d2;
-          }, Kokkos::Max<Real>(maxStepSq));
-    }
-    const bool farStep = maxStepSq > certDispLimit * certDispLimit;
-    useLocalNow = localCert && adjFresh && !farStep;
-    Kokkos::deep_copy(xPrev, pos);  // reference for the NEXT step's per-step displacement (read above)
+    // Use the cheap local certificate whenever store.adj/face4 are valid for the current topology. With the
+    // 4th-face plane included the local cert matches the brute flag set (it is complete, not a subset), so
+    // no per-step displacement gate or brute fallback is needed — large moves and teleports are handled by
+    // the same detect→gather→verify path. (adj/face4 are invalidated only by a cold rebuild.)
+    useLocalNow = localCert && adjFresh;
 
     // Pass 1: detect (flagged ∪ partners ∪ skin-movers). flagged-commons + their violated-plane partners
     // (the gaining cells) fully cover an isolated flip — no Pass 2 for flips.

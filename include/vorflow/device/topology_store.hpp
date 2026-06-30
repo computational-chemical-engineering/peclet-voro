@@ -43,6 +43,8 @@ struct TopologyStore {
                                           // TrackAdj, the Lawson local certificate; allocated via allocAdj()).
                                           // A triangle index fits in a byte (MAXT<=112<256), so this is
                                           // packed — its per-cell load traffic is below the old poke store's.
+  Kokkos::View<unsigned char*, MemSpace> face4;  // N*MAXT : per-triangle 4th-face plane index (completeness
+                                          // companion to adj; computed by ConvexCell::computeFace4()).
 
   void alloc(int n) {
     using Kokkos::view_alloc;
@@ -61,6 +63,8 @@ struct TopologyStore {
   void allocAdj() {
     adj = Kokkos::View<unsigned char*, MemSpace>(
         Kokkos::view_alloc(std::string("topo.adj"), Kokkos::WithoutInitializing), (size_t)N * MAXT * 3);
+    face4 = Kokkos::View<unsigned char*, MemSpace>(
+        Kokkos::view_alloc(std::string("topo.face4"), Kokkos::WithoutInitializing), (size_t)N * MAXT);
   }
 
   /// Persist cell `c` at slot i (call after the cell is finalised — clipped + complete).
@@ -72,11 +76,13 @@ struct TopologyStore {
     for (int t = 0; t < c.nt; ++t)
       tri((size_t)i * MAXT + t) = (unsigned)c.t0[t] | ((unsigned)c.t1[t] << 8) |
                                   ((unsigned)c.t2[t] << 16) | ((c.alive[t] ? 1u : 0u) << 24);
-    if constexpr (Cell::kTrackAdj) {  // persist the incrementally-stitched edge adjacency (if allocAdj())
+    if constexpr (Cell::kTrackAdj) {  // persist the incrementally-stitched edge adjacency + 4th-face plane
       if (adj.extent(0) > 0)
         for (int t = 0; t < c.nt; ++t)
           for (int e = 0; e < 3; ++e)
             adj((size_t)i * MAXT * 3 + t * 3 + e) = (unsigned char)c.adj[t * 3 + e];
+      if (face4.extent(0) > 0)
+        for (int t = 0; t < c.nt; ++t) face4((size_t)i * MAXT + t) = c.face4[t];
     }
   }
 
@@ -98,10 +104,12 @@ struct TopologyStore {
       c.t2[t] = (unsigned char)((w >> 16) & 0xffu);
       c.alive[t] = ((w >> 24) & 1u) != 0u;
     }
-    if constexpr (Cell::kTrackAdj) {  // restore the edge adjacency (reevalGeometry leaves it valid)
+    if constexpr (Cell::kTrackAdj) {  // restore the edge adjacency + 4th-face (reevalGeometry leaves valid)
       if (adj.extent(0) > 0)          // an adj-less store leaves c.adj uninitialised — caller rebuilds it
         for (int t = 0; t < nti; ++t)
           for (int e = 0; e < 3; ++e) c.adj[t * 3 + e] = (int)adj((size_t)i * MAXT * 3 + t * 3 + e);
+      if (face4.extent(0) > 0)
+        for (int t = 0; t < nti; ++t) c.face4[t] = face4((size_t)i * MAXT + t);
     }
   }
 };

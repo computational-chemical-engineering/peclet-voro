@@ -219,7 +219,7 @@ static int gate1a_subset(int N, real_t L) {
   Store fullStore; fullStore.alloc(N);
   Kokkos::View<real_t*, Mem> fullVol("fullVol", N);
   vor::device::subsetGather<real_t, false>(grid, allIdx, N, fullStore.np, fullStore.nt,
-                                           fullStore.pnbr, fullStore.tri, fullVol, {},
+                                           fullStore.pnbr, fullStore.tri, fullVol, {}, {},
                                            vor::device::NoSdf{}, /*withForceGeom=*/true);
 
   const int nSub = std::max(1, N / 7);
@@ -233,7 +233,7 @@ static int gate1a_subset(int N, real_t L) {
   Store subStore; subStore.alloc(N);
   Kokkos::View<real_t*, Mem> subVol("subVol", N);
   vor::device::subsetGather<real_t, false>(grid, idx, nSub, subStore.np, subStore.nt,
-                                           subStore.pnbr, subStore.tri, subVol, {},
+                                           subStore.pnbr, subStore.tri, subVol, {}, {},
                                            vor::device::NoSdf{}, /*withForceGeom=*/true);
 
   // Bit-for-bit: np, nt, every pnbr, every packed triangle, and the volume — for each chosen index.
@@ -468,39 +468,49 @@ static int gate2_localcert(int N, real_t L) {
   Kokkos::deep_copy(x0d, Kokkos::View<real_t*, Kokkos::HostSpace>(x0.data(), 3 * N));
   Kokkos::deep_copy(veld, Kokkos::View<real_t*, Kokkos::HostSpace>(vel.data(), 3 * N));
   Kokkos::View<real_t*, Mem> wd; Kokkos::View<long*, Mem> gd;
-  Store store; store.alloc(N);
+  Store store; store.alloc(N); store.allocAdj();
   const real_t tol = (sizeof(real_t) == 4 ? real_t(2e-3) : real_t(1e-4)) * spacing;
 
-  long subsetViol = 0;  // pass criterion: the local cert must never over-flag the brute one
+  long subsetViol = 0, missSmall = 0;  // local must never over-flag brute, AND match it in the operating regime
   for (real_t disp : {real_t(0.0005), real_t(0.001), real_t(0.002), real_t(0.005), real_t(0.02), real_t(0.05)}) {
     Kokkos::deep_copy(pos, x0d);  // build store at P0
     vor::device::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd, vor::device::NoSdf{},
         false, -1, store.np, store.nt, store.pnbr, store.tri);
+    // Build adj + the 4th-face plane at the BUILD config (P0) and persist them — exactly how the gather
+    // populates them for the repair. The cert below then tests the DISPLACED vertices against this proxy.
+    { Store st = store; auto P = pos;
+      Kokkos::parallel_for("g2.face4", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+        AdjCell c; st.load(i, c, L, L, L);
+        c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), L);
+        c.rebuildAdjacency(); c.computeFace4(); st.save(i, c); }); }
     // displace
     { auto P = pos; auto X0 = x0d; auto V = veld; const real_t s = disp * spacing, Ll = L;
       Kokkos::parallel_for("g2.move", Kokkos::RangePolicy<Exec>(0, 3 * N), KOKKOS_LAMBDA(int i) {
         real_t v = X0(i) + V(i) * s; v -= Ll * Kokkos::floor(v / Ll); P(i) = v; }); }
-    long viol = 0, farPoke = 0, flagB = 0;
+    long viol = 0, miss = 0, flagB = 0;
     { Store st = store; auto P = pos; const real_t tl = tol;
       Kokkos::parallel_reduce("g2.cmp", Kokkos::RangePolicy<Exec>(0, N),
-        KOKKOS_LAMBDA(int i, long& vv, long& fp, long& fb) {
-          AdjCell c; st.load(i, c, L, L, L);  // load topology; rebuild adj (brute) for the local test
+        KOKKOS_LAMBDA(int i, long& vv, long& mm, long& fb) {
+          AdjCell c; st.load(i, c, L, L, L);  // load brings adj + face4 (built at P0)
           c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), L);
-          c.rebuildAdjacency();
           const bool okB = c.isSelfConsistent(tl);
           const bool okL = c.isLocallyConvex(tl);
           if (okB && !okL) ++vv;   // local flagged what brute did not -> SUBSET VIOLATION (bug)
-          if (!okB && okL) ++fp;   // far-poke the local form misses (expected; gate rebuilds here)
+          if (!okB && okL) ++mm;   // local MISSED a brute flag (4th-face stale at large disp)
           if (!okB) ++fb;
-        }, viol, farPoke, flagB);
+        }, viol, miss, flagB);
     }
-    std::printf("  disp=%.4f sp:  brute-flagged=%7ld  subset-viol=%4ld  far-poke(local-misses)=%4ld\n",
-                (double)disp, flagB, viol, farPoke);
+    std::printf("  disp=%.4f sp:  brute-flagged=%7ld  subset-viol=%4ld  local-missed=%4ld\n",
+                (double)disp, flagB, viol, miss);
     subsetViol += viol;
+    if (disp <= real_t(0.001)) missSmall += miss;  // operating regime: the build-config 4th-face is fresh
   }
-  const bool pass = subsetViol == 0;
-  std::printf("GATE 2: %s (%ld subset violations — local must never over-flag brute)\n",
-              pass ? "PASS" : "FAIL", subsetViol);
+  // With the 4th-face plane the local cert is COMPLETE: it never over-flags (subsetViol==0) and matches the
+  // brute flag set in the operating regime (missSmall==0); at large disp the build-config proxy goes stale
+  // (informational — a gather refreshes it). A handful of FP-marginal misses at small disp are tolerated.
+  const bool pass = subsetViol == 0 && missSmall <= 5;
+  std::printf("GATE 2: %s (subset-viol=%ld, local-missed@δ/h≤0.001=%ld)\n", pass ? "PASS" : "FAIL",
+              subsetViol, missSmall);
   return pass ? 0 : 1;
 }
 

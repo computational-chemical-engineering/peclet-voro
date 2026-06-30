@@ -109,6 +109,7 @@ struct CellBuilder {
   Kokkos::View<unsigned*, MemSpace> oTri;
   Kokkos::View<unsigned char*, MemSpace> oAdj;  // N*kMaxT*3 edge adjacency (packed: index fits a byte),
                                                 // emitted only when TrackAdj && emitTopo
+  Kokkos::View<unsigned char*, MemSpace> oFace4;  // N*kMaxT 4th-face plane index (completeness companion)
   Kokkos::View<int*, MemSpace> oCand, oCandCnt;
   bool emitTopo, emitCand;
   int candCap;
@@ -193,10 +194,13 @@ struct CellBuilder {
       for (int t = 0; t < c.nt; ++t)
         oTri[(size_t)i * kMaxT + t] = (unsigned)c.t0[t] | ((unsigned)c.t1[t] << 8) |
                                       ((unsigned)c.t2[t] << 16) | ((c.alive[t] ? 1u : 0u) << 24);
-      if constexpr (TrackAdj) {  // persist the incrementally-stitched edge adjacency for the local cert
-        for (int t = 0; t < c.nt; ++t)
+      if constexpr (TrackAdj) {  // persist the incrementally-stitched edge adjacency + 4th-face for the cert
+        c.computeFace4();  // adj is populated (clip) + vertices cached; the 3 edge planes come from adj
+        for (int t = 0; t < c.nt; ++t) {
           for (int e = 0; e < 3; ++e)
             oAdj[(size_t)i * kMaxT * 3 + t * 3 + e] = (unsigned char)c.adj[t * 3 + e];
+          oFace4[(size_t)i * kMaxT + t] = c.face4[t];
+        }
       }
     }
 
@@ -397,13 +401,13 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   // Build each cell: one thread per cell (RangePolicy), the compact ConvexCell in the
   // per-thread frame, the cut applied on the fly. Same path on every backend (ConvexCell is
   // lean enough that the worklist + geometry run well on the GPU without a team variant).
-  Kokkos::View<unsigned char*, MemSpace> noAdj;  // cold build does not emit adjacency (TrackAdj defaults false)
+  Kokkos::View<unsigned char*, MemSpace> noAdj, noFace4;  // cold build does not emit adjacency (TrackAdj=false)
   CellBuilder<Real, Weighted, Sdf> op{
       grid.binned, grid.posSorted, grid.wSorted, grid.gidSorted, grid.cellStart, grid.wlOff, grid.wlRmin,
       status, cellVol, facetCount, cellFacetBase, oNbr, oArea, oDV, oConn, facetCursor,
       icx, icy, icz, Lx, Ly, Lz, minCsz, dimx, dimy, dimz, sw, nOff, wlS,
       useMorton, haveGid, withForceGeom, facetCap, sdf,
-      outNp, outNt, outPnbr, outTri, noAdj, outCand, outCandCnt, emitTopo, emitCand, candCap};
+      outNp, outNt, outPnbr, outTri, noAdj, noFace4, outCand, outCandCnt, emitTopo, emitCand, candCap};
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
   Kokkos::parallel_for(

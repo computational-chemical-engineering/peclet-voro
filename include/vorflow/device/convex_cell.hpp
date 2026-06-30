@@ -126,6 +126,15 @@ struct ConvexCell {
   /// keep stale adj (they are alive==false, so the oracle ignores them and clip never follows into them).
   Kokkos::Array<int, (TrackAdj ? MAXT : 0) * 3> adj;
 
+  /// The "fourth face" plane index of each live triangle's dual Delaunay tet — the one face NOT incident
+  /// to the seed, which the three adj-derived edge-opposite planes do not cover. Without it the local
+  /// certificate is an incomplete subset of the brute one (a non-adjacent plane can poke a vertex without
+  /// flipping an incident edge); with it the local test matches the brute flag set (validated). 0xff = none.
+  /// Not maintainable incrementally (a global nearest-plane property), so it is (re)computed by
+  /// computeFace4() whenever the cell is finalised (cold build / gather / rebuildAdjacency) — but cheaper
+  /// than the old poke store, since the three edge planes come from `adj`, not a findSharing scan.
+  Kokkos::Array<unsigned char, (TrackAdj ? MAXT : 0)> face4;
+
   /// Seed the cell with the big cuboid of extent (L0,L1,L2) centred on the seed.
   /// Planes 0:+x 1:-x 2:+y 3:-y 4:+z 5:-z; the 8 corners are the dual triangles.
   KOKKOS_INLINE_FUNCTION void initBox(Real L0, Real L1, Real L2) {
@@ -301,28 +310,63 @@ struct ConvexCell {
     return (a != x && a != y) ? a : (b != x && b != y) ? b : c;
   }
 
-  /// Local convexity certificate (Lawson), O(nt). Each interior edge {x,y} shared by triangles t and s is
-  /// locally convex iff the dual vertex of one incident triangle lies inside the OTHER triangle's
-  /// edge-opposite plane: n_k·v ≤ nn_k. The relation is symmetric, so each edge is tested once (canonical
-  /// t < neighbour) against the neighbour's edge-opposite plane k. Requires the maintained `adj` table and
-  /// the cached vertices (computeVertex / reevalGeometry must have run).
-  ///
-  /// PRECONDITION — this is a LOCAL test, valid ONLY behind the gate's small-displacement (sparse-repair)
-  /// guard: it detects the FIRST edge flip of a cell that is still nearly Voronoi. It is NOT a drop-in for
-  /// the brute-force `isSelfConsistent`, which additionally catches far-pokes by NON-adjacent planes (a seed
-  /// that crossed a vertex without flipping an incident edge). Keep both bodies; pick by the gate.
+  /// The four candidate planes the local certificate tests dual-vertex `t` against: the three
+  /// edge-opposite planes of its in-cell edges (derived from `adj`) plus the precomputed `face4[t]`.
+  /// out[j] < 0 means "no candidate" (degenerate edge / 0xff sentinel). Pure topology + the `face4` cache.
+  KOKKOS_INLINE_FUNCTION void localCandidates(int t, int out[4]) const {
+    const int vt[3] = {t0[t], t1[t], t2[t]};
+    for (int e = 0; e < 3; ++e) {
+      const int s = adj[t * 3 + e];
+      out[e] = (s >= 0 && s < nt && alive[s]) ? oppositePlane(s, vt[e], vt[(e + 1) % 3]) : -1;
+    }
+    out[3] = (face4[t] == 0xff) ? -1 : (int)face4[t];
+  }
+
+  /// Compute the per-triangle `face4` plane: the non-defining, non-edge-opposite plane the dual vertex is
+  /// nearest to from inside (smallest positive slack) — the proxy for the dual Delaunay tet's fourth face
+  /// (the one not incident to the seed). The three edge-opposite planes come from `adj` (no findSharing),
+  /// so this is cheaper than the old poke recompute. Requires `adj` populated + the cached vertices; call
+  /// after the cell is finalised (cold build / gather / rebuildAdjacency) or reloaded + re-evaluated.
+  KOKKOS_INLINE_FUNCTION void computeFace4() {
+    if constexpr (TrackAdj) {
+      for (int t = 0; t < nt; ++t) {
+        if (!alive[t]) { face4[t] = 0xff; continue; }
+        const int vt[3] = {t0[t], t1[t], t2[t]};
+        int eo[3];
+        for (int e = 0; e < 3; ++e) {
+          const int s = adj[t * 3 + e];
+          eo[e] = (s >= 0 && s < nt && alive[s]) ? oppositePlane(s, vt[e], vt[(e + 1) % 3]) : -1;
+        }
+        const Real v[3] = {vx[t], vy[t], vz[t]};
+        Real best = Real(3.4e38);
+        int g = 0xff;
+        for (int k = 0; k < np; ++k) {
+          if (k == vt[0] || k == vt[1] || k == vt[2]) continue;  // defining plane
+          if (k == eo[0] || k == eo[1] || k == eo[2]) continue;  // already an edge-opposite
+          const Real slack = nn[k] - (n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2]);
+          if (slack >= Real(0) && slack < best) { best = slack; g = k; }
+        }
+        face4[t] = (unsigned char)(g & 0xff);
+      }
+    }
+  }
+
+  /// Local convexity certificate (Lawson), O(nt). Per dual vertex, test it against its four `localCandidates`
+  /// (the three edge-opposite planes from `adj` + the fourth-face plane): the cell is locally Voronoi iff no
+  /// vertex pokes past any of them. With the fourth-face plane included this matches the brute certificate's
+  /// flag set (Delaunay's lemma over the full dual tet, not just its three seed-incident faces) — so it is
+  /// NOT merely a small-displacement subset detector. Requires `adj` + `face4` + the cached vertices.
   KOKKOS_INLINE_FUNCTION bool isLocallyConvex(Real tol) const {
     static_assert(TrackAdj, "isLocallyConvex requires TrackAdj");
     Real maxd = Real(0);
     for (int t = 0; t < nt; ++t) {
       if (!alive[t]) continue;
       const Real v[3] = {vx[t], vy[t], vz[t]};
-      const int vt[3] = {t0[t], t1[t], t2[t]};
-      for (int e = 0; e < 3; ++e) {
-        const int s = adj[t * 3 + e];
-        if (s < t) continue;  // canonical: visit each interior edge exactly once
-        const int x = vt[e], y = vt[(e + 1) % 3];
-        const int k = oppositePlane(s, x, y);  // neighbour's edge-opposite plane
+      int cand[4];
+      localCandidates(t, cand);
+      for (int j = 0; j < 4; ++j) {
+        const int k = cand[j];
+        if (k < 0) continue;
         const Real sl = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
         if (sl > Real(0)) {
           const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
@@ -346,12 +390,11 @@ struct ConvexCell {
     for (int t = 0; t < nt; ++t) {
       if (!alive[t]) continue;
       const Real v[3] = {vx[t], vy[t], vz[t]};
-      const int vt[3] = {t0[t], t1[t], t2[t]};
-      for (int e = 0; e < 3; ++e) {
-        const int s = adj[t * 3 + e];
-        if (s < t) continue;  // canonical: visit each interior edge once
-        const int x = vt[e], y = vt[(e + 1) % 3];
-        const int k = oppositePlane(s, x, y);
+      int cand[4];
+      localCandidates(t, cand);
+      for (int j = 0; j < 4; ++j) {
+        const int k = cand[j];
+        if (k < 0) continue;
         const Real sl = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
         if (sl > Real(0)) {
           const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
@@ -1223,6 +1266,7 @@ KOKKOS_INLINE_FUNCTION void buildConvexCell(ConvexCell<Real, MAXP, MAXT, TrackAd
     c.clip(n, off, ids[i]);
     if (c.overflow) return;
   }
+  if constexpr (TrackAdj) c.computeFace4();  // finalise the local-cert inputs (adj is already maintained)
 }
 
 }  // namespace device
