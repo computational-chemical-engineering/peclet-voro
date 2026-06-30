@@ -45,3 +45,4 @@ Thumbs.db
 .codex
 build_*.log
 cuda_report_*.log
+.venv/

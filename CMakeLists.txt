@@ -147,6 +147,16 @@ if(VORFLOW_KOKKOS)
     if(DEFINED SKBUILD)
       install(TARGETS vorflow_device LIBRARY DESTINATION . COMPONENT python)
     endif()
+    # Python smoke test (Tessellation + Simulation) — needs numpy in the active interpreter.
+    if(VORONOI_BUILD_TESTS AND NOT DEFINED SKBUILD)
+      find_package(Python3 COMPONENTS Interpreter QUIET)
+      if(Python3_Interpreter_FOUND)
+        add_test(NAME test_vorflow_python
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_vorflow.py)
+        set_tests_properties(test_vorflow_python PROPERTIES
+          ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:vorflow_device>;OMP_PROC_BIND=false")
+      endif()
+    endif()
   endif()
 endif()
 
