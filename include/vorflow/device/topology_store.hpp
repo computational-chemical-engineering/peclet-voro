@@ -39,12 +39,11 @@ struct TopologyStore {
   Kokkos::View<int*, MemSpace> nt;        // N
   Kokkos::View<int*, MemSpace> pnbr;      // N*MAXP : neighbour seed id per plane (<0 = box)
   Kokkos::View<unsigned*, MemSpace> tri;  // N*MAXT : t0 | t1<<8 | t2<<16 | alive<<24
-  Kokkos::View<unsigned char*, MemSpace> adj;  // N*MAXT*3 : per-triangle edge adjacency (ConvexCell
-                                          // TrackAdj, the Lawson local certificate; allocated via allocAdj()).
-                                          // A triangle index fits in a byte (MAXT<=112<256), so this is
-                                          // packed — its per-cell load traffic is below the old poke store's.
-  Kokkos::View<unsigned char*, MemSpace> face4;  // N*MAXT : per-triangle 4th-face plane index (completeness
-                                          // companion to adj; computed by ConvexCell::computeFace4()).
+  Kokkos::View<unsigned char*, MemSpace> poke4;  // N*MAXT*4 : per-triangle local-cert plane set (3 edge-
+                                          // opposite + 4th-face), computed by ConvexCell::computePoke4() at
+                                          // gather/rebuild and read directly by isLocallyConvex each step.
+                                          // Allocated via allocPoke4(); written/read OUTSIDE save()/load()
+                                          // (the gather computes it; the cert reads its pointer).
 
   void alloc(int n) {
     using Kokkos::view_alloc;
@@ -60,11 +59,9 @@ struct TopologyStore {
 
   /// Allocate the per-triangle edge-adjacency store (the Lawson local certificate; opt-in so callers that
   /// don't use it pay no memory). N*MAXT*3 int ≈ MAXT·12 bytes/cell.
-  void allocAdj() {
-    adj = Kokkos::View<unsigned char*, MemSpace>(
-        Kokkos::view_alloc(std::string("topo.adj"), Kokkos::WithoutInitializing), (size_t)N * MAXT * 3);
-    face4 = Kokkos::View<unsigned char*, MemSpace>(
-        Kokkos::view_alloc(std::string("topo.face4"), Kokkos::WithoutInitializing), (size_t)N * MAXT);
+  void allocPoke4() {
+    poke4 = Kokkos::View<unsigned char*, MemSpace>(
+        Kokkos::view_alloc(std::string("topo.poke4"), Kokkos::WithoutInitializing), (size_t)N * MAXT * 4);
   }
 
   /// Persist cell `c` at slot i (call after the cell is finalised — clipped + complete).
@@ -76,14 +73,8 @@ struct TopologyStore {
     for (int t = 0; t < c.nt; ++t)
       tri((size_t)i * MAXT + t) = (unsigned)c.t0[t] | ((unsigned)c.t1[t] << 8) |
                                   ((unsigned)c.t2[t] << 16) | ((c.alive[t] ? 1u : 0u) << 24);
-    if constexpr (Cell::kTrackAdj) {  // persist the incrementally-stitched edge adjacency + 4th-face plane
-      if (adj.extent(0) > 0)
-        for (int t = 0; t < c.nt; ++t)
-          for (int e = 0; e < 3; ++e)
-            adj((size_t)i * MAXT * 3 + t * 3 + e) = (unsigned char)c.adj[t * 3 + e];
-      if (face4.extent(0) > 0)
-        for (int t = 0; t < c.nt; ++t) face4((size_t)i * MAXT + t) = c.face4[t];
-    }
+    // NOTE: the local-cert `poke4` table is NOT part of the topology snapshot — it is computed by the
+    // caller (ConvexCell::computePoke4) directly into `poke4` at gather/rebuild, and read by the cert.
   }
 
   /// Reload the stored topology of slot i into a fresh cell, ready for reevalGeometry(): seeds the six box
@@ -104,13 +95,8 @@ struct TopologyStore {
       c.t2[t] = (unsigned char)((w >> 16) & 0xffu);
       c.alive[t] = ((w >> 24) & 1u) != 0u;
     }
-    if constexpr (Cell::kTrackAdj) {  // restore the edge adjacency + 4th-face (reevalGeometry leaves valid)
-      if (adj.extent(0) > 0)          // an adj-less store leaves c.adj uninitialised — caller rebuilds it
-        for (int t = 0; t < nti; ++t)
-          for (int e = 0; e < 3; ++e) c.adj[t * 3 + e] = (int)adj((size_t)i * MAXT * 3 + t * 3 + e);
-      if (face4.extent(0) > 0)
-        for (int t = 0; t < nti; ++t) c.face4[t] = face4((size_t)i * MAXT + t);
-    }
+    // `poke4` is read by the certificate directly from this store (a pointer), not loaded into the cell;
+    // `adj` (if the cell is TrackAdj) is rebuilt by the caller when it needs it (rebuildAdjAll / the gather).
   }
 };
 

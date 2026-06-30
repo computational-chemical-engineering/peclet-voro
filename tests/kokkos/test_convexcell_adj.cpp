@@ -31,11 +31,11 @@ using vor::device::ConvexCell;
 static_assert(sizeof(ConvexCell<double, 64, 96, false>) == 5008, "false-mode sizeof changed");
 static_assert(sizeof(ConvexCell<float, 64, 96, false>) == 2828, "false-mode (float) sizeof changed");
 static_assert(sizeof(ConvexCell<double, 64, 96, true>) ==
-                  sizeof(ConvexCell<double, 64, 96, false>) + 96 * 3 * sizeof(int) + 96,
-              "true-mode footprint must be false + adj(MAXT*3*int) + face4(MAXT*uchar)");
+                  sizeof(ConvexCell<double, 64, 96, false>) + 96 * 3 * sizeof(int),
+              "true-mode footprint must be false + adj(MAXT*3*int)");
 static_assert(sizeof(ConvexCell<float, 64, 96, true>) ==
-                  sizeof(ConvexCell<float, 64, 96, false>) + 96 * 3 * sizeof(int) + 96,
-              "true-mode (float) footprint must be false + adj(MAXT*3*int) + face4(MAXT*uchar)");
+                  sizeof(ConvexCell<float, 64, 96, false>) + 96 * 3 * sizeof(int),
+              "true-mode (float) footprint must be false + adj(MAXT*3*int)");
 
 static constexpr int MAXP = 64, MAXT = 96;
 using CellT = ConvexCell<real_t, MAXP, MAXT, true>;
@@ -84,7 +84,6 @@ static void buildStepwise(CellT& c, const Nbrs& nb, real_t L, CB&& cb) {
     if (c.overflow) return;
     cb(c, (int)i);
   }
-  c.computeFace4();  // finalise the local-cert inputs (4th-face plane completeness companion to adj)
 }
 
 // True iff cell `a`'s incrementally-stitched adj equals a brute rebuild, element-wise on live triangles.
@@ -167,10 +166,12 @@ int main(int argc, char** argv) {
         std::vector<real_t> Pd = P;
         if (!isValid)
           for (auto& x : Pd) x += disp * L * g(r2);  // displace all seeds (topology fixed -> reeval)
+        unsigned char poke4[MAXT * 4];
+        c.computePoke4(poke4);  // build the cert plane set at the BUILD config (then displace + test)
         c.reevalGeometry(Pd[0], Pd[1], Pd[2], Pd.data(), L);
         const real_t tol = 1e-7;
         const bool okB = c.isSelfConsistent(tol);
-        const bool okL = c.isLocallyConvex(tol);
+        const bool okL = c.isLocallyConvex(poke4, tol);
         if (isValid) {
           if (okB && okL) ++validBothTrue;
           ++validChecked;

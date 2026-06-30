@@ -100,15 +100,14 @@ struct MovingTessellation {
   bool surgical = false;     ///< repair flip cells by re-clipping known candidates instead of gathering
   static constexpr int kExtraCap = 8;  ///< per-cell capacity for partner-discovered new neighbours
   // ---- Lawson local convexity certificate (the cheap O(nt) convexity test) ----
-  bool localCert = true;     ///< use ConvexCell::isLocallyConvexPartners (test each edge vs the neighbour's
-                             ///< edge-opposite plane, O(nt)) instead of the brute O(nt·np) form. The edge
-                             ///< adjacency it reads is maintained incrementally by `clip` during the gather
-                             ///< (TrackAdj) and persisted in the store, so the local cert is always valid —
-                             ///< no separate poke-plane pass. The brute form (isSelfConsistentPartners)
-                             ///< additionally catches far-pokes by non-adjacent planes; the gate routes
-                             ///< high-churn steps (where far-pokes appear) to a rebuild, so local suffices
-                             ///< in the sparse regime it runs in (validated by the bench GATE 2).
-  bool adjFresh = false;     ///< store.adj is valid for the whole current topology. Gathers maintain it
+  bool localCert = true;     ///< use ConvexCell::isLocallyConvexPartners (read each triangle's 4 precomputed
+                             ///< `poke4` planes — 3 edge-opposite + 4th-face — O(nt)) instead of the brute
+                             ///< O(nt·np) form. The gather derives poke4 from the clip-maintained edge
+                             ///< adjacency (computePoke4, no findSharing) into store.poke4, so it is fused
+                             ///< into the build with no separate maintenance pass, and the cert reads it
+                             ///< directly each step. With the 4th-face plane the local cert is COMPLETE
+                             ///< (matches the brute flag set — bench GATE 2), so there is no fallback gate.
+  bool adjFresh = false;     ///< store.poke4 is valid for the whole current topology. Gathers maintain it
                              ///< incrementally (TrackAdj clip + outAdj); a cold buildTessellation does NOT
                              ///< emit adj, so it clears this and maybeBuildAdj repopulates lazily (skipped
                              ///< on a gate-rebuild so a sustained high-churn regime stays on the brute cert).
@@ -133,7 +132,7 @@ struct MovingTessellation {
     tol = tol_; skin = skin_;
     for (int k = 0; k < 3; ++k) L[k] = Lbox[k];
     store.alloc(n);
-    store.allocAdj();  // resident edge adjacency for the Lawson local certificate (maintained by gather)
+    store.allocPoke4();  // resident local-cert plane set (computed by the gather, read each step by the cert)
     using Kokkos::view_alloc; using Kokkos::WithoutInitializing;
     vol = Kokkos::View<Real*, Mem>("mt.vol", n);
     xRef = Kokkos::View<Real*, Mem>(view_alloc(std::string("mt.xRef"), WithoutInitializing), (size_t)n * 3);
@@ -157,7 +156,7 @@ struct MovingTessellation {
 
   /// Full cold (re)build: the production tessellator emitting the resident topology + volume, then
   /// reset the Verlet reference. This is the oracle, the fallback, and the initial build.
-  /// @param eagerAdj  populate store.adj now (default; the cheap initial/explicit rebuild → next step is
+  /// @param eagerAdj  populate store.poke4 now (default; the cheap initial/explicit rebuild → next step is
   ///                  local). A GATE-rebuild passes false: in a high-churn regime we keep rebuilding, so
   ///                  paying rebuildAdjAll every step is wasted — fall back to the brute certificate until
   ///                  churn drops, then maybeBuildAdj rebuilds the adjacency once.
@@ -170,7 +169,7 @@ struct MovingTessellation {
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(xRef, pos);
     adjFresh = false;  // the cold build does not emit adjacency
-    if (eagerAdj) maybeBuildAdj(pos);  // the whole topology changed -> repopulate store.adj (unless gating)
+    if (eagerAdj) maybeBuildAdj(pos);  // the whole topology changed -> repopulate store.poke4 (unless gating)
   }
 
   /// Compact the nonzero entries of `m[0..nProc)` into `wl`, returning the count.
@@ -204,7 +203,7 @@ struct MovingTessellation {
     auto EN = extraNbr; auto EC = extraCnt;
     constexpr int kCap = kExtraCap;
     auto P = pos; auto XR = xRef; auto Vv = vol; auto M = outMask; auto Mv = outMover;
-    Store st = store;
+    Store st = store; auto Pk4 = store.poke4;
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
     const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
     const Real tolL = tol, half2 = Real(0.25) * skin * skin;
@@ -217,7 +216,7 @@ struct MovingTessellation {
           Vv(i) = c.volumePerVertex();
           int partners[32]; int nP = 0;
           bool ok;
-          if constexpr (Local) ok = c.isLocallyConvexPartners(tolL, partners, 32, nP);
+          if constexpr (Local) ok = c.isLocallyConvexPartners(&Pk4((size_t)i * MAXT * 4), tolL, partners, 32, nP);
           else ok = c.isSelfConsistentPartners(tolL, partners, 32, nP);
           bool mover = false;
           if (skinOn) {
@@ -260,7 +259,7 @@ struct MovingTessellation {
                    const Kokkos::View<int*, Mem>& outMask) {
     Kokkos::deep_copy(outMask, 0);
     if (n <= 0) return;
-    auto P = pos; auto Vv = vol; auto M = outMask; Store st = store;
+    auto P = pos; auto Vv = vol; auto M = outMask; Store st = store; auto Pk4 = store.poke4;
     const Real Lx = L[0], Ly = L[1], Lz = L[2]; const Real tolL = tol; const int nP_ = nProc;
     Kokkos::parallel_for("mt.certifyList", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
       const int i = list(s);
@@ -269,31 +268,30 @@ struct MovingTessellation {
       Vv(i) = c.volumePerVertex();
       int partners[32]; int nP = 0;
       bool ok;
-      if constexpr (Local) ok = c.isLocallyConvexPartners(tolL, partners, 32, nP);
+      if constexpr (Local) ok = c.isLocallyConvexPartners(&Pk4((size_t)i * MAXT * 4), tolL, partners, 32, nP);
       else ok = c.isSelfConsistentPartners(tolL, partners, 32, nP);
       if (!ok) M(i) = 1;
       for (int q = 0; q < nP; ++q) if (partners[q] < nP_) Kokkos::atomic_exchange(&M(partners[q]), 1);
     });
   }
 
-  /// Repopulate store.adj for ALL owned cells from the resident topology — pure topology (brute
+  /// Repopulate store.poke4 for ALL owned cells from the resident topology — pure topology (brute
   /// findSharing, ConvexCell::rebuildAdjacency), no incremental stitch. Used only after a cold
   /// buildTessellation (which does not emit adjacency); the frequent gathers maintain adj incrementally.
   /// The result is element-for-element identical to the gather's incremental adj (validated foundation
   /// gate), so the two adj sources mix cleanly across the store.
   void rebuildAdjAll(const Kokkos::View<Real*, Mem>& pos) {
     if (!localCert) return;
-    Store st = store; auto P = pos;
+    Store st = store; auto P = pos; auto Pk4 = store.poke4;
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
     Kokkos::parallel_for("mt.rebuildAdjAll", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
-      Cell c; st.load(i, c, Lx, Ly, Lz);  // load brings topology; adj + face4 are (re)derived below
-      c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);  // computeFace4 needs vertices
+      Cell c; st.load(i, c, Lx, Ly, Lz);  // load brings topology; adj is rebuilt to derive the cert planes
+      c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);  // computePoke4 needs vertices
       c.rebuildAdjacency();
-      c.computeFace4();
-      st.save(i, c);  // writes back topology (unchanged) + the freshly built adj + face4
+      c.computePoke4(&Pk4((size_t)i * MAXT * 4));  // the only thing this pass produces (topology unchanged)
     });
   }
-  /// Lazily repopulate store.adj on a low-churn step so later steps use the cheap local certificate. A
+  /// Lazily repopulate store.poke4 on a low-churn step so later steps use the cheap local certificate. A
   /// gate-rebuild clears adjFresh; gating steps return before this runs, so a sustained high-churn regime
   /// keeps falling back to the brute certificate (no adj overhead), and a low-churn streak pays the full
   /// rebuildAdjAll exactly once (then gathers maintain adj incrementally).
@@ -308,10 +306,11 @@ struct MovingTessellation {
   void gatherSet(const TessGrid<Real>& grid, const Kokkos::View<int*, Mem>& wl, int n,
                  const Kokkos::View<Real*, Mem>& pos) {
     if (n <= 0) return;
-    // TrackAdj gather: clip stitches the edge adjacency incrementally and subsetGather persists it into
-    // store.adj, so the local certificate stays valid for the gathered cells with no separate pass.
-    subsetGather<Real, false, true>(grid, wl, n, store.np, store.nt, store.pnbr, store.tri, vol, store.adj,
-                                    store.face4, NoSdf{}, /*withForceGeom=*/false);
+    // TrackAdj gather: clip stitches the edge adjacency incrementally; the builder derives the cert plane
+    // set from it (computePoke4, no findSharing) into store.poke4, so the local cert stays valid for the
+    // gathered cells with no separate maintenance pass.
+    subsetGather<Real, false, true>(grid, wl, n, store.np, store.nt, store.pnbr, store.tri, vol, store.poke4,
+                                    NoSdf{}, /*withForceGeom=*/false);
     auto W = wl; auto rb = rebuilt; auto P = pos; auto XR = xRef;
     Kokkos::parallel_for("mt.markRebuilt", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
       const int i = W(s);
@@ -356,7 +355,7 @@ struct MovingTessellation {
     if (n <= 0) return;
     auto W = wl; auto P = pos; auto rb = rebuilt; auto XR = xRef; auto Vv = vol;
     auto EN = extraNbr; auto EC = extraCnt; constexpr int kCap = kExtraCap;
-    Store st = store;
+    Store st = store; auto Pk4 = store.poke4;
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
     const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
     Kokkos::parallel_for("mt.surgical", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
@@ -385,7 +384,10 @@ struct MovingTessellation {
         const Real nrm[3] = {rx, ry, rz};
         c.clip(nrm, Real(0.5) * (rx * rx + ry * ry + rz * rz), j);
       }
-      if (!c.overflow) { st.save(i, c); Vv(i) = c.volumePerVertex(); }
+      if (!c.overflow) {
+        st.save(i, c); Vv(i) = c.volumePerVertex();
+        c.computePoke4(&Pk4((size_t)i * MAXT * 4));  // refresh the cert plane set for this re-clipped cell
+      }
       rb(i) = 1;
       XR(3 * i) = sx; XR(3 * i + 1) = sy; XR(3 * i + 2) = sz;
     });
@@ -454,7 +456,7 @@ struct MovingTessellation {
     auto grid = buildTessGrid<Real, false>(pos, Kokkos::View<Real*, Mem>(), N, L, sw, densityCount,
                                            Kokkos::View<long*, Mem>());
     Kokkos::deep_copy(rebuilt, 0);
-    // Use the cheap local certificate whenever store.adj/face4 are valid for the current topology. With the
+    // Use the cheap local certificate whenever store.poke4 is valid for the current topology. With the
     // 4th-face plane included the local cert matches the brute flag set (it is complete, not a subset), so
     // no per-step displacement gate or brute fallback is needed — large moves and teleports are handled by
     // the same detect→gather→verify path. (adj/face4 are invalidated only by a cold rebuild.)

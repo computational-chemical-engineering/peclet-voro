@@ -60,8 +60,7 @@ SubsetGatherResult<Real> subsetGather(const TessGrid<Real>& grid,
                                       const Kokkos::View<int*, tpx::MemSpace>& outPnbr,
                                       const Kokkos::View<unsigned*, tpx::MemSpace>& outTri,
                                       const Kokkos::View<Real*, tpx::MemSpace>& cellVol,
-                                      const Kokkos::View<unsigned char*, tpx::MemSpace>& outAdj = {},
-                                      const Kokkos::View<unsigned char*, tpx::MemSpace>& outFace4 = {},
+                                      const Kokkos::View<unsigned char*, tpx::MemSpace>& outPoke4 = {},
                                       Sdf sdf = {}, bool withForceGeom = false) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
@@ -97,7 +96,7 @@ SubsetGatherResult<Real> subsetGather(const TessGrid<Real>& grid,
       grid.icx, grid.icy, grid.icz, grid.Lx, grid.Ly, grid.Lz, grid.minCsz,
       grid.dimx, grid.dimy, grid.dimz, grid.sw, grid.nOff, grid.wlS,
       grid.useMorton, grid.haveGid, withForceGeom, facetCap, sdf,
-      outNp, outNt, outPnbr, outTri, outAdj, outFace4, noCand, noCandCnt,
+      outNp, outNt, outPnbr, outTri, outPoke4, noCand, noCandCnt,
       /*emitTopo=*/true, /*emitCand=*/false, /*candCap=*/0};
 
   auto slotOf = grid.slotOf;
