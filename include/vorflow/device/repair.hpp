@@ -63,7 +63,13 @@ template <class Real, int MAXP = 64, int MAXT = 112>
 struct MovingTessellation {
   using Mem = tpx::MemSpace;
   using Exec = tpx::ExecSpace;
-  using Cell = ConvexCell<Real, MAXP, MAXT, true>;  // TrackAdj: maintain edge adjacency for the local cert
+  // The certificate/load/re-eval path reads the resident `poke4` plane set by pointer and never touches
+  // the edge adjacency, so it uses a LEAN cell with NO `adj` member (TrackAdj=false) — ~MAXT*3*4 bytes
+  // smaller per thread, which lifts occupancy on the full-N certify (the GPU repair's hot kernel). Only
+  // the cell-BUILDING paths (the gather's CellBuilder, rebuildAdjAll, surgicalRepair) need `adj` to derive
+  // poke4, so they use the TrackAdj=true BuildCell.
+  using CertCell = ConvexCell<Real, MAXP, MAXT, false>;
+  using BuildCell = ConvexCell<Real, MAXP, MAXT, true>;
   using Store = TopologyStore<MAXP, MAXT>;
 
   int N = 0;       ///< total cells in the resident arrays (single-domain: all; MPI: owned+ghost)
@@ -211,7 +217,7 @@ struct MovingTessellation {
     const int nP_ = nProc;
     Kokkos::parallel_for(
         "mt.certify", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
-          Cell c; st.load(i, c, Lx, Ly, Lz);
+          CertCell c; st.load(i, c, Lx, Ly, Lz);
           c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
           Vv(i) = c.volumePerVertex();
           int partners[32]; int nP = 0;
@@ -267,7 +273,7 @@ struct MovingTessellation {
     const Real Lx = L[0], Ly = L[1], Lz = L[2]; const Real tolL = tol; const int nP_ = nProc;
     Kokkos::parallel_for("mt.certifyList", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
       const int i = list(s);
-      Cell c; st.load(i, c, Lx, Ly, Lz);
+      CertCell c; st.load(i, c, Lx, Ly, Lz);
       c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
       Vv(i) = c.volumePerVertex();
       int partners[32]; int nP = 0;
@@ -291,7 +297,7 @@ struct MovingTessellation {
     Store st = store; auto P = pos; auto Pk4 = store.poke4;
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
     Kokkos::parallel_for("mt.rebuildAdjAll", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
-      Cell c; st.load(i, c, Lx, Ly, Lz);  // load brings topology; adj is rebuilt to derive the cert planes
+      BuildCell c; st.load(i, c, Lx, Ly, Lz);  // load brings topology; adj is rebuilt to derive the cert planes
       c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);  // computePoke4 needs vertices
       c.rebuildAdjacency();
       c.computePoke4(&Pk4((size_t)i * MAXT * 4));  // the only thing this pass produces (topology unchanged)
@@ -366,7 +372,7 @@ struct MovingTessellation {
     const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
     Kokkos::parallel_for("mt.surgical", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
       const int i = W(s);
-      Cell c; c.initBox(Lx, Ly, Lz);
+      BuildCell c; c.initBox(Lx, Ly, Lz);
       const Real sx = P(3 * i), sy = P(3 * i + 1), sz = P(3 * i + 2);
       const int npi = st.np(i);
       for (int k = 6; k < npi && !c.overflow; ++k) {  // stored neighbours, current positions
