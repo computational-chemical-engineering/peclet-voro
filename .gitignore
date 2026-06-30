@@ -43,3 +43,5 @@ benchmarks/archive_pending/
 .DS_Store
 Thumbs.db
 .codex
+build_*.log
+cuda_report_*.log
