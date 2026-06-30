@@ -90,6 +90,9 @@ add_vorflow_kokkos_test(test_convexcell_unit)
 # G2 validation: ConvexCell per-facet geometry (area/dV/connVec) vs the half-edge oracle.
 add_vorflow_kokkos_test(test_convexcell_geometry)
 
+# TrackAdj axis: incremental edge-adjacency + Lawson local-convexity certificate foundation gates.
+add_vorflow_kokkos_test(test_convexcell_adj)
+
 # Vertex-local sort-free geometry (design note): acceptance criteria in FP64.
 add_vorflow_kokkos_test(test_pervertex_geometry)
 

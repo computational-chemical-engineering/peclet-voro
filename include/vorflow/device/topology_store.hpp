@@ -39,8 +39,10 @@ struct TopologyStore {
   Kokkos::View<int*, MemSpace> nt;        // N
   Kokkos::View<int*, MemSpace> pnbr;      // N*MAXP : neighbour seed id per plane (<0 = box)
   Kokkos::View<unsigned*, MemSpace> tri;  // N*MAXT : t0 | t1<<8 | t2<<16 | alive<<24
-  Kokkos::View<unsigned*, MemSpace> poke; // N*MAXT : per-triangle 3 edge-opposite plane indices (local
-                                          // certificate; allocated only when allocPoke() is called)
+  Kokkos::View<unsigned char*, MemSpace> adj;  // N*MAXT*3 : per-triangle edge adjacency (ConvexCell
+                                          // TrackAdj, the Lawson local certificate; allocated via allocAdj()).
+                                          // A triangle index fits in a byte (MAXT<=112<256), so this is
+                                          // packed — its per-cell load traffic is below the old poke store's.
 
   void alloc(int n) {
     using Kokkos::view_alloc;
@@ -54,11 +56,11 @@ struct TopologyStore {
                                             (size_t)n * MAXT);
   }
 
-  /// Allocate the per-triangle poke-plane store (the local-Delaunay certificate; opt-in so callers that
-  /// don't use it pay no memory). N*MAXT unsigned ≈ MAXT·4 bytes/cell.
-  void allocPoke() {
-    poke = Kokkos::View<unsigned*, MemSpace>(
-        Kokkos::view_alloc(std::string("topo.poke"), Kokkos::WithoutInitializing), (size_t)N * MAXT);
+  /// Allocate the per-triangle edge-adjacency store (the Lawson local certificate; opt-in so callers that
+  /// don't use it pay no memory). N*MAXT*3 int ≈ MAXT·12 bytes/cell.
+  void allocAdj() {
+    adj = Kokkos::View<unsigned char*, MemSpace>(
+        Kokkos::view_alloc(std::string("topo.adj"), Kokkos::WithoutInitializing), (size_t)N * MAXT * 3);
   }
 
   /// Persist cell `c` at slot i (call after the cell is finalised — clipped + complete).
@@ -70,6 +72,12 @@ struct TopologyStore {
     for (int t = 0; t < c.nt; ++t)
       tri((size_t)i * MAXT + t) = (unsigned)c.t0[t] | ((unsigned)c.t1[t] << 8) |
                                   ((unsigned)c.t2[t] << 16) | ((c.alive[t] ? 1u : 0u) << 24);
+    if constexpr (Cell::kTrackAdj) {  // persist the incrementally-stitched edge adjacency (if allocAdj())
+      if (adj.extent(0) > 0)
+        for (int t = 0; t < c.nt; ++t)
+          for (int e = 0; e < 3; ++e)
+            adj((size_t)i * MAXT * 3 + t * 3 + e) = (unsigned char)c.adj[t * 3 + e];
+    }
   }
 
   /// Reload the stored topology of slot i into a fresh cell, ready for reevalGeometry(): seeds the six box
@@ -89,6 +97,11 @@ struct TopologyStore {
       c.t1[t] = (unsigned char)((w >> 8) & 0xffu);
       c.t2[t] = (unsigned char)((w >> 16) & 0xffu);
       c.alive[t] = ((w >> 24) & 1u) != 0u;
+    }
+    if constexpr (Cell::kTrackAdj) {  // restore the edge adjacency (reevalGeometry leaves it valid)
+      if (adj.extent(0) > 0)          // an adj-less store leaves c.adj uninitialised — caller rebuilds it
+        for (int t = 0; t < nti; ++t)
+          for (int e = 0; e < 3; ++e) c.adj[t * 3 + e] = (int)adj((size_t)i * MAXT * 3 + t * 3 + e);
     }
   }
 };

@@ -98,9 +98,10 @@ template <class Real, int K> KOKKOS_INLINE_FUNCTION void dedgeFoot(const Dual<Re
 /// Compact convex Voronoi cell. MAXP planes (<=255 so a plane index fits in a byte),
 /// MAXT dual triangles (= primal vertices). Trivially default-constructible (POD) so it
 /// lives in registers / a per-thread stack.
-template <class Real, int MAXP = 64, int MAXT = 96>
+template <class Real, int MAXP = 64, int MAXT = 96, bool TrackAdj = false>
 struct ConvexCell {
   static_assert(MAXP <= 255, "plane index must fit in unsigned char");
+  static constexpr bool kTrackAdj = TrackAdj;  ///< lets templated consumers (store save/load) branch at compile time
   Real n[MAXP][3];   ///< foot-point normal of each plane: half-space {x : n·x <= n·n}, so x=n is the
                      ///< foot of the perpendicular from the seed (origin) and |n| the seed->plane dist
                      ///< (= ½·(neighbour rel-pos) for Voronoi; the connector r = 2n).
@@ -112,6 +113,18 @@ struct ConvexCell {
   bool alive[MAXT];  ///< triangle live flag
   int nt;            ///< triangle high-water mark
   bool overflow;     ///< set if MAXP/MAXT exceeded -> cell invalid, caller falls back
+
+  /// Per-triangle edge adjacency, maintained incrementally in `clip` when TrackAdj — the input to the
+  /// O(nt) Lawson local-convexity certificate (`isLocallyConvex`). Zero-footprint when !TrackAdj
+  /// (`Kokkos::Array<int,0>` is the intended empty case, so `sizeof(ConvexCell<...,false>)` is unchanged).
+  ///   adj[t*3 + e] = index of the live triangle sharing edge-slot e of triangle t.
+  /// Edge-slot convention (must match findSharing / fan enumeration):
+  ///   slot 0 = edge {vtx0, vtx1}, slot 1 = edge {vtx1, vtx2}, slot 2 = edge {vtx2, vtx0},
+  /// where (vtx0,vtx1,vtx2) = (t0[t], t1[t], t2[t]).
+  /// The cell surface is a closed triangulation (topological sphere), so every edge is shared by exactly
+  /// two live triangles; adj entries for live triangles are never -1 in a valid state. Killed triangles
+  /// keep stale adj (they are alive==false, so the oracle ignores them and clip never follows into them).
+  Kokkos::Array<int, (TrackAdj ? MAXT : 0) * 3> adj;
 
   /// Seed the cell with the big cuboid of extent (L0,L1,L2) centred on the seed.
   /// Planes 0:+x 1:-x 2:+y 3:-y 4:+z 5:-z; the 8 corners are the dual triangles.
@@ -140,6 +153,7 @@ struct ConvexCell {
           computeVertex(nt);
           ++nt;
         }
+    if constexpr (TrackAdj) rebuildAdjacency();  // one-time bootstrap (~12 box triangles)
   }
 
   /// Compute and cache the dual vertex of triangle t (where its three planes meet,
@@ -216,6 +230,11 @@ struct ConvexCell {
   /// such an event makes the PARTNER cell self-inconsistent, so a global sweep of this test still flags it.
   /// Exception: an SDF/boundary plane has no partner cell, so boundary cells need a separate boundary watch.
   KOKKOS_INLINE_FUNCTION bool isSelfConsistent(Real tol) const {
+    // Branch-free max-slack accumulation (no per-thread early-out divergence): the whole-cell worst
+    // perpendicular poke is compared to `tol` once at the end. The brute scan is the complete certificate —
+    // it catches far-pokes by NON-adjacent planes too, which the local (Lawson) form deliberately does not.
+    // (An early-out variant would only help when np is large AND fail-fast rate is high; measure first.)
+    Real maxd = Real(0);
     for (int t = 0; t < nt; ++t) {
       if (!alive[t]) continue;
       const Real v[3] = {vx[t], vy[t], vz[t]};
@@ -224,11 +243,11 @@ struct ConvexCell {
         const Real s = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
         if (s > Real(0)) {  // v outside plane k; convert to a perpendicular distance for the tol test
           const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
-          if (s * invlen > tol) return false;
+          maxd = Kokkos::max(maxd, s * invlen);
         }
       }
     }
-    return true;
+    return maxd <= tol;
   }
 
   /// Part-II repair signal (Phase 1): the convexity/in-sphere certificate above, additionally emitting
@@ -247,8 +266,8 @@ struct ConvexCell {
   /// carries to the regular triangulation. The ConvexCell device path is Voronoi-only today
   /// (no radical-plane geometry), so only the unweighted form is implemented; the orthosphere form plugs
   /// in here when the Power policy lands.
-  KOKKOS_INLINE_FUNCTION bool isSelfConsistent(Real tol, int* outPartners, int maxPartners,
-                                               int& nPartners) const {
+  KOKKOS_INLINE_FUNCTION bool isSelfConsistentPartners(Real tol, int* outPartners, int maxPartners,
+                                                       int& nPartners) const {
     nPartners = 0;
     bool consistent = true;
     for (int t = 0; t < nt; ++t) {
@@ -275,70 +294,68 @@ struct ConvexCell {
     return consistent;
   }
 
-  /// Local-Delaunay acceleration of the certificate. For each live dual-triangle (= Voronoi vertex)
-  /// compute its three **poke planes**: the "fourth" plane of the triangle sharing each of its three
-  /// edges. By Delaunay's lemma a cell is non-Voronoi iff some shared facet is locally non-Delaunay,
-  /// and that failure pokes a vertex past one of THESE edge-opposite planes — so the certificate only
-  /// needs to test each vertex against its three poke planes, not all `np` planes (O(nt·3) vs O(nt·np)).
-  /// `out[t]` packs the three plane indices (one byte each; 0xff = no neighbour / degenerate edge); a
-  /// dead triangle gets all-0xff. Pure topology (uses t0/t1/t2/alive + findSharing) — no geometry, so it
-  /// can be precomputed once per (re)build and reused across the cheap re-eval steps. `out` has MAXT
-  /// entries. NOTE: an edge-opposite plane is never a defining plane of its own triangle, so the local
-  /// test does not need the defining-plane skip the brute-force form has.
-  KOKKOS_INLINE_FUNCTION void computePokePlanes(unsigned* out) const {
-    for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) { out[t] = 0xffffffffu; continue; }
-      const int vtx[3] = {t0[t], t1[t], t2[t]};
-      unsigned packed = 0;
-      for (int e = 0; e < 3; ++e) {  // bytes 0,1,2: the three EDGE-opposite planes (the in-seed faces of
-        const int x = vtx[e], y = vtx[(e + 1) % 3];          // the dual Delaunay tet)
-        const int other = findSharing(t, x, y);
-        int p = 0xff;
-        if (other >= 0) {
-          const int a = t0[other], b = t1[other], c = t2[other];
-          p = (a != x && a != y) ? a : (b != x && b != y) ? b : c;
-          if (p < 0 || p > 0xfe) p = 0xff;
-        }
-        packed |= (unsigned)(p & 0xff) << (e * 8);
-      }
-      // byte 3: the FOURTH face of the Delaunay tet (the one NOT containing the seed). A neighbour across
-      // it can poke this vertex without being one of the three in-cell edge neighbours, so the 3-edge test
-      // alone is incomplete. At the (Delaunay) build config that fourth neighbour is the non-defining plane
-      // the vertex is nearest to from inside (smallest positive slack); record it as the fourth candidate.
-      // Requires the cached vertex (computeVertex / reevalGeometry must have run).
-      const Real v[3] = {vx[t], vy[t], vz[t]};
-      Real best = Real(3.4e38);
-      int g = 0xff;
-      const int b0 = (int)(packed & 0xff), b1 = (int)((packed >> 8) & 0xff), b2 = (int)((packed >> 16) & 0xff);
-      for (int k = 0; k < np; ++k) {
-        if (k == vtx[0] || k == vtx[1] || k == vtx[2]) continue;  // defining
-        if (k == b0 || k == b1 || k == b2) continue;              // already an edge-opposite
-        const Real slack = nn[k] - (n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2]);
-        if (slack >= Real(0) && slack < best) { best = slack; g = k; }
-      }
-      packed |= (unsigned)(g & 0xff) << 24;
-      out[t] = packed;
-    }
+  /// Edge-opposite plane of the triangle `s` across shared edge {x,y}: the one vertex (plane index) of
+  /// `s` that is neither x nor y. Helper for the Lawson local certificate.
+  KOKKOS_INLINE_FUNCTION int oppositePlane(int s, int x, int y) const {
+    const int a = t0[s], b = t1[s], c = t2[s];
+    return (a != x && a != y) ? a : (b != x && b != y) ? b : c;
   }
 
-  /// Local certificate: same result as `isSelfConsistent(tol, partners…)` but tests each live vertex
-  /// only against its three precomputed poke planes (computePokePlanes) — complete by Delaunay's lemma,
-  /// ~np/3× fewer plane tests. `poke[t]` is the packed triple for triangle t. Returns true iff consistent.
-  KOKKOS_INLINE_FUNCTION bool isSelfConsistentLocal(const unsigned* poke, Real tol, int* outPartners,
-                                                    int maxPartners, int& nPartners) const {
+  /// Local convexity certificate (Lawson), O(nt). Each interior edge {x,y} shared by triangles t and s is
+  /// locally convex iff the dual vertex of one incident triangle lies inside the OTHER triangle's
+  /// edge-opposite plane: n_k·v ≤ nn_k. The relation is symmetric, so each edge is tested once (canonical
+  /// t < neighbour) against the neighbour's edge-opposite plane k. Requires the maintained `adj` table and
+  /// the cached vertices (computeVertex / reevalGeometry must have run).
+  ///
+  /// PRECONDITION — this is a LOCAL test, valid ONLY behind the gate's small-displacement (sparse-repair)
+  /// guard: it detects the FIRST edge flip of a cell that is still nearly Voronoi. It is NOT a drop-in for
+  /// the brute-force `isSelfConsistent`, which additionally catches far-pokes by NON-adjacent planes (a seed
+  /// that crossed a vertex without flipping an incident edge). Keep both bodies; pick by the gate.
+  KOKKOS_INLINE_FUNCTION bool isLocallyConvex(Real tol) const {
+    static_assert(TrackAdj, "isLocallyConvex requires TrackAdj");
+    Real maxd = Real(0);
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t]) continue;
+      const Real v[3] = {vx[t], vy[t], vz[t]};
+      const int vt[3] = {t0[t], t1[t], t2[t]};
+      for (int e = 0; e < 3; ++e) {
+        const int s = adj[t * 3 + e];
+        if (s < t) continue;  // canonical: visit each interior edge exactly once
+        const int x = vt[e], y = vt[(e + 1) % 3];
+        const int k = oppositePlane(s, x, y);  // neighbour's edge-opposite plane
+        const Real sl = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
+        if (sl > Real(0)) {
+          const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
+          maxd = Kokkos::max(maxd, sl * invlen);
+        }
+      }
+    }
+    return maxd <= tol;
+  }
+
+  /// Partner-emitting Lawson local certificate — same edge test as `isLocallyConvex`, additionally emitting
+  /// the violated-plane partner seed(s) (the `pnbr` id of each edge-opposite plane a vertex pokes past),
+  /// deduplicated into outPartners[0..nPartners). These are the gaining cells of a flip (the §1 repair
+  /// signal), so the gather-based repair can seed Pass 1 from them exactly as it did from the brute form.
+  /// Same LOCAL precondition as `isLocallyConvex`. Returns true iff locally convex (no poke past `tol`).
+  KOKKOS_INLINE_FUNCTION bool isLocallyConvexPartners(Real tol, int* outPartners, int maxPartners,
+                                                      int& nPartners) const {
+    static_assert(TrackAdj, "isLocallyConvexPartners requires TrackAdj");
     nPartners = 0;
     bool consistent = true;
     for (int t = 0; t < nt; ++t) {
       if (!alive[t]) continue;
       const Real v[3] = {vx[t], vy[t], vz[t]};
-      const unsigned pk = poke[t];
-      for (int e = 0; e < 4; ++e) {  // 3 edge-opposite + the 4th-face plane (byte 3)
-        const int k = (int)((pk >> (e * 8)) & 0xffu);
-        if (k == 0xff) continue;  // sentinel
-        const Real s = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
-        if (s > Real(0)) {
+      const int vt[3] = {t0[t], t1[t], t2[t]};
+      for (int e = 0; e < 3; ++e) {
+        const int s = adj[t * 3 + e];
+        if (s < t) continue;  // canonical: visit each interior edge once
+        const int x = vt[e], y = vt[(e + 1) % 3];
+        const int k = oppositePlane(s, x, y);
+        const Real sl = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
+        if (sl > Real(0)) {
           const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
-          if (s * invlen > tol) {
+          if (sl * invlen > tol) {
             consistent = false;
             const int part = pnbr[k];
             if (part >= 0) {
@@ -380,6 +397,48 @@ struct ConvexCell {
       if (hasX && hasY) return s;
     }
     return -1;
+  }
+
+  /// Brute O(nt²) rebuild of the edge-adjacency table from triangle topology (via findSharing).
+  /// Bootstrap (initBox) + fallback only, never in the hot path. No-op when !TrackAdj.
+  KOKKOS_INLINE_FUNCTION void rebuildAdjacency() {
+    if constexpr (TrackAdj) {
+      for (int t = 0; t < nt; ++t) {
+        if (!alive[t]) continue;
+        const int vt[3] = {t0[t], t1[t], t2[t]};
+        for (int e = 0; e < 3; ++e)
+          adj[t * 3 + e] = findSharing(t, vt[e], vt[(e + 1) % 3]);
+      }
+    }
+  }
+
+  /// DEBUG oracle: true iff `adj` is internally consistent for all live triangles (every entry points to
+  /// a live triangle that actually shares the edge, and the back-link is symmetric). Every incremental
+  /// stitch in clip must leave this true; assert it after each clip in debug builds. Trivially true when
+  /// !TrackAdj.
+  KOKKOS_INLINE_FUNCTION bool checkAdjacencyInvariant() const {
+    if constexpr (!TrackAdj) {
+      return true;
+    } else {
+      for (int t = 0; t < nt; ++t) {
+        if (!alive[t]) continue;
+        const int vt[3] = {t0[t], t1[t], t2[t]};
+        for (int e = 0; e < 3; ++e) {
+          const int x = vt[e], y = vt[(e + 1) % 3];
+          const int s = adj[t * 3 + e];
+          if (s < 0 || s >= nt || !alive[s]) return false;  // live target
+          const int vs[3] = {t0[s], t1[s], t2[s]};
+          const bool hasX = (vs[0] == x || vs[1] == x || vs[2] == x);
+          const bool hasY = (vs[0] == y || vs[1] == y || vs[2] == y);
+          if (!(hasX && hasY)) return false;  // shares the edge
+          bool back = false;                  // symmetry
+          for (int f = 0; f < 3; ++f)
+            if (adj[s * 3 + f] == t) back = true;
+          if (!back) return false;
+        }
+      }
+      return true;
+    }
   }
 
   KOKKOS_INLINE_FUNCTION int allocTri() {
@@ -425,39 +484,122 @@ struct ConvexCell {
 
     np = pi + 1;  // commit the plane
 
-    // Horizon: for each killed triangle edge whose sharing triangle is alive, the new
-    // plane gets a triangle (x, y, pi). Collect first, then mutate.
-    unsigned char nA[MAXT], nB[MAXT];
-    int nnew = 0;
-    for (int t = 0; t < nt; ++t) {
-      if (!kill[t]) continue;
-      const int vtx[3] = {t0[t], t1[t], t2[t]};
-      for (int e = 0; e < 3; ++e) {
-        const int x = vtx[e], y = vtx[(e + 1) % 3];
-        const int other = findSharing(t, x, y);
-        if (other >= 0 && !kill[other]) {
-          if (nnew < MAXT) {
-            nA[nnew] = (unsigned char)x;
-            nB[nnew] = (unsigned char)y;
-            ++nnew;
-          } else {
-            overflow = true;
+    if constexpr (!TrackAdj) {
+      // ---- Lean path (unchanged): collect the horizon by findSharing, then retriangulate. ----
+      // For each killed triangle edge whose sharing triangle is alive, the new plane gets a
+      // triangle (x, y, pi). Collect first, then mutate.
+      unsigned char nA[MAXT], nB[MAXT];
+      int nnew = 0;
+      for (int t = 0; t < nt; ++t) {
+        if (!kill[t]) continue;
+        const int vtx[3] = {t0[t], t1[t], t2[t]};
+        for (int e = 0; e < 3; ++e) {
+          const int x = vtx[e], y = vtx[(e + 1) % 3];
+          const int other = findSharing(t, x, y);
+          if (other >= 0 && !kill[other]) {
+            if (nnew < MAXT) {
+              nA[nnew] = (unsigned char)x;
+              nB[nnew] = (unsigned char)y;
+              ++nnew;
+            } else {
+              overflow = true;
+            }
           }
         }
       }
-    }
-    // Remove killed triangles.
-    for (int t = 0; t < nt; ++t)
-      if (kill[t]) alive[t] = false;
-    // Add the new fan around plane pi.
-    for (int i = 0; i < nnew; ++i) {
-      const int slot = allocTri();
-      if (slot < 0) break;
-      t0[slot] = nA[i];
-      t1[slot] = nB[i];
-      t2[slot] = (unsigned char)pi;
-      alive[slot] = true;
-      computeVertex(slot);
+      // Remove killed triangles.
+      for (int t = 0; t < nt; ++t)
+        if (kill[t]) alive[t] = false;
+      // Add the new fan around plane pi.
+      for (int i = 0; i < nnew; ++i) {
+        const int slot = allocTri();
+        if (slot < 0) break;
+        t0[slot] = nA[i];
+        t1[slot] = nB[i];
+        t2[slot] = (unsigned char)pi;
+        alive[slot] = true;
+        computeVertex(slot);
+      }
+    } else {
+      // ---- TrackAdj path: walk the conflict-region boundary as ONE oriented cycle via `adj` (O(conflict),
+      // no findSharing), then stitch the new fan's adjacency in O(1) per edge. The conflict region (vertices
+      // outside the new half-space) is connected and its boundary is a single cycle for a convex clip. ----
+      int hA[MAXT], hB[MAXT], hSurv[MAXT], hBack[MAXT];  // horizon edge {A,B}, survivor across it, slot back
+      int H = 0;
+      // Start edge: a killed triangle with a surviving neighbour across some slot.
+      int t0k = -1, e0 = -1;
+      for (int t = 0; t < nt && t0k < 0; ++t) {
+        if (!kill[t]) continue;
+        for (int e = 0; e < 3; ++e) {
+          const int s = adj[t * 3 + e];
+          if (s >= 0 && alive[s] && !kill[s]) { t0k = t; e0 = e; break; }
+        }
+      }
+      if (t0k < 0) { overflow = true; return true; }  // no surviving boundary (cannot happen for a real cut)
+      const int vstart[3] = {t0[t0k], t1[t0k], t2[t0k]};
+      int A = vstart[e0], B = vstart[(e0 + 1) % 3];
+      int tt = t0k, ee = e0;
+      const int guardMax = 6 * nt + 12;
+      int guard = 0;
+      do {
+        const int surv = adj[tt * 3 + ee];
+        int back = 0;
+        for (int f = 0; f < 3; ++f)
+          if (adj[surv * 3 + f] == tt) { back = f; break; }
+        if (H < MAXT) {
+          hA[H] = A; hB[H] = B; hSurv[H] = surv; hBack[H] = back; ++H;
+        } else {
+          overflow = true; break;
+        }
+        // Pivot around vertex B, rotating through killed triangles, until we exit to the next survivor.
+        const int pivot = B;
+        int rt = tt, arrival = ee, rotGuard = 0;
+        while (true) {
+          const int rv[3] = {t0[rt], t1[rt], t2[rt]};
+          const int lv = (rv[0] == pivot) ? 0 : (rv[1] == pivot) ? 1 : 2;  // local index of pivot in rt
+          const int crossSlot = (arrival == lv) ? (lv + 2) % 3 : lv;       // the OTHER B-edge of rt
+          const int rn = adj[rt * 3 + crossSlot];
+          if (rn >= 0 && kill[rn]) {  // still inside the conflict region: keep rotating around B
+            int f = (adj[rn * 3 + 0] == rt) ? 0 : (adj[rn * 3 + 1] == rt) ? 1 : 2;
+            rt = rn; arrival = f;
+            if (++rotGuard > guardMax) { overflow = true; break; }
+            continue;
+          }
+          // rn survives -> edge crossSlot of rt is the next horizon edge, oriented out of the pivot.
+          const int u = rv[crossSlot], w = rv[(crossSlot + 1) % 3];
+          A = pivot; B = (u == pivot) ? w : u;
+          tt = rt; ee = crossSlot;
+          break;
+        }
+        if (overflow) break;
+        if (++guard > guardMax) { overflow = true; break; }
+      } while (!(tt == t0k && ee == e0));
+
+      // Remove killed triangles (frees their slots for the fan via allocTri).
+      for (int t = 0; t < nt; ++t)
+        if (kill[t]) alive[t] = false;
+      // Allocate the whole fan first (so τ_{i±1} cross-references resolve), then set topology + adjacency.
+      int tau[MAXT];
+      bool ok = !overflow;
+      for (int i = 0; i < H && ok; ++i) {
+        tau[i] = allocTri();
+        if (tau[i] < 0) ok = false;
+        else alive[tau[i]] = true;  // reserve the slot so allocTri doesn't hand it out again
+      }
+      if (ok) {
+        for (int i = 0; i < H; ++i) {
+          const int s = tau[i];
+          t0[s] = (unsigned char)hA[i];
+          t1[s] = (unsigned char)hB[i];
+          t2[s] = (unsigned char)pi;
+          alive[s] = true;
+          computeVertex(s);
+          adj[s * 3 + 0] = hSurv[i];              // slot 0 = edge {A_i,B_i} -> survivor across the horizon
+          adj[s * 3 + 1] = tau[(i + 1) % H];      // slot 1 = edge {B_i,P}   -> next fan triangle
+          adj[s * 3 + 2] = tau[(i - 1 + H) % H];  // slot 2 = edge {P,A_i}   -> prev fan triangle
+          adj[hSurv[i] * 3 + hBack[i]] = s;       // back-patch the survivor's slot to this fan triangle
+        }
+      }
     }
     return true;
   }
@@ -1068,8 +1210,8 @@ struct ConvexCell {
 /// (rSqHalf). Clips closest-first with the security-radius early-out: once the next
 /// candidate's plane offset exceeds 2·max-vertex-rsq, no farther seed can cut. Mirrors
 /// the half-edge buildVoronoiCell, but on the compact ConvexCell.
-template <class Real, int MAXP, int MAXT>
-KOKKOS_INLINE_FUNCTION void buildConvexCell(ConvexCell<Real, MAXP, MAXT>& c, const Real L[3],
+template <class Real, int MAXP, int MAXT, bool TrackAdj>
+KOKKOS_INLINE_FUNCTION void buildConvexCell(ConvexCell<Real, MAXP, MAXT, TrackAdj>& c, const Real L[3],
                                             const Real* relx, const Real* rely, const Real* relz,
                                             const int* ids, int nNbr) {
   c.initBox(L[0], L[1], L[2]);

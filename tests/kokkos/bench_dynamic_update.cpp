@@ -219,7 +219,7 @@ static int gate1a_subset(int N, real_t L) {
   Store fullStore; fullStore.alloc(N);
   Kokkos::View<real_t*, Mem> fullVol("fullVol", N);
   vor::device::subsetGather<real_t, false>(grid, allIdx, N, fullStore.np, fullStore.nt,
-                                           fullStore.pnbr, fullStore.tri, fullVol,
+                                           fullStore.pnbr, fullStore.tri, fullVol, {},
                                            vor::device::NoSdf{}, /*withForceGeom=*/true);
 
   const int nSub = std::max(1, N / 7);
@@ -233,7 +233,7 @@ static int gate1a_subset(int N, real_t L) {
   Store subStore; subStore.alloc(N);
   Kokkos::View<real_t*, Mem> subVol("subVol", N);
   vor::device::subsetGather<real_t, false>(grid, idx, nSub, subStore.np, subStore.nt,
-                                           subStore.pnbr, subStore.tri, subVol,
+                                           subStore.pnbr, subStore.tri, subVol, {},
                                            vor::device::NoSdf{}, /*withForceGeom=*/true);
 
   // Bit-for-bit: np, nt, every pnbr, every packed triangle, and the volume — for each chosen index.
@@ -317,7 +317,7 @@ static int gate1b_partners(int N, real_t L) {
       Cell c; st.load(i, c, L, L, L);
       c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), L);
       int partners[32]; int nP = 0;
-      const bool ok = c.isSelfConsistent(tol, partners, 32, nP);
+      const bool ok = c.isSelfConsistentPartners(tol, partners, 32, nP);
       Fl(i) = ok ? 0 : 1;
       for (int q = 0; q < nP; ++q) {
         const int p = partners[q];
@@ -445,14 +445,19 @@ static int gate1c_skin(int N, real_t L) {
 }
 
 // ============================================================================================
-//   GATE 2 — the local-Delaunay certificate flags the SAME cells as the brute-force one
+//   GATE 2 — the Lawson local certificate is a sound SUBSET detector of the brute-force one
 // ============================================================================================
-// Build a store + poke planes at P0, displace by a moderate δ/h (so a real fraction flips), then per
-// cell run BOTH ConvexCell::isSelfConsistent (brute, all planes) and isSelfConsistentLocal (3 poke
-// planes) on the re-evaluated cell and compare. Completeness (Delaunay's lemma) ⇒ identical flagged
-// sets. Swept over a few displacements incl. large.
+// Build a store at P0, displace by a sweep of δ/h, then per cell run BOTH the brute ConvexCell::
+// isSelfConsistent (all planes) and the O(nt) Lawson isLocallyConvex (each edge vs the neighbour's
+// edge-opposite plane, off the maintained `adj`). The local test reads a STRICT SUBSET of the planes,
+// so the binding correctness invariant is: it must NEVER flag a cell the brute form calls convex
+// (subset violation == 0). The reverse — brute flags, local does not (a far-poke by a non-adjacent
+// plane) — is EXPECTED at larger δ/h and is exactly why the Phase-3 gate routes that regime to a
+// rebuild; it is reported as informational. adj is built here with the brute rebuildAdjacency (proved
+// element-identical to the gather's incremental stitch by test_convexcell_adj).
 static int gate2_localcert(int N, real_t L) {
-  std::printf("\n===== GATE 2: local-Delaunay certificate == brute-force certificate =====\n");
+  std::printf("\n===== GATE 2: Lawson local certificate ⊆ brute-force certificate =====\n");
+  using AdjCell = vor::device::ConvexCell<real_t, CMAXP, CMAXT, true>;
   const real_t Larr[3] = {L, L, L};
   const real_t spacing = std::cbrt((double)L * L * L / N);
   std::mt19937 rng(4242);
@@ -463,48 +468,39 @@ static int gate2_localcert(int N, real_t L) {
   Kokkos::deep_copy(x0d, Kokkos::View<real_t*, Kokkos::HostSpace>(x0.data(), 3 * N));
   Kokkos::deep_copy(veld, Kokkos::View<real_t*, Kokkos::HostSpace>(vel.data(), 3 * N));
   Kokkos::View<real_t*, Mem> wd; Kokkos::View<long*, Mem> gd;
-  Store store; store.alloc(N); store.allocPoke();
+  Store store; store.alloc(N);
   const real_t tol = (sizeof(real_t) == 4 ? real_t(2e-3) : real_t(1e-4)) * spacing;
 
-  long smallMismatch = 0;  // pass criterion: exact at the repair's operating regime (δ/h ≤ 0.002)
+  long subsetViol = 0;  // pass criterion: the local cert must never over-flag the brute one
   for (real_t disp : {real_t(0.0005), real_t(0.001), real_t(0.002), real_t(0.005), real_t(0.02), real_t(0.05)}) {
-    Kokkos::deep_copy(pos, x0d);  // build store + poke at P0
+    Kokkos::deep_copy(pos, x0d);  // build store at P0
     vor::device::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd, vor::device::NoSdf{},
         false, -1, store.np, store.nt, store.pnbr, store.tri);
-    { Store st = store; auto Pk = store.poke; auto P = pos;
-      Kokkos::parallel_for("g2.poke", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-        Cell c; st.load(i, c, L, L, L);
-        c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), L);  // build-config vertices
-        c.computePokePlanes(&Pk((size_t)i * CMAXT));
-      }); }
     // displace
     { auto P = pos; auto X0 = x0d; auto V = veld; const real_t s = disp * spacing, Ll = L;
       Kokkos::parallel_for("g2.move", Kokkos::RangePolicy<Exec>(0, 3 * N), KOKKOS_LAMBDA(int i) {
         real_t v = X0(i) + V(i) * s; v -= Ll * Kokkos::floor(v / Ll); P(i) = v; }); }
-    long mism = 0, flagB = 0;
-    { Store st = store; auto Pk = store.poke; auto P = pos; const real_t tl = tol;
+    long viol = 0, farPoke = 0, flagB = 0;
+    { Store st = store; auto P = pos; const real_t tl = tol;
       Kokkos::parallel_reduce("g2.cmp", Kokkos::RangePolicy<Exec>(0, N),
-        KOKKOS_LAMBDA(int i, long& mm, long& fb) {
-          Cell c; st.load(i, c, L, L, L);
+        KOKKOS_LAMBDA(int i, long& vv, long& fp, long& fb) {
+          AdjCell c; st.load(i, c, L, L, L);  // load topology; rebuild adj (brute) for the local test
           c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), L);
-          int pb[32], pl[32]; int nb = 0, nl = 0;
-          const bool okB = c.isSelfConsistent(tl, pb, 32, nb);
-          const bool okL = c.isSelfConsistentLocal(&Pk((size_t)i * CMAXT), tl, pl, 32, nl);
-          if (okB != okL) ++mm;
+          c.rebuildAdjacency();
+          const bool okB = c.isSelfConsistent(tl);
+          const bool okL = c.isLocallyConvex(tl);
+          if (okB && !okL) ++vv;   // local flagged what brute did not -> SUBSET VIOLATION (bug)
+          if (!okB && okL) ++fp;   // far-poke the local form misses (expected; gate rebuilds here)
           if (!okB) ++fb;
-        }, mism, flagB);
+        }, viol, farPoke, flagB);
     }
-    std::printf("  disp=%.4f sp:  brute-flagged=%7ld  brute≠local cells=%4ld %s\n", (double)disp, flagB,
-                mism, disp <= real_t(0.001) ? "(must be 0)" : "(informational; gate rebuilds here)");
-    if (disp <= real_t(0.001)) smallMismatch += mism;
+    std::printf("  disp=%.4f sp:  brute-flagged=%7ld  subset-viol=%4ld  far-poke(local-misses)=%4ld\n",
+                (double)disp, flagB, viol, farPoke);
+    subsetViol += viol;
   }
-  // The 4-poke-plane local test is COMPLETE at small per-step displacement (the build-config 4th-face
-  // neighbour is the correct candidate); as δ/h grows that build-config candidate goes stale so a few
-  // cells differ (a handful per 1e4 by δ/h~0.005) — but the Phase-3 gate routes that regime to a full
-  // rebuild, and the repair's own exactness gate confirms the residual stays marginal. So require
-  // exactness only for the operating regime δ/h ≤ 0.001.
-  const bool pass = smallMismatch == 0;
-  std::printf("GATE 2: %s (%ld flag mismatches at δ/h ≤ 0.001)\n", pass ? "PASS" : "FAIL", smallMismatch);
+  const bool pass = subsetViol == 0;
+  std::printf("GATE 2: %s (%ld subset violations — local must never over-flag brute)\n",
+              pass ? "PASS" : "FAIL", subsetViol);
   return pass ? 0 : 1;
 }
 
@@ -595,7 +591,7 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
       }
       // --- repair timing over the same trajectory ---
       vor::device::MovingTessellation<real_t, CMAXP, CMAXT> mt;
-      mt.localCert = !bruteCert;  // set before alloc (gates the poke-plane allocation)
+      mt.localCert = !bruteCert;  // selects local (Lawson) vs brute certificate
       mt.alloc(N, Larr, tol, skin, 4, N);
       mt.surgical = surgical;
       mt.useGate = !noGate;

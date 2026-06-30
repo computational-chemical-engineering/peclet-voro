@@ -52,7 +52,7 @@ struct SubsetGatherResult {
  *                 the cold build); the facet CSR itself is not published here (the store is). Default
  *                 false: the store + volume are what Phase-1 needs (geometry is re-derived on reload).
  */
-template <class Real, bool Weighted = false, class Sdf = NoSdf>
+template <class Real, bool Weighted = false, bool TrackAdj = false, class Sdf = NoSdf>
 SubsetGatherResult<Real> subsetGather(const TessGrid<Real>& grid,
                                       const Kokkos::View<int*, tpx::MemSpace>& indices, int nSubset,
                                       const Kokkos::View<int*, tpx::MemSpace>& outNp,
@@ -60,10 +60,11 @@ SubsetGatherResult<Real> subsetGather(const TessGrid<Real>& grid,
                                       const Kokkos::View<int*, tpx::MemSpace>& outPnbr,
                                       const Kokkos::View<unsigned*, tpx::MemSpace>& outTri,
                                       const Kokkos::View<Real*, tpx::MemSpace>& cellVol,
+                                      const Kokkos::View<unsigned char*, tpx::MemSpace>& outAdj = {},
                                       Sdf sdf = {}, bool withForceGeom = false) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
-  using Builder = CellBuilder<Real, Weighted, Sdf>;
+  using Builder = CellBuilder<Real, Weighted, Sdf, TrackAdj>;
   static_assert(!Weighted, "subsetGather: Power/Laguerre on the ConvexCell device path is deferred.");
   const int N = grid.N;
   using Kokkos::view_alloc;
@@ -95,7 +96,7 @@ SubsetGatherResult<Real> subsetGather(const TessGrid<Real>& grid,
       grid.icx, grid.icy, grid.icz, grid.Lx, grid.Ly, grid.Lz, grid.minCsz,
       grid.dimx, grid.dimy, grid.dimz, grid.sw, grid.nOff, grid.wlS,
       grid.useMorton, grid.haveGid, withForceGeom, facetCap, sdf,
-      outNp, outNt, outPnbr, outTri, noCand, noCandCnt,
+      outNp, outNt, outPnbr, outTri, outAdj, noCand, noCandCnt,
       /*emitTopo=*/true, /*emitCand=*/false, /*candCap=*/0};
 
   auto slotOf = grid.slotOf;
