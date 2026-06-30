@@ -139,27 +139,42 @@ the retired "poke" store it replaces, so the complete Lawson cert is **memory-ne
 
 ## 3. Distributed build (MPI: full-MPI and MPI+OpenMP)
 
-The distributed path uses the transport-core ORB block decomposition + async ghost-layer exchange; each
-rank cold-builds its owned cells (ghosts are cut candidates). Measured on `bench_repair_mpi`,
-N_global = 40 000, δ/h = 1e-3 (cold ms / repair ms per step):
+The distributed path uses the transport-core ORB block decomposition + async ghost-layer exchange (NBX);
+each rank cold-builds its owned cells (ghosts are cut candidates), and the moving-point step refreshes
+ghost positions on the established halo topology, re-gathering only on a (global) skin trip.
 
-| config | cores | cold ms/step | repair ms/step | cold Mcells/s | repair Mcells/s |
-|---|---|---|---|---|---|
-| np=1 × OMP=1 (≡ serial) | 1 | 676 | 117 | 0.059 | 0.34 |
-| np=2 × OMP=1 (full MPI) | 2 | 721 | 140 | 0.055 | 0.29 |
-| np=2 × OMP=4 (hybrid) | 8 | 307 | 95 | 0.130 | 0.42 |
+![mpi weak scaling](figs/report/mpi_scaling.png)
 
-* **np=1 reproduces serial exactly** (the per-rank build is the same kernel).
-* At this **small** N_global, strong scaling is **poor**: 40 k cells split two ways gives 20 k
-  owned/rank surrounded by a thick ghost layer, so per-rank work barely halves while the halo exchange
-  adds overhead — np=2 is no faster than np=1. The hybrid 2×4 (8 cores) is 2.2× the pure-2, but still
-  slower than a single-rank OpenMP-8 build (0.33 Mcells/s) at this size. **MPI is for problems too large
-  for one node**, not for speeding up a node-sized build; a proper weak-scaling study wants per-rank N
-  in the 10⁵–10⁶ range where the ghost surface is a small fraction.
-* **Correctness:** np=1 and np=2 (pure and hybrid) are machine-exact vs a single-rank oracle.
-* **Limitation:** np ≥ 4 currently **deadlocks** on this box (Open MPI 5.0.7) inside the *unchanged*
-  distributed driver/halo (the moving-point work added no MPI calls); a proper scaling sweep is blocked
-  on diagnosing that pre-existing hang separately.
+**Weak scaling** — fixed **50 000 cells/rank**, δ/h=1e-3, 1 core/rank (per-step cold ms / repair ms,
+and aggregate Mcells/s):
+
+| ranks | N_global | cold ms | repair ms | cold Mcells/s | repair Mcells/s | parallel efficiency |
+|---|---|---|---|---|---|---|
+| 1 | 50k | 846 | 149 | 0.059 | 0.34 | 1.00 |
+| 2 | 100k | 856 | 151 | 0.116 | 0.66 | 0.99 |
+| 4 | 200k | 862 | 152 | 0.231 | 1.31 | 0.98 |
+| 8 | 400k | 866 | 156 | 0.461 | **2.56** | 0.95 |
+
+* **Near-ideal weak scaling.** Per-rank wall time is flat across np, so aggregate throughput scales
+  **~linearly** — np=8 delivers **7.8× the cold-build and 7.6× the repair throughput** of one rank
+  (95% efficiency). This is the regime MPI is for: problems larger than one node, with the per-rank
+  domain big enough that the ghost surface is a small fraction of the volume.
+* **Strong scaling** (fixed N_global) is, as expected, much weaker: splitting a *node-sized* problem
+  adds a thick ghost layer per rank and a halo exchange while barely reducing per-rank work, so for a
+  problem that already fits one node a single OpenMP/GPU build wins. Use ranks to grow the problem, not
+  to subdivide a small one.
+* **Correctness:** machine-exact vs a single-rank oracle at np = 1, 2, 4, 6, 8 and hybrid (np=4×OMP2);
+  the repair's skin-trip re-gather path is exercised at the larger δ/h.
+* **Hybrid MPI+OpenMP** composes (each rank runs the OpenMP build over its owned cells); pick the
+  rank×thread split from the node topology.
+
+> **Fixed during this study (was an np≥4 deadlock).** The per-step driver chose, *per rank*, between
+> re-gather (rebuild the halo topology) and refresh (forward on it) — both **collective** with different
+> NBX/Waitall patterns. When ranks diverged on the *local* skin-trip test at larger δ/h, they entered
+> mismatched collectives and deadlocked (gdb showed half the ranks in `NbxEngine::exchange`, half in
+> `forwardDirect/Waitall`). The fix is the distributed-Verlet invariant: reduce the skin trip to a
+> **global** `MPI_Allreduce(MAX)` decision — if any rank trips, all re-gather. (Driver bug only; the
+> halo collectives were correct.)
 
 ---
 
@@ -279,11 +294,12 @@ certificate's tolerance.
    a prior best-first BVH attempt without it didn't help); (b) reuse the per-step grid's neighbour lists
    across the *cold rebuild fallback* so a gated rebuild doesn't re-pay the full gather. Every Mcells/s
    on the gather lifts both the cold build and the rare repair-rebuild.
-2. **Lean cert cell on GPU (occupancy).** The repair's certify cell is `ConvexCell<…,TrackAdj=true>`,
-   so it carries a dead `adj` member (1.3 KB/cell of stack frame) it never reads (the cert reads the
-   `poke4` *store* pointer). Switching the certify/load path to a `TrackAdj=false` lean cell drops that
-   from the GPU frame → higher occupancy on the full-N certify, which is the GPU repair's hot kernel.
-   Pure win on GPU, free on host. (Noted as the immediate follow-up.)
+2. **Lean cert cell on GPU (occupancy) — TRIED, perf-neutral.** The certify/load/re-eval path now uses a
+   `TrackAdj=false` cell with no `adj` member (the cert reads the `poke4` *store* pointer, not `adj`).
+   It is the correct abstraction, but it gave **no measurable RTX 5080 speedup** (21.98 vs 21.8 Mcells/s
+   at δ/h=1e-4): nvcc already dead-code-eliminates the never-read member, so it was not in the frame to
+   begin with, and the certify is not occupancy-bound here. Kept for clarity; may still help on
+   tighter-occupancy backends (HIP/older).
 3. **FP32 cold/construct path.** FP32 construct is ~1.5–2× FP64 and hits the 14–17 Mcells/s SOTA; for
    workloads tolerant of FP32 topology (do the *certificate* in FP64 to avoid marginal-face flicker) the
    cold build and the repair gathers both speed up materially.
@@ -291,8 +307,9 @@ certificate's tolerance.
    re-eval + certificate + the (cheap) grid rebuild; fusing the grid bucketing into the re-eval pass
    would shave a memory-bound sweep. Modest, but it targets the exact small-δ/h floor where the biggest
    speedups live.
-5. **Diagnose the np ≥ 4 MPI deadlock.** Unblocks the at-scale multi-node study (the build itself is
-   node-saturating already; the value is in problems larger than one GPU/node).
+5. ~~Diagnose the np ≥ 4 MPI deadlock.~~ **Done** (§3) — it was a divergent-collective driver bug, fixed
+   with a global skin-trip reduction; weak scaling is now ~linear to np=8. Next: a true multi-node run
+   (this box is single-node) and dynamic load rebalancing for non-uniform densities.
 
 ---
 
