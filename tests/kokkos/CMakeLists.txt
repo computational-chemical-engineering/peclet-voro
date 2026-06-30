@@ -120,14 +120,6 @@ if(TARGET voro++)
   target_compile_definitions(bench_convexcell_f32 PRIVATE VORFLOW_HAVE_VOROPP)
 endif()
 
-# SIMD cells-as-lanes prototype for the per-vertex geometry kernel (standalone, no Kokkos).
-# Needs -march=native for real AVX2 (the bootstrapped Kokkos was built without KOKKOS_ARCH_AVX2). See
-# docs/voronoi_simd_cells_prototype.md. Build the -ffast-math / -DNODIV variants by hand (doc has cmds).
-add_executable(bench_simd_cells bench_simd_cells.cpp)
-target_link_libraries(bench_simd_cells PRIVATE OpenMP::OpenMP_CXX)
-target_compile_options(bench_simd_cells PRIVATE -march=native)
-target_compile_features(bench_simd_cells PRIVATE cxx_std_20)
-
 # F2/F3: isolate cell construction from cached candidate planes (B+G, no gather), per tier.
 foreach(suffix "" "_f32")
   add_executable(bench_construct${suffix} bench_construct.cpp)
@@ -138,17 +130,6 @@ foreach(suffix "" "_f32")
   target_compile_features(bench_construct${suffix} PRIVATE cxx_std_20)
 endforeach()
 target_compile_definitions(bench_construct_f32 PRIVATE CC_FLOAT=1)
-
-# Compact-cell A/B: packed-triangle + recomputed-vertex ConvexCellCompact vs cached ConvexCell.
-foreach(suffix "" "_f32")
-  add_executable(bench_construct_compact${suffix} bench_construct_compact.cpp)
-  target_link_libraries(bench_construct_compact${suffix} PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
-  target_compile_definitions(bench_construct_compact${suffix} PRIVATE MORTON_ENABLE_KOKKOS=1)
-  target_include_directories(bench_construct_compact${suffix} PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
-  target_compile_features(bench_construct_compact${suffix} PRIVATE cxx_std_20)
-endforeach()
-target_compile_definitions(bench_construct_compact_f32 PRIVATE CC_FLOAT=1)
 
 # Part II / Phase 1: incremental geometry re-eval over resident topology vs full rebuild.
 add_executable(bench_incremental bench_incremental.cpp)
@@ -187,22 +168,3 @@ target_compile_definitions(bench_report_f32 PRIVATE CC_FLOAT=1)
 add_test(NAME bench_dynamic_update_gates COMMAND bench_dynamic_update 20000 4 --gates)
 set_tests_properties(bench_dynamic_update_gates PROPERTIES ENVIRONMENT "OMP_PROC_BIND=false")
 
-# F4: ArborX BVH (kNN) neighbour query vs the grid gather. ArborX is in the same prefix as Kokkos.
-find_package(ArborX CONFIG QUIET)
-if(ArborX_FOUND)
-  add_executable(bench_bvh_gather bench_bvh_gather.cpp)
-  target_link_libraries(bench_bvh_gather PRIVATE Kokkos::kokkos ArborX::ArborX OpenMP::OpenMP_CXX)
-  target_compile_definitions(bench_bvh_gather PRIVATE MORTON_ENABLE_KOKKOS=1 CC_FLOAT=1)
-  target_include_directories(bench_bvh_gather PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
-  target_compile_features(bench_bvh_gather PRIVATE cxx_std_20)
-  add_executable(bench_bvh_bestfirst bench_bvh_bestfirst.cpp)
-  target_link_libraries(bench_bvh_bestfirst PRIVATE Kokkos::kokkos ArborX::ArborX OpenMP::OpenMP_CXX)
-  target_compile_definitions(bench_bvh_bestfirst PRIVATE MORTON_ENABLE_KOKKOS=1 CC_FLOAT=1)
-  target_include_directories(bench_bvh_bestfirst PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
-  target_compile_features(bench_bvh_bestfirst PRIVATE cxx_std_20)
-  message(STATUS "vorflow: ArborX ${ArborX_VERSION} found -> bench_bvh_gather")
-else()
-  message(STATUS "vorflow: ArborX not found -> skipping bench_bvh_gather")
-endif()
