@@ -173,7 +173,8 @@ TessellationView<Real> upload(const HostTessellation<Real>& h) {
   {
     const int nC = static_cast<int>(h.cellSeedId.size());
     std::vector<int> cnt(nC);
-    for (int i = 0; i < nC; ++i) cnt[i] = h.cellFacetOffset[i + 1] - h.cellFacetOffset[i];
+    for (int i = 0; i < nC; ++i)
+      cnt[i] = h.cellFacetOffset[i + 1] - h.cellFacetOffset[i];
     v.cellFacetCount = detail::deviceFrom(cnt, "tess.cellFacetCount");
   }
   v.cellSeedId = detail::deviceFrom(h.cellSeedId, "tess.cellSeedId");

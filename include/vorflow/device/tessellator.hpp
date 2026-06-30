@@ -29,9 +29,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <Kokkos_Core.hpp>
 #include <cstdio>
 #include <cstdlib>
+#include <Kokkos_Core.hpp>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -99,16 +99,18 @@ struct CellBuilder {
   bool useMorton, haveGid, withForceGeom;
   size_t facetCap;
   Sdf sdf;
-  // Optional Part-II (moving-points) outputs — emitted only when the views are sized (else left empty so
-  // existing callers are unaffected): the compact resident TOPOLOGY store (np/nt + pnbr/packed-triangles at
-  // kMaxP/kMaxT strides, written from the final clipped cell) and the per-cell CANDIDATE (skin) list = the
-  // neighbour ids this cell examined (within the worklist's security reach), capped at candCap. Together they
-  // let a later step re-evaluate geometry (ConvexCell::reevalGeometry) and locally repair off the skin list
-  // without re-gathering. See vorflow/docs/voronoi_dynamic_update_study.md.
+  // Optional Part-II (moving-points) outputs — emitted only when the views are sized (else left
+  // empty so existing callers are unaffected): the compact resident TOPOLOGY store (np/nt +
+  // pnbr/packed-triangles at kMaxP/kMaxT strides, written from the final clipped cell) and the
+  // per-cell CANDIDATE (skin) list = the neighbour ids this cell examined (within the worklist's
+  // security reach), capped at candCap. Together they let a later step re-evaluate geometry
+  // (ConvexCell::reevalGeometry) and locally repair off the skin list without re-gathering. See
+  // vorflow/docs/voronoi_dynamic_update_study.md.
   Kokkos::View<int*, MemSpace> oNp, oNt, oTopoPnbr;
   Kokkos::View<unsigned*, MemSpace> oTri;
-  Kokkos::View<unsigned char*, MemSpace> oPoke4;  // N*kMaxT*4 local-cert plane set (3 edge-opposite +
-                                                  // 4th-face), emitted only when TrackAdj && emitTopo
+  Kokkos::View<unsigned char*, MemSpace>
+      oPoke4;  // N*kMaxT*4 local-cert plane set (3 edge-opposite +
+               // 4th-face), emitted only when TrackAdj && emitTopo
   Kokkos::View<int*, MemSpace> oCand, oCandCnt;
   bool emitTopo, emitCand;
   int candCap;
@@ -179,21 +181,27 @@ struct CellBuilder {
       clipCellAgainstSdf<Real, kMaxP, kMaxT>(c, seedW, sdf);
     }
     int st = kOk;
-    if (c.overflow) st |= kOverflow;
+    if (c.overflow)
+      st |= kOverflow;
     const bool empty = c.empty();
-    if (empty) st |= kEmpty;
-    if (incomplete) st |= kIncomplete;
+    if (empty)
+      st |= kEmpty;
+    if (incomplete)
+      st |= kIncomplete;
     cellVol(i) = (empty || c.overflow) ? Real(0) : c.volumePerVertex();
 
-    // Part-II: persist the final (post-SDF-clip) topology so a later step can re-eval/repair without a rebuild.
+    // Part-II: persist the final (post-SDF-clip) topology so a later step can re-eval/repair
+    // without a rebuild.
     if (emitTopo && !empty && !c.overflow) {
       oNp(i) = c.np;
       oNt(i) = c.nt;
-      for (int k = 0; k < c.np; ++k) oTopoPnbr[(size_t)i * kMaxP + k] = c.pnbr[k];
+      for (int k = 0; k < c.np; ++k)
+        oTopoPnbr[(size_t)i * kMaxP + k] = c.pnbr[k];
       for (int t = 0; t < c.nt; ++t)
         oTri[(size_t)i * kMaxT + t] = (unsigned)c.t0[t] | ((unsigned)c.t1[t] << 8) |
                                       ((unsigned)c.t2[t] << 16) | ((c.alive[t] ? 1u : 0u) << 24);
-      if constexpr (TrackAdj)  // derive the local-cert plane set from the clip-maintained adj (no findSharing)
+      if constexpr (TrackAdj)  // derive the local-cert plane set from the clip-maintained adj (no
+                               // findSharing)
         c.computePoke4(&oPoke4[(size_t)i * kMaxT * 4]);
     }
 
@@ -205,8 +213,10 @@ struct CellBuilder {
       for (int k = 0; k < c.np; ++k) {
         int cnt = 0;
         for (int t = 0; t < c.nt; ++t)
-          if (c.alive[t] && (c.t0[t] == k || c.t1[t] == k || c.t2[t] == k)) ++cnt;
-        if (cnt < 3) continue;  // not a polygon face
+          if (c.alive[t] && (c.t0[t] == k || c.t1[t] == k || c.t2[t] == k))
+            ++cnt;
+        if (cnt < 3)
+          continue;  // not a polygon face
         if (nf >= MAXF_TMP) {
           st |= kOverflow;
           break;
@@ -230,7 +240,8 @@ struct CellBuilder {
       conn[0] = Real(2) * c.n[k][0];
       conn[1] = Real(2) * c.n[k][1];
       conn[2] = Real(2) * c.n[k][2];
-      if (withForceGeom) c.facetGeometry(k, area, dv, conn);  // area vector + dV + connector
+      if (withForceGeom)
+        c.facetGeometry(k, area, dv, conn);  // area vector + dV + connector
       oNbr((size_t)base + idx) = c.pnbr[k];
       const size_t o = ((size_t)base + idx) * 3;
       for (int cc = 0; cc < 3; ++cc) {
@@ -253,7 +264,8 @@ struct CellBuilder {
                   "Power/Laguerre on the device is pending ConvexCell radical-plane geometry; "
                   "buildTessellation currently supports Voronoi (Weighted=false) only.");
     const int i = binned(pi);
-    const Real pix = posSorted(3 * pi + 0), piy = posSorted(3 * pi + 1), piz = posSorted(3 * pi + 2);
+    const Real pix = posSorted(3 * pi + 0), piy = posSorted(3 * pi + 1),
+               piz = posSorted(3 * pi + 2);
     int cx, cy, cz;
     homeCell(pix, piy, piz, cx, cy, cz);
     const int base = subBase(pix, piy, piz);
@@ -266,21 +278,29 @@ struct CellBuilder {
     Real secR2 = Real(2) * c.maxVertexRsq();
     int ncRec = 0;  // Part-II: count of recorded candidate (skin) ids for this cell
     for (int g = 0; g < nOff && !c.overflow; ++g) {
-      if (wlRmin(base + g) > Real(2) * secR2) break;  // sorted ⇒ rest are farther; cell closed
+      if (wlRmin(base + g) > Real(2) * secR2)
+        break;  // sorted ⇒ rest are farther; cell closed
       const int gc = worklistCell(base, g, cx, cy, cz);
       for (int q = cellStart(gc); q < cellStart(gc + 1) && !c.overflow; ++q) {
-        if (q == pi) continue;
-        if (haveGid && gidSorted(q) == gidSorted(pi)) continue;
-        // record the examined neighbour as a skin candidate (within the worklist's security reach), capped.
-        if (emitCand && ncRec < candCap) oCand[(size_t)i * candCap + ncRec++] = binned(q);
+        if (q == pi)
+          continue;
+        if (haveGid && gidSorted(q) == gidSorted(pi))
+          continue;
+        // record the examined neighbour as a skin candidate (within the worklist's security reach),
+        // capped.
+        if (emitCand && ncRec < candCap)
+          oCand[(size_t)i * candCap + ncRec++] = binned(q);
         Real pv[3];
         relVec(q, pix, piy, piz, pv);
         const Real off = Real(0.5) * (pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2]);
-        if (off >= secR2) continue;  // beyond the radius: cannot cut
-        if (c.clip(pv, off, binned(q))) secR2 = Real(2) * c.maxVertexRsq();
+        if (off >= secR2)
+          continue;  // beyond the radius: cannot cut
+        if (c.clip(pv, off, binned(q)))
+          secR2 = Real(2) * c.maxVertexRsq();
       }
     }
-    if (emitCand) oCandCnt(i) = ncRec;
+    if (emitCand)
+      oCandCnt(i) = ncRec;
     // Completeness uses the conservative inscribed-sphere coverage (sw·minCsz)², the same
     // criterion the legacy gather used: complete iff (sw·minCsz)² > 4·rSqMax.
     const Real covSq = Real(sw) * minCsz * Real(sw) * minCsz;
@@ -324,8 +344,9 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
                                           int candCap = 0, WorklistCache<Real>* wlc = nullptr) {
   using tpx::MemSpace;
   using Exec = tpx::ExecSpace;
-  // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin list only
-  // when the caller supplies sized views (so existing callers, passing none, are byte-for-byte unaffected).
+  // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin
+  // list only when the caller supplies sized views (so existing callers, passing none, are
+  // byte-for-byte unaffected).
   const bool emitTopo = outNp.extent(0) == static_cast<size_t>(N);
   const bool emitCand = outCand.extent(0) > 0 && candCap > 0;
   // Optional global ids: skip a candidate sharing the cell's own id (its periodic
@@ -389,23 +410,64 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   Kokkos::View<Real*, MemSpace> oConn(view_alloc(std::string("oConn"), WithoutInitializing),
                                       facetCap * 3);
   Kokkos::View<int*, MemSpace> facetCursor("facetCursor", 1);  // zero-initialised
-  if (prof) std::fprintf(stderr, "[worklist] sw=%d nOff=%d\n", sw, nOff);
+  if (prof)
+    std::fprintf(stderr, "[worklist] sw=%d nOff=%d\n", sw, nOff);
 
   // Build each cell: one thread per cell (RangePolicy), the compact ConvexCell in the
   // per-thread frame, the cut applied on the fly. Same path on every backend (ConvexCell is
   // lean enough that the worklist + geometry run well on the GPU without a team variant).
-  Kokkos::View<unsigned char*, MemSpace> noPoke4;  // cold build does not emit the cert plane set (TrackAdj=false)
-  CellBuilder<Real, Weighted, Sdf> op{
-      grid.binned, grid.posSorted, grid.wSorted, grid.gidSorted, grid.cellStart, grid.wlOff, grid.wlRmin,
-      status, cellVol, facetCount, cellFacetBase, oNbr, oArea, oDV, oConn, facetCursor,
-      icx, icy, icz, Lx, Ly, Lz, minCsz, dimx, dimy, dimz, sw, nOff, wlS,
-      useMorton, haveGid, withForceGeom, facetCap, sdf,
-      outNp, outNt, outPnbr, outTri, noPoke4, outCand, outCandCnt, emitTopo, emitCand, candCap};
+  Kokkos::View<unsigned char*, MemSpace>
+      noPoke4;  // cold build does not emit the cert plane set (TrackAdj=false)
+  CellBuilder<Real, Weighted, Sdf> op{grid.binned,
+                                      grid.posSorted,
+                                      grid.wSorted,
+                                      grid.gidSorted,
+                                      grid.cellStart,
+                                      grid.wlOff,
+                                      grid.wlRmin,
+                                      status,
+                                      cellVol,
+                                      facetCount,
+                                      cellFacetBase,
+                                      oNbr,
+                                      oArea,
+                                      oDV,
+                                      oConn,
+                                      facetCursor,
+                                      icx,
+                                      icy,
+                                      icz,
+                                      Lx,
+                                      Ly,
+                                      Lz,
+                                      minCsz,
+                                      dimx,
+                                      dimy,
+                                      dimz,
+                                      sw,
+                                      nOff,
+                                      wlS,
+                                      useMorton,
+                                      haveGid,
+                                      withForceGeom,
+                                      facetCap,
+                                      sdf,
+                                      outNp,
+                                      outNt,
+                                      outPnbr,
+                                      outTri,
+                                      noPoke4,
+                                      outCand,
+                                      outCandCnt,
+                                      emitTopo,
+                                      emitCand,
+                                      candCap};
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
   Kokkos::parallel_for(
       "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int pi) {
-        if (binnedV0(pi) >= nBuildL) return;  // candidate-only seed: skip its cell
+        if (binnedV0(pi) >= nBuildL)
+          return;  // candidate-only seed: skip its cell
         op.buildCell(pi);
       });
 
@@ -430,8 +492,8 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   view.cellFacetOffset = cellFacetBase;
   view.cellFacetCount = facetCount;
   view.cellVolume = cellVol;
-  view.cellSeedId = Kokkos::View<gid_t*, MemSpace>(view_alloc(std::string("cellSeedId"),
-                                                              WithoutInitializing), N);
+  view.cellSeedId =
+      Kokkos::View<gid_t*, MemSpace>(view_alloc(std::string("cellSeedId"), WithoutInitializing), N);
   {
     auto vSeed = view.cellSeedId;
     Kokkos::parallel_for(
@@ -450,8 +512,9 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   {
     auto v = view.facetNeighbor;
     auto src = oNbr;
-    Kokkos::parallel_for("tess.packNbr", Kokkos::RangePolicy<Exec>(0, nFacets),
-                         KOKKOS_LAMBDA(const int g) { v(g) = (gid_t)src(g); });
+    Kokkos::parallel_for(
+        "tess.packNbr", Kokkos::RangePolicy<Exec>(0, nFacets),
+        KOKKOS_LAMBDA(const int g) { v(g) = (gid_t)src(g); });
   }
   Kokkos::fence();
   oNbr = Kokkos::View<int*, MemSpace>();
@@ -461,10 +524,11 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   {
     auto v = view.facetArea;
     auto src = oArea;
-    Kokkos::parallel_for("tess.packArea", Kokkos::RangePolicy<Exec>(0, nFacets),
-                         KOKKOS_LAMBDA(const int g) {
-                           for (int cc = 0; cc < 3; ++cc) v(3 * g + cc) = src(3 * (size_t)g + cc);
-                         });
+    Kokkos::parallel_for(
+        "tess.packArea", Kokkos::RangePolicy<Exec>(0, nFacets), KOKKOS_LAMBDA(const int g) {
+          for (int cc = 0; cc < 3; ++cc)
+            v(3 * g + cc) = src(3 * (size_t)g + cc);
+        });
   }
   Kokkos::fence();
   oArea = Kokkos::View<Real*, MemSpace>();
@@ -474,10 +538,11 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   {
     auto v = view.facetConnect;
     auto src = oDV;
-    Kokkos::parallel_for("tess.packDV", Kokkos::RangePolicy<Exec>(0, nFacets),
-                         KOKKOS_LAMBDA(const int g) {
-                           for (int cc = 0; cc < 3; ++cc) v(3 * g + cc) = src(3 * (size_t)g + cc);
-                         });
+    Kokkos::parallel_for(
+        "tess.packDV", Kokkos::RangePolicy<Exec>(0, nFacets), KOKKOS_LAMBDA(const int g) {
+          for (int cc = 0; cc < 3; ++cc)
+            v(3 * g + cc) = src(3 * (size_t)g + cc);
+        });
   }
   Kokkos::fence();
   oDV = Kokkos::View<Real*, MemSpace>();
@@ -487,10 +552,11 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   {
     auto v = view.facetConnVec;
     auto src = oConn;
-    Kokkos::parallel_for("tess.packConn", Kokkos::RangePolicy<Exec>(0, nFacets),
-                         KOKKOS_LAMBDA(const int g) {
-                           for (int cc = 0; cc < 3; ++cc) v(3 * g + cc) = src(3 * (size_t)g + cc);
-                         });
+    Kokkos::parallel_for(
+        "tess.packConn", Kokkos::RangePolicy<Exec>(0, nFacets), KOKKOS_LAMBDA(const int g) {
+          for (int cc = 0; cc < 3; ++cc)
+            v(3 * g + cc) = src(3 * (size_t)g + cc);
+        });
   }
   Kokkos::fence();
   oConn = Kokkos::View<Real*, MemSpace>();

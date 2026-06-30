@@ -1,7 +1,8 @@
 // Controlled unit tests for ConvexCell: known cells with exact volumes.
-#include <Kokkos_Core.hpp>
-#include <cstdio>
 #include <cmath>
+#include <cstdio>
+#include <Kokkos_Core.hpp>
+
 #include "vorflow/device/convex_cell.hpp"
 
 using vor::device::ConvexCell;
@@ -41,7 +42,8 @@ int main(int argc, char** argv) {
       ConvexCell<R> c;
       c.initBox(10, 10, 10);
       R nb[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-      for (int k = 0; k < 6; ++k) c.clip(nb[k], 0.5, k);
+      for (int k = 0; k < 6; ++k)
+        c.clip(nb[k], 0.5, k);
       int id = 6;
       for (int sx = -1; sx <= 1; sx += 2)
         for (int sy = -1; sy <= 1; sy += 2)
@@ -57,7 +59,8 @@ int main(int argc, char** argv) {
       ConvexCell<R> c;
       c.initBox(10, 10, 10);
       R nb[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-      for (int k = 0; k < 6; ++k) c.clip(nb[k], 0.5, k);
+      for (int k = 0; k < 6; ++k)
+        c.clip(nb[k], 0.5, k);
       R far[3] = {3, 0, 0};
       bool cut = c.clip(far, 4.5, 99);  // d=0.5*9=4.5 -> plane x=1.5, no cut
       std::printf("far nbr cut=%d (exp 0)\n", (int)cut);
@@ -73,7 +76,8 @@ int main(int argc, char** argv) {
       ConvexCell<R> c;
       c.initBox(10, 10, 10);
       R nb[6][3] = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
-      for (int k = 0; k < 6; ++k) c.clip(nb[k], 0.5, k);
+      for (int k = 0; k < 6; ++k)
+        c.clip(nb[k], 0.5, k);
       R cn[3] = {0.6, 0.6, 0.6};
       c.clip(cn, 0.5 * (0.36 * 3), 7);  // d=0.54
       double v = c.volume();
@@ -123,8 +127,10 @@ int main(int argc, char** argv) {
           pz = 4.0 * std::rand() / RAND_MAX - 2;
         bool in = true;
         for (int k = 0; k < c.np && in; ++k)
-          if (c.n[k][0] * px + c.n[k][1] * py + c.n[k][2] * pz > c.nn[k]) in = false;
-        if (in) ++inside;
+          if (c.n[k][0] * px + c.n[k][1] * py + c.n[k][2] * pz > c.nn[k])
+            in = false;
+        if (in)
+          ++inside;
       }
       double mc = 64.0 * inside / total;
       std::printf("sphere (60 planes r=1) vol=%.4f  MC=%.4f  maxVrsq=%.3f faces=%d ovf=%d %s\n", v,
@@ -154,37 +160,52 @@ int main(int argc, char** argv) {
           R kk = key[a], xx = rx[a], yy = ry[a], zz = rz[a];
           int ii = id[a], b = a - 1;
           while (b >= 0 && key[b] > kk) {
-            key[b + 1] = key[b]; rx[b + 1] = rx[b]; ry[b + 1] = ry[b]; rz[b + 1] = rz[b];
-            id[b + 1] = id[b]; --b;
+            key[b + 1] = key[b];
+            rx[b + 1] = rx[b];
+            ry[b + 1] = ry[b];
+            rz[b + 1] = rz[b];
+            id[b + 1] = id[b];
+            --b;
           }
-          key[b + 1] = kk; rx[b + 1] = xx; ry[b + 1] = yy; rz[b + 1] = zz; id[b + 1] = ii;
+          key[b + 1] = kk;
+          rx[b + 1] = xx;
+          ry[b + 1] = yy;
+          rz[b + 1] = zz;
+          id[b + 1] = ii;
         }
         ConvexCell<R, 128, 256> c;
         c.initBox(4, 4, 4);
         for (int s = 0; s < M; ++s) {
-          if (!(key[s] < 2.0 * c.maxVertexRsq())) break;
+          if (!(key[s] < 2.0 * c.maxVertexRsq()))
+            break;
           R n[3] = {rx[s], ry[s], rz[s]};
           c.clip(n, key[s], id[s]);
-          if (c.overflow) break;
+          if (c.overflow)
+            break;
         }
-        if (c.overflow) continue;
+        if (c.overflow)
+          continue;
         double v = c.volume();
         // MC in a tight box [-R,R]^3 around the cell so the inside fraction is O(1).
         const R Rb = 1.05 * std::sqrt(c.maxVertexRsq());
         long inside = 0, total = 400000;
         std::srand(55 + trial);
         for (long s = 0; s < total; ++s) {
-          R px = Rb * (2.0 * std::rand() / RAND_MAX - 1), py = Rb * (2.0 * std::rand() / RAND_MAX - 1),
+          R px = Rb * (2.0 * std::rand() / RAND_MAX - 1),
+            py = Rb * (2.0 * std::rand() / RAND_MAX - 1),
             pz = Rb * (2.0 * std::rand() / RAND_MAX - 1);
           bool in = true;
           for (int k = 0; k < c.np && in; ++k)
-            if (c.n[k][0] * px + c.n[k][1] * py + c.n[k][2] * pz > c.nn[k]) in = false;
-          if (in) ++inside;
+            if (c.n[k][0] * px + c.n[k][1] * py + c.n[k][2] * pz > c.nn[k])
+              in = false;
+          if (in)
+            ++inside;
         }
         double mc = (2 * Rb) * (2 * Rb) * (2 * Rb) * inside / total;
         ++tested;
         double rel = std::fabs(v - mc) / (mc + 1e-12);
-        if (rel > worst) worst = rel;
+        if (rel > worst)
+          worst = rel;
         if (rel > 0.05) {
           ++fails;
           if (fails <= 2)

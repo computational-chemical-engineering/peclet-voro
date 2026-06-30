@@ -9,9 +9,9 @@
  * scatter -> grid-order reorder, then the per-sub-position worklist table) and returns a `TessGrid`
  * holding the grid-sorted inputs + the worklist + the grid scalars. It additionally fills `slotOf`
  * (the inverse of `binned`: original seed index -> grid-sorted slot), which the subset gather needs
- * to launch the cold-build kernel over an arbitrary list of ORIGINAL indices (the device analogue of
- * the legacy NbrList::setupSubset). The cold-build output stays byte-for-byte identical (pure code
- * motion — the kernels and their launch order are unchanged).
+ * to launch the cold-build kernel over an arbitrary list of ORIGINAL indices (the device analogue
+ * of the legacy NbrList::setupSubset). The cold-build output stays byte-for-byte identical (pure
+ * code motion — the kernels and their launch order are unchanged).
  *
  * Core header: Kokkos + transport-core + morton, no physics.
  */
@@ -56,15 +56,16 @@ template <class Real>
 struct TessGrid {
   using MemSpace = tpx::MemSpace;
   // Grid-sorted inputs (read by the gather).
-  Kokkos::View<int*, MemSpace> binned;     // N: grid-sorted slot -> original seed index
-  Kokkos::View<int*, MemSpace> slotOf;     // N: original seed index -> grid-sorted slot (inverse of binned)
-  Kokkos::View<Real*, MemSpace> posSorted; // 3N (grid order)
-  Kokkos::View<Real*, MemSpace> wSorted;   // N (Power) or 0
-  Kokkos::View<gid_t*, MemSpace> gidSorted;// N (multi-domain) or 0
-  Kokkos::View<int*, MemSpace> cellStart;  // ncellEff+1
+  Kokkos::View<int*, MemSpace> binned;  // N: grid-sorted slot -> original seed index
+  Kokkos::View<int*, MemSpace>
+      slotOf;  // N: original seed index -> grid-sorted slot (inverse of binned)
+  Kokkos::View<Real*, MemSpace> posSorted;   // 3N (grid order)
+  Kokkos::View<Real*, MemSpace> wSorted;     // N (Power) or 0
+  Kokkos::View<gid_t*, MemSpace> gidSorted;  // N (multi-domain) or 0
+  Kokkos::View<int*, MemSpace> cellStart;    // ncellEff+1
   // Per-sub-position worklist (both backends).
-  Kokkos::View<int*, MemSpace> wlOff;      // nSub*nOff : packed (dx,dy,dz)+kWlOffBias
-  Kokkos::View<Real*, MemSpace> wlRmin;    // nSub*nOff : nearest-corner dist^2 (sorted)
+  Kokkos::View<int*, MemSpace> wlOff;    // nSub*nOff : packed (dx,dy,dz)+kWlOffBias
+  Kokkos::View<Real*, MemSpace> wlRmin;  // nSub*nOff : nearest-corner dist^2 (sorted)
   // Grid scalars.
   Real icx = 0, icy = 0, icz = 0, Lx = 0, Ly = 0, Lz = 0, minCsz = 0;
   int dimx = 0, dimy = 0, dimz = 0, sw = 0, nOff = 0, wlS = 0, N = 0;
@@ -73,10 +74,11 @@ struct TessGrid {
 
 /// Cache for the step-invariant presorted worklist table (E3). The table depends only on the grid
 /// dimensions, the search width `sw`, and the cell sizes `csz` — none of which change as the seeds
-/// move — so a stepper that rebuilds the tessellation every step can reuse it instead of redoing the
-/// host std::sort + two H2D copies each time. Held by value in the simulation (Views are
+/// move — so a stepper that rebuilds the tessellation every step can reuse it instead of redoing
+/// the host std::sort + two H2D copies each time. Held by value in the simulation (Views are
 /// reference-counted handles); passed by pointer into buildTessGrid/buildTessellation. Holding the
-/// Views in the owning object (not a function-local static) keeps them freed before Kokkos::finalize.
+/// Views in the owning object (not a function-local static) keeps them freed before
+/// Kokkos::finalize.
 template <class Real>
 struct WorklistCache {
   Kokkos::View<int*, tpx::MemSpace> wlOff;
@@ -85,17 +87,17 @@ struct WorklistCache {
   Real cszx = 0, cszy = 0, cszz = 0;
   bool valid = false;
   bool matches(int dx, int dy, int dz, int s, Real cx, Real cy, Real cz) const {
-    return valid && dimx == dx && dimy == dy && dimz == dz && sw == s && cszx == cx &&
-           cszy == cy && cszz == cz;
+    return valid && dimx == dx && dimy == dy && dimz == dz && sw == s && cszx == cx && cszy == cy &&
+           cszz == cz;
   }
 };
 
 /**
  * Build the counting-sort grid + worklist for the Voronoi gather (the first half of the old
  * buildTessellation, unchanged). `Weighted` only affects the grid density (Power keeps 1 seed/cell;
- * unweighted host uses 2/cell for cache locality). See buildTessellation for the argument semantics.
- * `wlc` (optional) reuses/fills the step-invariant worklist table across calls (E3); nullptr rebuilds
- * it every call (the original behaviour, byte-for-byte).
+ * unweighted host uses 2/cell for cache locality). See buildTessellation for the argument
+ * semantics. `wlc` (optional) reuses/fills the step-invariant worklist table across calls (E3);
+ * nullptr rebuilds it every call (the original behaviour, byte-for-byte).
  */
 template <class Real, bool Weighted>
 TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
@@ -122,8 +124,7 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
   // only: on a GPU the gather is bandwidth/latency-hidden, not cache-bound, so a coarser
   // grid just adds per-thread candidate work — GPUs keep 1/cell. Power also keeps 1/cell
   // (its no-early-out full-sphere gather would blow past MAXCAND at 2/cell).
-  constexpr bool kHostBackend =
-      Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible;
+  constexpr bool kHostBackend = Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible;
   constexpr Real kSeedsPerCell = (!Weighted && kHostBackend) ? Real(2) : Real(1);
   const int dens = densityCount > 0 ? densityCount : N;
   const Real vol = L[0] * L[1] * L[2];
@@ -152,7 +153,8 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
   {
     int md = dimx > dimy ? dimx : dimy;
     md = md > dimz ? md : dimz;
-    while ((1 << mbits) < md) ++mbits;
+    while ((1 << mbits) < md)
+      ++mbits;
   }
   const size_t mortonNcell = (size_t)1 << (3 * mbits);
   const bool useMorton = !kHostBackend && mortonNcell <= (size_t)8 * (size_t)ncell;
@@ -162,9 +164,16 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
   const Real icx = invcsz[0], icy = invcsz[1], icz = invcsz[2];
   Real minCsz = csz[0] < csz[1] ? csz[0] : csz[1];
   minCsz = minCsz < csz[2] ? minCsz : csz[2];
-  grid.icx = icx; grid.icy = icy; grid.icz = icz;
-  grid.Lx = Lx; grid.Ly = Ly; grid.Lz = Lz; grid.minCsz = minCsz;
-  grid.dimx = dimx; grid.dimy = dimy; grid.dimz = dimz;
+  grid.icx = icx;
+  grid.icy = icy;
+  grid.icz = icz;
+  grid.Lx = Lx;
+  grid.Ly = Ly;
+  grid.Lz = Lz;
+  grid.minCsz = minCsz;
+  grid.dimx = dimx;
+  grid.dimy = dimy;
+  grid.dimz = dimz;
   grid.useMorton = useMorton;
 
   // --- counting sort: bin seeds into grid cells (Morton- or linear-indexed) ---
@@ -216,8 +225,8 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
   Kokkos::View<Real*, MemSpace> posSorted(view_alloc(std::string("posSorted"), WithoutInitializing),
                                           (size_t)N * 3);
   Kokkos::View<int*, MemSpace> slotOf(view_alloc(std::string("slotOf"), WithoutInitializing), N);
-  Kokkos::View<gid_t*, MemSpace> gidSorted(view_alloc(std::string("gidSorted"), WithoutInitializing),
-                                           haveGid ? N : 0);
+  Kokkos::View<gid_t*, MemSpace> gidSorted(
+      view_alloc(std::string("gidSorted"), WithoutInitializing), haveGid ? N : 0);
   Kokkos::View<Real*, MemSpace> wSorted(view_alloc(std::string("wSorted"), WithoutInitializing),
                                         Weighted ? N : 0);
   {
@@ -229,8 +238,10 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
           posSorted(3 * p + 0) = posFlat(3 * o + 0);
           posSorted(3 * p + 1) = posFlat(3 * o + 1);
           posSorted(3 * p + 2) = posFlat(3 * o + 2);
-          if (haveGidL) gidSorted(p) = gid(o);
-          if (Weighted) wSorted(p) = weight(o);
+          if (haveGidL)
+            gidSorted(p) = gid(o);
+          if (Weighted)
+            wSorted(p) = weight(o);
         });
   }
   grid.binned = binned;
@@ -259,7 +270,8 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
           for (int dx = -(swl + 1); dx <= swl + 1; ++dx) {
             const int ex = dx < -1 ? -dx - 1 : (dx > 1 ? dx - 1 : 0);
             const int d2 = ex * ex + ey * ey + ez * ez;
-            if (d2 <= lo2 || d2 > hi2 || d2 > sw2) continue;
+            if (d2 <= lo2 || d2 > hi2 || d2 > sw2)
+              continue;
             offHx.push_back(dx);
             offHy.push_back(dy);
             offHz.push_back(dz);

@@ -3,9 +3,9 @@
  * \brief Part II / Phase 1 — incremental geometry re-eval over resident topology vs full rebuild.
  *
  * The moving-point workload (DEM/fluid): each step the seeds move a little. Most cells keep their
- * topology (Phase 0: 73-94% stable at realistic displacement), so instead of re-gathering neighbours
- * and re-clipping, we REUSE each cell's resident topology and only recompute plane equations +
- * vertices + geometry (`ConvexCell::reevalGeometry`). This benchmark:
+ * topology (Phase 0: 73-94% stable at realistic displacement), so instead of re-gathering
+ * neighbours and re-clipping, we REUSE each cell's resident topology and only recompute plane
+ * equations + vertices + geometry (`ConvexCell::reevalGeometry`). This benchmark:
  *   - builds N cells once (storing each cell + its global-id topology),
  *   - displaces all seeds by `delta * spacing` (Gaussian),
  *   - times re-eval (no gather/clip) vs full rebuild (clip the K updated neighbours),
@@ -14,13 +14,13 @@
  *   - sweeps `delta`.
  * FP32. Run: ./bench_incremental [N] [delta1 delta2 ...]
  */
-#include <Kokkos_Core.hpp>
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <Kokkos_Core.hpp>
 #include <random>
 #include <vector>
 
@@ -54,10 +54,13 @@ KOKKOS_INLINE_FUNCTION void buildCell(int i, Cell& c, const real_t* pos, const i
     ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
     rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
     const real_t off = 0.5f * (rx * rx + ry * ry + rz * rz);
-    if (off >= secR2) break;
+    if (off >= secR2)
+      break;
     const real_t n[3] = {rx, ry, rz};
-    if (c.clip(n, off, g)) secR2 = 2.0f * c.maxVertexRsq();
-    if (c.overflow) break;
+    if (c.clip(n, off, g))
+      secR2 = 2.0f * c.maxVertexRsq();
+    if (c.overflow)
+      break;
   }
 }
 
@@ -66,16 +69,20 @@ int main(int argc, char** argv) {
   {
     const int N = argc > 1 ? std::atoi(argv[1]) : 1000000;
     std::vector<real_t> deltas;
-    for (int i = 2; i < argc; ++i) deltas.push_back(std::atof(argv[i]));
-    if (deltas.empty()) deltas = {0.02f, 0.05f, 0.1f, 0.2f, 0.4f};
+    for (int i = 2; i < argc; ++i)
+      deltas.push_back(std::atof(argv[i]));
+    if (deltas.empty())
+      deltas = {0.02f, 0.05f, 0.1f, 0.2f, 0.4f};
     const real_t L = 1.0f, spacing = std::cbrt(1.0f / N);
-    std::printf("Part II Phase 1: re-eval vs rebuild.  N=%d  cell=%zu B  (FP32)\n", N, sizeof(Cell));
+    std::printf("Part II Phase 1: re-eval vs rebuild.  N=%d  cell=%zu B  (FP32)\n", N,
+                sizeof(Cell));
 
     // --- seeds + closest-K neighbour ids per cell (grid brute force; one-time) ---
     std::mt19937 rng(123 + N);
     std::uniform_real_distribution<real_t> U(0, 1);
     std::vector<real_t> pos0(3 * N);
-    for (auto& x : pos0) x = U(rng);
+    for (auto& x : pos0)
+      x = U(rng);
     const int dim = std::max(1, (int)std::floor(1.0 / spacing));
     const real_t csz = 1.0 / dim;
     std::vector<std::vector<int>> grid(dim * dim * dim);
@@ -83,7 +90,8 @@ int main(int argc, char** argv) {
       return (x + dim) % dim + dim * (((y + dim) % dim) + dim * ((z + dim) % dim));
     };
     for (int i = 0; i < N; ++i) {
-      int gx = (int)(pos0[3 * i] / csz), gy = (int)(pos0[3 * i + 1] / csz), gz = (int)(pos0[3 * i + 2] / csz);
+      int gx = (int)(pos0[3 * i] / csz), gy = (int)(pos0[3 * i + 1] / csz),
+          gz = (int)(pos0[3 * i + 2] / csz);
       grid[gid(gx, gy, gz)].push_back(i);
     }
     Kokkos::View<int*, Mem> candId("candId", (size_t)N * KCAND);  // GLOBAL neighbour id per slot
@@ -94,22 +102,27 @@ int main(int argc, char** argv) {
       const int sw = 3;
       std::vector<std::array<real_t, 2>> tmp;  // {dist2, (float)j}
       for (int i = 0; i < N; ++i) {
-        int gx = (int)(pos0[3 * i] / csz), gy = (int)(pos0[3 * i + 1] / csz), gz = (int)(pos0[3 * i + 2] / csz);
+        int gx = (int)(pos0[3 * i] / csz), gy = (int)(pos0[3 * i + 1] / csz),
+            gz = (int)(pos0[3 * i + 2] / csz);
         tmp.clear();
         for (int dz = -sw; dz <= sw; ++dz)
           for (int dy = -sw; dy <= sw; ++dy)
             for (int dx = -sw; dx <= sw; ++dx)
               for (int j : grid[gid(gx + dx, gy + dy, gz + dz)]) {
-                if (j == i) continue;
+                if (j == i)
+                  continue;
                 real_t rx = pos0[3 * j] - pos0[3 * i], ry = pos0[3 * j + 1] - pos0[3 * i + 1],
                        rz = pos0[3 * j + 2] - pos0[3 * i + 2];
-                rx -= std::round(rx); ry -= std::round(ry); rz -= std::round(rz);
+                rx -= std::round(rx);
+                ry -= std::round(ry);
+                rz -= std::round(rz);
                 tmp.push_back({rx * rx + ry * ry + rz * rz, (real_t)j});
               }
         std::sort(tmp.begin(), tmp.end(), [](auto& a, auto& b) { return a[0] < b[0]; });
         int k = std::min((int)tmp.size(), KCAND);
         hn(i) = k;
-        for (int t = 0; t < k; ++t) hId((size_t)i * KCAND + t) = (int)tmp[t][1];
+        for (int t = 0; t < k; ++t)
+          hId((size_t)i * KCAND + t) = (int)tmp[t][1];
       }
       Kokkos::deep_copy(candId, hId);
       Kokkos::deep_copy(ncand, hn);
@@ -118,9 +131,9 @@ int main(int argc, char** argv) {
     Kokkos::View<real_t*, Mem> pos("pos", 3 * N);  // current global positions
     Kokkos::View<Cell*, Mem> cells0("cells0", N);  // resident topology (built once)
     Kokkos::View<real_t*, Mem> volRe("volRe", N), volRb("volRb", N), volRc("volRc", N);
-    Kokkos::View<int*, Mem> needfix("needfix", N);          // Phase 1.5 reclip flag
-    Kokkos::View<int*, Mem> fixList("fixList", N);          // compacted flagged indices
-    Kokkos::View<int, Mem> fixCount("fixCount");            // # flagged
+    Kokkos::View<int*, Mem> needfix("needfix", N);  // Phase 1.5 reclip flag
+    Kokkos::View<int*, Mem> fixList("fixList", N);  // compacted flagged indices
+    Kokkos::View<int, Mem> fixCount("fixCount");    // # flagged
     const real_t* posRaw = pos.data();
     const int* candRaw = candId.data();
     const int* ncRaw = ncand.data();
@@ -128,302 +141,486 @@ int main(int argc, char** argv) {
     // step 0: build at the initial positions and store the resident topology
     Kokkos::deep_copy(pos, Kokkos::View<real_t*, Kokkos::HostSpace>(pos0.data(), 3 * N));
     auto cells0L = cells0;
-    Kokkos::parallel_for("build0", Kokkos::RangePolicy<Exec>(0, N),
-                         KOKKOS_LAMBDA(int i) { buildCell(i, cells0L(i), posRaw, candRaw, ncRaw, L); });
+    Kokkos::parallel_for(
+        "build0", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(int i) { buildCell(i, cells0L(i), posRaw, candRaw, ncRaw, L); });
     Kokkos::fence();
 
     // --- compact resident topology: pnbr + packed triangles (no planes/vertices/box)
     Kokkos::View<int*, Mem> topoNp("topoNp", N), topoNt("topoNt", N);
     Kokkos::View<int*, Mem> topoPnbr("topoPnbr", (size_t)N * CMAXP);
     Kokkos::View<unsigned*, Mem> topoTri("topoTri", (size_t)N * CMAXT);
-    auto topoNpL = topoNp; auto topoNtL = topoNt; auto topoPnbrL = topoPnbr; auto topoTriL = topoTri;
-    Kokkos::parallel_for("extract", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-      const Cell& c = cells0L(i);
-      topoNpL(i) = c.np; topoNtL(i) = c.nt;
-      for (int k = 0; k < c.np; ++k) topoPnbrL((size_t)i * CMAXP + k) = c.pnbr[k];
-      for (int t = 0; t < c.nt; ++t)
-        topoTriL((size_t)i * CMAXT + t) = (unsigned)c.t0[t] | ((unsigned)c.t1[t] << 8) |
-                                          ((unsigned)c.t2[t] << 16) | ((c.alive[t] ? 1u : 0u) << 24);
-    });
+    auto topoNpL = topoNp;
+    auto topoNtL = topoNt;
+    auto topoPnbrL = topoPnbr;
+    auto topoTriL = topoTri;
+    Kokkos::parallel_for(
+        "extract", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+          const Cell& c = cells0L(i);
+          topoNpL(i) = c.np;
+          topoNtL(i) = c.nt;
+          for (int k = 0; k < c.np; ++k)
+            topoPnbrL((size_t)i * CMAXP + k) = c.pnbr[k];
+          for (int t = 0; t < c.nt; ++t)
+            topoTriL((size_t)i * CMAXT + t) = (unsigned)c.t0[t] | ((unsigned)c.t1[t] << 8) |
+                                              ((unsigned)c.t2[t] << 16) |
+                                              ((c.alive[t] ? 1u : 0u) << 24);
+        });
     Kokkos::fence();
     std::printf("  storage/cell: full=%zu B   compact=%d B\n", sizeof(Cell),
                 (int)(8 + CMAXP * 4 + CMAXT * 4));
 
     // --- precompute the near-miss SKIN: per cell, the non-face kNN whose bisector is within `skin`
-    // of cutting a vertex at build. Only these can flip into a face under a per-step move < ~skin/2,
-    // so the per-step flag cut-tests just this short watch list (O(NMISS·nt)) instead of all K.
+    // of cutting a vertex at build. Only these can flip into a face under a per-step move <
+    // ~skin/2, so the per-step flag cut-tests just this short watch list (O(NMISS·nt)) instead of
+    // all K.
     constexpr int NMISS = 16;
     const real_t skin = 0.04f * spacing;  // displacement budget before a rebuild is required
     Kokkos::View<int*, Mem> nmId("nmId", (size_t)N * NMISS);
     Kokkos::View<int*, Mem> nmCount("nmCount", N);
-    auto nmIdL = nmId; auto nmCountL = nmCount;
+    auto nmIdL = nmId;
+    auto nmCountL = nmCount;
     {
-      Kokkos::parallel_for("nearmiss", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-        const Cell& c = cells0L(i);
-        const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
-        const real_t Lh = 0.5f * L;
-        int cnt = 0;
-        const int k = ncRaw[i];
-        for (int t = 0; t < k && cnt < NMISS; ++t) {
-          const int g = candRaw[(size_t)i * KCAND + t];
-          bool isFace = false;
-          for (int m = 6; m < c.np; ++m)
-            if (c.pnbr[m] == g) { isFace = true; break; }
-          if (isFace) continue;
-          real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;
-          rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
-          ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
-          rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
-          const real_t rlen2 = rx * rx + ry * ry + rz * rz, dd = 0.5f * rlen2;
-          real_t maxnv = -1e30f;  // most-extreme vertex toward g
-          for (int t2 = 0; t2 < c.nt; ++t2)
-            if (c.alive[t2]) {
-              const real_t nv = rx * c.vx[t2] + ry * c.vy[t2] + rz * c.vz[t2];
-              if (nv > maxnv) maxnv = nv;
+      Kokkos::parallel_for(
+          "nearmiss", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+            const Cell& c = cells0L(i);
+            const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
+            const real_t Lh = 0.5f * L;
+            int cnt = 0;
+            const int k = ncRaw[i];
+            for (int t = 0; t < k && cnt < NMISS; ++t) {
+              const int g = candRaw[(size_t)i * KCAND + t];
+              bool isFace = false;
+              for (int m = 6; m < c.np; ++m)
+                if (c.pnbr[m] == g) {
+                  isFace = true;
+                  break;
+                }
+              if (isFace)
+                continue;
+              real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy,
+                     rz = posRaw[3 * g + 2] - sz;
+              rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+              ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+              rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+              const real_t rlen2 = rx * rx + ry * ry + rz * rz, dd = 0.5f * rlen2;
+              real_t maxnv = -1e30f;  // most-extreme vertex toward g
+              for (int t2 = 0; t2 < c.nt; ++t2)
+                if (c.alive[t2]) {
+                  const real_t nv = rx * c.vx[t2] + ry * c.vy[t2] + rz * c.vz[t2];
+                  if (nv > maxnv)
+                    maxnv = nv;
+                }
+              const real_t margin =
+                  (dd - maxnv) / Kokkos::sqrt(rlen2);  // perpendicular slack (>=0)
+              if (margin < skin)
+                nmIdL((size_t)i * NMISS + cnt++) = g;
             }
-          const real_t margin = (dd - maxnv) / Kokkos::sqrt(rlen2);  // perpendicular slack (>=0)
-          if (margin < skin) nmIdL((size_t)i * NMISS + cnt++) = g;
-        }
-        nmCountL(i) = cnt;
-      });
+            nmCountL(i) = cnt;
+          });
       Kokkos::fence();
       // report mean watch-list length
       long sumnm = 0;
       auto hnm = Kokkos::create_mirror_view(nmCount);
       Kokkos::deep_copy(hnm, nmCount);
-      for (int i = 0; i < N; ++i) sumnm += hnm(i);
+      for (int i = 0; i < N; ++i)
+        sumnm += hnm(i);
       std::printf("  near-miss skin=%.4f (%.2f%% spacing)  watch-list mean=%.2f / cell\n", skin,
                   100.0 * skin / spacing, (double)sumnm / N);
     }
 
-    // ===== topology/geometry split study: is re-eval bound on the topology READ or the RECOMPUTE? =====
-    // Compare AoS-compact (cell-major) vs SoA (field-major, warp-coalesced) topology, and isolate the
-    // volume compute (AoS-novol). If SoA≈AoS and novol≈full, re-eval is recompute-bound ⇒ the split is
-    // fully captured; if SoA>AoS, a coalesced topology datastructure extracts more.
+    // ===== topology/geometry split study: is re-eval bound on the topology READ or the RECOMPUTE?
+    // ===== Compare AoS-compact (cell-major) vs SoA (field-major, warp-coalesced) topology, and
+    // isolate the volume compute (AoS-novol). If SoA≈AoS and novol≈full, re-eval is recompute-bound
+    // ⇒ the split is fully captured; if SoA>AoS, a coalesced topology datastructure extracts more.
     {
       Kokkos::View<int*, Mem> pnbrSoA("pnbrSoA", (size_t)N * CMAXP);
       Kokkos::View<unsigned*, Mem> triSoA("triSoA", (size_t)N * CMAXT);
-      auto pnbrSoAL = pnbrSoA; auto triSoAL = triSoA;
-      Kokkos::parallel_for("toSoA", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-        const int np = topoNpL(i), nt = topoNtL(i);
-        for (int k = 0; k < np; ++k) pnbrSoAL((size_t)k * N + i) = topoPnbrL((size_t)i * CMAXP + k);
-        for (int t = 0; t < nt; ++t) triSoAL((size_t)t * N + i) = topoTriL((size_t)i * CMAXT + t);
-      });
+      auto pnbrSoAL = pnbrSoA;
+      auto triSoAL = triSoA;
+      Kokkos::parallel_for(
+          "toSoA", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+            const int np = topoNpL(i), nt = topoNtL(i);
+            for (int k = 0; k < np; ++k)
+              pnbrSoAL((size_t)k * N + i) = topoPnbrL((size_t)i * CMAXP + k);
+            for (int t = 0; t < nt; ++t)
+              triSoAL((size_t)t * N + i) = topoTriL((size_t)i * CMAXT + t);
+          });
       Kokkos::fence();
-      Kokkos::View<real_t*, Mem> vtmp("vtmp", N); auto vtmpL = vtmp;
+      Kokkos::View<real_t*, Mem> vtmp("vtmp", N);
+      auto vtmpL = vtmp;
       auto aos = [&](bool dovol) {
-        Kokkos::parallel_for("aos", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c; c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          vtmpL(i) = dovol ? c.volume() : c.maxVertexRsq();
-        });
+        Kokkos::parallel_for(
+            "aos", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+              Cell c;
+              c.initBoxPlanes(L, L, L);
+              const int np = topoNpL(i), nt = topoNtL(i);
+              c.np = np;
+              c.nt = nt;
+              c.overflow = false;
+              for (int k = 6; k < np; ++k)
+                c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+              for (int t = 0; t < nt; ++t) {
+                const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                c.t0[t] = w & 0xff;
+                c.t1[t] = (w >> 8) & 0xff;
+                c.t2[t] = (w >> 16) & 0xff;
+                c.alive[t] = (w >> 24) & 1u;
+              }
+              c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+              vtmpL(i) = dovol ? c.volume() : c.maxVertexRsq();
+            });
         Kokkos::fence();
       };
       auto soa = [&]() {
-        Kokkos::parallel_for("soa", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c; c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = pnbrSoAL((size_t)k * N + i);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = triSoAL((size_t)t * N + i);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          vtmpL(i) = c.volume();
-        });
+        Kokkos::parallel_for(
+            "soa", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+              Cell c;
+              c.initBoxPlanes(L, L, L);
+              const int np = topoNpL(i), nt = topoNtL(i);
+              c.np = np;
+              c.nt = nt;
+              c.overflow = false;
+              for (int k = 6; k < np; ++k)
+                c.pnbr[k] = pnbrSoAL((size_t)k * N + i);
+              for (int t = 0; t < nt; ++t) {
+                const unsigned w = triSoAL((size_t)t * N + i);
+                c.t0[t] = w & 0xff;
+                c.t1[t] = (w >> 8) & 0xff;
+                c.t2[t] = (w >> 16) & 0xff;
+                c.alive[t] = (w >> 24) & 1u;
+              }
+              c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+              vtmpL(i) = c.volume();
+            });
         Kokkos::fence();
       };
-      auto pv = [&]() {  // vertex-local flag/divergence volume (the design note) — no order, no adjacency
-        Kokkos::parallel_for("pv", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c; c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          vtmpL(i) = c.volumePerVertex();
-        });
-        Kokkos::fence();
-      };
+      auto pv =
+          [&]() {  // vertex-local flag/divergence volume (the design note) — no order, no adjacency
+            Kokkos::parallel_for(
+                "pv", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+                  Cell c;
+                  c.initBoxPlanes(L, L, L);
+                  const int np = topoNpL(i), nt = topoNtL(i);
+                  c.np = np;
+                  c.nt = nt;
+                  c.overflow = false;
+                  for (int k = 6; k < np; ++k)
+                    c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+                  for (int t = 0; t < nt; ++t) {
+                    const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                    c.t0[t] = w & 0xff;
+                    c.t1[t] = (w >> 8) & 0xff;
+                    c.t2[t] = (w >> 16) & 0xff;
+                    c.alive[t] = (w >> 24) & 1u;
+                  }
+                  c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+                  vtmpL(i) = c.volumePerVertex();
+                });
+            Kokkos::fence();
+          };
       auto pva = [&]() {  // FULL physics geometry: per-vertex volume + per-facet areas (forces)
-        Kokkos::parallel_for("pva", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c; c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          real_t area[CMAXP];
-          for (int k = 0; k < np; ++k) area[k] = 0;
-          c.facetAreasPerVertex(area);  // forces follow from areas (dV = Σ A_f dh_f)
-          real_t s = c.volumePerVertex();
-          for (int k = 0; k < np; ++k) s += area[k];  // touch areas so they aren't elided
-          vtmpL(i) = s;
-        });
+        Kokkos::parallel_for(
+            "pva", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+              Cell c;
+              c.initBoxPlanes(L, L, L);
+              const int np = topoNpL(i), nt = topoNtL(i);
+              c.np = np;
+              c.nt = nt;
+              c.overflow = false;
+              for (int k = 6; k < np; ++k)
+                c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+              for (int t = 0; t < nt; ++t) {
+                const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                c.t0[t] = w & 0xff;
+                c.t1[t] = (w >> 8) & 0xff;
+                c.t2[t] = (w >> 16) & 0xff;
+                c.alive[t] = (w >> 24) & 1u;
+              }
+              c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+              real_t area[CMAXP];
+              for (int k = 0; k < np; ++k)
+                area[k] = 0;
+              c.facetAreasPerVertex(area);  // forces follow from areas (dV = Σ A_f dh_f)
+              real_t s = c.volumePerVertex();
+              for (int k = 0; k < np; ++k)
+                s += area[k];  // touch areas so they aren't elided
+              vtmpL(i) = s;
+            });
         Kokkos::fence();
       };
-      auto pvg = [&]() {  // geomVolumeGrad tier: per-vertex volume + dV/dn, NO per-facet area/moment arrays
-        Kokkos::parallel_for("pvg", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c; c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          real_t vg = 0, dgx[CMAXP], dgy[CMAXP], dgz[CMAXP];
-          for (int k = 0; k < np; ++k) dgx[k] = dgy[k] = dgz[k] = 0;
-          c.geomVolumeGrad(vg, dgx, dgy, dgz);
-          real_t s = vg;
-          for (int k = 0; k < np; ++k) s += dgx[k] + dgy[k] + dgz[k];  // touch dV/dn so it isn't elided
-          vtmpL(i) = s;
-        });
+      auto pvg = [&]() {  // geomVolumeGrad tier: per-vertex volume + dV/dn, NO per-facet
+                          // area/moment arrays
+        Kokkos::parallel_for(
+            "pvg", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+              Cell c;
+              c.initBoxPlanes(L, L, L);
+              const int np = topoNpL(i), nt = topoNtL(i);
+              c.np = np;
+              c.nt = nt;
+              c.overflow = false;
+              for (int k = 6; k < np; ++k)
+                c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+              for (int t = 0; t < nt; ++t) {
+                const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                c.t0[t] = w & 0xff;
+                c.t1[t] = (w >> 8) & 0xff;
+                c.t2[t] = (w >> 16) & 0xff;
+                c.alive[t] = (w >> 24) & 1u;
+              }
+              c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+              real_t vg = 0, dgx[CMAXP], dgy[CMAXP], dgz[CMAXP];
+              for (int k = 0; k < np; ++k)
+                dgx[k] = dgy[k] = dgz[k] = 0;
+              c.geomVolumeGrad(vg, dgx, dgy, dgz);
+              real_t s = vg;
+              for (int k = 0; k < np; ++k)
+                s += dgx[k] + dgy[k] + dgz[k];  // touch dV/dn so it isn't elided
+              vtmpL(i) = s;
+            });
         Kokkos::fence();
       };
-      auto pvf = [&]() {  // OLD force path: merged V+area+moment (4 arrays) THEN a post-pass deriving dV/dn
-        Kokkos::parallel_for("pvf", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c; c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          real_t vol = 0, area[CMAXP], mx[CMAXP], my[CMAXP], mz[CMAXP];
-          for (int k = 0; k < np; ++k) area[k] = mx[k] = my[k] = mz[k] = 0;
-          c.geometryPerVertex(vol, area, mx, my, mz);
-          real_t s = vol;
-          for (int k = 6; k < np; ++k) {  // post-pass: derive force dV/dn = (2·area·n − m)/|n|
-            if (area[k] <= real_t(0)) continue;
-            const real_t invn = real_t(1) / Kokkos::sqrt(c.nn[k]);
-            s += (real_t(2) * area[k] * c.n[k][0] - mx[k]) * invn +
-                 (real_t(2) * area[k] * c.n[k][1] - my[k]) * invn +
-                 (real_t(2) * area[k] * c.n[k][2] - mz[k]) * invn;
-          }
-          vtmpL(i) = s;
-        });
+      auto pvf = [&]() {  // OLD force path: merged V+area+moment (4 arrays) THEN a post-pass
+                          // deriving dV/dn
+        Kokkos::parallel_for(
+            "pvf", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+              Cell c;
+              c.initBoxPlanes(L, L, L);
+              const int np = topoNpL(i), nt = topoNtL(i);
+              c.np = np;
+              c.nt = nt;
+              c.overflow = false;
+              for (int k = 6; k < np; ++k)
+                c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+              for (int t = 0; t < nt; ++t) {
+                const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                c.t0[t] = w & 0xff;
+                c.t1[t] = (w >> 8) & 0xff;
+                c.t2[t] = (w >> 16) & 0xff;
+                c.alive[t] = (w >> 24) & 1u;
+              }
+              c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+              real_t vol = 0, area[CMAXP], mx[CMAXP], my[CMAXP], mz[CMAXP];
+              for (int k = 0; k < np; ++k)
+                area[k] = mx[k] = my[k] = mz[k] = 0;
+              c.geometryPerVertex(vol, area, mx, my, mz);
+              real_t s = vol;
+              for (int k = 6; k < np; ++k) {  // post-pass: derive force dV/dn = (2·area·n − m)/|n|
+                if (area[k] <= real_t(0))
+                  continue;
+                const real_t invn = real_t(1) / Kokkos::sqrt(c.nn[k]);
+                s += (real_t(2) * area[k] * c.n[k][0] - mx[k]) * invn +
+                     (real_t(2) * area[k] * c.n[k][1] - my[k]) * invn +
+                     (real_t(2) * area[k] * c.n[k][2] - mz[k]) * invn;
+              }
+              vtmpL(i) = s;
+            });
         Kokkos::fence();
       };
-      auto pvga = [&]() {  // geomVolumeArea tier: V + outward area-vectors + dV/dn, one sqrt-free pass
-        Kokkos::parallel_for("pvga", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c; c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          real_t vol = 0, avx[CMAXP], avy[CMAXP], avz[CMAXP], dgx[CMAXP], dgy[CMAXP], dgz[CMAXP];
-          for (int k = 0; k < np; ++k) avx[k] = avy[k] = avz[k] = dgx[k] = dgy[k] = dgz[k] = 0;
-          c.geomVolumeArea(vol, avx, avy, avz, dgx, dgy, dgz);
-          real_t s = vol;
-          for (int k = 0; k < np; ++k) s += avx[k] + avy[k] + avz[k] + dgx[k] + dgy[k] + dgz[k];  // touch
-          vtmpL(i) = s;
-        });
-        Kokkos::fence();
-      };
-      auto pvfa = [&]() {  // OLD full-physics path: V+area+moment (4 arrays) THEN derive areaVec AND dV/dn
-        Kokkos::parallel_for("pvfa", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c; c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          real_t vol = 0, area[CMAXP], mx[CMAXP], my[CMAXP], mz[CMAXP];
-          for (int k = 0; k < np; ++k) area[k] = mx[k] = my[k] = mz[k] = 0;
-          c.geometryPerVertex(vol, area, mx, my, mz);
-          real_t s = vol;
-          for (int k = 6; k < np; ++k) {  // derive areaVec = area·n/|n| AND force dV/dn = (2·area·n − m)/|n|
-            if (area[k] <= real_t(0)) continue;
-            const real_t invn = real_t(1) / Kokkos::sqrt(c.nn[k]);
-            for (int d = 0; d < 3; ++d) {
-              const real_t nd = c.n[k][d];
-              const real_t avd = area[k] * nd * invn;
-              const real_t dvd = (real_t(2) * area[k] * nd - (d == 0 ? mx[k] : d == 1 ? my[k] : mz[k])) * invn;
-              s += avd + dvd;
-            }
-          }
-          vtmpL(i) = s;
-        });
-        Kokkos::fence();
-      };
-      auto jac = [&](bool ad) {  // geomFull dA/dn Jacobian: gather the per-triangle blocks over the cell
-        Kokkos::parallel_for("jac", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c; c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i); c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          real_t s = 0;
-          for (int t = 0; t < nt; ++t) {
-            if (!c.alive[t]) continue;
-            int pl[3]; real_t cb[3], gr[3][3][3];
-            if (ad) c.geomVolumeAreaGradAD(t, pl, cb, gr); else c.geomVolumeAreaGrad(t, pl, cb, gr);
-            for (int ii = 0; ii < 3; ++ii) { s += cb[ii];
-              for (int jj = 0; jj < 3; ++jj) for (int dd = 0; dd < 3; ++dd) s += gr[ii][jj][dd]; }
-          }
-          vtmpL(i) = s;
-        });
-        Kokkos::fence();
-      };
-      aos(true); aos(false); soa(); pv(); pva(); pvg(); pvf(); pvga(); pvfa(); jac(false); jac(true);  // warm
+      auto pvga =
+          [&]() {  // geomVolumeArea tier: V + outward area-vectors + dV/dn, one sqrt-free pass
+            Kokkos::parallel_for(
+                "pvga", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+                  Cell c;
+                  c.initBoxPlanes(L, L, L);
+                  const int np = topoNpL(i), nt = topoNtL(i);
+                  c.np = np;
+                  c.nt = nt;
+                  c.overflow = false;
+                  for (int k = 6; k < np; ++k)
+                    c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+                  for (int t = 0; t < nt; ++t) {
+                    const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                    c.t0[t] = w & 0xff;
+                    c.t1[t] = (w >> 8) & 0xff;
+                    c.t2[t] = (w >> 16) & 0xff;
+                    c.alive[t] = (w >> 24) & 1u;
+                  }
+                  c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+                  real_t vol = 0, avx[CMAXP], avy[CMAXP], avz[CMAXP], dgx[CMAXP], dgy[CMAXP],
+                         dgz[CMAXP];
+                  for (int k = 0; k < np; ++k)
+                    avx[k] = avy[k] = avz[k] = dgx[k] = dgy[k] = dgz[k] = 0;
+                  c.geomVolumeArea(vol, avx, avy, avz, dgx, dgy, dgz);
+                  real_t s = vol;
+                  for (int k = 0; k < np; ++k)
+                    s += avx[k] + avy[k] + avz[k] + dgx[k] + dgy[k] + dgz[k];  // touch
+                  vtmpL(i) = s;
+                });
+            Kokkos::fence();
+          };
+      auto pvfa =
+          [&]() {  // OLD full-physics path: V+area+moment (4 arrays) THEN derive areaVec AND dV/dn
+            Kokkos::parallel_for(
+                "pvfa", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+                  Cell c;
+                  c.initBoxPlanes(L, L, L);
+                  const int np = topoNpL(i), nt = topoNtL(i);
+                  c.np = np;
+                  c.nt = nt;
+                  c.overflow = false;
+                  for (int k = 6; k < np; ++k)
+                    c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+                  for (int t = 0; t < nt; ++t) {
+                    const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                    c.t0[t] = w & 0xff;
+                    c.t1[t] = (w >> 8) & 0xff;
+                    c.t2[t] = (w >> 16) & 0xff;
+                    c.alive[t] = (w >> 24) & 1u;
+                  }
+                  c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+                  real_t vol = 0, area[CMAXP], mx[CMAXP], my[CMAXP], mz[CMAXP];
+                  for (int k = 0; k < np; ++k)
+                    area[k] = mx[k] = my[k] = mz[k] = 0;
+                  c.geometryPerVertex(vol, area, mx, my, mz);
+                  real_t s = vol;
+                  for (int k = 6; k < np;
+                       ++k) {  // derive areaVec = area·n/|n| AND force dV/dn = (2·area·n − m)/|n|
+                    if (area[k] <= real_t(0))
+                      continue;
+                    const real_t invn = real_t(1) / Kokkos::sqrt(c.nn[k]);
+                    for (int d = 0; d < 3; ++d) {
+                      const real_t nd = c.n[k][d];
+                      const real_t avd = area[k] * nd * invn;
+                      const real_t dvd = (real_t(2) * area[k] * nd - (d == 0   ? mx[k]
+                                                                      : d == 1 ? my[k]
+                                                                               : mz[k])) *
+                                         invn;
+                      s += avd + dvd;
+                    }
+                  }
+                  vtmpL(i) = s;
+                });
+            Kokkos::fence();
+          };
+      auto jac =
+          [&](bool ad) {  // geomFull dA/dn Jacobian: gather the per-triangle blocks over the cell
+            Kokkos::parallel_for(
+                "jac", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+                  Cell c;
+                  c.initBoxPlanes(L, L, L);
+                  const int np = topoNpL(i), nt = topoNtL(i);
+                  c.np = np;
+                  c.nt = nt;
+                  c.overflow = false;
+                  for (int k = 6; k < np; ++k)
+                    c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+                  for (int t = 0; t < nt; ++t) {
+                    const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                    c.t0[t] = w & 0xff;
+                    c.t1[t] = (w >> 8) & 0xff;
+                    c.t2[t] = (w >> 16) & 0xff;
+                    c.alive[t] = (w >> 24) & 1u;
+                  }
+                  c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+                  real_t s = 0;
+                  for (int t = 0; t < nt; ++t) {
+                    if (!c.alive[t])
+                      continue;
+                    int pl[3];
+                    real_t cb[3], gr[3][3][3];
+                    if (ad)
+                      c.geomVolumeAreaGradAD(t, pl, cb, gr);
+                    else
+                      c.geomVolumeAreaGrad(t, pl, cb, gr);
+                    for (int ii = 0; ii < 3; ++ii) {
+                      s += cb[ii];
+                      for (int jj = 0; jj < 3; ++jj)
+                        for (int dd = 0; dd < 3; ++dd)
+                          s += gr[ii][jj][dd];
+                    }
+                  }
+                  vtmpL(i) = s;
+                });
+            Kokkos::fence();
+          };
+      aos(true);
+      aos(false);
+      soa();
+      pv();
+      pva();
+      pvg();
+      pvf();
+      pvga();
+      pvfa();
+      jac(false);
+      jac(true);  // warm
       auto sumv = [&]() {
-        auto h = Kokkos::create_mirror_view(vtmp); Kokkos::deep_copy(h, vtmp);
-        double s = 0; for (int i = 0; i < N; ++i) s += h(i); return s;
+        auto h = Kokkos::create_mirror_view(vtmp);
+        Kokkos::deep_copy(h, vtmp);
+        double s = 0;
+        for (int i = 0; i < N; ++i)
+          s += h(i);
+        return s;
       };
-      aos(true); const double sAtan = sumv();
-      pv(); const double sPv = sumv();
-      double tA = 1e30, tNv = 1e30, tS = 1e30, tP = 1e30, tPA = 1e30, tPG = 1e30, tPF = 1e30, tPGA = 1e30, tPFA = 1e30, tJac = 1e30, tJacAD = 1e30;
+      aos(true);
+      const double sAtan = sumv();
+      pv();
+      const double sPv = sumv();
+      double tA = 1e30, tNv = 1e30, tS = 1e30, tP = 1e30, tPA = 1e30, tPG = 1e30, tPF = 1e30,
+             tPGA = 1e30, tPFA = 1e30, tJac = 1e30, tJacAD = 1e30;
       for (int r = 0; r < 5; ++r) {
-        auto a0 = clk::now(); aos(true); auto a1 = clk::now(); tA = std::min(tA, secs(a0, a1));
-        auto b0 = clk::now(); aos(false); auto b1 = clk::now(); tNv = std::min(tNv, secs(b0, b1));
-        auto c0 = clk::now(); soa(); auto c1 = clk::now(); tS = std::min(tS, secs(c0, c1));
-        auto p0 = clk::now(); pv(); auto p1 = clk::now(); tP = std::min(tP, secs(p0, p1));
-        auto q0 = clk::now(); pva(); auto q1 = clk::now(); tPA = std::min(tPA, secs(q0, q1));
-        auto g0 = clk::now(); pvg(); auto g1 = clk::now(); tPG = std::min(tPG, secs(g0, g1));
-        auto f0 = clk::now(); pvf(); auto f1 = clk::now(); tPF = std::min(tPF, secs(f0, f1));
-        auto ga0 = clk::now(); pvga(); auto ga1 = clk::now(); tPGA = std::min(tPGA, secs(ga0, ga1));
-        auto fa0 = clk::now(); pvfa(); auto fa1 = clk::now(); tPFA = std::min(tPFA, secs(fa0, fa1));
-        auto j0 = clk::now(); jac(false); auto j1 = clk::now(); tJac = std::min(tJac, secs(j0, j1));
-        auto k0 = clk::now(); jac(true); auto k1 = clk::now(); tJacAD = std::min(tJacAD, secs(k0, k1));
+        auto a0 = clk::now();
+        aos(true);
+        auto a1 = clk::now();
+        tA = std::min(tA, secs(a0, a1));
+        auto b0 = clk::now();
+        aos(false);
+        auto b1 = clk::now();
+        tNv = std::min(tNv, secs(b0, b1));
+        auto c0 = clk::now();
+        soa();
+        auto c1 = clk::now();
+        tS = std::min(tS, secs(c0, c1));
+        auto p0 = clk::now();
+        pv();
+        auto p1 = clk::now();
+        tP = std::min(tP, secs(p0, p1));
+        auto q0 = clk::now();
+        pva();
+        auto q1 = clk::now();
+        tPA = std::min(tPA, secs(q0, q1));
+        auto g0 = clk::now();
+        pvg();
+        auto g1 = clk::now();
+        tPG = std::min(tPG, secs(g0, g1));
+        auto f0 = clk::now();
+        pvf();
+        auto f1 = clk::now();
+        tPF = std::min(tPF, secs(f0, f1));
+        auto ga0 = clk::now();
+        pvga();
+        auto ga1 = clk::now();
+        tPGA = std::min(tPGA, secs(ga0, ga1));
+        auto fa0 = clk::now();
+        pvfa();
+        auto fa1 = clk::now();
+        tPFA = std::min(tPFA, secs(fa0, fa1));
+        auto j0 = clk::now();
+        jac(false);
+        auto j1 = clk::now();
+        tJac = std::min(tJac, secs(j0, j1));
+        auto k0 = clk::now();
+        jac(true);
+        auto k1 = clk::now();
+        tJacAD = std::min(tJacAD, secs(k0, k1));
       }
-      std::printf("  re-eval decomposition (Mc/s):  atan2-sort %.1f   no-volume %.1f   SoA-topo %.1f"
-                  "   pervertex(V) %.1f   pervertex(V+A) %.1f\n", N / tA / 1e3, N / tNv / 1e3, N / tS / 1e3,
-                  N / tP / 1e3, N / tPA / 1e3);
-      std::printf("  force path (Mc/s):  geomVolumeGrad(1-pass) %.1f   geometryPerVertex+derive(2-pass) %.1f\n",
-                  N / tPG / 1e3, N / tPF / 1e3);
-      std::printf("  full-physics path (Mc/s):  geomVolumeArea(1-pass) %.1f   geometryPerVertex+derive2(2-pass) %.1f\n",
-                  N / tPGA / 1e3, N / tPFA / 1e3);
-      std::printf("  dA/dn Jacobian (Mc/s):  geomVolumeAreaGrad analytic %.1f   geomVolumeAreaGradAD forward-AD %.1f   (speedup %.2fx)\n",
-                  N / tJac / 1e3, N / tJacAD / 1e3, tJacAD / tJac);
+      std::printf(
+          "  re-eval decomposition (Mc/s):  atan2-sort %.1f   no-volume %.1f   SoA-topo %.1f"
+          "   pervertex(V) %.1f   pervertex(V+A) %.1f\n",
+          N / tA / 1e3, N / tNv / 1e3, N / tS / 1e3, N / tP / 1e3, N / tPA / 1e3);
+      std::printf(
+          "  force path (Mc/s):  geomVolumeGrad(1-pass) %.1f   geometryPerVertex+derive(2-pass) "
+          "%.1f\n",
+          N / tPG / 1e3, N / tPF / 1e3);
+      std::printf(
+          "  full-physics path (Mc/s):  geomVolumeArea(1-pass) %.1f   "
+          "geometryPerVertex+derive2(2-pass) %.1f\n",
+          N / tPGA / 1e3, N / tPFA / 1e3);
+      std::printf(
+          "  dA/dn Jacobian (Mc/s):  geomVolumeAreaGrad analytic %.1f   geomVolumeAreaGradAD "
+          "forward-AD %.1f   (speedup %.2fx)\n",
+          N / tJac / 1e3, N / tJacAD / 1e3, tJacAD / tJac);
       std::printf("  volume check (FP32): atan2 Σ=%.6f  pervertex |Δ|=%.2e\n", sAtan,
                   std::fabs(sAtan - sPv));
     }
@@ -447,125 +644,177 @@ int main(int argc, char** argv) {
       }
 
       auto reeval = [&] {
-        Kokkos::parallel_for("reeval", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c = cells0L(i);  // copy resident topology
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          volReL(i) = c.volumePerVertex();
-        });
+        Kokkos::parallel_for(
+            "reeval", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+              Cell c = cells0L(i);  // copy resident topology
+              c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+              volReL(i) = c.volumePerVertex();
+            });
         Kokkos::fence();
       };
-      // re-eval from the COMPACT topology: rebuild a local cell from pnbr + packed triangles, reeval
+      // re-eval from the COMPACT topology: rebuild a local cell from pnbr + packed triangles,
+      // reeval
       auto reevalCompact = [&] {
-        Kokkos::parallel_for("reevalCmp", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c;
-          c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i);
-          c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
-          volRcL(i) = c.volumePerVertex();
-        });
+        Kokkos::parallel_for(
+            "reevalCmp", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+              Cell c;
+              c.initBoxPlanes(L, L, L);
+              const int np = topoNpL(i), nt = topoNtL(i);
+              c.np = np;
+              c.nt = nt;
+              c.overflow = false;
+              for (int k = 6; k < np; ++k)
+                c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+              for (int t = 0; t < nt; ++t) {
+                const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                c.t0[t] = w & 0xff;
+                c.t1[t] = (w >> 8) & 0xff;
+                c.t2[t] = (w >> 16) & 0xff;
+                c.alive[t] = (w >> 24) & 1u;
+              }
+              c.reevalGeometry(posRaw[3 * i], posRaw[3 * i + 1], posRaw[3 * i + 2], posRaw, L);
+              volRcL(i) = c.volumePerVertex();
+            });
         Kokkos::fence();
       };
       auto rebuild = [&] {
-        Kokkos::parallel_for("rebuild", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c;
-          buildCell(i, c, posRaw, candRaw, ncRaw, L);
-          volRbL(i) = c.overflow ? 0.0f : c.volumePerVertex();
-        });
+        Kokkos::parallel_for(
+            "rebuild", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+              Cell c;
+              buildCell(i, c, posRaw, candRaw, ncRaw, L);
+              volRbL(i) = c.overflow ? 0.0f : c.volumePerVertex();
+            });
         Kokkos::fence();
       };
-      reeval(); reevalCompact(); rebuild();  // warm
+      reeval();
+      reevalCompact();
+      rebuild();  // warm
       double tRe = 1e30, tRc = 1e30, tRb = 1e30;
       for (int rep = 0; rep < 3; ++rep) {
-        auto t0 = clk::now(); reeval(); auto t1 = clk::now(); tRe = std::min(tRe, secs(t0, t1));
-        auto ta = clk::now(); reevalCompact(); auto tb = clk::now(); tRc = std::min(tRc, secs(ta, tb));
-        auto t2 = clk::now(); rebuild(); auto t3 = clk::now(); tRb = std::min(tRb, secs(t2, t3));
+        auto t0 = clk::now();
+        reeval();
+        auto t1 = clk::now();
+        tRe = std::min(tRe, secs(t0, t1));
+        auto ta = clk::now();
+        reevalCompact();
+        auto tb = clk::now();
+        tRc = std::min(tRc, secs(ta, tb));
+        auto t2 = clk::now();
+        rebuild();
+        auto t3 = clk::now();
+        tRb = std::min(tRb, secs(t2, t3));
       }
-      long stable = 0; double sre = 0, scmp_match = 0;
+      long stable = 0;
+      double sre = 0, scmp_match = 0;
       {
         auto hRe = Kokkos::create_mirror_view(volRe);
         auto hRb = Kokkos::create_mirror_view(volRb);
         auto hRc = Kokkos::create_mirror_view(volRc);
-        Kokkos::deep_copy(hRe, volRe); Kokkos::deep_copy(hRb, volRb); Kokkos::deep_copy(hRc, volRc);
+        Kokkos::deep_copy(hRe, volRe);
+        Kokkos::deep_copy(hRb, volRb);
+        Kokkos::deep_copy(hRc, volRc);
         for (int i = 0; i < N; ++i) {
           sre += hRc(i);
           const double rel = hRb(i) > 0 ? std::fabs(hRc(i) - hRb(i)) / hRb(i) : 1.0;
-          if (rel < 1e-3) ++stable;
-          scmp_match += std::fabs((double)hRc(i) - (double)hRe(i));  // compact vs full re-eval agree?
+          if (rel < 1e-3)
+            ++stable;
+          scmp_match +=
+              std::fabs((double)hRc(i) - (double)hRe(i));  // compact vs full re-eval agree?
         }
       }
       std::printf("  %4.2f  %9.1f  %9.1f  %8.1f  %7.2fx   %8.1f%%   %.2e\n", d, N / tRe / 1e3,
-                  N / tRc / 1e3, N / tRb / 1e3, tRb / tRc, 100.0 * stable / N, std::fabs(sre - 1.0));
-      if (scmp_match > 1e-3) std::printf("    [warn] compact vs full re-eval differ: %.2e\n", scmp_match);
+                  N / tRc / 1e3, N / tRb / 1e3, tRb / tRc, 100.0 * stable / N,
+                  std::fabs(sre - 1.0));
+      if (scmp_match > 1e-3)
+        std::printf("    [warn] compact vs full re-eval differ: %.2e\n", scmp_match);
 
       // ---- Phase 1.5: re-eval + flag, stream-compact, re-clip only flagged ----
-      auto needfixL = needfix; auto fixListL = fixList; auto fixCountL = fixCount;
+      auto needfixL = needfix;
+      auto fixListL = fixList;
+      auto fixCountL = fixCount;
       auto reevalFlag = [&] {
         Kokkos::deep_copy(fixCount, 0);
-        Kokkos::parallel_for("reevalFlag", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c;
-          c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i);
-          c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
-          c.reevalGeometry(sx, sy, sz, posRaw, L);
-          volRcL(i) = c.volumePerVertex();
-          // needs-reclip test: face beyond 2Rmax (lost) OR non-face kNN that actually cuts (gained)
-          const real_t Rm2 = c.maxVertexRsq();  // cache: one O(nt) scan, not one per candidate
-          const real_t Lh = 0.5f * L, rad2 = 4.0f * 1.1f * Rm2;  // (2Rmax)^2 +10% margin
-          auto dist2 = [&](int g) {
-            real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;
-            rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
-            ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
-            rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
-            return rx * rx + ry * ry + rz * rz;
-          };
-          bool flag = false;
-          // lost face: a current face-neighbour whose bisector is now beyond every vertex
-          for (int k = 6; k < np && !flag; ++k)
-            if (c.pnbr[k] >= 0 && dist2(c.pnbr[k]) > rad2) flag = true;
-          // gained face: a non-face kNN whose bisector ACTUALLY cuts a vertex (n·v > d) — the real
-          // test, not just "inside 2Rmax" (most candidates in that ball are no-ops, not new faces)
-          const int kk = ncRaw[i];
-          for (int t = 0; t < kk && !flag; ++t) {
-            const int g = candRaw[(size_t)i * KCAND + t];
-            real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;
-            rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
-            ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
-            rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
-            const real_t dd = 0.5f * (rx * rx + ry * ry + rz * rz);
-            if (dd >= 2.0f * Rm2) continue;  // bisector beyond the cell (cached Rmax) -> cannot cut
-            bool isFace = false;
-            for (int m = 6; m < np; ++m)
-              if (c.pnbr[m] == g) { isFace = true; break; }
-            if (isFace) continue;
-            for (int t2 = 0; t2 < c.nt; ++t2)  // does this non-face bisector cut any vertex?
-              if (c.alive[t2] && rx * c.vx[t2] + ry * c.vy[t2] + rz * c.vz[t2] > dd) { flag = true; break; }
-          }
-          needfixL(i) = flag;
-          if (flag) { int s = Kokkos::atomic_fetch_add(&fixCountL(), 1); fixListL(s) = i; }
-        });
+        Kokkos::parallel_for(
+            "reevalFlag", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+              Cell c;
+              c.initBoxPlanes(L, L, L);
+              const int np = topoNpL(i), nt = topoNtL(i);
+              c.np = np;
+              c.nt = nt;
+              c.overflow = false;
+              for (int k = 6; k < np; ++k)
+                c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+              for (int t = 0; t < nt; ++t) {
+                const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                c.t0[t] = w & 0xff;
+                c.t1[t] = (w >> 8) & 0xff;
+                c.t2[t] = (w >> 16) & 0xff;
+                c.alive[t] = (w >> 24) & 1u;
+              }
+              const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
+              c.reevalGeometry(sx, sy, sz, posRaw, L);
+              volRcL(i) = c.volumePerVertex();
+              // needs-reclip test: face beyond 2Rmax (lost) OR non-face kNN that actually cuts
+              // (gained)
+              const real_t Rm2 = c.maxVertexRsq();  // cache: one O(nt) scan, not one per candidate
+              const real_t Lh = 0.5f * L, rad2 = 4.0f * 1.1f * Rm2;  // (2Rmax)^2 +10% margin
+              auto dist2 = [&](int g) {
+                real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy,
+                       rz = posRaw[3 * g + 2] - sz;
+                rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+                ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+                rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+                return rx * rx + ry * ry + rz * rz;
+              };
+              bool flag = false;
+              // lost face: a current face-neighbour whose bisector is now beyond every vertex
+              for (int k = 6; k < np && !flag; ++k)
+                if (c.pnbr[k] >= 0 && dist2(c.pnbr[k]) > rad2)
+                  flag = true;
+              // gained face: a non-face kNN whose bisector ACTUALLY cuts a vertex (n·v > d) — the
+              // real test, not just "inside 2Rmax" (most candidates in that ball are no-ops, not
+              // new faces)
+              const int kk = ncRaw[i];
+              for (int t = 0; t < kk && !flag; ++t) {
+                const int g = candRaw[(size_t)i * KCAND + t];
+                real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy,
+                       rz = posRaw[3 * g + 2] - sz;
+                rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+                ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+                rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+                const real_t dd = 0.5f * (rx * rx + ry * ry + rz * rz);
+                if (dd >= 2.0f * Rm2)
+                  continue;  // bisector beyond the cell (cached Rmax) -> cannot cut
+                bool isFace = false;
+                for (int m = 6; m < np; ++m)
+                  if (c.pnbr[m] == g) {
+                    isFace = true;
+                    break;
+                  }
+                if (isFace)
+                  continue;
+                for (int t2 = 0; t2 < c.nt; ++t2)  // does this non-face bisector cut any vertex?
+                  if (c.alive[t2] && rx * c.vx[t2] + ry * c.vy[t2] + rz * c.vz[t2] > dd) {
+                    flag = true;
+                    break;
+                  }
+              }
+              needfixL(i) = flag;
+              if (flag) {
+                int s = Kokkos::atomic_fetch_add(&fixCountL(), 1);
+                fixListL(s) = i;
+              }
+            });
         Kokkos::fence();
       };
       auto repair = [&](int nfix) {
-        Kokkos::parallel_for("repair", Kokkos::RangePolicy<Exec>(0, nfix), KOKKOS_LAMBDA(int s) {
-          const int i = fixListL(s);
-          Cell c;
-          buildCell(i, c, posRaw, candRaw, ncRaw, L);
-          volRcL(i) = c.overflow ? 0.0f : c.volumePerVertex();
-        });
+        Kokkos::parallel_for(
+            "repair", Kokkos::RangePolicy<Exec>(0, nfix), KOKKOS_LAMBDA(int s) {
+              const int i = fixListL(s);
+              Cell c;
+              buildCell(i, c, posRaw, candRaw, ncRaw, L);
+              volRcL(i) = c.overflow ? 0.0f : c.volumePerVertex();
+            });
         Kokkos::fence();
       };
       reevalFlag();
@@ -574,65 +823,89 @@ int main(int argc, char** argv) {
       repair(nfix);  // warm
       double tFlag = 1e30, tFix = 1e30;
       for (int rep = 0; rep < 3; ++rep) {
-        auto t0 = clk::now(); reevalFlag(); auto t1 = clk::now(); tFlag = std::min(tFlag, secs(t0, t1));
+        auto t0 = clk::now();
+        reevalFlag();
+        auto t1 = clk::now();
+        tFlag = std::min(tFlag, secs(t0, t1));
         Kokkos::deep_copy(Kokkos::View<int, Kokkos::HostSpace>(&nfix), fixCount);
-        auto t2 = clk::now(); repair(nfix); auto t3 = clk::now(); tFix = std::min(tFix, secs(t2, t3));
+        auto t2 = clk::now();
+        repair(nfix);
+        auto t3 = clk::now();
+        tFix = std::min(tFix, secs(t2, t3));
       }
       // residual error after repair (vs full rebuild) — validates no false negatives
       double resid = 0;
       {
         auto hRc = Kokkos::create_mirror_view(volRc);
         auto hRb = Kokkos::create_mirror_view(volRb);
-        Kokkos::deep_copy(hRc, volRc); Kokkos::deep_copy(hRb, volRb);
-        for (int i = 0; i < N; ++i) resid += std::fabs((double)hRc(i) - (double)hRb(i));
+        Kokkos::deep_copy(hRc, volRc);
+        Kokkos::deep_copy(hRb, volRb);
+        for (int i = 0; i < N; ++i)
+          resid += std::fabs((double)hRc(i) - (double)hRb(i));
       }
       const double effMcs = N / (tFlag + tFix) / 1e3;
-      std::printf("    Phase1.5  (cut-test all K): flagged %.1f%%  reeval+flag %.1f + repair %.1f ms"
-                  "  -> %.1f Mc/s (%.2fx)  resid=%.2e\n",
-                  100.0 * nfix / N, tFlag * 1e3, tFix * 1e3, effMcs, effMcs / (N / tRb / 1e3), resid);
+      std::printf(
+          "    Phase1.5  (cut-test all K): flagged %.1f%%  reeval+flag %.1f + repair %.1f ms"
+          "  -> %.1f Mc/s (%.2fx)  resid=%.2e\n",
+          100.0 * nfix / N, tFlag * 1e3, tFix * 1e3, effMcs, effMcs / (N / tRb / 1e3), resid);
 
       // ---- Phase 1.5b: near-miss SKIN flag — cut-test only the precomputed watch list ----
       auto reevalFlagSkin = [&] {
         Kokkos::deep_copy(fixCount, 0);
-        Kokkos::parallel_for("reevalSkin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
-          Cell c;
-          c.initBoxPlanes(L, L, L);
-          const int np = topoNpL(i), nt = topoNtL(i);
-          c.np = np; c.nt = nt; c.overflow = false;
-          for (int k = 6; k < np; ++k) c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
-          for (int t = 0; t < nt; ++t) {
-            const unsigned w = topoTriL((size_t)i * CMAXT + t);
-            c.t0[t] = w & 0xff; c.t1[t] = (w >> 8) & 0xff; c.t2[t] = (w >> 16) & 0xff;
-            c.alive[t] = (w >> 24) & 1u;
-          }
-          const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
-          c.reevalGeometry(sx, sy, sz, posRaw, L);
-          volRcL(i) = c.volumePerVertex();
-          const real_t Lh = 0.5f * L, rad2 = 4.0f * 1.1f * c.maxVertexRsq();
-          auto dist2 = [&](int g) {
-            real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;
-            rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
-            ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
-            rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
-            return rx * rx + ry * ry + rz * rz;
-          };
-          bool flag = false;
-          for (int k = 6; k < np && !flag; ++k)
-            if (c.pnbr[k] >= 0 && dist2(c.pnbr[k]) > rad2) flag = true;  // lost face
-          const int nm = nmCountL(i);
-          for (int q = 0; q < nm && !flag; ++q) {  // gained face: cut-test ONLY the watch list
-            const int g = nmIdL((size_t)i * NMISS + q);
-            real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy, rz = posRaw[3 * g + 2] - sz;
-            rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
-            ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
-            rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
-            const real_t dd = 0.5f * (rx * rx + ry * ry + rz * rz);
-            for (int t2 = 0; t2 < c.nt; ++t2)
-              if (c.alive[t2] && rx * c.vx[t2] + ry * c.vy[t2] + rz * c.vz[t2] > dd) { flag = true; break; }
-          }
-          needfixL(i) = flag;
-          if (flag) { int s = Kokkos::atomic_fetch_add(&fixCountL(), 1); fixListL(s) = i; }
-        });
+        Kokkos::parallel_for(
+            "reevalSkin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) {
+              Cell c;
+              c.initBoxPlanes(L, L, L);
+              const int np = topoNpL(i), nt = topoNtL(i);
+              c.np = np;
+              c.nt = nt;
+              c.overflow = false;
+              for (int k = 6; k < np; ++k)
+                c.pnbr[k] = topoPnbrL((size_t)i * CMAXP + k);
+              for (int t = 0; t < nt; ++t) {
+                const unsigned w = topoTriL((size_t)i * CMAXT + t);
+                c.t0[t] = w & 0xff;
+                c.t1[t] = (w >> 8) & 0xff;
+                c.t2[t] = (w >> 16) & 0xff;
+                c.alive[t] = (w >> 24) & 1u;
+              }
+              const real_t sx = posRaw[3 * i], sy = posRaw[3 * i + 1], sz = posRaw[3 * i + 2];
+              c.reevalGeometry(sx, sy, sz, posRaw, L);
+              volRcL(i) = c.volumePerVertex();
+              const real_t Lh = 0.5f * L, rad2 = 4.0f * 1.1f * c.maxVertexRsq();
+              auto dist2 = [&](int g) {
+                real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy,
+                       rz = posRaw[3 * g + 2] - sz;
+                rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+                ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+                rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+                return rx * rx + ry * ry + rz * rz;
+              };
+              bool flag = false;
+              for (int k = 6; k < np && !flag; ++k)
+                if (c.pnbr[k] >= 0 && dist2(c.pnbr[k]) > rad2)
+                  flag = true;  // lost face
+              const int nm = nmCountL(i);
+              for (int q = 0; q < nm && !flag; ++q) {  // gained face: cut-test ONLY the watch list
+                const int g = nmIdL((size_t)i * NMISS + q);
+                real_t rx = posRaw[3 * g] - sx, ry = posRaw[3 * g + 1] - sy,
+                       rz = posRaw[3 * g + 2] - sz;
+                rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
+                ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
+                rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
+                const real_t dd = 0.5f * (rx * rx + ry * ry + rz * rz);
+                for (int t2 = 0; t2 < c.nt; ++t2)
+                  if (c.alive[t2] && rx * c.vx[t2] + ry * c.vy[t2] + rz * c.vz[t2] > dd) {
+                    flag = true;
+                    break;
+                  }
+              }
+              needfixL(i) = flag;
+              if (flag) {
+                int s = Kokkos::atomic_fetch_add(&fixCountL(), 1);
+                fixListL(s) = i;
+              }
+            });
         Kokkos::fence();
       };
       reevalFlagSkin();
@@ -641,21 +914,30 @@ int main(int argc, char** argv) {
       repair(nfix2);  // warm
       double tSkin = 1e30, tFix2 = 1e30;
       for (int rep = 0; rep < 3; ++rep) {
-        auto t0 = clk::now(); reevalFlagSkin(); auto t1 = clk::now(); tSkin = std::min(tSkin, secs(t0, t1));
+        auto t0 = clk::now();
+        reevalFlagSkin();
+        auto t1 = clk::now();
+        tSkin = std::min(tSkin, secs(t0, t1));
         Kokkos::deep_copy(Kokkos::View<int, Kokkos::HostSpace>(&nfix2), fixCount);
-        auto t2 = clk::now(); repair(nfix2); auto t3 = clk::now(); tFix2 = std::min(tFix2, secs(t2, t3));
+        auto t2 = clk::now();
+        repair(nfix2);
+        auto t3 = clk::now();
+        tFix2 = std::min(tFix2, secs(t2, t3));
       }
       double resid2 = 0;
       {
         auto hRc = Kokkos::create_mirror_view(volRc);
         auto hRb = Kokkos::create_mirror_view(volRb);
-        Kokkos::deep_copy(hRc, volRc); Kokkos::deep_copy(hRb, volRb);
-        for (int i = 0; i < N; ++i) resid2 += std::fabs((double)hRc(i) - (double)hRb(i));
+        Kokkos::deep_copy(hRc, volRc);
+        Kokkos::deep_copy(hRb, volRb);
+        for (int i = 0; i < N; ++i)
+          resid2 += std::fabs((double)hRc(i) - (double)hRb(i));
       }
       const double effSkin = N / (tSkin + tFix2) / 1e3;
-      std::printf("    Phase1.5b (near-miss skin): flagged %.1f%%  reeval+flag %.1f + repair %.1f ms"
-                  "  -> %.1f Mc/s (%.2fx)  resid=%.2e\n",
-                  100.0 * nfix2 / N, tSkin * 1e3, tFix2 * 1e3, effSkin, effSkin / (N / tRb / 1e3), resid2);
+      std::printf(
+          "    Phase1.5b (near-miss skin): flagged %.1f%%  reeval+flag %.1f + repair %.1f ms"
+          "  -> %.1f Mc/s (%.2fx)  resid=%.2e\n",
+          100.0 * nfix2 / N, tSkin * 1e3, tFix2 * 1e3, effSkin, effSkin / (N / tRb / 1e3), resid2);
     }
   }
   Kokkos::finalize();

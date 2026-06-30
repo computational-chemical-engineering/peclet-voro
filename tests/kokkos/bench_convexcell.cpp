@@ -8,13 +8,13 @@
  * box volume) and, if voro++ is available, against per-cell voro++ volumes. Reports
  * throughput across N. Run manually:  ./bench_convexcell [N1 N2 ...]
  */
-#include <Kokkos_Core.hpp>
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <Kokkos_Core.hpp>
 #include <random>
 #include <vector>
 
@@ -79,7 +79,8 @@ struct Result {
   double volSumW = 0;
   long faceSumW = 0;
   long overflowW = 0;
-  long exhaustW = 0;  // Phase C: cells that drained the worklist without the radius break (0 ⇒ provably complete)
+  long exhaustW = 0;  // Phase C: cells that drained the worklist without the radius break (0 ⇒
+                      // provably complete)
   double secsBestW = -1;
 };
 
@@ -93,11 +94,12 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   const real_t vol = L[0] * L[1] * L[2];
   const real_t dens = std::getenv("CC_DENS") ? std::atof(std::getenv("CC_DENS")) : 1.0;
   const real_t spacing = std::cbrt(dens * vol / std::max(1, N));
-  // Auto-size the search window to cover the security radius (~2·R_vertex ≈ 2.6·mean-spacing) at this
-  // grid density: a cell needs blocks out to ~2.6·mean/minCsz = 2.6/cbrt(dens) cells; +3 margin for
-  // irregular cells. The sorted radius break terminates early inside it, so an over-size window only
-  // costs setup, not the per-cell walk. CC_SW still overrides for sweeps.
-  if (std::getenv("CC_SW") == nullptr) sw = (int)std::ceil(2.6 / std::cbrt(dens)) + 3;
+  // Auto-size the search window to cover the security radius (~2·R_vertex ≈ 2.6·mean-spacing) at
+  // this grid density: a cell needs blocks out to ~2.6·mean/minCsz = 2.6/cbrt(dens) cells; +3
+  // margin for irregular cells. The sorted radius break terminates early inside it, so an over-size
+  // window only costs setup, not the per-cell walk. CC_SW still overrides for sweeps.
+  if (std::getenv("CC_SW") == nullptr)
+    sw = (int)std::ceil(2.6 / std::cbrt(dens)) + 3;
   int dim[3];
   real_t icsz[3], csz[3];
   for (int k = 0; k < 3; ++k) {
@@ -108,7 +110,8 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   const int dimx = dim[0], dimy = dim[1], dimz = dim[2];
   // Morton cell id => cellStart sized to the (power-of-two)^3 Z-order range, not dimx*dimy*dimz.
   int nbits = 1;
-  while ((1 << nbits) < std::max({dimx, dimy, dimz})) ++nbits;
+  while ((1 << nbits) < std::max({dimx, dimy, dimz}))
+    ++nbits;
   const long ncell = 1L << (3 * nbits);
   real_t minCsz = std::min({csz[0], csz[1], csz[2]});
 
@@ -116,7 +119,8 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   Kokkos::View<int*, MemSpace> cellOf("cellOf", N), counts("counts", ncell + 1);
   Kokkos::deep_copy(counts, 0);
   const real_t icx = icsz[0], icy = icsz[1], icz = icsz[2];
-  const real_t cszx = csz[0], cszy = csz[1], cszz = csz[2];  // cell sizes (for tight seed-to-block dist)
+  const real_t cszx = csz[0], cszy = csz[1],
+               cszz = csz[2];  // cell sizes (for tight seed-to-block dist)
   Kokkos::parallel_for(
       "bin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         int gx = ((((int)Kokkos::floor(pos(3 * i) * icx)) % dimx) + dimx) % dimx;
@@ -130,12 +134,14 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   Kokkos::parallel_scan(
       "scan", Kokkos::RangePolicy<Exec>(0, ncell + 1), KOKKOS_LAMBDA(const int c, int& a, bool f) {
         int v = (c < ncell) ? counts(c) : 0;
-        if (f) cellStart(c) = a;
+        if (f)
+          cellStart(c) = a;
         a += v;
       });
   Kokkos::View<int*, MemSpace> cursor("cursor", ncell), binned("binned", N);
   Kokkos::parallel_for(
-      "cur", Kokkos::RangePolicy<Exec>(0, ncell), KOKKOS_LAMBDA(const int c) { cursor(c) = cellStart(c); });
+      "cur", Kokkos::RangePolicy<Exec>(0, ncell),
+      KOKKOS_LAMBDA(const int c) { cursor(c) = cellStart(c); });
   Kokkos::parallel_for(
       "scat", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         int s = Kokkos::atomic_fetch_add(&cursor(cellOf(i)), 1);
@@ -168,7 +174,8 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   const int nOff = (int)oX.size();
   // sort offsets by ascending nearest-corner distance²
   std::vector<int> ord(nOff);
-  for (int i = 0; i < nOff; ++i) ord[i] = i;
+  for (int i = 0; i < nOff; ++i)
+    ord[i] = i;
   std::sort(ord.begin(), ord.end(), [&](int a, int b) { return oD[a] < oD[b]; });
   Kokkos::View<int*, MemSpace> offX("offX", nOff), offY("offY", nOff), offZ("offZ", nOff);
   Kokkos::View<real_t*, MemSpace> offD("offD", nOff);
@@ -177,45 +184,56 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
          hz = Kokkos::create_mirror_view(offZ);
     auto hd = Kokkos::create_mirror_view(offD);
     for (int i = 0; i < nOff; ++i) {
-      hx(i) = oX[ord[i]]; hy(i) = oY[ord[i]]; hz(i) = oZ[ord[i]]; hd(i) = oD[ord[i]];
+      hx(i) = oX[ord[i]];
+      hy(i) = oY[ord[i]];
+      hz(i) = oZ[ord[i]];
+      hd(i) = oD[ord[i]];
     }
-    Kokkos::deep_copy(offX, hx); Kokkos::deep_copy(offY, hy); Kokkos::deep_copy(offZ, hz);
+    Kokkos::deep_copy(offX, hx);
+    Kokkos::deep_copy(offY, hy);
+    Kokkos::deep_copy(offZ, hz);
     Kokkos::deep_copy(offD, hd);
   }
 
-  // --- Phase A: voro++-style worklist precompute (CPU gather option, CC_GATHER=1) -----------------
-  // The default sorted-offset gather bounds the query at its WHOLE home cell, so adjacent blocks have
-  // nearest-corner dist²=0 and are always walked (over-examination ~4×). A worklist tightens that bound
-  // by subdividing the home cell into S³ sub-regions: for the sub-region the query actually lands in, we
-  // precompute a list of block offsets sorted by nearest-corner dist² (rmin) AND the farthest-corner
-  // dist² (rmax). rmin gives a complete radius break with NO runtime per-block geometry (table lookup);
-  // rmax (used in Phase B) gives cull-free whole-block accept. This mirrors voro++'s worklist.hh + radp[]
-  // but as flat per-(sub-position,offset) dist² thresholds rather than its bit-packed permuted table.
-  // The worklist gather wins on BOTH backends — ≈voro++ parity on CPU (vs 0.89× for the sorted-offset
-  // walk) and +12–13% on GPU (7.85 vs 6.97 Mcells/s, 1.27× the Liu-2020 SOTA): it keeps the same branchless
-  // inner loop but walks a tighter presorted offset list, so the radius break fires sooner (less work AND
-  // less warp divergence). Default it ON everywhere; CC_GATHER overrides. The sub-grid optimum differs by
-  // backend — host S=3, device S=4 (the device tolerates a tighter bound / bigger table better).
+  // --- Phase A: voro++-style worklist precompute (CPU gather option, CC_GATHER=1)
+  // ----------------- The default sorted-offset gather bounds the query at its WHOLE home cell, so
+  // adjacent blocks have nearest-corner dist²=0 and are always walked (over-examination ~4×). A
+  // worklist tightens that bound by subdividing the home cell into S³ sub-regions: for the
+  // sub-region the query actually lands in, we precompute a list of block offsets sorted by
+  // nearest-corner dist² (rmin) AND the farthest-corner dist² (rmax). rmin gives a complete radius
+  // break with NO runtime per-block geometry (table lookup); rmax (used in Phase B) gives cull-free
+  // whole-block accept. This mirrors voro++'s worklist.hh + radp[] but as flat
+  // per-(sub-position,offset) dist² thresholds rather than its bit-packed permuted table. The
+  // worklist gather wins on BOTH backends — ≈voro++ parity on CPU (vs 0.89× for the sorted-offset
+  // walk) and +12–13% on GPU (7.85 vs 6.97 Mcells/s, 1.27× the Liu-2020 SOTA): it keeps the same
+  // branchless inner loop but walks a tighter presorted offset list, so the radius break fires
+  // sooner (less work AND less warp divergence). Default it ON everywhere; CC_GATHER overrides. The
+  // sub-grid optimum differs by backend — host S=3, device S=4 (the device tolerates a tighter
+  // bound / bigger table better).
   constexpr bool isHostBackend =
       Kokkos::SpaceAccessibility<Kokkos::HostSpace, typename Exec::memory_space>::accessible;
   const int gatherMode = std::getenv("CC_GATHER") ? std::atoi(std::getenv("CC_GATHER")) : 1;
-  const int wlS = std::getenv("CC_WLS") ? std::max(1, std::atoi(std::getenv("CC_WLS")))
-                                        : (isHostBackend ? 3 : 4);  // sub-grid/axis: host 3, device 4
-  // Phase B finding: rmax whole-block-accept (CC_WBA=1) is a NET LOSS on this fine grid (≤~1 seed/block,
-  // so it amortises over nothing while adding a per-block rmax branch) — measured ~3% slower than the
-  // rmin-only walk at every density 0.3–4. Kept as an opt-in for the record; default OFF.
+  const int wlS = std::getenv("CC_WLS")
+                      ? std::max(1, std::atoi(std::getenv("CC_WLS")))
+                      : (isHostBackend ? 3 : 4);  // sub-grid/axis: host 3, device 4
+  // Phase B finding: rmax whole-block-accept (CC_WBA=1) is a NET LOSS on this fine grid (≤~1
+  // seed/block, so it amortises over nothing while adding a per-block rmax branch) — measured ~3%
+  // slower than the rmin-only walk at every density 0.3–4. Kept as an opt-in for the record;
+  // default OFF.
   const bool wholeBlockAccept = std::getenv("CC_WBA") && std::atoi(std::getenv("CC_WBA")) != 0;
   const int nSub = wlS * wlS * wlS;
-  // Lever #3: pack the three block-offset components (dx,dy,dz ∈ [-sw,sw], sw ≤ 127) into ONE int (8 bits
-  // each, biased by OFFB) so the hot walk does a single table load + bit-unpack instead of three scattered
-  // loads — less L2 traffic / fewer load instructions per offset.
+  // Lever #3: pack the three block-offset components (dx,dy,dz ∈ [-sw,sw], sw ≤ 127) into ONE int
+  // (8 bits each, biased by OFFB) so the hot walk does a single table load + bit-unpack instead of
+  // three scattered loads — less L2 traffic / fewer load instructions per offset.
   constexpr int OFFB = 128;
   Kokkos::View<int*, MemSpace> wlOff("wlOff", (size_t)nSub * nOff);  // packed (dx,dy,dz)
-  Kokkos::View<real_t*, MemSpace> wlRmin("wlRmin", (size_t)nSub * nOff), wlRmax("wlRmax", (size_t)nSub * nOff);
+  Kokkos::View<real_t*, MemSpace> wlRmin("wlRmin", (size_t)nSub * nOff),
+      wlRmax("wlRmax", (size_t)nSub * nOff);
   if (gatherMode == 1) {
     auto hwoff = Kokkos::create_mirror_view(wlOff);
     auto hrmin = Kokkos::create_mirror_view(wlRmin), hrmax = Kokkos::create_mirror_view(wlRmax);
-    // axis box-to-box gap/far between query sub-interval [a0,a1] and target block [b0,b1] (local cell units)
+    // axis box-to-box gap/far between query sub-interval [a0,a1] and target block [b0,b1] (local
+    // cell units)
     auto axisGap = [](real_t a0, real_t a1, real_t b0, real_t b1) {
       real_t g = std::max((real_t)0, std::max(b0 - a1, a0 - b1));
       return g * g;
@@ -240,8 +258,10 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
             const real_t bx0 = dx * cszx, bx1 = (dx + 1) * cszx;
             const real_t by0 = dy * cszy, by1 = (dy + 1) * cszy;
             const real_t bz0 = dz * cszz, bz1 = (dz + 1) * cszz;
-            rmn[k] = axisGap(ax0, ax1, bx0, bx1) + axisGap(ay0, ay1, by0, by1) + axisGap(az0, az1, bz0, bz1);
-            rmx[k] = axisFar(ax0, ax1, bx0, bx1) + axisFar(ay0, ay1, by0, by1) + axisFar(az0, az1, bz0, bz1);
+            rmn[k] = axisGap(ax0, ax1, bx0, bx1) + axisGap(ay0, ay1, by0, by1) +
+                     axisGap(az0, az1, bz0, bz1);
+            rmx[k] = axisFar(ax0, ax1, bx0, bx1) + axisFar(ay0, ay1, by0, by1) +
+                     axisFar(az0, az1, bz0, bz1);
             idx[k] = k;
           }
           std::sort(idx.begin(), idx.end(), [&](int a, int b) { return rmn[a] < rmn[b]; });
@@ -249,11 +269,13 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
             const int k = idx[g];
             const size_t slot = (size_t)p * nOff + g;
             hwoff(slot) = (oX[k] + OFFB) | ((oY[k] + OFFB) << 8) | ((oZ[k] + OFFB) << 16);
-            hrmin(slot) = rmn[k]; hrmax(slot) = rmx[k];
+            hrmin(slot) = rmn[k];
+            hrmax(slot) = rmx[k];
           }
         }
     Kokkos::deep_copy(wlOff, hwoff);
-    Kokkos::deep_copy(wlRmin, hrmin); Kokkos::deep_copy(wlRmax, hrmax);
+    Kokkos::deep_copy(wlRmin, hrmin);
+    Kokkos::deep_copy(wlRmax, hrmax);
   }
 
   auto build = [&]() {
@@ -269,14 +291,16 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           long nclip = 0;
           for (int o = 0; o < nOff; ++o) {
             const real_t secR2 = 2.0 * c.maxVertexRsq();  // security radius² (cell shrinks)
-            if (offD(o) > secR2) break;                   // no closer grid cell can cut (sorted)
+            if (offD(o) > secR2)
+              break;  // no closer grid cell can cut (sorted)
             int gx = ((cx + offX(o)) % dimx + dimx) % dimx;
             int gy = ((cy + offY(o)) % dimy + dimy) % dimy;
             int gz = ((cz + offZ(o)) % dimz + dimz) % dimz;
             int gc = (int)mortonEncode(gx, gy, gz);
             for (int q = cellStart(gc); q < cellStart(gc + 1); ++q) {
               int j = binned(q);
-              if (j == i) continue;
+              if (j == i)
+                continue;
               ++nclip;  // EXAMINED: distance computed for this candidate (the gather's real work)
               real_t ax = pos(3 * j) - pix, ay = pos(3 * j + 1) - piy, az = pos(3 * j + 2) - piz;
               ax = ax > Lxh ? ax - Lx : (ax < -Lxh ? ax + Lx : ax);
@@ -287,12 +311,15 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
               // hold seeds beyond the radius (the bound is the nearest corner, not the seed).
               // off >= 2·maxVrsq => the bisector is past every vertex => cannot cut. Skipping
               // avoids the O(#tri) clip scan for the ~85% of gathered candidates that are no-ops.
-              if (off >= secR2) continue;
+              if (off >= secR2)
+                continue;
               real_t n[3] = {ax, ay, az};
               c.clip(n, off, j);
-              if (c.overflow) break;
+              if (c.overflow)
+                break;
             }
-            if (c.overflow) break;
+            if (c.overflow)
+              break;
           }
           (void)minCsz;
           cellVol(i) = (c.overflow || !doVol) ? 0.0 : c.volumePerVertex();
@@ -316,16 +343,18 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
         posS(3 * q + 1) = pos(3 * i + 1);
         posS(3 * q + 2) = pos(3 * i + 2);
       });
-  // Lever #1 (warp-shares-one-worklist: order queries by (sub-position, Morton) so a warp shares the same
-  // worklist base) was TESTED and is a NET LOSS on GPU (−7%: 7.82 → 7.28 Mcells/s). The uniform wlRmin/wlX
-  // loads it would buy are negligible (the table is tiny, L2-resident, effectively broadcast already), while
-  // grouping by sub-position SCATTERS each warp's neighbour reads across distant cells — wrecking the Morton
-  // locality that dominates memory traffic. Keep Morton order (thread q == Morton slot). Not implemented.
+  // Lever #1 (warp-shares-one-worklist: order queries by (sub-position, Morton) so a warp shares
+  // the same worklist base) was TESTED and is a NET LOSS on GPU (−7%: 7.82 → 7.28 Mcells/s). The
+  // uniform wlRmin/wlX loads it would buy are negligible (the table is tiny, L2-resident,
+  // effectively broadcast already), while grouping by sub-position SCATTERS each warp's neighbour
+  // reads across distant cells — wrecking the Morton locality that dominates memory traffic. Keep
+  // Morton order (thread q == Morton slot). Not implemented.
 
   Kokkos::View<real_t*, MemSpace> cellVolS("cellVolS", N);
   Kokkos::View<int*, MemSpace> cellFacesS("cellFacesS", N), cellOvfS("cellOvfS", N);
   Kokkos::View<real_t*, MemSpace> cellVolW("cellVolW", N);
-  Kokkos::View<int*, MemSpace> cellFacesW("cellFacesW", N), cellOvfW("cellOvfW", N), cellExhaustW("cellExhaustW", N);
+  Kokkos::View<int*, MemSpace> cellFacesW("cellFacesW", N), cellOvfW("cellOvfW", N),
+      cellExhaustW("cellExhaustW", N);
   auto build_sorted = [&]() {
     Kokkos::parallel_for(
         "cc.build_sorted", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int q) {
@@ -337,40 +366,72 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
           c.initBox(Lx, Ly, Lz);
           // Sorted-offset gather with the CORRECT radius cutoff. The offsets offX/Y/Z are sorted by
-          // nearest-corner dist² offD, so `break` on the first offD past the radius is provably complete
-          // (all remaining are farther). The cutoff is 2·secR2, NOT secR2: a seed at full dist² d cuts
-          // iff d < 2·R_vertex i.e. d² < 4·maxVrsq = 2·secR2 (the per-candidate `off`=½d² is culled at
-          // off>=secR2). Comparing offD to secR2 under-reaches by √2 and silently drops neighbours — that
-          // was the long-standing bug. The window (sw) is auto-sized above to cover this radius at the
-          // chosen density, so the break always fires inside it.
-          // Sorted-offset gather. Per-block PERIODIC DISPLACEMENT (voro++'s trick): a block's periodic
-          // image needs the same ±L shift for ALL its seeds, so compute it ONCE per block from the grid
-          // wrap and fold it into the rel-pos — the inner candidate loop is then branchless (no per-seed
-          // min-image wrap, which was ~3 branches × ~65 candidates/cell). Branchless inner loop helps the
-          // GPU (no warp divergence) as well as the CPU, so one path serves both. The window (sw) is
-          // auto-sized < dim/2 so a single ±L wrap per axis suffices.
-          (void)cszx; (void)cszy; (void)cszz;
+          // nearest-corner dist² offD, so `break` on the first offD past the radius is provably
+          // complete (all remaining are farther). The cutoff is 2·secR2, NOT secR2: a seed at full
+          // dist² d cuts iff d < 2·R_vertex i.e. d² < 4·maxVrsq = 2·secR2 (the per-candidate
+          // `off`=½d² is culled at off>=secR2). Comparing offD to secR2 under-reaches by √2 and
+          // silently drops neighbours — that was the long-standing bug. The window (sw) is
+          // auto-sized above to cover this radius at the chosen density, so the break always fires
+          // inside it. Sorted-offset gather. Per-block PERIODIC DISPLACEMENT (voro++'s trick): a
+          // block's periodic image needs the same ±L shift for ALL its seeds, so compute it ONCE
+          // per block from the grid wrap and fold it into the rel-pos — the inner candidate loop is
+          // then branchless (no per-seed min-image wrap, which was ~3 branches × ~65
+          // candidates/cell). Branchless inner loop helps the GPU (no warp divergence) as well as
+          // the CPU, so one path serves both. The window (sw) is auto-sized < dim/2 so a single ±L
+          // wrap per axis suffices.
+          (void)cszx;
+          (void)cszy;
+          (void)cszz;
           real_t secR2 = 2.0 * c.maxVertexRsq();  // cached; only shrinks when a clip cuts
           for (int o = 0; o < nOff; ++o) {
-            if (offD(o) > 2.0 * secR2) break;  // sorted ⇒ all remaining offsets are beyond the radius
-            int gx = cx + offX(o); real_t dispx = 0;
-            if (gx >= dimx) { gx -= dimx; dispx = Lx; } else if (gx < 0) { gx += dimx; dispx = -Lx; }
-            int gy = cy + offY(o); real_t dispy = 0;
-            if (gy >= dimy) { gy -= dimy; dispy = Ly; } else if (gy < 0) { gy += dimy; dispy = -Ly; }
-            int gz = cz + offZ(o); real_t dispz = 0;
-            if (gz >= dimz) { gz -= dimz; dispz = Lz; } else if (gz < 0) { gz += dimz; dispz = -Lz; }
-            const real_t bx = dispx - pix, by = dispy - piy, bz = dispz - piz;  // per-block rel-pos base
+            if (offD(o) > 2.0 * secR2)
+              break;  // sorted ⇒ all remaining offsets are beyond the radius
+            int gx = cx + offX(o);
+            real_t dispx = 0;
+            if (gx >= dimx) {
+              gx -= dimx;
+              dispx = Lx;
+            } else if (gx < 0) {
+              gx += dimx;
+              dispx = -Lx;
+            }
+            int gy = cy + offY(o);
+            real_t dispy = 0;
+            if (gy >= dimy) {
+              gy -= dimy;
+              dispy = Ly;
+            } else if (gy < 0) {
+              gy += dimy;
+              dispy = -Ly;
+            }
+            int gz = cz + offZ(o);
+            real_t dispz = 0;
+            if (gz >= dimz) {
+              gz -= dimz;
+              dispz = Lz;
+            } else if (gz < 0) {
+              gz += dimz;
+              dispz = -Lz;
+            }
+            const real_t bx = dispx - pix, by = dispy - piy,
+                         bz = dispz - piz;  // per-block rel-pos base
             int gc = (int)mortonEncode(gx, gy, gz);
             for (int q2 = cellStart(gc); q2 < cellStart(gc + 1); ++q2) {
-              if (q2 == q) continue;
-              const real_t ax = posS(3 * q2) + bx, ay = posS(3 * q2 + 1) + by, az = posS(3 * q2 + 2) + bz;
+              if (q2 == q)
+                continue;
+              const real_t ax = posS(3 * q2) + bx, ay = posS(3 * q2 + 1) + by,
+                           az = posS(3 * q2 + 2) + bz;
               const real_t off = 0.5 * (ax * ax + ay * ay + az * az);
-              if (off >= secR2) continue;
+              if (off >= secR2)
+                continue;
               real_t n[3] = {ax, ay, az};
-              if (c.clip(n, off, q2)) secR2 = 2.0 * c.maxVertexRsq();  // recompute only on a cut
-              if (c.overflow) break;
+              if (c.clip(n, off, q2))
+                secR2 = 2.0 * c.maxVertexRsq();  // recompute only on a cut
+              if (c.overflow)
+                break;
             }
-            if (c.overflow) break;
+            if (c.overflow)
+              break;
           }
           cellVolS(q) = (c.overflow || !doVol) ? 0.0 : c.volumePerVertex();
           cellFacesS(q) = c.overflow ? 0 : c.countFaces();
@@ -379,11 +440,12 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
     Kokkos::fence();
   };
 
-  // --- Phase A: worklist gather (CC_GATHER=1). Same clip + per-block periodic displacement as the sorted
-  // gather, but the block-offset sequence and the radius break come from the precomputed per-sub-position
-  // worklist (wlOff, wlRmin) — so the break is a table lookup with NO runtime per-block geometry. The
-  // per-candidate `off >= secR2` cull is KEPT here (exactness independent of rmax); whole-block accept via
-  // rmax is Phase B. Runs on the sorted (posS) point order, same as build_sorted.
+  // --- Phase A: worklist gather (CC_GATHER=1). Same clip + per-block periodic displacement as the
+  // sorted gather, but the block-offset sequence and the radius break come from the precomputed
+  // per-sub-position worklist (wlOff, wlRmin) — so the break is a table lookup with NO runtime
+  // per-block geometry. The per-candidate `off >= secR2` cull is KEPT here (exactness independent
+  // of rmax); whole-block accept via rmax is Phase B. Runs on the sorted (posS) point order, same
+  // as build_sorted.
   auto build_worklist = [&]() {
     Kokkos::parallel_for(
         "cc.build_worklist", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int q) {
@@ -394,64 +456,105 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           int cy = (((int)fly % dimy) + dimy) % dimy;
           int cz = (((int)flz % dimz) + dimz) % dimz;
           // query sub-position within its home cell (fractional offset → S-grid index)
-          int sx = (int)((fxi - flx) * wlS); sx = sx < 0 ? 0 : (sx >= wlS ? wlS - 1 : sx);
-          int sy = (int)((fyi - fly) * wlS); sy = sy < 0 ? 0 : (sy >= wlS ? wlS - 1 : sy);
-          int sz = (int)((fzi - flz) * wlS); sz = sz < 0 ? 0 : (sz >= wlS ? wlS - 1 : sz);
+          int sx = (int)((fxi - flx) * wlS);
+          sx = sx < 0 ? 0 : (sx >= wlS ? wlS - 1 : sx);
+          int sy = (int)((fyi - fly) * wlS);
+          sy = sy < 0 ? 0 : (sy >= wlS ? wlS - 1 : sy);
+          int sz = (int)((fzi - flz) * wlS);
+          sz = sz < 0 ? 0 : (sz >= wlS ? wlS - 1 : sz);
           const size_t base = (size_t)(sx + wlS * (sy + wlS * sz)) * nOff;
           const real_t Lxh = 0.5 * Lx, Lyh = 0.5 * Ly, Lzh = 0.5 * Lz;
-          (void)Lxh; (void)Lyh; (void)Lzh;
+          (void)Lxh;
+          (void)Lyh;
+          (void)Lzh;
           vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
           c.initBox(Lx, Ly, Lz);
           real_t secR2 = 2.0 * c.maxVertexRsq();
-          bool radiusClosed = false;  // Phase C: did the rmin break fire before the worklist ran out?
+          bool radiusClosed =
+              false;  // Phase C: did the rmin break fire before the worklist ran out?
           for (int g = 0; g < nOff; ++g) {
-            if (wlRmin(base + g) > 2.0 * secR2) { radiusClosed = true; break; }  // sorted ⇒ rest are farther
+            if (wlRmin(base + g) > 2.0 * secR2) {
+              radiusClosed = true;
+              break;
+            }  // sorted ⇒ rest are farther
             const int packed = wlOff(base + g);  // Lever #3: one load, unpack (dx,dy,dz)
-            int gx = cx + ((packed & 0xFF) - OFFB); real_t dispx = 0;
-            if (gx >= dimx) { gx -= dimx; dispx = Lx; } else if (gx < 0) { gx += dimx; dispx = -Lx; }
-            int gy = cy + (((packed >> 8) & 0xFF) - OFFB); real_t dispy = 0;
-            if (gy >= dimy) { gy -= dimy; dispy = Ly; } else if (gy < 0) { gy += dimy; dispy = -Ly; }
-            int gz = cz + (((packed >> 16) & 0xFF) - OFFB); real_t dispz = 0;
-            if (gz >= dimz) { gz -= dimz; dispz = Lz; } else if (gz < 0) { gz += dimz; dispz = -Lz; }
+            int gx = cx + ((packed & 0xFF) - OFFB);
+            real_t dispx = 0;
+            if (gx >= dimx) {
+              gx -= dimx;
+              dispx = Lx;
+            } else if (gx < 0) {
+              gx += dimx;
+              dispx = -Lx;
+            }
+            int gy = cy + (((packed >> 8) & 0xFF) - OFFB);
+            real_t dispy = 0;
+            if (gy >= dimy) {
+              gy -= dimy;
+              dispy = Ly;
+            } else if (gy < 0) {
+              gy += dimy;
+              dispy = -Ly;
+            }
+            int gz = cz + (((packed >> 16) & 0xFF) - OFFB);
+            real_t dispz = 0;
+            if (gz >= dimz) {
+              gz -= dimz;
+              dispz = Lz;
+            } else if (gz < 0) {
+              gz += dimz;
+              dispz = -Lz;
+            }
             const real_t bx = dispx - pix, by = dispy - piy, bz = dispz - piz;
             int gc = (int)mortonEncode(gx, gy, gz);
             const int lo = cellStart(gc), hi = cellStart(gc + 1);
-            // Phase B (opt-in, CC_WBA=1): whole-block accept. rmax = farthest-corner dist² from this query's
-            // sub-region to the block, so rmax < 2·secR2 ⇒ EVERY seed in the block has off < secR2 — the
-            // per-candidate cull can never fire, so drop it (branchless inner loop). secR2 only shrinks on a
-            // clip, so a candidate accepted here can at worst become a no-op clip after a mid-block cut
-            // (still exact). Measured a net loss on the fine grid (see CC_WBA note above) ⇒ default off.
+            // Phase B (opt-in, CC_WBA=1): whole-block accept. rmax = farthest-corner dist² from
+            // this query's sub-region to the block, so rmax < 2·secR2 ⇒ EVERY seed in the block has
+            // off < secR2 — the per-candidate cull can never fire, so drop it (branchless inner
+            // loop). secR2 only shrinks on a clip, so a candidate accepted here can at worst become
+            // a no-op clip after a mid-block cut (still exact). Measured a net loss on the fine
+            // grid (see CC_WBA note above) ⇒ default off.
             if (wholeBlockAccept && wlRmax(base + g) < 2.0 * secR2) {
               for (int q2 = lo; q2 < hi; ++q2) {
-                if (q2 == q) continue;
-                const real_t axx = posS(3 * q2) + bx, ayy = posS(3 * q2 + 1) + by, azz = posS(3 * q2 + 2) + bz;
+                if (q2 == q)
+                  continue;
+                const real_t axx = posS(3 * q2) + bx, ayy = posS(3 * q2 + 1) + by,
+                             azz = posS(3 * q2 + 2) + bz;
                 const real_t off = 0.5 * (axx * axx + ayy * ayy + azz * azz);
                 real_t n[3] = {axx, ayy, azz};
-                if (c.clip(n, off, q2)) secR2 = 2.0 * c.maxVertexRsq();
-                if (c.overflow) break;
+                if (c.clip(n, off, q2))
+                  secR2 = 2.0 * c.maxVertexRsq();
+                if (c.overflow)
+                  break;
               }
             } else {
               for (int q2 = lo; q2 < hi; ++q2) {
-                if (q2 == q) continue;
-                const real_t axx = posS(3 * q2) + bx, ayy = posS(3 * q2 + 1) + by, azz = posS(3 * q2 + 2) + bz;
+                if (q2 == q)
+                  continue;
+                const real_t axx = posS(3 * q2) + bx, ayy = posS(3 * q2 + 1) + by,
+                             azz = posS(3 * q2 + 2) + bz;
                 const real_t off = 0.5 * (axx * axx + ayy * ayy + azz * azz);
-                if (off >= secR2) continue;
+                if (off >= secR2)
+                  continue;
                 real_t n[3] = {axx, ayy, azz};
-                if (c.clip(n, off, q2)) secR2 = 2.0 * c.maxVertexRsq();
-                if (c.overflow) break;
+                if (c.clip(n, off, q2))
+                  secR2 = 2.0 * c.maxVertexRsq();
+                if (c.overflow)
+                  break;
               }
             }
-            if (c.overflow) break;
+            if (c.overflow)
+              break;
           }
           cellVolW(q) = (c.overflow || !doVol) ? 0.0 : c.volumePerVertex();
           cellFacesW(q) = c.overflow ? 0 : c.countFaces();
           cellOvfW(q) = c.overflow ? 1 : 0;
-          // Phase C completeness guard: a cell that drained the whole worklist WITHOUT the radius break
-          // firing may have a neighbour outside the window — the gather is then NOT provably complete for
-          // that cell. Flag it so incompleteness can never pass silently (unlike the fixed-window
-          // spatial-sort, which just drops the neighbour). exhausted=0 over all cells ⇒ provably exact;
-          // any count >0 means sw (auto-sized, CC_SW to override) must grow. Overflowed cells are excluded
-          // (their loop exits early by design, not by exhaustion).
+          // Phase C completeness guard: a cell that drained the whole worklist WITHOUT the radius
+          // break firing may have a neighbour outside the window — the gather is then NOT provably
+          // complete for that cell. Flag it so incompleteness can never pass silently (unlike the
+          // fixed-window spatial-sort, which just drops the neighbour). exhausted=0 over all cells
+          // ⇒ provably exact; any count >0 means sw (auto-sized, CC_SW to override) must grow.
+          // Overflowed cells are excluded (their loop exits early by design, not by exhaustion).
           cellExhaustW(q) = (!radiusClosed && !c.overflow) ? 1 : 0;
         });
     Kokkos::fence();
@@ -459,7 +562,8 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
 
   build();         // warm
   build_sorted();  // warm
-  if (gatherMode == 1) build_worklist();  // warm
+  if (gatherMode == 1)
+    build_worklist();  // warm
   Result r;
   if (!timeOnly) {
     auto hv = Kokkos::create_mirror_view(cellVol);
@@ -475,7 +579,8 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
       r.faceSum += hf(i);
       r.overflow += ho(i);
       r.clipSum += hc(i);
-      if (hc(i) > r.clipMax) r.clipMax = hc(i);
+      if (hc(i) > r.clipMax)
+        r.clipMax = hc(i);
     }
     auto hvs = Kokkos::create_mirror_view(cellVolS);
     auto hfs = Kokkos::create_mirror_view(cellFacesS);
@@ -524,7 +629,8 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
   }
   r.secsBest = best;
   r.secsBestS = bestS;
-  if (gatherMode == 1) r.secsBestW = bestW;
+  if (gatherMode == 1)
+    r.secsBestW = bestW;
   return r;
 }
 
@@ -533,12 +639,14 @@ static void run(int N) {
   std::mt19937 rng(12345 + N);
   std::uniform_real_distribution<real_t> U(0.0, 1.0);
   std::vector<real_t> h(3 * N);
-  for (int i = 0; i < 3 * N; ++i) h[i] = U(rng);
+  for (int i = 0; i < 3 * N; ++i)
+    h[i] = U(rng);
   Kokkos::View<real_t*, tpx::MemSpace> pos(
       Kokkos::view_alloc(std::string("pos"), Kokkos::WithoutInitializing), (size_t)N * 3);
   {
     auto m = Kokkos::create_mirror_view(pos);
-    for (int i = 0; i < 3 * N; ++i) m(i) = h[i];
+    for (int i = 0; i < 3 * N; ++i)
+      m(i) = h[i];
     Kokkos::deep_copy(pos, m);
   }
   const int sw = std::getenv("CC_SW") ? std::atoi(std::getenv("CC_SW")) : 3;
@@ -548,38 +656,51 @@ static void run(int N) {
 
 #ifdef VORFLOW_HAVE_VOROPP
   // voro++ FULL periodic tessellation, timed (single-threaded library = the serial reference). Skip
-  // with CC_NOVORO=1 for large-N our-only sweeps. The put()+compute_cell() loop is the cold-build work.
+  // with CC_NOVORO=1 for large-N our-only sweeps. The put()+compute_cell() loop is the cold-build
+  // work.
   double voroVol = 0, voroSecs = -1;
   if (!std::getenv("CC_NOVORO")) {
     const int nbl = std::max(1, (int)std::cbrt(N / 8.0));
     auto vt0 = clk::now();
     voro::container_periodic con(L[0], 0, L[1], 0, 0, L[2], nbl, nbl, nbl, 8);
-    for (int i = 0; i < N; ++i) con.put(i, h[3 * i], h[3 * i + 1], h[3 * i + 2]);
+    for (int i = 0; i < N; ++i)
+      con.put(i, h[3 * i], h[3 * i + 1], h[3 * i + 2]);
     voro::voronoicell c(con);
     voro::c_loop_all_periodic vl(con);
-    if (vl.start()) do {
-        if (con.compute_cell(c, vl)) voroVol += c.volume();
+    if (vl.start())
+      do {
+        if (con.compute_cell(c, vl))
+          voroVol += c.volume();
       } while (vl.inc());
     voroSecs = secs(vt0, clk::now());
   }
   const double voroErr = voroSecs < 0 ? 0.0 : std::fabs(r.volSum - voroVol) / voroVol;
   std::printf(
-      "N=%-8d  convexcell %7.1f k/s  voro++ %7.1f k/s  | Σvol/box err=%.2e  Σvol/voro err=%.2e  faces/cell=%.2f  "
+      "N=%-8d  convexcell %7.1f k/s  voro++ %7.1f k/s  | Σvol/box err=%.2e  Σvol/voro err=%.2e  "
+      "faces/cell=%.2f  "
       "overflow=%ld examined/cell mean=%.1f max=%ld\n",
-      N, N / r.secsBest / 1e3, voroSecs < 0 ? 0.0 : N / voroSecs / 1e3, volErr, voroErr, (double)r.faceSum / N,
-      r.overflow, (double)r.clipSum / N, r.clipMax);
+      N, N / r.secsBest / 1e3, voroSecs < 0 ? 0.0 : N / voroSecs / 1e3, volErr, voroErr,
+      (double)r.faceSum / N, r.overflow, (double)r.clipSum / N, r.clipMax);
 #else
-  std::printf("N=%-8d  convexcell %7.1f k/s  | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld examined/cell mean=%.1f max=%ld\n",
-              N, N / r.secsBest / 1e3, volErr, (double)r.faceSum / N, r.overflow, (double)r.clipSum / N, r.clipMax);
+  std::printf(
+      "N=%-8d  convexcell %7.1f k/s  | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld "
+      "examined/cell mean=%.1f max=%ld\n",
+      N, N / r.secsBest / 1e3, volErr, (double)r.faceSum / N, r.overflow, (double)r.clipSum / N,
+      r.clipMax);
 #endif
   const double volErrS = std::fabs(r.volSumS - boxVol) / boxVol;
-  std::printf("          spatial-sort %7.1f k/s (%.2fx) | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld\n",
-              N / r.secsBestS / 1e3, r.secsBest / r.secsBestS, volErrS, (double)r.faceSumS / N, r.overflowS);
+  std::printf(
+      "          spatial-sort %7.1f k/s (%.2fx) | Σvol/box err=%.2e  faces/cell=%.2f  "
+      "overflow=%ld\n",
+      N / r.secsBestS / 1e3, r.secsBest / r.secsBestS, volErrS, (double)r.faceSumS / N,
+      r.overflowS);
   if (r.secsBestW >= 0) {
     const double volErrW = std::fabs(r.volSumW - boxVol) / boxVol;
     std::printf(
-        "          worklist     %7.1f k/s (%.2fx) | Σvol/box err=%.2e  faces/cell=%.2f  overflow=%ld  exhausted=%ld%s\n",
-        N / r.secsBestW / 1e3, r.secsBestS / r.secsBestW, volErrW, (double)r.faceSumW / N, r.overflowW, r.exhaustW,
+        "          worklist     %7.1f k/s (%.2fx) | Σvol/box err=%.2e  faces/cell=%.2f  "
+        "overflow=%ld  exhausted=%ld%s\n",
+        N / r.secsBestW / 1e3, r.secsBestS / r.secsBestW, volErrW, (double)r.faceSumW / N,
+        r.overflowW, r.exhaustW,
         r.exhaustW ? "  <-- WINDOW TOO SMALL (raise CC_SW)" : " (complete)");
   }
 }
@@ -589,9 +710,12 @@ int main(int argc, char** argv) {
   {
     std::printf("backend: %s\n", Kokkos::DefaultExecutionSpace::name());
     std::vector<int> Ns;
-    for (int i = 1; i < argc; ++i) Ns.push_back(std::atoi(argv[i]));
-    if (Ns.empty()) Ns = {10000, 100000, 1000000};
-    for (int N : Ns) run(N);
+    for (int i = 1; i < argc; ++i)
+      Ns.push_back(std::atoi(argv[i]));
+    if (Ns.empty())
+      Ns = {10000, 100000, 1000000};
+    for (int N : Ns)
+      run(N);
   }
   Kokkos::finalize();
   return 0;

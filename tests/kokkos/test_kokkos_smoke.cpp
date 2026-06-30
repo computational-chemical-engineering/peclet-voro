@@ -49,7 +49,6 @@ int main(int argc, char** argv) {
         break;
       }
     }
-
   }
   Kokkos::finalize();
   std::printf("%s\n", failures == 0 ? "kokkos smoke PASS" : "kokkos smoke FAIL");

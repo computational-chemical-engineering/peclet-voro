@@ -10,80 +10,39 @@ permissions:
   contents: read
 
 jobs:
-  # ── Build & Test ────────────────────────────────────────────────────────────
-  build-and-test:
-    name: Build & Test (${{ matrix.os }}, ${{ matrix.build_type }})
-    runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-24.04]
-        build_type: [Debug, Release]
-        compiler: [g++]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y \
-            cmake \
-            git \
-            ninja-build \
-            libboost-dev \
-            libomp-dev \
-            clang-format \
-            clang-tidy \
-            doxygen \
-            graphviz
-
-      - name: Configure CMake
-        run: |
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
-            -DCMAKE_CXX_COMPILER=${{ matrix.compiler }} \
-            -DVORONOI_BUILD_TESTS=ON \
-            -G Ninja
-
-      - name: Build
-        run: cmake --build build --parallel
-
-      - name: Run fast tests (CTest)
-        # Run the quick self-contained tests plus the Voro++ comparison to
-        # verify the two libraries agree on cell volumes. test_invariants is the
-        # §5 geometric-invariant oracle; test_golden the frozen-seed master;
-        # test_include_graph the one-way core/physics dependency rule.
-        run: |
-          ctest --test-dir build \
-            -R "test_static_voronoi|test_voro_comparison|test_invariants|test_golden|test_include_graph|test_incremental_skin" \
-            --output-on-failure \
-            --timeout 180
-
-  # ── Kokkos device build (suite migration) ────────────────────────────────────
-  # Builds the Kokkos OpenMP backend from source (vorflow's CI is standalone, so
-  # the suite's bootstrap_deps.sh prefix is not present) and exercises the
-  # Phase-0 device toolchain: the smoke test plus the invariant/golden oracle.
-  # Kernels are still host/legacy at this phase; this proves the toolchain wiring.
+  # ── Kokkos device build & test ───────────────────────────────────────────────
+  # The library is the Kokkos device path; it depends on the transport-core and morton
+  # sibling repos (checked out next to vorflow) and a Kokkos install. This builds the
+  # OpenMP backend from source and runs the device test suite.
   kokkos-openmp:
-    name: Kokkos build (OpenMP backend)
+    name: Build & test (Kokkos OpenMP)
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-
     steps:
-      - name: Checkout
+      - name: Checkout vorflow
         uses: actions/checkout@v4
+        with:
+          path: vorflow
+
+      - name: Checkout transport-core (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: computational-chemical-engineering/transport-core
+          path: transport-core
+
+      - name: Checkout morton (sibling)
+        uses: actions/checkout@v4
+        with:
+          repository: computational-chemical-engineering/morton
+          path: morton
 
       - name: Install dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y cmake ninja-build libboost-dev libomp-dev g++
+          sudo apt-get install -y cmake ninja-build libomp-dev g++
 
-      - name: Build & install Kokkos (OpenMP)
+      - name: Build & install Kokkos (OpenMP + Serial)
         run: |
           git clone --depth 1 --branch 4.5.00 https://github.com/kokkos/kokkos.git /tmp/kokkos
           cmake -S /tmp/kokkos -B /tmp/kokkos/build -G Ninja \
@@ -95,24 +54,24 @@ jobs:
           cmake --install /tmp/kokkos/build
 
       - name: Configure (VORFLOW_KOKKOS=ON)
+        working-directory: vorflow
         run: |
-          cmake -B build-kokkos -G Ninja \
+          cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DVORFLOW_KOKKOS=ON \
             -DVORONOI_BUILD_TESTS=ON \
             -DCMAKE_PREFIX_PATH=$HOME/kokkos-install
 
-      - name: Build device + oracle tests
-        run: |
-          cmake --build build-kokkos --target \
-            test_kokkos_smoke test_tessellation_view test_cell_cutter test_tessellator test_device_geometry test_sdf_boundary_device test_device_step test_viscous_device \
-            test_euler_pressure test_invariants test_golden --parallel
+      - name: Build
+        working-directory: vorflow
+        run: cmake --build build --parallel
 
-      - name: Run device + oracle tests
+      - name: Run device tests
+        working-directory: vorflow
         run: |
           export OMP_PROC_BIND=false
-          ctest --test-dir build-kokkos \
-            -R "test_kokkos_smoke|test_tessellation_view|test_cell_cutter|test_tessellator|test_device_geometry|test_sdf_boundary_device|test_incremental_device|test_device_step|test_viscous_device|test_euler_pressure|test_invariants|test_golden|test_include_graph" \
+          ctest --test-dir build \
+            -R "test_kokkos_smoke|test_tessellation_invariants|test_convexcell_unit|test_convexcell_adj|test_pervertex_geometry|test_include_graph|bench_dynamic_update_gates" \
             --output-on-failure --timeout 600
 
   # ── Format Check ─────────────────────────────────────────────────────────────
@@ -121,7 +80,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -135,64 +93,12 @@ jobs:
         run: |
           CLANG_FORMAT_BIN=clang-format-18 bash tools/clang_format_check.sh
 
-  # ── Static Analysis ───────────────────────────────────────────────────────────
-  clang-tidy:
-    name: clang-tidy static analysis
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          sudo apt-get update -q
-          sudo apt-get install -y \
-            cmake \
-            ninja-build \
-            libboost-dev \
-            libomp-dev \
-            clang \
-            clang-tidy
-
-      - name: Configure CMake (generate compile_commands.json)
-        run: |
-          cmake -B build \
-            -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_COMPILER=clang++ \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
-            -DVORONOI_BUILD_TESTS=ON \
-            -G Ninja
-
-      - name: Run clang-tidy
-        run: |
-          clang-tidy \
-            -p build \
-            $(find include/vorflow -name '*.hpp') \
-            -- \
-            -std=c++17 \
-            -I include \
-            2>&1 | tee clang-tidy-report.txt
-          # Warn but do not fail the build on tidy issues until the code base
-          # is fully clean; remove the '|| true' when all warnings are fixed.
-          echo "clang-tidy completed (warnings are informational for now)"
-
-      - name: Upload clang-tidy report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: clang-tidy-report
-          path: clang-tidy-report.txt
-
   # ── Doxygen ──────────────────────────────────────────────────────────────────
   documentation:
     name: Doxygen documentation
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -200,7 +106,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y cmake ninja-build libboost-dev doxygen graphviz
+          sudo apt-get install -y cmake ninja-build doxygen graphviz
 
       - name: Configure CMake
         run: |

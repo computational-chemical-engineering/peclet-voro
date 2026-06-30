@@ -3,8 +3,8 @@
  * \brief Per-particle Verlet-skin tracker (Part II, Phase 1) — the *insertion* trigger.
  *
  * The convexity certificate (ConvexCell::isSelfConsistent) detects that a particle LEFT a region
- * (its old neighbours flag), but never that one ARRIVED: when a far-mover lands among cells that did
- * not move, those cells stay convex against their current planes and never flag, so the gained
+ * (its old neighbours flag), but never that one ARRIVED: when a far-mover lands among cells that
+ * did not move, those cells stay convex against their current planes and never flag, so the gained
  * adjacency is invisible to detection (Risk 1c in dynamic_update_decision_and_plan.md). The only
  * signal that reaches it is "this particle moved far" — the standard Verlet criterion: flag a
  * particle once it has moved more than skin/2 from its last-rebuild position (two seeds can each
@@ -20,8 +20,8 @@
 #ifndef VORFLOW_DEVICE_VERLET_SKIN_HPP
 #define VORFLOW_DEVICE_VERLET_SKIN_HPP
 
-#include <string>
 #include <Kokkos_Core.hpp>
+#include <string>
 
 #include "tpx/common/view.hpp"
 
@@ -59,9 +59,9 @@ struct VerletSkin {
 };
 
 /// Flag every particle that has moved more than skin/2 from xRef (minimal image in box L), writing
-/// `kSkinMover`/`kSkinNone` into outFlags, and return the number flagged. `outFlags` must be sized N.
-/// The flag value is OR-combinable with future trigger bits; here it is overwritten each call (the
-/// only Phase-1 trigger). One reduce + write pass; no host round-trip beyond the final count.
+/// `kSkinMover`/`kSkinNone` into outFlags, and return the number flagged. `outFlags` must be sized
+/// N. The flag value is OR-combinable with future trigger bits; here it is overwritten each call
+/// (the only Phase-1 trigger). One reduce + write pass; no host round-trip beyond the final count.
 template <class Real>
 int flagSkinMovers(const Kokkos::View<Real*, tpx::MemSpace>& pos,
                    const Kokkos::View<Real*, tpx::MemSpace>& xRef, Real skin, const Real L[3],
@@ -84,7 +84,8 @@ int flagSkinMovers(const Kokkos::View<Real*, tpx::MemSpace>& pos,
         const Real d2 = dx * dx + dy * dy + dz * dz;
         const bool mover = d2 > half2;
         outFlags(i) = mover ? kSkinMover : kSkinNone;
-        if (mover) ++acc;
+        if (mover)
+          ++acc;
       },
       count);
   return count;
@@ -110,7 +111,8 @@ Real maxDisplacement(const Kokkos::View<Real*, tpx::MemSpace>& pos,
         dy = dy > Lyh ? dy - Ly : (dy < -Lyh ? dy + Ly : dy);
         dz = dz > Lzh ? dz - Lz : (dz < -Lzh ? dz + Lz : dz);
         const Real d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > lm) lm = d2;
+        if (d2 > lm)
+          lm = d2;
       },
       Kokkos::Max<Real>(m2));
   return Kokkos::sqrt(m2);

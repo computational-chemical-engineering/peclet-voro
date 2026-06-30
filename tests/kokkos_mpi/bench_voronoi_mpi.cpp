@@ -20,16 +20,16 @@
  * numbers are not directly comparable to the single-process worklist bench; this measures the
  * distributed path as it stands.
  */
+#include <mpi.h>
+
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <Kokkos_Core.hpp>
 #include <random>
 #include <vector>
-
-#include <Kokkos_Core.hpp>
-#include <mpi.h>
 
 #include "tpx/common/view.hpp"
 #include "vorflow/device/tessellator.hpp"
@@ -40,8 +40,10 @@ using Vec3 = std::array<real_t, 3>;
 
 static real_t wrap1(real_t x, real_t L) {
   x -= L * std::floor(x / L);
-  if (x >= L) x -= L;
-  if (x < 0) x += L;
+  if (x >= L)
+    x -= L;
+  if (x < 0)
+    x += L;
   return x;
 }
 
@@ -70,7 +72,8 @@ int main(int argc, char** argv) {
     std::uniform_real_distribution<real_t> U(0.0, 1.0);
     std::vector<Vec3> pos(N);
     for (int i = 0; i < N; ++i)
-      for (int d = 0; d < 3; ++d) pos[i][d] = L[d] * U(rng);
+      for (int d = 0; d < 3; ++d)
+        pos[i][d] = L[d] * U(rng);
 
     // Block decomposition + ghost gather (transport-core).
     vor::mpi::VoronoiHalo<real_t> halo;
@@ -103,7 +106,8 @@ int main(int argc, char** argv) {
     {
       auto h = Kokkos::create_mirror_view(dPos);
       for (int i = 0; i < nComb; ++i)
-        for (int k = 0; k < 3; ++k) h(3 * i + k) = wrap1(g.pos[i][k], L[k]);
+        for (int k = 0; k < 3; ++k)
+          h(3 * i + k) = wrap1(g.pos[i][k], L[k]);
       Kokkos::deep_copy(dPos, h);
     }
     Kokkos::View<real_t*, tpx::MemSpace> dW("w", nComb);
@@ -111,7 +115,8 @@ int main(int argc, char** argv) {
         Kokkos::view_alloc(std::string("gid"), Kokkos::WithoutInitializing), nComb);
     {
       auto hg = Kokkos::create_mirror_view(dGid);
-      for (int i = 0; i < nComb; ++i) hg(i) = g.gid[i];
+      for (int i = 0; i < nComb; ++i)
+        hg(i) = g.gid[i];
       Kokkos::deep_copy(dGid, hg);
     }
     const real_t Larr[3] = {L[0], L[1], L[2]};
@@ -119,7 +124,8 @@ int main(int argc, char** argv) {
     // --- build (cold tessellation) timing ---
     double buildBest = 1e30;
     double ownedVol = 0;
-    long badOwned = 0;  // owned cells flagged incomplete/overflow/empty (must be 0 for completeness)
+    long badOwned =
+        0;  // owned cells flagged incomplete/overflow/empty (must be 0 for completeness)
     for (int r = 0; r < reps + 1; ++r) {  // first = warm
       MPI_Barrier(MPI_COMM_WORLD);
       double t0 = MPI_Wtime();
@@ -128,7 +134,8 @@ int main(int argc, char** argv) {
           /*nBuild=*/g.nOwned);  // build only owned cells; ghosts are candidate-only
       Kokkos::fence();
       double t1 = MPI_Wtime();
-      if (r > 0) buildBest = std::min(buildBest, t1 - t0);
+      if (r > 0)
+        buildBest = std::min(buildBest, t1 - t0);
       if (r == reps) {  // last rep: sum owned volumes + count incomplete owned cells
         auto vol = Kokkos::create_mirror_view(res.view.cellVolume);
         auto st = Kokkos::create_mirror_view(res.status);
@@ -158,18 +165,21 @@ int main(int argc, char** argv) {
       MPI_Barrier(MPI_COMM_WORLD);
       if (r == rank)
         std::printf(
-            "  [rank %2d/%d] owned=%7d ghost=%7d (%.0f%%)  gather=%.2f ms  build=%.2f ms  perRank=%.1f kcell/s\n",
-            rank, nproc, g.nOwned, nComb - g.nOwned, 100.0 * (nComb - g.nOwned) / std::max(1, nComb),
-            gatherBest * 1e3, buildBest * 1e3, perRankKps);
+            "  [rank %2d/%d] owned=%7d ghost=%7d (%.0f%%)  gather=%.2f ms  build=%.2f ms  "
+            "perRank=%.1f kcell/s\n",
+            rank, nproc, g.nOwned, nComb - g.nOwned,
+            100.0 * (nComb - g.nOwned) / std::max(1, nComb), gatherBest * 1e3, buildBest * 1e3,
+            perRankKps);
       fflush(stdout);
     }
     if (rank == 0) {
       const double aggMps = totOwned / maxBuild / 1e6;  // aggregate (Σ owned / max build)
       std::printf(
-          "MPI np=%2d  N=%d  rcut=%.2f·sp  | aggregate build = %.3f Mcell/s  | per-core = %.1f kcell/s  | "
+          "MPI np=%2d  N=%d  rcut=%.2f·sp  | aggregate build = %.3f Mcell/s  | per-core = %.1f "
+          "kcell/s  | "
           "max gather = %.2f ms  build = %.2f ms  | totOwned=%d badOwned=%ld Σvol=%.6f\n",
-          nproc, N, rcutMult, aggMps, aggMps * 1e3 / nproc, sumGather * 1e3, maxBuild * 1e3, totOwned,
-          totBad, totVol);
+          nproc, N, rcutMult, aggMps, aggMps * 1e3 / nproc, sumGather * 1e3, maxBuild * 1e3,
+          totOwned, totBad, totVol);
     }
   }
   Kokkos::finalize();

@@ -148,13 +148,14 @@ KOKKOS_INLINE_FUNCTION void sdfGradient(const Sdf& s, Real x, Real y, Real z, Re
  * @return true if the cell was emptied (seed inside solid).
  */
 template <class Real, int MAXP, int MAXT, bool TrackAdj, class Sdf>
-KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ConvexCell<Real, MAXP, MAXT, TrackAdj>& c, const Real seed[3],
-                                               const Sdf& sdf) {
+KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ConvexCell<Real, MAXP, MAXT, TrackAdj>& c,
+                                               const Real seed[3], const Sdf& sdf) {
   const Real tol = Real(1e-8);
   const int maxCuts = 24;
   const Real phiCenter = sdf.eval(seed[0], seed[1], seed[2]);
   if (phiCenter <= Real(0)) {  // seed inside solid -> no cell
-    for (int t = 0; t < c.nt; ++t) c.alive[t] = false;
+    for (int t = 0; t < c.nt; ++t)
+      c.alive[t] = false;
     return true;
   }
   // cell circumradius (dual vertices are seed-relative)

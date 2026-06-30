@@ -6,17 +6,19 @@
  * Kokkos backend the extension was built against — from Python. Two surfaces:
  *
  *  - @ref Tess "vorflow.Tessellation" — the bare moving-particle Voronoi tessellator: a cold build
- *    plus the incremental two-pass *repair* update (the fast per-step path for moving points), exposing
- *    per-cell volumes and neighbour counts. This is the core primitive all the geometry work builds on.
- *  - @ref Sim "vorflow.Simulation" — a device-native compressible-Euler / Navier–Stokes Voronoi fluid
- *    simulation (velocity-Verlet over the tessellation) on top of that primitive.
+ *    plus the incremental two-pass *repair* update (the fast per-step path for moving points),
+ * exposing per-cell volumes and neighbour counts. This is the core primitive all the geometry work
+ * builds on.
+ *  - @ref Sim "vorflow.Simulation" — a device-native compressible-Euler / Navier–Stokes Voronoi
+ * fluid simulation (velocity-Verlet over the tessellation) on top of that primitive.
  *
  * Particle data crosses the boundary as NumPy arrays: positions/velocities are `(N,3)` float64,
  * scalars (masses, viscosities, volumes) are `(N,)`. Arrays move through the shared `tpx::python`
  * bridge (transport-core): returned arrays are backed by host buffers (no extra device copy).
  *
- * Kokkos is initialized at import and finalized via a Python `atexit` hook (with every live object's
- * Views released first — required on CUDA). Call `vorflow.finalize()` for deterministic teardown.
+ * Kokkos is initialized at import and finalized via a Python `atexit` hook (with every live
+ * object's Views released first — required on CUDA). Call `vorflow.finalize()` for deterministic
+ * teardown.
  *
  * Example
  * -------
@@ -59,7 +61,8 @@ namespace {
 
 // (N,3) c-contiguous array -> flat row-major host vector of length 3N.
 std::vector<real_t> flatten3(nb::ndarray<real_t, nb::c_contig> a) {
-  if (a.ndim() != 2 || a.shape(1) != 3) throw std::runtime_error("expected an (N,3) array");
+  if (a.ndim() != 2 || a.shape(1) != 3)
+    throw std::runtime_error("expected an (N,3) array");
   const real_t* p = a.data();
   return std::vector<real_t>(p, p + static_cast<std::size_t>(a.shape(0)) * 3);
 }
@@ -104,11 +107,12 @@ class Tess {
     pos_ = tpx::toDevice<real_t>(p, "pos");
     auto st = mt_.step(pos_);
     nb::dict d;
-    d["flagged"] = st.pass1Raw;                                            // cells the certificate flagged
-    d["pass1"] = st.pass1;                                                 // cells gathered in Pass 1
-    d["pass2"] = st.pass2;                                                 // cells gathered in Pass 2
-    d["rebuilt"] = (st.route == vor::device::RepairStats::kRebuildGate);   // gate routed to a full rebuild
-    d["fell_back"] = st.fellBack;                                          // verify failed -> cold rebuild
+    d["flagged"] = st.pass1Raw;  // cells the certificate flagged
+    d["pass1"] = st.pass1;       // cells gathered in Pass 1
+    d["pass2"] = st.pass2;       // cells gathered in Pass 2
+    d["rebuilt"] =
+        (st.route == vor::device::RepairStats::kRebuildGate);  // gate routed to a full rebuild
+    d["fell_back"] = st.fellBack;                              // verify failed -> cold rebuild
     return d;
   }
 
@@ -126,12 +130,12 @@ class Tess {
     auto st = mt_.store;
     auto C = cnt;
     const real_t Lx = L_[0], Ly = L_[1], Lz = L_[2];
-    Kokkos::parallel_for("vorflow.nbrcount", Kokkos::RangePolicy<tpx::ExecSpace>(0, N),
-                         KOKKOS_LAMBDA(int i) {
-                           Cell c;
-                           st.load(i, c, Lx, Ly, Lz);
-                           C(i) = c.countFaces();
-                         });
+    Kokkos::parallel_for(
+        "vorflow.nbrcount", Kokkos::RangePolicy<tpx::ExecSpace>(0, N), KOKKOS_LAMBDA(int i) {
+          Cell c;
+          st.load(i, c, Lx, Ly, Lz);
+          C(i) = c.countFaces();
+        });
     return tpx::python::vector_to_ndarray(tpx::toVector(cnt), {static_cast<std::size_t>(N)}, {1});
   }
 
@@ -147,7 +151,8 @@ class Tess {
     return s;
   }
   static void releaseAll() {
-    for (Tess* t : live()) t->release();
+    for (Tess* t : live())
+      t->release();
   }
 
  private:
@@ -182,7 +187,8 @@ class Sim {
     return s;
   }
   static void releaseAll() {
-    for (Sim* d : live()) d->release();
+    for (Sim* d : live())
+      d->release();
   }
 
   void set_l(std::array<real_t, 3> L) { L_ = L; }
@@ -200,7 +206,8 @@ class Sim {
       invm[i] = real_t(1) / mass_[i];
     sim_.init(tpx::toDevice<real_t>(pos_, "pos"), tpx::toDevice<real_t>(vel_, "vel"),
               tpx::toDevice<real_t>(invm, "im"), L_, pressEq_);
-    dmass_ = tpx::toDevice<real_t>(mass_, "mass");  // resident; kinetic-energy reads it each call (E4b)
+    dmass_ =
+        tpx::toDevice<real_t>(mass_, "mass");  // resident; kinetic-energy reads it each call (E4b)
     if (!visc_.empty()) {
       if (bulk_.empty())
         bulk_.assign(N, 0.0);
@@ -251,16 +258,17 @@ NB_MODULE(vorflow, m) {
   m.attr("__doc__") =
       "vorflow (device/Kokkos): moving-particle Voronoi dynamics on the device path.\n\n"
       "Classes: Tessellation (bare cold build + incremental repair, volumes, neighbour counts);\n"
-      "Simulation (compressible-Euler / Navier-Stokes Voronoi fluid). Arrays are NumPy: positions/\n"
+      "Simulation (compressible-Euler / Navier-Stokes Voronoi fluid). Arrays are NumPy: "
+      "positions/\n"
       "velocities (N,3) float64, scalars (N,). The backend (Serial/OpenMP/CUDA) is fixed at build\n"
       "time; see vorflow.execution_space.";
   if (!Kokkos::is_initialized())
     Kokkos::initialize();
   // Teardown order matters on CUDA: releaseAll() drops every live object's Views FIRST (so none
-  // outlive finalize -> no "deallocated after Kokkos::finalize"), THEN Kokkos::finalize() runs from a
-  // Python atexit hook while the CUDA driver is still up (so no cudaErrorCudartUnloading). Doing only
-  // one of the two aborts on CUDA. Returned arrays are backed by host std::vectors (no device Views),
-  // so they need no special handling.
+  // outlive finalize -> no "deallocated after Kokkos::finalize"), THEN Kokkos::finalize() runs from
+  // a Python atexit hook while the CUDA driver is still up (so no cudaErrorCudartUnloading). Doing
+  // only one of the two aborts on CUDA. Returned arrays are backed by host std::vectors (no device
+  // Views), so they need no special handling.
   auto shutdown = []() {
     Tess::releaseAll();
     Sim::releaseAll();
@@ -268,52 +276,65 @@ NB_MODULE(vorflow, m) {
       Kokkos::finalize();
   };
   m.def("finalize", shutdown,
-        "Release every live Tessellation/Simulation and finalize Kokkos (deterministic teardown; also "
+        "Release every live Tessellation/Simulation and finalize Kokkos (deterministic teardown; "
+        "also "
         "run automatically at interpreter exit).");
   m.attr("execution_space") = nb::str(Kokkos::DefaultExecutionSpace::name());
   nb::module_::import_("atexit").attr("register")(nb::cpp_function(shutdown));
 
   // ---- Tessellation -----------------------------------------------------------------------------
-  nb::class_<Tess>(m, "Tessellation",
-                   "Moving-particle Voronoi tessellator on the device path.\n\n"
-                   "Build a tessellation once (`build`) then advance it cheaply as the points move\n"
-                   "(`step`) — the incremental two-pass repair is several times faster than rebuilding\n"
-                   "for the small per-step displacements typical of CFD/DEM, and falls back to a full\n"
-                   "rebuild (via an adaptive gate) when displacements are large, so it is never much\n"
-                   "slower than a cold build. Periodic cubic box. Single domain (one process).")
+  nb::class_<Tess>(
+      m, "Tessellation",
+      "Moving-particle Voronoi tessellator on the device path.\n\n"
+      "Build a tessellation once (`build`) then advance it cheaply as the points move\n"
+      "(`step`) — the incremental two-pass repair is several times faster than rebuilding\n"
+      "for the small per-step displacements typical of CFD/DEM, and falls back to a full\n"
+      "rebuild (via an adaptive gate) when displacements are large, so it is never much\n"
+      "slower than a cold build. Periodic cubic box. Single domain (one process).")
       .def(nb::init<>())
       .def("set_box", &Tess::set_box, nb::arg("L"),
            "Set the periodic box edge lengths (Lx, Ly, Lz). Call before `build`.")
       .def("set_tolerance", &Tess::set_tolerance, nb::arg("frac") = 1e-4,
-           "Certificate tolerance as a fraction of the mean inter-particle spacing (default 1e-4). A\n"
-           "vertex poking past a stored plane by more than this flags the cell for repair; smaller is\n"
+           "Certificate tolerance as a fraction of the mean inter-particle spacing (default 1e-4). "
+           "A\n"
+           "vertex poking past a stored plane by more than this flags the cell for repair; smaller "
+           "is\n"
            "stricter (closer to machine-exact) at marginally higher cost.")
       .def("set_local_certificate", &Tess::set_local_certificate, nb::arg("on") = true,
-           "Use the cheap O(nt) Lawson local certificate (default True) instead of the brute O(nt*np)\n"
+           "Use the cheap O(nt) Lawson local certificate (default True) instead of the brute "
+           "O(nt*np)\n"
            "form for detecting which cells changed. Both are complete; local is faster.")
       .def("set_gate", &Tess::set_gate, nb::arg("on") = true,
-           "Enable the adaptive gate (default True) that routes high-churn steps straight to a full\n"
+           "Enable the adaptive gate (default True) that routes high-churn steps straight to a "
+           "full\n"
            "rebuild — the 'never much slower than a cold build' guard.")
       .def("build", &Tess::build, nb::arg("positions"),
-           "Cold-build the Voronoi tessellation of `positions` (N,3) from scratch and make it resident.\n"
+           "Cold-build the Voronoi tessellation of `positions` (N,3) from scratch and make it "
+           "resident.\n"
            "Sets the particle count N for subsequent `step` calls.")
       .def("step", &Tess::step, nb::arg("positions"),
-           "Incrementally repair the resident tessellation to new `positions` (N,3, same N as `build`).\n"
-           "Returns a dict of per-step work stats: 'flagged' (cells the certificate flagged), 'pass1'\n"
-           "and 'pass2' (cells re-gathered in each pass), 'rebuilt' (True if the gate routed this step\n"
-           "to a full rebuild), 'fell_back' (True if the verify failed and a cold rebuild was forced).")
+           "Incrementally repair the resident tessellation to new `positions` (N,3, same N as "
+           "`build`).\n"
+           "Returns a dict of per-step work stats: 'flagged' (cells the certificate flagged), "
+           "'pass1'\n"
+           "and 'pass2' (cells re-gathered in each pass), 'rebuilt' (True if the gate routed this "
+           "step\n"
+           "to a full rebuild), 'fell_back' (True if the verify failed and a cold rebuild was "
+           "forced).")
       .def("volumes", &Tess::volumes,
            "Per-particle Voronoi cell volume (N,) float64. Sums to the box volume (space-filling).")
       .def("neighbor_counts", &Tess::neighbor_counts,
            "Per-particle Voronoi neighbour count (N,) int32 — the number of faces of each cell.")
-      .def_prop_ro("num_particles", &Tess::num_particles, "Particle count N set by the last `build`.");
+      .def_prop_ro("num_particles", &Tess::num_particles,
+                   "Particle count N set by the last `build`.");
 
   // ---- Simulation -------------------------------------------------------------------------------
-  nb::class_<Sim>(m, "Simulation",
-                  "Device-native compressible-Euler / Navier-Stokes Voronoi fluid simulation.\n\n"
-                  "Velocity-Verlet dynamics of a moving-particle Voronoi fluid: pressure forces from an\n"
-                  "EOS plus an optional per-particle viscous (Navier-Stokes) term, with the tessellation\n"
-                  "repaired each step on the device. Set the particle state, `init`, then `step`.")
+  nb::class_<Sim>(
+      m, "Simulation",
+      "Device-native compressible-Euler / Navier-Stokes Voronoi fluid simulation.\n\n"
+      "Velocity-Verlet dynamics of a moving-particle Voronoi fluid: pressure forces from an\n"
+      "EOS plus an optional per-particle viscous (Navier-Stokes) term, with the tessellation\n"
+      "repaired each step on the device. Set the particle state, `init`, then `step`.")
       .def(nb::init<>())
       .def("set_l", &Sim::set_l, nb::arg("L"), "Set the periodic box edge lengths (Lx, Ly, Lz).")
       .def("set_positions", &Sim::set_positions, nb::arg("positions"),
@@ -334,7 +355,8 @@ NB_MODULE(vorflow, m) {
       .def("get_positions", &Sim::get_positions, "Current particle positions (N,3) float64.")
       .def("get_velocities", &Sim::get_velocities, "Current particle velocities (N,3) float64.")
       .def("get_kinetic_energy", &Sim::get_kinetic_energy, "Total kinetic energy (scalar).")
-      .def("get_internal_energy", &Sim::get_internal_energy, "Total internal (EOS) energy (scalar).")
+      .def("get_internal_energy", &Sim::get_internal_energy,
+           "Total internal (EOS) energy (scalar).")
       .def("get_time", &Sim::get_time, "Current simulation time (scalar).")
       .def("get_volumes", &Sim::get_volumes, "Per-particle Voronoi cell volume (N,) float64.")
       .def("get_num_neighbors", &Sim::get_num_neighbors,

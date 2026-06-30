@@ -128,23 +128,29 @@ class VoronoiHalo {
   /// Position-only halo refresh: re-forward the CURRENT owned positions onto the EXISTING ghost
   /// topology (the one built by the last gather()), WITHOUT re-decomposing or re-selecting ghosts.
   /// Returns the combined owned+ghost positions in the SAME order as that gather() — so a resident
-  /// per-cell topology (whose neighbour ids are combined-local indices) stays valid across the step.
-  /// The periodic-native (minimal-image) tessellator recovers the right relative vectors from these
-  /// raw in-[0,L) positions, so no periodic shift is applied here. This is the moving-point fast path:
-  /// while no owned seed has moved beyond the Verlet skin (so no neighbour crossed the gathered shell
-  /// undetected) the driver refreshes positions + repairs locally; on a skin trip it calls gather()
-  /// again to re-establish the topology. `out` is resized to nOwned + numGhost().
+  /// per-cell topology (whose neighbour ids are combined-local indices) stays valid across the
+  /// step. The periodic-native (minimal-image) tessellator recovers the right relative vectors from
+  /// these raw in-[0,L) positions, so no periodic shift is applied here. This is the moving-point
+  /// fast path: while no owned seed has moved beyond the Verlet skin (so no neighbour crossed the
+  /// gathered shell undetected) the driver refreshes positions + repairs locally; on a skin trip it
+  /// calls gather() again to re-establish the topology. `out` is resized to nOwned + numGhost().
   void refreshPositions(const std::vector<Vec3>& ownedPos, std::vector<Vec3>& out) {
     const int nOwned = static_cast<int>(ownedPos.size());
     const int ng = nGhost_;
     std::vector<Real> ox(nOwned), oy(nOwned), oz(nOwned), gx(ng), gy(ng), gz(ng);
-    for (int i = 0; i < nOwned; ++i) { ox[i] = ownedPos[i][0]; oy[i] = ownedPos[i][1]; oz[i] = ownedPos[i][2]; }
+    for (int i = 0; i < nOwned; ++i) {
+      ox[i] = ownedPos[i][0];
+      oy[i] = ownedPos[i][1];
+      oz[i] = ownedPos[i][2];
+    }
     halo_.forward(ox.data(), gx.data());
     halo_.forward(oy.data(), gy.data());
     halo_.forward(oz.data(), gz.data());
     out.resize(nOwned + ng);
-    for (int i = 0; i < nOwned; ++i) out[i] = ownedPos[i];
-    for (int j = 0; j < ng; ++j) out[nOwned + j] = Vec3{gx[j], gy[j], gz[j]};
+    for (int i = 0; i < nOwned; ++i)
+      out[i] = ownedPos[i];
+    for (int j = 0; j < ng; ++j)
+      out[nOwned + j] = Vec3{gx[j], gy[j], gz[j]};
   }
 
  private:

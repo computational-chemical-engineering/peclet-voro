@@ -26,8 +26,9 @@
 
 #include <Kokkos_Core.hpp>
 
-// Loop unroll hint, applied ONLY in the CUDA/HIP device passes (where it lets the compiler scalarize
-// small dynamically-indexed local arrays into registers); a no-op on the host so gcc sees no unknown pragma.
+// Loop unroll hint, applied ONLY in the CUDA/HIP device passes (where it lets the compiler
+// scalarize small dynamically-indexed local arrays into registers); a no-op on the host so gcc sees
+// no unknown pragma.
 #if defined(__CUDA_ARCH__) || defined(__HIP_DEVICE_COMPILE__)
 #define VOR_UNROLL _Pragma("unroll")
 #else
@@ -38,60 +39,95 @@ namespace vor {
 namespace device {
 
 namespace detail {
-// Minimal forward-mode dual number (value + K partials) used by ConvexCell::geomVolumeAreaGrad (the geomFull
-// area-Jacobian). Templated on Real so it routes through nvcc/hipcc like the rest of the header.
+// Minimal forward-mode dual number (value + K partials) used by ConvexCell::geomVolumeAreaGrad (the
+// geomFull area-Jacobian). Templated on Real so it routes through nvcc/hipcc like the rest of the
+// header.
 template <class Real, int K>
 struct Dual {
   Real v;
   Real d[K];
 };
-template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> dnum(Real c) {
-  Dual<Real, K> r; r.v = c;
-  for (int i = 0; i < K; ++i) r.d[i] = Real(0);
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION Dual<Real, K> dnum(Real c) {
+  Dual<Real, K> r;
+  r.v = c;
+  for (int i = 0; i < K; ++i)
+    r.d[i] = Real(0);
   return r;
 }
-template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> dseed(Real c, int s) {
-  Dual<Real, K> r = dnum<Real, K>(c); r.d[s] = Real(1);
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION Dual<Real, K> dseed(Real c, int s) {
+  Dual<Real, K> r = dnum<Real, K>(c);
+  r.d[s] = Real(1);
   return r;
 }
-template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> operator+(const Dual<Real, K>& a, const Dual<Real, K>& b) {
-  Dual<Real, K> r; r.v = a.v + b.v;
-  for (int i = 0; i < K; ++i) r.d[i] = a.d[i] + b.d[i];
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION Dual<Real, K> operator+(const Dual<Real, K>& a, const Dual<Real, K>& b) {
+  Dual<Real, K> r;
+  r.v = a.v + b.v;
+  for (int i = 0; i < K; ++i)
+    r.d[i] = a.d[i] + b.d[i];
   return r;
 }
-template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> operator-(const Dual<Real, K>& a, const Dual<Real, K>& b) {
-  Dual<Real, K> r; r.v = a.v - b.v;
-  for (int i = 0; i < K; ++i) r.d[i] = a.d[i] - b.d[i];
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION Dual<Real, K> operator-(const Dual<Real, K>& a, const Dual<Real, K>& b) {
+  Dual<Real, K> r;
+  r.v = a.v - b.v;
+  for (int i = 0; i < K; ++i)
+    r.d[i] = a.d[i] - b.d[i];
   return r;
 }
-template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> operator*(const Dual<Real, K>& a, const Dual<Real, K>& b) {
-  Dual<Real, K> r; r.v = a.v * b.v;
-  for (int i = 0; i < K; ++i) r.d[i] = a.d[i] * b.v + a.v * b.d[i];
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION Dual<Real, K> operator*(const Dual<Real, K>& a, const Dual<Real, K>& b) {
+  Dual<Real, K> r;
+  r.v = a.v * b.v;
+  for (int i = 0; i < K; ++i)
+    r.d[i] = a.d[i] * b.v + a.v * b.d[i];
   return r;
 }
-template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> operator/(const Dual<Real, K>& a, const Dual<Real, K>& b) {
-  Dual<Real, K> r; const Real inv = Real(1) / b.v; r.v = a.v * inv;
-  for (int i = 0; i < K; ++i) r.d[i] = (a.d[i] - r.v * b.d[i]) * inv;
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION Dual<Real, K> operator/(const Dual<Real, K>& a, const Dual<Real, K>& b) {
+  Dual<Real, K> r;
+  const Real inv = Real(1) / b.v;
+  r.v = a.v * inv;
+  for (int i = 0; i < K; ++i)
+    r.d[i] = (a.d[i] - r.v * b.d[i]) * inv;
   return r;
 }
-template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> dsqrt(const Dual<Real, K>& a) {
-  Dual<Real, K> r; r.v = Kokkos::sqrt(a.v);
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION Dual<Real, K> dsqrt(const Dual<Real, K>& a) {
+  Dual<Real, K> r;
+  r.v = Kokkos::sqrt(a.v);
   const Real inv = (r.v > Real(0)) ? Real(1) / (Real(2) * r.v) : Real(0);
-  for (int i = 0; i < K; ++i) r.d[i] = a.d[i] * inv;
+  for (int i = 0; i < K; ++i)
+    r.d[i] = a.d[i] * inv;
   return r;
 }
-template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> ddot(const Dual<Real, K> a[3], const Dual<Real, K> b[3]) {
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION Dual<Real, K> ddot(const Dual<Real, K> a[3], const Dual<Real, K> b[3]) {
   return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 }
-template <class Real, int K> KOKKOS_INLINE_FUNCTION void dcross(const Dual<Real, K> a[3], const Dual<Real, K> b[3], Dual<Real, K> o[3]) {
-  o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0];
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION void dcross(const Dual<Real, K> a[3], const Dual<Real, K> b[3],
+                                   Dual<Real, K> o[3]) {
+  o[0] = a[1] * b[2] - a[2] * b[1];
+  o[1] = a[2] * b[0] - a[0] * b[2];
+  o[2] = a[0] * b[1] - a[1] * b[0];
 }
-template <class Real, int K> KOKKOS_INLINE_FUNCTION Dual<Real, K> ddet3(const Dual<Real, K> a[3], const Dual<Real, K> b[3], const Dual<Real, K> c[3]) {
-  Dual<Real, K> bc[3]; dcross(b, c, bc); return ddot(a, bc);
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION Dual<Real, K> ddet3(const Dual<Real, K> a[3], const Dual<Real, K> b[3],
+                                           const Dual<Real, K> c[3]) {
+  Dual<Real, K> bc[3];
+  dcross(b, c, bc);
+  return ddot(a, bc);
 }
-template <class Real, int K> KOKKOS_INLINE_FUNCTION void dedgeFoot(const Dual<Real, K> v[3], const Dual<Real, K> c[3], Dual<Real, K> f[3]) {
+template <class Real, int K>
+KOKKOS_INLINE_FUNCTION void dedgeFoot(const Dual<Real, K> v[3], const Dual<Real, K> c[3],
+                                      Dual<Real, K> f[3]) {
   const Dual<Real, K> s = ddot(v, c) / ddot(c, c);
-  f[0] = v[0] - s * c[0]; f[1] = v[1] - s * c[1]; f[2] = v[2] - s * c[2];
+  f[0] = v[0] - s * c[0];
+  f[1] = v[1] - s * c[1];
+  f[2] = v[2] - s * c[2];
 }
 }  // namespace detail
 
@@ -101,29 +137,34 @@ template <class Real, int K> KOKKOS_INLINE_FUNCTION void dedgeFoot(const Dual<Re
 template <class Real, int MAXP = 64, int MAXT = 96, bool TrackAdj = false>
 struct ConvexCell {
   static_assert(MAXP <= 255, "plane index must fit in unsigned char");
-  static constexpr bool kTrackAdj = TrackAdj;  ///< lets templated consumers (store save/load) branch at compile time
-  Real n[MAXP][3];   ///< foot-point normal of each plane: half-space {x : n·x <= n·n}, so x=n is the
-                     ///< foot of the perpendicular from the seed (origin) and |n| the seed->plane dist
-                     ///< (= ½·(neighbour rel-pos) for Voronoi; the connector r = 2n).
-  Real nn[MAXP];     ///< cached n·n, i.e. the half-space offset (so the cull test is n·x <= nn)
-  int pnbr[MAXP];    ///< neighbour seed id per plane (<0 => bounding box)
-  int np;            ///< number of planes
+  static constexpr bool kTrackAdj =
+      TrackAdj;  ///< lets templated consumers (store save/load) branch at compile time
+  Real n[MAXP]
+        [3];      ///< foot-point normal of each plane: half-space {x : n·x <= n·n}, so x=n is the
+                  ///< foot of the perpendicular from the seed (origin) and |n| the seed->plane dist
+                  ///< (= ½·(neighbour rel-pos) for Voronoi; the connector r = 2n).
+  Real nn[MAXP];  ///< cached n·n, i.e. the half-space offset (so the cull test is n·x <= nn)
+  int pnbr[MAXP];                              ///< neighbour seed id per plane (<0 => bounding box)
+  int np;                                      ///< number of planes
   unsigned char t0[MAXT], t1[MAXT], t2[MAXT];  ///< triangle = triple of plane indices
   Real vx[MAXT], vy[MAXT], vz[MAXT];           ///< cached dual-vertex position per triangle
-  bool alive[MAXT];  ///< triangle live flag
-  int nt;            ///< triangle high-water mark
-  bool overflow;     ///< set if MAXP/MAXT exceeded -> cell invalid, caller falls back
+  bool alive[MAXT];                            ///< triangle live flag
+  int nt;                                      ///< triangle high-water mark
+  bool overflow;  ///< set if MAXP/MAXT exceeded -> cell invalid, caller falls back
 
-  /// Per-triangle edge adjacency, maintained incrementally in `clip` when TrackAdj — the input to the
-  /// O(nt) Lawson local-convexity certificate (`isLocallyConvex`). Zero-footprint when !TrackAdj
-  /// (`Kokkos::Array<int,0>` is the intended empty case, so `sizeof(ConvexCell<...,false>)` is unchanged).
+  /// Per-triangle edge adjacency, maintained incrementally in `clip` when TrackAdj — the input to
+  /// the O(nt) Lawson local-convexity certificate (`isLocallyConvex`). Zero-footprint when
+  /// !TrackAdj
+  /// (`Kokkos::Array<int,0>` is the intended empty case, so `sizeof(ConvexCell<...,false>)` is
+  /// unchanged).
   ///   adj[t*3 + e] = index of the live triangle sharing edge-slot e of triangle t.
   /// Edge-slot convention (must match findSharing / fan enumeration):
   ///   slot 0 = edge {vtx0, vtx1}, slot 1 = edge {vtx1, vtx2}, slot 2 = edge {vtx2, vtx0},
   /// where (vtx0,vtx1,vtx2) = (t0[t], t1[t], t2[t]).
-  /// The cell surface is a closed triangulation (topological sphere), so every edge is shared by exactly
-  /// two live triangles; adj entries for live triangles are never -1 in a valid state. Killed triangles
-  /// keep stale adj (they are alive==false, so the oracle ignores them and clip never follows into them).
+  /// The cell surface is a closed triangulation (topological sphere), so every edge is shared by
+  /// exactly two live triangles; adj entries for live triangles are never -1 in a valid state.
+  /// Killed triangles keep stale adj (they are alive==false, so the oracle ignores them and clip
+  /// never follows into them).
   Kokkos::Array<int, (TrackAdj ? MAXT : 0) * 3> adj;
 
   /// Seed the cell with the big cuboid of extent (L0,L1,L2) centred on the seed.
@@ -153,7 +194,8 @@ struct ConvexCell {
           computeVertex(nt);
           ++nt;
         }
-    if constexpr (TrackAdj) rebuildAdjacency();  // one-time bootstrap (~12 box triangles)
+    if constexpr (TrackAdj)
+      rebuildAdjacency();  // one-time bootstrap (~12 box triangles)
   }
 
   /// Compute and cache the dual vertex of triangle t (where its three planes meet,
@@ -179,8 +221,9 @@ struct ConvexCell {
   }
 
   /// Set ONLY the six bounding-box planes (0:+x 1:-x 2:+y 3:-y 4:+z 5:-z), np=6, no triangles.
-  /// Used to rebuild a cell from a compact stored topology: the caller then overwrites np/nt and the
-  /// triangle structure and calls reevalGeometry() (which fills the neighbour planes + all vertices).
+  /// Used to rebuild a cell from a compact stored topology: the caller then overwrites np/nt and
+  /// the triangle structure and calls reevalGeometry() (which fills the neighbour planes + all
+  /// vertices).
   KOKKOS_INLINE_FUNCTION void initBoxPlanes(Real L0, Real L1, Real L2) {
     const Real h[3] = {Real(0.5) * L0, Real(0.5) * L1, Real(0.5) * L2};
     for (int ax = 0; ax < 3; ++ax)
@@ -205,7 +248,8 @@ struct ConvexCell {
   KOKKOS_INLINE_FUNCTION void reevalGeometry(Real sx, Real sy, Real sz, const Real* pos, Real L) {
     const Real Lh = Real(0.5) * L;
     for (int k = 0; k < np; ++k) {
-      if (pnbr[k] < 0) continue;  // bounding-box plane — does not move
+      if (pnbr[k] < 0)
+        continue;  // bounding-box plane — does not move
       const int g = pnbr[k];
       Real rx = pos[3 * g] - sx, ry = pos[3 * g + 1] - sy, rz = pos[3 * g + 2] - sz;
       rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
@@ -213,35 +257,43 @@ struct ConvexCell {
       rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
       // foot point of the Voronoi bisector: n = ½r, offset nn = |n|² = ¼|r|²
       const Real hx = Real(0.5) * rx, hy = Real(0.5) * ry, hz = Real(0.5) * rz;
-      n[k][0] = hx; n[k][1] = hy; n[k][2] = hz;
+      n[k][0] = hx;
+      n[k][1] = hy;
+      n[k][2] = hz;
       nn[k] = hx * hx + hy * hy + hz * hz;
     }
     for (int t = 0; t < nt; ++t)
-      if (alive[t]) computeVertex(t);
+      if (alive[t])
+        computeVertex(t);
   }
 
-  /// Part II detection (D2 — the "convexity"/self-consistency certificate). After a re-eval on the FIXED
-  /// stored topology, the cell is the intersection of its half-spaces ONLY if every dual vertex still lies
-  /// inside every OTHER plane of the cell: n_k·v ≤ nn_k. If some vertex pokes out past a plane k (by more
-  /// than `tol`, an absolute distance), that plane should have cut it ⇒ the stored topology is stale (a face
-  /// was lost / an internal flip happened) ⇒ this cell needs a topology rebuild. This is purely cell-local
-  /// (no neighbour data): it catches LOST faces directly. A GAINED face (an external seed that has moved
-  /// close enough to cut this cell) is NOT visible here — the conjecture (to be tested empirically) is that
-  /// such an event makes the PARTNER cell self-inconsistent, so a global sweep of this test still flags it.
-  /// Exception: an SDF/boundary plane has no partner cell, so boundary cells need a separate boundary watch.
+  /// Part II detection (D2 — the "convexity"/self-consistency certificate). After a re-eval on the
+  /// FIXED stored topology, the cell is the intersection of its half-spaces ONLY if every dual
+  /// vertex still lies inside every OTHER plane of the cell: n_k·v ≤ nn_k. If some vertex pokes out
+  /// past a plane k (by more than `tol`, an absolute distance), that plane should have cut it ⇒ the
+  /// stored topology is stale (a face was lost / an internal flip happened) ⇒ this cell needs a
+  /// topology rebuild. This is purely cell-local (no neighbour data): it catches LOST faces
+  /// directly. A GAINED face (an external seed that has moved close enough to cut this cell) is NOT
+  /// visible here — the conjecture (to be tested empirically) is that such an event makes the
+  /// PARTNER cell self-inconsistent, so a global sweep of this test still flags it. Exception: an
+  /// SDF/boundary plane has no partner cell, so boundary cells need a separate boundary watch.
   KOKKOS_INLINE_FUNCTION bool isSelfConsistent(Real tol) const {
     // Branch-free max-slack accumulation (no per-thread early-out divergence): the whole-cell worst
-    // perpendicular poke is compared to `tol` once at the end. The brute scan is the complete certificate —
-    // it catches far-pokes by NON-adjacent planes too, which the local (Lawson) form deliberately does not.
-    // (An early-out variant would only help when np is large AND fail-fast rate is high; measure first.)
+    // perpendicular poke is compared to `tol` once at the end. The brute scan is the complete
+    // certificate — it catches far-pokes by NON-adjacent planes too, which the local (Lawson) form
+    // deliberately does not. (An early-out variant would only help when np is large AND fail-fast
+    // rate is high; measure first.)
     Real maxd = Real(0);
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       const Real v[3] = {vx[t], vy[t], vz[t]};
       for (int k = 0; k < np; ++k) {
-        if (t0[t] == k || t1[t] == k || t2[t] == k) continue;  // a plane that defines this vertex
+        if (t0[t] == k || t1[t] == k || t2[t] == k)
+          continue;  // a plane that defines this vertex
         const Real s = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
-        if (s > Real(0)) {  // v outside plane k; convert to a perpendicular distance for the tol test
+        if (s >
+            Real(0)) {  // v outside plane k; convert to a perpendicular distance for the tol test
           const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
           maxd = Kokkos::max(maxd, s * invlen);
         }
@@ -250,31 +302,34 @@ struct ConvexCell {
     return maxd <= tol;
   }
 
-  /// Part-II repair signal (Phase 1): the convexity/in-sphere certificate above, additionally emitting
-  /// the **violated-plane partner seed(s)** — the `pnbr` id of each stored plane k a re-evaluated vertex
-  /// pokes past. By the §1 analysis (dynamic_update_decision_and_plan.md) these partners are exactly the
-  /// *gaining* cells of a 2→3 flip (cells i,m that never flag themselves), so they are the cheap, local,
-  /// connectivity-free signal that reaches them — necessary for a complete one-pass repair. Partners are
-  /// deduplicated into outPartners[0..nPartners) (capped at maxPartners; the rare overflow just truncates —
-  /// the periodic oracle is the backstop). A violated plane with pnbr<0 (box/SDF wall) has no partner cell:
-  /// it still marks the cell inconsistent (so the cell itself is rebuilt) but emits no partner — the SDF
-  /// boundary-contact trigger (Risk 1d) is the deferred complement that catches *gained* wall faces.
-  /// Returns true iff the cell is self-consistent (no violation past `tol`).
+  /// Part-II repair signal (Phase 1): the convexity/in-sphere certificate above, additionally
+  /// emitting the **violated-plane partner seed(s)** — the `pnbr` id of each stored plane k a
+  /// re-evaluated vertex pokes past. By the §1 analysis (dynamic_update_decision_and_plan.md) these
+  /// partners are exactly the *gaining* cells of a 2→3 flip (cells i,m that never flag themselves),
+  /// so they are the cheap, local, connectivity-free signal that reaches them — necessary for a
+  /// complete one-pass repair. Partners are deduplicated into outPartners[0..nPartners) (capped at
+  /// maxPartners; the rare overflow just truncates — the periodic oracle is the backstop). A
+  /// violated plane with pnbr<0 (box/SDF wall) has no partner cell: it still marks the cell
+  /// inconsistent (so the cell itself is rebuilt) but emits no partner — the SDF boundary-contact
+  /// trigger (Risk 1d) is the deferred complement that catches *gained* wall faces. Returns true
+  /// iff the cell is self-consistent (no violation past `tol`).
   ///
-  /// WEIGHTED/POWER (deferred, see [[vorflow-power-cells-deferred]]): for a Laguerre cell the in-sphere
-  /// test `n_k·v ≤ nn_k` must become the empty-**orthosphere** (power-distance) predicate so completeness
-  /// carries to the regular triangulation. The ConvexCell device path is Voronoi-only today
-  /// (no radical-plane geometry), so only the unweighted form is implemented; the orthosphere form plugs
-  /// in here when the Power policy lands.
+  /// WEIGHTED/POWER (deferred, see [[vorflow-power-cells-deferred]]): for a Laguerre cell the
+  /// in-sphere test `n_k·v ≤ nn_k` must become the empty-**orthosphere** (power-distance) predicate
+  /// so completeness carries to the regular triangulation. The ConvexCell device path is
+  /// Voronoi-only today (no radical-plane geometry), so only the unweighted form is implemented;
+  /// the orthosphere form plugs in here when the Power policy lands.
   KOKKOS_INLINE_FUNCTION bool isSelfConsistentPartners(Real tol, int* outPartners, int maxPartners,
                                                        int& nPartners) const {
     nPartners = 0;
     bool consistent = true;
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       const Real v[3] = {vx[t], vy[t], vz[t]};
       for (int k = 0; k < np; ++k) {
-        if (t0[t] == k || t1[t] == k || t2[t] == k) continue;  // a plane that defines this vertex
+        if (t0[t] == k || t1[t] == k || t2[t] == k)
+          continue;  // a plane that defines this vertex
         const Real s = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
         if (s > Real(0)) {  // v outside plane k; perpendicular distance vs tol
           const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
@@ -284,8 +339,12 @@ struct ConvexCell {
             if (part >= 0) {  // box/SDF planes (pnbr<0) have no partner cell
               bool seen = false;
               for (int q = 0; q < nPartners; ++q)
-                if (outPartners[q] == part) { seen = true; break; }
-              if (!seen && nPartners < maxPartners) outPartners[nPartners++] = part;
+                if (outPartners[q] == part) {
+                  seen = true;
+                  break;
+                }
+              if (!seen && nPartners < maxPartners)
+                outPartners[nPartners++] = part;
             }
           }
         }
@@ -294,20 +353,21 @@ struct ConvexCell {
     return consistent;
   }
 
-  /// Edge-opposite plane of the triangle `s` across shared edge {x,y}: the one vertex (plane index) of
-  /// `s` that is neither x nor y. Helper for the Lawson local certificate.
+  /// Edge-opposite plane of the triangle `s` across shared edge {x,y}: the one vertex (plane index)
+  /// of `s` that is neither x nor y. Helper for the Lawson local certificate.
   KOKKOS_INLINE_FUNCTION int oppositePlane(int s, int x, int y) const {
     const int a = t0[s], b = t1[s], c = t2[s];
     return (a != x && a != y) ? a : (b != x && b != y) ? b : c;
   }
 
-  /// Compute the packed per-triangle "poke4" plane set the local certificate reads: for each live triangle,
-  /// out[t*4 + 0..2] = the three edge-opposite planes (from `adj`, no findSharing) and out[t*4 + 3] = the
-  /// dual Delaunay tet's FOURTH face (the one not incident to the seed) — the non-defining, non-edge-opposite
-  /// plane the vertex is nearest to from inside (smallest positive slack). 0xff = none. Including the fourth
-  /// face makes the local cert match the brute flag set (complete, not a subset). Dead triangles get all-0xff.
-  /// Requires `adj` populated + the cached vertices; call once after the cell is finalised (gather / rebuild)
-  /// and persist `out` — the cert then reads it directly each re-eval step, with NO per-vertex adj derivation.
+  /// Compute the packed per-triangle "poke4" plane set the local certificate reads: for each live
+  /// triangle, out[t*4 + 0..2] = the three edge-opposite planes (from `adj`, no findSharing) and
+  /// out[t*4 + 3] = the dual Delaunay tet's FOURTH face (the one not incident to the seed) — the
+  /// non-defining, non-edge-opposite plane the vertex is nearest to from inside (smallest positive
+  /// slack). 0xff = none. Including the fourth face makes the local cert match the brute flag set
+  /// (complete, not a subset). Dead triangles get all-0xff. Requires `adj` populated + the cached
+  /// vertices; call once after the cell is finalised (gather / rebuild) and persist `out` — the
+  /// cert then reads it directly each re-eval step, with NO per-vertex adj derivation.
   KOKKOS_INLINE_FUNCTION void computePoke4(unsigned char* out) const {
     static_assert(TrackAdj, "computePoke4 requires TrackAdj");
     for (int t = 0; t < nt; ++t) {
@@ -326,28 +386,36 @@ struct ConvexCell {
       Real best = Real(3.4e38);
       int g = 0xff;
       for (int k = 0; k < np; ++k) {
-        if (k == vt[0] || k == vt[1] || k == vt[2]) continue;  // defining plane
-        if (k == eo[0] || k == eo[1] || k == eo[2]) continue;  // already an edge-opposite
+        if (k == vt[0] || k == vt[1] || k == vt[2])
+          continue;  // defining plane
+        if (k == eo[0] || k == eo[1] || k == eo[2])
+          continue;  // already an edge-opposite
         const Real slack = nn[k] - (n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2]);
-        if (slack >= Real(0) && slack < best) { best = slack; g = k; }
+        if (slack >= Real(0) && slack < best) {
+          best = slack;
+          g = k;
+        }
       }
       out[t * 4 + 3] = (unsigned char)(g & 0xff);
     }
   }
 
-  /// Local convexity certificate (Lawson), O(nt). Per dual vertex, test it against its four precomputed
-  /// `poke4` planes (the three edge-opposite + the fourth-face plane): the cell is locally Voronoi iff no
-  /// vertex pokes past any of them. With the fourth face included this matches the brute certificate's flag
-  /// set (Delaunay's lemma over the full dual tet), so it is complete, not a subset. Reads the planes from
-  /// `poke4` (no `adj`), so it runs on ANY cell — the cert path keeps a lean cell + this persisted table.
+  /// Local convexity certificate (Lawson), O(nt). Per dual vertex, test it against its four
+  /// precomputed `poke4` planes (the three edge-opposite + the fourth-face plane): the cell is
+  /// locally Voronoi iff no vertex pokes past any of them. With the fourth face included this
+  /// matches the brute certificate's flag set (Delaunay's lemma over the full dual tet), so it is
+  /// complete, not a subset. Reads the planes from `poke4` (no `adj`), so it runs on ANY cell — the
+  /// cert path keeps a lean cell + this persisted table.
   KOKKOS_INLINE_FUNCTION bool isLocallyConvex(const unsigned char* poke4, Real tol) const {
     Real maxd = Real(0);
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       const Real v[3] = {vx[t], vy[t], vz[t]};
       for (int j = 0; j < 4; ++j) {
         const int k = (int)poke4[t * 4 + j];
-        if (k == 0xff) continue;
+        if (k == 0xff)
+          continue;
         const Real sl = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
         if (sl > Real(0)) {
           const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
@@ -358,19 +426,23 @@ struct ConvexCell {
     return maxd <= tol;
   }
 
-  /// Partner-emitting form of `isLocallyConvex` — same `poke4` test, additionally emitting the violated-plane
-  /// partner seed(s) (the `pnbr` id of each plane a vertex pokes past), deduplicated into outPartners. These
-  /// are the gaining cells of a flip (the §1 repair signal) so the gather repair seeds Pass 1 from them.
-  KOKKOS_INLINE_FUNCTION bool isLocallyConvexPartners(const unsigned char* poke4, Real tol, int* outPartners,
-                                                      int maxPartners, int& nPartners) const {
+  /// Partner-emitting form of `isLocallyConvex` — same `poke4` test, additionally emitting the
+  /// violated-plane partner seed(s) (the `pnbr` id of each plane a vertex pokes past), deduplicated
+  /// into outPartners. These are the gaining cells of a flip (the §1 repair signal) so the gather
+  /// repair seeds Pass 1 from them.
+  KOKKOS_INLINE_FUNCTION bool isLocallyConvexPartners(const unsigned char* poke4, Real tol,
+                                                      int* outPartners, int maxPartners,
+                                                      int& nPartners) const {
     nPartners = 0;
     bool consistent = true;
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       const Real v[3] = {vx[t], vy[t], vz[t]};
       for (int j = 0; j < 4; ++j) {
         const int k = (int)poke4[t * 4 + j];
-        if (k == 0xff) continue;
+        if (k == 0xff)
+          continue;
         const Real sl = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
         if (sl > Real(0)) {
           const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
@@ -380,8 +452,12 @@ struct ConvexCell {
             if (part >= 0) {
               bool seen = false;
               for (int q = 0; q < nPartners; ++q)
-                if (outPartners[q] == part) { seen = true; break; }
-              if (!seen && nPartners < maxPartners) outPartners[nPartners++] = part;
+                if (outPartners[q] == part) {
+                  seen = true;
+                  break;
+                }
+              if (!seen && nPartners < maxPartners)
+                outPartners[nPartners++] = part;
             }
           }
         }
@@ -394,9 +470,11 @@ struct ConvexCell {
   KOKKOS_INLINE_FUNCTION Real maxVertexRsq() const {
     Real m = 0;
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       const Real r = vx[t] * vx[t] + vy[t] * vy[t] + vz[t] * vz[t];
-      if (r > m) m = r;
+      if (r > m)
+        m = r;
     }
     return m;
   }
@@ -409,11 +487,13 @@ struct ConvexCell {
   /// correctly considered here and rejected by the caller's kill[] test.
   KOKKOS_INLINE_FUNCTION int findSharing(int self, int x, int y) const {
     for (int s = 0; s < nt; ++s) {
-      if (s == self || !alive[s]) continue;
+      if (s == self || !alive[s])
+        continue;
       const int a = t0[s], b = t1[s], c = t2[s];
       const bool hasX = (a == x || b == x || c == x);
       const bool hasY = (a == y || b == y || c == y);
-      if (hasX && hasY) return s;
+      if (hasX && hasY)
+        return s;
     }
     return -1;
   }
@@ -423,7 +503,8 @@ struct ConvexCell {
   KOKKOS_INLINE_FUNCTION void rebuildAdjacency() {
     if constexpr (TrackAdj) {
       for (int t = 0; t < nt; ++t) {
-        if (!alive[t]) continue;
+        if (!alive[t])
+          continue;
         const int vt[3] = {t0[t], t1[t], t2[t]};
         for (int e = 0; e < 3; ++e)
           adj[t * 3 + e] = findSharing(t, vt[e], vt[(e + 1) % 3]);
@@ -431,29 +512,34 @@ struct ConvexCell {
     }
   }
 
-  /// DEBUG oracle: true iff `adj` is internally consistent for all live triangles (every entry points to
-  /// a live triangle that actually shares the edge, and the back-link is symmetric). Every incremental
-  /// stitch in clip must leave this true; assert it after each clip in debug builds. Trivially true when
-  /// !TrackAdj.
+  /// DEBUG oracle: true iff `adj` is internally consistent for all live triangles (every entry
+  /// points to a live triangle that actually shares the edge, and the back-link is symmetric).
+  /// Every incremental stitch in clip must leave this true; assert it after each clip in debug
+  /// builds. Trivially true when !TrackAdj.
   KOKKOS_INLINE_FUNCTION bool checkAdjacencyInvariant() const {
     if constexpr (!TrackAdj) {
       return true;
     } else {
       for (int t = 0; t < nt; ++t) {
-        if (!alive[t]) continue;
+        if (!alive[t])
+          continue;
         const int vt[3] = {t0[t], t1[t], t2[t]};
         for (int e = 0; e < 3; ++e) {
           const int x = vt[e], y = vt[(e + 1) % 3];
           const int s = adj[t * 3 + e];
-          if (s < 0 || s >= nt || !alive[s]) return false;  // live target
+          if (s < 0 || s >= nt || !alive[s])
+            return false;  // live target
           const int vs[3] = {t0[s], t1[s], t2[s]};
           const bool hasX = (vs[0] == x || vs[1] == x || vs[2] == x);
           const bool hasY = (vs[0] == y || vs[1] == y || vs[2] == y);
-          if (!(hasX && hasY)) return false;  // shares the edge
-          bool back = false;                  // symmetry
+          if (!(hasX && hasY))
+            return false;     // shares the edge
+          bool back = false;  // symmetry
           for (int f = 0; f < 3; ++f)
-            if (adj[s * 3 + f] == t) back = true;
-          if (!back) return false;
+            if (adj[s * 3 + f] == t)
+              back = true;
+          if (!back)
+            return false;
         }
       }
       return true;
@@ -462,8 +548,10 @@ struct ConvexCell {
 
   KOKKOS_INLINE_FUNCTION int allocTri() {
     for (int s = 0; s < nt; ++s)
-      if (!alive[s]) return s;
-    if (nt < MAXT) return nt++;
+      if (!alive[s])
+        return s;
+    if (nt < MAXT)
+      return nt++;
     overflow = true;
     return -1;
   }
@@ -492,14 +580,16 @@ struct ConvexCell {
     bool any = false;
     for (int t = 0; t < nt; ++t) {
       kill[t] = false;
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       const Real s = n[pi][0] * vx[t] + n[pi][1] * vy[t] + n[pi][2] * vz[t] - nn[pi];
       if (s > 0) {
         kill[t] = true;
         any = true;
       }
     }
-    if (!any) return false;  // candidate does not cut -> no-op, plane not committed
+    if (!any)
+      return false;  // candidate does not cut -> no-op, plane not committed
 
     np = pi + 1;  // commit the plane
 
@@ -510,7 +600,8 @@ struct ConvexCell {
       unsigned char nA[MAXT], nB[MAXT];
       int nnew = 0;
       for (int t = 0; t < nt; ++t) {
-        if (!kill[t]) continue;
+        if (!kill[t])
+          continue;
         const int vtx[3] = {t0[t], t1[t], t2[t]};
         for (int e = 0; e < 3; ++e) {
           const int x = vtx[e], y = vtx[(e + 1) % 3];
@@ -528,11 +619,13 @@ struct ConvexCell {
       }
       // Remove killed triangles.
       for (int t = 0; t < nt; ++t)
-        if (kill[t]) alive[t] = false;
+        if (kill[t])
+          alive[t] = false;
       // Add the new fan around plane pi.
       for (int i = 0; i < nnew; ++i) {
         const int slot = allocTri();
-        if (slot < 0) break;
+        if (slot < 0)
+          break;
         t0[slot] = nA[i];
         t1[slot] = nB[i];
         t2[slot] = (unsigned char)pi;
@@ -540,21 +633,31 @@ struct ConvexCell {
         computeVertex(slot);
       }
     } else {
-      // ---- TrackAdj path: walk the conflict-region boundary as ONE oriented cycle via `adj` (O(conflict),
-      // no findSharing), then stitch the new fan's adjacency in O(1) per edge. The conflict region (vertices
-      // outside the new half-space) is connected and its boundary is a single cycle for a convex clip. ----
-      int hA[MAXT], hB[MAXT], hSurv[MAXT], hBack[MAXT];  // horizon edge {A,B}, survivor across it, slot back
+      // ---- TrackAdj path: walk the conflict-region boundary as ONE oriented cycle via `adj`
+      // (O(conflict), no findSharing), then stitch the new fan's adjacency in O(1) per edge. The
+      // conflict region (vertices outside the new half-space) is connected and its boundary is a
+      // single cycle for a convex clip. ----
+      int hA[MAXT], hB[MAXT], hSurv[MAXT],
+          hBack[MAXT];  // horizon edge {A,B}, survivor across it, slot back
       int H = 0;
       // Start edge: a killed triangle with a surviving neighbour across some slot.
       int t0k = -1, e0 = -1;
       for (int t = 0; t < nt && t0k < 0; ++t) {
-        if (!kill[t]) continue;
+        if (!kill[t])
+          continue;
         for (int e = 0; e < 3; ++e) {
           const int s = adj[t * 3 + e];
-          if (s >= 0 && alive[s] && !kill[s]) { t0k = t; e0 = e; break; }
+          if (s >= 0 && alive[s] && !kill[s]) {
+            t0k = t;
+            e0 = e;
+            break;
+          }
         }
       }
-      if (t0k < 0) { overflow = true; return true; }  // no surviving boundary (cannot happen for a real cut)
+      if (t0k < 0) {
+        overflow = true;
+        return true;
+      }  // no surviving boundary (cannot happen for a real cut)
       const int vstart[3] = {t0[t0k], t1[t0k], t2[t0k]};
       int A = vstart[e0], B = vstart[(e0 + 1) % 3];
       int tt = t0k, ee = e0;
@@ -564,46 +667,72 @@ struct ConvexCell {
         const int surv = adj[tt * 3 + ee];
         int back = 0;
         for (int f = 0; f < 3; ++f)
-          if (adj[surv * 3 + f] == tt) { back = f; break; }
+          if (adj[surv * 3 + f] == tt) {
+            back = f;
+            break;
+          }
         if (H < MAXT) {
-          hA[H] = A; hB[H] = B; hSurv[H] = surv; hBack[H] = back; ++H;
+          hA[H] = A;
+          hB[H] = B;
+          hSurv[H] = surv;
+          hBack[H] = back;
+          ++H;
         } else {
-          overflow = true; break;
+          overflow = true;
+          break;
         }
-        // Pivot around vertex B, rotating through killed triangles, until we exit to the next survivor.
+        // Pivot around vertex B, rotating through killed triangles, until we exit to the next
+        // survivor.
         const int pivot = B;
         int rt = tt, arrival = ee, rotGuard = 0;
         while (true) {
           const int rv[3] = {t0[rt], t1[rt], t2[rt]};
-          const int lv = (rv[0] == pivot) ? 0 : (rv[1] == pivot) ? 1 : 2;  // local index of pivot in rt
-          const int crossSlot = (arrival == lv) ? (lv + 2) % 3 : lv;       // the OTHER B-edge of rt
+          const int lv = (rv[0] == pivot)   ? 0
+                         : (rv[1] == pivot) ? 1
+                                            : 2;                      // local index of pivot in rt
+          const int crossSlot = (arrival == lv) ? (lv + 2) % 3 : lv;  // the OTHER B-edge of rt
           const int rn = adj[rt * 3 + crossSlot];
           if (rn >= 0 && kill[rn]) {  // still inside the conflict region: keep rotating around B
             int f = (adj[rn * 3 + 0] == rt) ? 0 : (adj[rn * 3 + 1] == rt) ? 1 : 2;
-            rt = rn; arrival = f;
-            if (++rotGuard > guardMax) { overflow = true; break; }
+            rt = rn;
+            arrival = f;
+            if (++rotGuard > guardMax) {
+              overflow = true;
+              break;
+            }
             continue;
           }
-          // rn survives -> edge crossSlot of rt is the next horizon edge, oriented out of the pivot.
+          // rn survives -> edge crossSlot of rt is the next horizon edge, oriented out of the
+          // pivot.
           const int u = rv[crossSlot], w = rv[(crossSlot + 1) % 3];
-          A = pivot; B = (u == pivot) ? w : u;
-          tt = rt; ee = crossSlot;
+          A = pivot;
+          B = (u == pivot) ? w : u;
+          tt = rt;
+          ee = crossSlot;
           break;
         }
-        if (overflow) break;
-        if (++guard > guardMax) { overflow = true; break; }
+        if (overflow)
+          break;
+        if (++guard > guardMax) {
+          overflow = true;
+          break;
+        }
       } while (!(tt == t0k && ee == e0));
 
       // Remove killed triangles (frees their slots for the fan via allocTri).
       for (int t = 0; t < nt; ++t)
-        if (kill[t]) alive[t] = false;
-      // Allocate the whole fan first (so τ_{i±1} cross-references resolve), then set topology + adjacency.
+        if (kill[t])
+          alive[t] = false;
+      // Allocate the whole fan first (so τ_{i±1} cross-references resolve), then set topology +
+      // adjacency.
       int tau[MAXT];
       bool ok = !overflow;
       for (int i = 0; i < H && ok; ++i) {
         tau[i] = allocTri();
-        if (tau[i] < 0) ok = false;
-        else alive[tau[i]] = true;  // reserve the slot so allocTri doesn't hand it out again
+        if (tau[i] < 0)
+          ok = false;
+        else
+          alive[tau[i]] = true;  // reserve the slot so allocTri doesn't hand it out again
       }
       if (ok) {
         for (int i = 0; i < H; ++i) {
@@ -613,10 +742,10 @@ struct ConvexCell {
           t2[s] = (unsigned char)pi;
           alive[s] = true;
           computeVertex(s);
-          adj[s * 3 + 0] = hSurv[i];              // slot 0 = edge {A_i,B_i} -> survivor across the horizon
+          adj[s * 3 + 0] = hSurv[i];  // slot 0 = edge {A_i,B_i} -> survivor across the horizon
           adj[s * 3 + 1] = tau[(i + 1) % H];      // slot 1 = edge {B_i,P}   -> next fan triangle
           adj[s * 3 + 2] = tau[(i - 1 + H) % H];  // slot 2 = edge {P,A_i}   -> prev fan triangle
-          adj[hSurv[i] * 3 + hBack[i]] = s;       // back-patch the survivor's slot to this fan triangle
+          adj[hSurv[i] * 3 + hBack[i]] = s;  // back-patch the survivor's slot to this fan triangle
         }
       }
     }
@@ -625,7 +754,8 @@ struct ConvexCell {
 
   KOKKOS_INLINE_FUNCTION bool empty() const {
     for (int t = 0; t < nt; ++t)
-      if (alive[t]) return false;
+      if (alive[t])
+        return false;
     return true;
   }
 
@@ -634,8 +764,10 @@ struct ConvexCell {
     for (int k = 0; k < np; ++k) {
       bool used = false;
       for (int t = 0; t < nt && !used; ++t)
-        if (alive[t] && (t0[t] == k || t1[t] == k || t2[t] == k)) used = true;
-      if (used) ++nf;
+        if (alive[t] && (t0[t] == k || t1[t] == k || t2[t] == k))
+          used = true;
+      if (used)
+        ++nf;
     }
     return nf;
   }
@@ -650,8 +782,10 @@ struct ConvexCell {
                                          Real fz[MAXFV]) const {
     int m = 0;
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
-      if (t0[t] != k && t1[t] != k && t2[t] != k) continue;
+      if (!alive[t])
+        continue;
+      if (t0[t] != k && t1[t] != k && t2[t] != k)
+        continue;
       if (m < MAXFV) {
         fx[m] = vx[t];
         fy[m] = vy[t];
@@ -659,10 +793,12 @@ struct ConvexCell {
         ++m;
       }
     }
-    if (m < 3) return m;
+    if (m < 3)
+      return m;
     const Real nx = n[k][0], ny = n[k][1], nz = n[k][2];
     const Real nlen = Kokkos::sqrt(nx * nx + ny * ny + nz * nz);
-    if (nlen == Real(0)) return 0;
+    if (nlen == Real(0))
+      return 0;
     const Real un[3] = {nx / nlen, ny / nlen, nz / nlen};
     Real e1[3];
     if (Kokkos::fabs(un[0]) <= Kokkos::fabs(un[1]) && Kokkos::fabs(un[0]) <= Kokkos::fabs(un[2])) {
@@ -700,7 +836,7 @@ struct ConvexCell {
       const Real py = dx * e2[0] + dy * e2[1] + dz * e2[2];
       // diamond pseudo-angle: monotonic in true angle, in [0,4), NO atan2 (transcendental)
       const Real s = Kokkos::fabs(px) + Kokkos::fabs(py);
-      const Real t = (s > Real(0)) ? py / s : Real(0);            // [-1,1]
+      const Real t = (s > Real(0)) ? py / s : Real(0);  // [-1,1]
       ang[i] = (px < Real(0)) ? (Real(2) - t) : (py < Real(0) ? Real(4) + t : t);
     }
     for (int i = 1; i < m; ++i) {
@@ -743,7 +879,8 @@ struct ConvexCell {
     Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
     for (int k = 0; k < np; ++k) {
       const int m = faceOrdered(k, fx, fy, fz);
-      if (m < 3) continue;
+      if (m < 3)
+        continue;
       Real A[3];
       polyAreaVec(fx, fy, fz, m, A);
       const Real area = Kokkos::sqrt(A[0] * A[0] + A[1] * A[1] + A[2] * A[2]);
@@ -753,85 +890,138 @@ struct ConvexCell {
     return vol * (Real(1) / Real(3));
   }
 
-  // ---- Vertex-local, SORT-FREE geometry (Ray/Sokolov/Lefebvre/Lévy TOG 2018; geogram ConvexCell) ----
-  // Plane stored as the (non-unit) foot-point normal n with interior {x : n·x ≤ n·n}; then x=n is the
-  // foot of the perpendicular from the origin onto the plane (the facet point), and |n| is the origin→
-  // plane distance. The cell now stores n directly (member `n`, with `nn = n·n`), so this is just a read.
-  // Volume by the divergence theorem, coning every boundary flag (facet n_i, edge foot f, vertex v) to
-  // the origin: each tetra (0,n_i,f,v) is LOCAL to one vertex + its 3 planes, and the signed sum is exact
-  // even when feet fall outside their faces. No vertex ordering, no adjacency — a pure per-vertex scatter.
+  // ---- Vertex-local, SORT-FREE geometry (Ray/Sokolov/Lefebvre/Lévy TOG 2018; geogram ConvexCell)
+  // ---- Plane stored as the (non-unit) foot-point normal n with interior {x : n·x ≤ n·n}; then x=n
+  // is the foot of the perpendicular from the origin onto the plane (the facet point), and |n| is
+  // the origin→ plane distance. The cell now stores n directly (member `n`, with `nn = n·n`), so
+  // this is just a read. Volume by the divergence theorem, coning every boundary flag (facet n_i,
+  // edge foot f, vertex v) to the origin: each tetra (0,n_i,f,v) is LOCAL to one vertex + its 3
+  // planes, and the signed sum is exact even when feet fall outside their faces. No vertex
+  // ordering, no adjacency — a pure per-vertex scatter.
 
-  /// Foot-point normal of plane k — now stored directly, so just a copy (the reconstruction divide is gone).
+  /// Foot-point normal of plane k — now stored directly, so just a copy (the reconstruction divide
+  /// is gone).
   KOKKOS_INLINE_FUNCTION void planeN(int k, Real out[3]) const {
-    out[0] = n[k][0]; out[1] = n[k][1]; out[2] = n[k][2];
+    out[0] = n[k][0];
+    out[1] = n[k][1];
+    out[2] = n[k][2];
   }
   KOKKOS_INLINE_FUNCTION static void xprod(const Real a[3], const Real b[3], Real o[3]) {
-    o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0];
+    o[0] = a[1] * b[2] - a[2] * b[1];
+    o[1] = a[2] * b[0] - a[0] * b[2];
+    o[2] = a[0] * b[1] - a[1] * b[0];
   }
   KOKKOS_INLINE_FUNCTION static Real dot3(const Real a[3], const Real b[3]) {
     return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
   }
   KOKKOS_INLINE_FUNCTION static Real det3(const Real a[3], const Real b[3], const Real c[3]) {
-    Real bc[3]; xprod(b, c, bc); return dot3(a, bc);
+    Real bc[3];
+    xprod(b, c, bc);
+    return dot3(a, bc);
   }
   /// foot of the perpendicular from v onto the edge line of direction ck: v − (v·ck/ck·ck) ck.
   KOKKOS_INLINE_FUNCTION static void edgeFoot(const Real v[3], const Real ck[3], Real f[3]) {
     const Real c2 = dot3(ck, ck), s = (c2 > Real(0)) ? dot3(v, ck) / c2 : Real(0);
-    f[0] = v[0] - s * ck[0]; f[1] = v[1] - s * ck[1]; f[2] = v[2] - s * ck[2];
+    f[0] = v[0] - s * ck[0];
+    f[1] = v[1] - s * ck[1];
+    f[2] = v[2] - s * ck[2];
   }
 
-  /// Cell volume (G1) by the vertex-local flag/divergence sum — NO ordering, NO adjacency, NO atan2,
-  /// NO findSharing. One pass over vertices; each contributes 3 signed determinants.
+  /// Cell volume (G1) by the vertex-local flag/divergence sum — NO ordering, NO adjacency, NO
+  /// atan2, NO findSharing. One pass over vertices; each contributes 3 signed determinants.
   KOKKOS_INLINE_FUNCTION Real volumePerVertex() const {
     Real vol = 0;
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       Real n1[3], n2[3], n3[3];
-      planeN(t0[t], n1); planeN(t1[t], n2); planeN(t2[t], n3);
+      planeN(t0[t], n1);
+      planeN(t1[t], n2);
+      planeN(t2[t], n3);
       Real c1[3], c2[3], c3[3];
-      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      xprod(n2, n3, c1);
+      xprod(n3, n1, c2);
+      xprod(n1, n2, c3);
       Real D = dot3(n1, c1);
       if (D < Real(0))  // canonical order D>0: swap (n2,n3) and (c2,c3); v is unchanged
         for (int a = 0; a < 3; ++a) {
-          Real tmp = n2[a]; n2[a] = n3[a]; n3[a] = tmp;
-          tmp = c2[a]; c2[a] = c3[a]; c3[a] = tmp;
+          Real tmp = n2[a];
+          n2[a] = n3[a];
+          n3[a] = tmp;
+          tmp = c2[a];
+          c2[a] = c3[a];
+          c3[a] = tmp;
         }
       const Real v[3] = {vx[t], vy[t], vz[t]};
       Real f12[3], f23[3], f31[3];
-      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      edgeFoot(v, c3, f12);
+      edgeFoot(v, c1, f23);
+      edgeFoot(v, c2, f31);
       Real e[3], d = 0;
-      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; d += det3(e, f12, v);
-      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; d += det3(e, f23, v);
-      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2]; d += det3(e, f31, v);
+      e[0] = n1[0] - n2[0];
+      e[1] = n1[1] - n2[1];
+      e[2] = n1[2] - n2[2];
+      d += det3(e, f12, v);
+      e[0] = n2[0] - n3[0];
+      e[1] = n2[1] - n3[1];
+      e[2] = n2[2] - n3[2];
+      d += det3(e, f23, v);
+      e[0] = n3[0] - n1[0];
+      e[1] = n3[1] - n1[1];
+      e[2] = n3[2] - n1[2];
+      d += det3(e, f31, v);
       vol += d;
     }
     return vol * (Real(1) / Real(6));
   }
 
-  /// Per-facet areas by the same vertex-local scatter (area[k] zeroed by caller, size np). Each vertex
-  /// scatters into its 3 incident facets; |n_i| is the only sqrt (per facet). Order/adjacency-free.
+  /// Per-facet areas by the same vertex-local scatter (area[k] zeroed by caller, size np). Each
+  /// vertex scatters into its 3 incident facets; |n_i| is the only sqrt (per facet).
+  /// Order/adjacency-free.
   KOKKOS_INLINE_FUNCTION void facetAreasPerVertex(Real* area) const {
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       int k1 = t0[t], k2 = t1[t], k3 = t2[t];
       Real n1[3], n2[3], n3[3];
-      planeN(k1, n1); planeN(k2, n2); planeN(k3, n3);
+      planeN(k1, n1);
+      planeN(k2, n2);
+      planeN(k3, n3);
       Real c1[3], c2[3], c3[3];
-      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      xprod(n2, n3, c1);
+      xprod(n3, n1, c2);
+      xprod(n1, n2, c3);
       Real D = dot3(n1, c1);
       if (D < Real(0)) {  // canonical: swap planes 2,3 (normals, cross, AND indices)
-        for (int a = 0; a < 3; ++a) { Real tm = n2[a]; n2[a] = n3[a]; n3[a] = tm; tm = c2[a]; c2[a] = c3[a]; c3[a] = tm; }
-        int tk = k2; k2 = k3; k3 = tk;
+        for (int a = 0; a < 3; ++a) {
+          Real tm = n2[a];
+          n2[a] = n3[a];
+          n3[a] = tm;
+          tm = c2[a];
+          c2[a] = c3[a];
+          c3[a] = tm;
+        }
+        int tk = k2;
+        k2 = k3;
+        k3 = tk;
       }
       const Real v[3] = {vx[t], vy[t], vz[t]};
       Real f12[3], f23[3], f31[3];
-      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      edgeFoot(v, c3, f12);
+      edgeFoot(v, c1, f23);
+      edgeFoot(v, c2, f31);
       Real g[3];
-      g[0] = f12[0] - f31[0]; g[1] = f12[1] - f31[1]; g[2] = f12[2] - f31[2];
+      g[0] = f12[0] - f31[0];
+      g[1] = f12[1] - f31[1];
+      g[2] = f12[2] - f31[2];
       area[k1] += det3(n1, g, v) / (Real(2) * Kokkos::sqrt(dot3(n1, n1)));
-      g[0] = f23[0] - f12[0]; g[1] = f23[1] - f12[1]; g[2] = f23[2] - f12[2];
+      g[0] = f23[0] - f12[0];
+      g[1] = f23[1] - f12[1];
+      g[2] = f23[2] - f12[2];
       area[k2] += det3(n2, g, v) / (Real(2) * Kokkos::sqrt(dot3(n2, n2)));
-      g[0] = f31[0] - f23[0]; g[1] = f31[1] - f23[1]; g[2] = f31[2] - f23[2];
+      g[0] = f31[0] - f23[0];
+      g[1] = f31[1] - f23[1];
+      g[2] = f31[2] - f23[2];
       area[k3] += det3(n3, g, v) / (Real(2) * Kokkos::sqrt(dot3(n3, n3)));
     }
   }
@@ -840,8 +1030,8 @@ struct ConvexCell {
   /// Facet i's local boundary at v is the path f_first → v → f_last with apex n_i: two signed
   /// triangles (n_i,f_first,v) and (n_i,v,f_last). |n_i| is the one sqrt (per facet).
   KOKKOS_INLINE_FUNCTION static void scatterFacetMoment(int ki, const Real ni[3], const Real ff[3],
-                                                        const Real fl[3], const Real v[3], Real* area,
-                                                        Real* mx, Real* my, Real* mz) {
+                                                        const Real fl[3], const Real v[3],
+                                                        Real* area, Real* mx, Real* my, Real* mz) {
     const Real inv2n = Real(0.5) / Kokkos::sqrt(dot3(ni, ni));
     const Real sa = det3(ni, ff, v) * inv2n;   // triangle (ni, ff, v)
     const Real sb = -det3(ni, fl, v) * inv2n;  // triangle (ni, v, fl)
@@ -851,35 +1041,54 @@ struct ConvexCell {
     mz[ki] += sa * (ni[2] + ff[2] + v[2]) / Real(3) + sb * (ni[2] + v[2] + fl[2]) / Real(3);
   }
 
-  /// Per-facet area + first moment ∫x dA by the same vertex-local scatter (caller zeroes the np-sized
-  /// arrays). The area-weighted facet centroid is c_k = (mx,my,mz)[k]/area[k]; the volume gradient
-  /// (force) is then dV_k = ∂V/∂r_k = (area_k/|r_k|)(r_k − c_k) with connector r_k = 2·n[k] — sort/adjacency-free.
-  KOKKOS_INLINE_FUNCTION void facetMomentsPerVertex(Real* area, Real* mx, Real* my, Real* mz) const {
+  /// Per-facet area + first moment ∫x dA by the same vertex-local scatter (caller zeroes the
+  /// np-sized arrays). The area-weighted facet centroid is c_k = (mx,my,mz)[k]/area[k]; the volume
+  /// gradient (force) is then dV_k = ∂V/∂r_k = (area_k/|r_k|)(r_k − c_k) with connector r_k =
+  /// 2·n[k] — sort/adjacency-free.
+  KOKKOS_INLINE_FUNCTION void facetMomentsPerVertex(Real* area, Real* mx, Real* my,
+                                                    Real* mz) const {
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       int k1 = t0[t], k2 = t1[t], k3 = t2[t];
       Real n1[3], n2[3], n3[3];
-      planeN(k1, n1); planeN(k2, n2); planeN(k3, n3);
+      planeN(k1, n1);
+      planeN(k2, n2);
+      planeN(k3, n3);
       Real c1[3], c2[3], c3[3];
-      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      xprod(n2, n3, c1);
+      xprod(n3, n1, c2);
+      xprod(n1, n2, c3);
       if (dot3(n1, c1) < Real(0)) {  // canonical: swap planes 2,3 (normals, cross, indices)
-        for (int a = 0; a < 3; ++a) { Real tm = n2[a]; n2[a] = n3[a]; n3[a] = tm; tm = c2[a]; c2[a] = c3[a]; c3[a] = tm; }
-        int tk = k2; k2 = k3; k3 = tk;
+        for (int a = 0; a < 3; ++a) {
+          Real tm = n2[a];
+          n2[a] = n3[a];
+          n3[a] = tm;
+          tm = c2[a];
+          c2[a] = c3[a];
+          c3[a] = tm;
+        }
+        int tk = k2;
+        k2 = k3;
+        k3 = tk;
       }
       const Real v[3] = {vx[t], vy[t], vz[t]};
       Real f12[3], f23[3], f31[3];
-      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      edgeFoot(v, c3, f12);
+      edgeFoot(v, c1, f23);
+      edgeFoot(v, c2, f31);
       scatterFacetMoment(k1, n1, f12, f31, v, area, mx, my, mz);
       scatterFacetMoment(k2, n2, f23, f12, v, area, mx, my, mz);
       scatterFacetMoment(k3, n3, f31, f23, v, area, mx, my, mz);
     }
   }
 
-  /// Scatter one facet's contribution to the volume-gradient NUMERATOR 2·S_a·n_k − S_m AT a vertex, with
-  /// NO sqrt and into just the 3 output arrays. The trick: n_k is the SAME normal (= ni) at every vertex
-  /// of facet k, so the per-vertex term 2·da·ni − mom already carries the facet normal; summed over the
-  /// facet's vertices it is exactly 2·(Σda)·n_k − Σmom = 2·S_a·n_k − S_m. `da`, `mom` are RAW (no 1/(2|n|)
-  /// factor); geomVolumeGrad's fold supplies the shared 1/(2·nn[k]) once per facet (also sqrt-free).
+  /// Scatter one facet's contribution to the volume-gradient NUMERATOR 2·S_a·n_k − S_m AT a vertex,
+  /// with NO sqrt and into just the 3 output arrays. The trick: n_k is the SAME normal (= ni) at
+  /// every vertex of facet k, so the per-vertex term 2·da·ni − mom already carries the facet
+  /// normal; summed over the facet's vertices it is exactly 2·(Σda)·n_k − Σmom = 2·S_a·n_k − S_m.
+  /// `da`, `mom` are RAW (no 1/(2|n|) factor); geomVolumeGrad's fold supplies the shared
+  /// 1/(2·nn[k]) once per facet (also sqrt-free).
   KOKKOS_INLINE_FUNCTION static void scatterGradRaw(int ki, const Real ni[3], const Real ff[3],
                                                     const Real fl[3], const Real v[3], Real* dgx,
                                                     Real* dgy, Real* dgz) {
@@ -894,51 +1103,80 @@ struct ConvexCell {
     dgz[ki] += Real(2) * da * ni[2] - momz;
   }
 
-  /// geomVolumeGrad tier (Phase 2): cell volume + the volume gradient dV/dn_k per plane, with NO area/
-  /// centroid arrays exposed, NO sqrt anywhere, and only the 3 output arrays touched (so it keeps the
-  /// compact cell's GPU occupancy). dV/dn_k = (2·A_k·n_k − m_k)/|n_k|; scattering the raw numerator
-  /// 2·S_a·n_k − S_m per vertex (S_a = 2|n_k|·A_k, S_m = 2|n_k|·m_k), the per-facet fold is
-  /// dV/dn_k = (numerator)/(2·nn[k]) — the |n_k| cancels into the stored nn=|n|². Caller zeroes the
-  /// np-sized dgx/dgy/dgz (accumulate the numerator, then overwritten in place by the fold). Matches
-  /// geometryPerVertex's closed form to round-off. Voronoi position force dV/dr_k = ½·(dgx,dgy,dgz)[k];
-  /// the policy layer (Phase 3) owns that chain.
+  /// geomVolumeGrad tier (Phase 2): cell volume + the volume gradient dV/dn_k per plane, with NO
+  /// area/ centroid arrays exposed, NO sqrt anywhere, and only the 3 output arrays touched (so it
+  /// keeps the compact cell's GPU occupancy). dV/dn_k = (2·A_k·n_k − m_k)/|n_k|; scattering the raw
+  /// numerator 2·S_a·n_k − S_m per vertex (S_a = 2|n_k|·A_k, S_m = 2|n_k|·m_k), the per-facet fold
+  /// is dV/dn_k = (numerator)/(2·nn[k]) — the |n_k| cancels into the stored nn=|n|². Caller zeroes
+  /// the np-sized dgx/dgy/dgz (accumulate the numerator, then overwritten in place by the fold).
+  /// Matches geometryPerVertex's closed form to round-off. Voronoi position force dV/dr_k =
+  /// ½·(dgx,dgy,dgz)[k]; the policy layer (Phase 3) owns that chain.
   KOKKOS_INLINE_FUNCTION void geomVolumeGrad(Real& vol, Real* dgx, Real* dgy, Real* dgz) const {
     Real V = 0;
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       int k1 = t0[t], k2 = t1[t], k3 = t2[t];
       Real n1[3], n2[3], n3[3];
-      planeN(k1, n1); planeN(k2, n2); planeN(k3, n3);
+      planeN(k1, n1);
+      planeN(k2, n2);
+      planeN(k3, n3);
       Real c1[3], c2[3], c3[3];
-      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      xprod(n2, n3, c1);
+      xprod(n3, n1, c2);
+      xprod(n1, n2, c3);
       if (dot3(n1, c1) < Real(0)) {  // canonical D>0: swap planes 2,3 (normals, cross, indices)
-        for (int a = 0; a < 3; ++a) { Real tm = n2[a]; n2[a] = n3[a]; n3[a] = tm; tm = c2[a]; c2[a] = c3[a]; c3[a] = tm; }
-        int tk = k2; k2 = k3; k3 = tk;
+        for (int a = 0; a < 3; ++a) {
+          Real tm = n2[a];
+          n2[a] = n3[a];
+          n3[a] = tm;
+          tm = c2[a];
+          c2[a] = c3[a];
+          c3[a] = tm;
+        }
+        int tk = k2;
+        k2 = k3;
+        k3 = tk;
       }
       const Real v[3] = {vx[t], vy[t], vz[t]};
       Real f12[3], f23[3], f31[3];
-      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      edgeFoot(v, c3, f12);
+      edgeFoot(v, c1, f23);
+      edgeFoot(v, c2, f31);
       Real e[3];
-      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; V += det3(e, f12, v);
-      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; V += det3(e, f23, v);
-      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2]; V += det3(e, f31, v);
+      e[0] = n1[0] - n2[0];
+      e[1] = n1[1] - n2[1];
+      e[2] = n1[2] - n2[2];
+      V += det3(e, f12, v);
+      e[0] = n2[0] - n3[0];
+      e[1] = n2[1] - n3[1];
+      e[2] = n2[2] - n3[2];
+      V += det3(e, f23, v);
+      e[0] = n3[0] - n1[0];
+      e[1] = n3[1] - n1[1];
+      e[2] = n3[2] - n1[2];
+      V += det3(e, f31, v);
       scatterGradRaw(k1, n1, f12, f31, v, dgx, dgy, dgz);
       scatterGradRaw(k2, n2, f23, f12, v, dgx, dgy, dgz);
       scatterGradRaw(k3, n3, f31, f23, v, dgx, dgy, dgz);
     }
     for (int k = 0; k < np; ++k) {  // per-facet fold, sqrt-free: numerator/(2·nn)
       const Real inv = (nn[k] > Real(0)) ? Real(1) / (Real(2) * nn[k]) : Real(0);
-      dgx[k] *= inv; dgy[k] *= inv; dgz[k] *= inv;
+      dgx[k] *= inv;
+      dgy[k] *= inv;
+      dgz[k] *= inv;
     }
     vol = V * (Real(1) / Real(6));
   }
 
-  /// Scatter one facet's RAW area S_a (=Σdet3) and RAW first moment S_m (=Σdet3·centroid_tri) AT a vertex
-  /// — scatterFacetMoment without the 1/(2|n|) factor (so NO sqrt). geomVolumeArea defers the shared
-  /// 1/(2|n|) to its per-facet fold, where it cancels against |n| for the area-vector and the gradient.
-  KOKKOS_INLINE_FUNCTION static void scatterAreaMomentRaw(int ki, const Real ni[3], const Real ff[3],
-                                                          const Real fl[3], const Real v[3], Real* sa_acc,
-                                                          Real* smx, Real* smy, Real* smz) {
+  /// Scatter one facet's RAW area S_a (=Σdet3) and RAW first moment S_m (=Σdet3·centroid_tri) AT a
+  /// vertex — scatterFacetMoment without the 1/(2|n|) factor (so NO sqrt). geomVolumeArea defers
+  /// the shared 1/(2|n|) to its per-facet fold, where it cancels against |n| for the area-vector
+  /// and the gradient.
+  KOKKOS_INLINE_FUNCTION static void scatterAreaMomentRaw(int ki, const Real ni[3],
+                                                          const Real ff[3], const Real fl[3],
+                                                          const Real v[3], Real* sa_acc, Real* smx,
+                                                          Real* smy, Real* smz) {
     const Real sa = det3(ni, ff, v);   // raw signed area of triangle (ni, ff, v)
     const Real sb = -det3(ni, fl, v);  // raw signed area of triangle (ni, v, fl)
     sa_acc[ki] += sa + sb;
@@ -947,36 +1185,63 @@ struct ConvexCell {
     smz[ki] += sa * (ni[2] + ff[2] + v[2]) / Real(3) + sb * (ni[2] + v[2] + fl[2]) / Real(3);
   }
 
-  /// geomVolumeArea tier (Phase 2): cell volume + the outward area-VECTOR A_k·n_k/|n_k| AND the volume
-  /// gradient dV/dn_k per plane — the full G2 physics set (areas for fluxes/momentum, gradient for force).
-  /// Like geomVolumeGrad it is fully SQRT-FREE: both outputs are |n|²-normalized — areaVec_k =
-  /// S_a·n_k/(2·nn[k]) and dV/dn_k = (2·S_a·n_k − S_m)/(2·nn[k]) — with the raw S_a (=2|n_k|·A_k) and
-  /// S_m (=2|n_k|·m_k) scattered per vertex. No extra scratch: during the scatter `avx` holds S_a and
-  /// (dgx,dgy,dgz) hold S_m; the per-facet fold overwrites them in place (so the compact-cell stack stays
-  /// at the 6 caller arrays). Caller zeroes all six. The facet centroid, if wanted, is c_k = S_m/S_a
-  /// (also sqrt-free) — derivable but not exposed here. Matches facetGeometry's areaVec/dv to round-off.
+  /// geomVolumeArea tier (Phase 2): cell volume + the outward area-VECTOR A_k·n_k/|n_k| AND the
+  /// volume gradient dV/dn_k per plane — the full G2 physics set (areas for fluxes/momentum,
+  /// gradient for force). Like geomVolumeGrad it is fully SQRT-FREE: both outputs are
+  /// |n|²-normalized — areaVec_k = S_a·n_k/(2·nn[k]) and dV/dn_k = (2·S_a·n_k − S_m)/(2·nn[k]) —
+  /// with the raw S_a (=2|n_k|·A_k) and S_m (=2|n_k|·m_k) scattered per vertex. No extra scratch:
+  /// during the scatter `avx` holds S_a and (dgx,dgy,dgz) hold S_m; the per-facet fold overwrites
+  /// them in place (so the compact-cell stack stays at the 6 caller arrays). Caller zeroes all six.
+  /// The facet centroid, if wanted, is c_k = S_m/S_a (also sqrt-free) — derivable but not exposed
+  /// here. Matches facetGeometry's areaVec/dv to round-off.
   KOKKOS_INLINE_FUNCTION void geomVolumeArea(Real& vol, Real* avx, Real* avy, Real* avz, Real* dgx,
                                              Real* dgy, Real* dgz) const {
     Real V = 0;
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       int k1 = t0[t], k2 = t1[t], k3 = t2[t];
       Real n1[3], n2[3], n3[3];
-      planeN(k1, n1); planeN(k2, n2); planeN(k3, n3);
+      planeN(k1, n1);
+      planeN(k2, n2);
+      planeN(k3, n3);
       Real c1[3], c2[3], c3[3];
-      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      xprod(n2, n3, c1);
+      xprod(n3, n1, c2);
+      xprod(n1, n2, c3);
       if (dot3(n1, c1) < Real(0)) {  // canonical D>0: swap planes 2,3 (normals, cross, indices)
-        for (int a = 0; a < 3; ++a) { Real tm = n2[a]; n2[a] = n3[a]; n3[a] = tm; tm = c2[a]; c2[a] = c3[a]; c3[a] = tm; }
-        int tk = k2; k2 = k3; k3 = tk;
+        for (int a = 0; a < 3; ++a) {
+          Real tm = n2[a];
+          n2[a] = n3[a];
+          n3[a] = tm;
+          tm = c2[a];
+          c2[a] = c3[a];
+          c3[a] = tm;
+        }
+        int tk = k2;
+        k2 = k3;
+        k3 = tk;
       }
       const Real v[3] = {vx[t], vy[t], vz[t]};
       Real f12[3], f23[3], f31[3];
-      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      edgeFoot(v, c3, f12);
+      edgeFoot(v, c1, f23);
+      edgeFoot(v, c2, f31);
       Real e[3];
-      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; V += det3(e, f12, v);
-      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; V += det3(e, f23, v);
-      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2]; V += det3(e, f31, v);
-      scatterAreaMomentRaw(k1, n1, f12, f31, v, avx, dgx, dgy, dgz);  // avx <- S_a, (dgx,dgy,dgz) <- S_m
+      e[0] = n1[0] - n2[0];
+      e[1] = n1[1] - n2[1];
+      e[2] = n1[2] - n2[2];
+      V += det3(e, f12, v);
+      e[0] = n2[0] - n3[0];
+      e[1] = n2[1] - n3[1];
+      e[2] = n2[2] - n3[2];
+      V += det3(e, f23, v);
+      e[0] = n3[0] - n1[0];
+      e[1] = n3[1] - n1[1];
+      e[2] = n3[2] - n1[2];
+      V += det3(e, f31, v);
+      scatterAreaMomentRaw(k1, n1, f12, f31, v, avx, dgx, dgy,
+                           dgz);  // avx <- S_a, (dgx,dgy,dgz) <- S_m
       scatterAreaMomentRaw(k2, n2, f23, f12, v, avx, dgx, dgy, dgz);
       scatterAreaMomentRaw(k3, n3, f31, f23, v, avx, dgx, dgy, dgz);
     }
@@ -994,47 +1259,71 @@ struct ConvexCell {
     vol = V * (Real(1) / Real(6));
   }
 
-  /// Adjoint of a cross-product edge direction: (∂(N[p]×N[q])/∂n_j)^T w. Used by the analytic geomVolumeAreaGrad.
+  /// Adjoint of a cross-product edge direction: (∂(N[p]×N[q])/∂n_j)^T w. Used by the analytic
+  /// geomVolumeAreaGrad.
   KOKKOS_INLINE_FUNCTION static void edgeCrossAdj(int j, int p, int q, const Real Nn[3][3],
                                                   const Real w[3], Real out[3]) {
     if (j == p) {
       xprod(Nn[q], w, out);
     } else if (j == q) {
-      Real tm[3]; xprod(Nn[p], w, tm);
-      out[0] = -tm[0]; out[1] = -tm[1]; out[2] = -tm[2];
+      Real tm[3];
+      xprod(Nn[p], w, tm);
+      out[0] = -tm[0];
+      out[1] = -tm[1];
+      out[2] = -tm[2];
     } else {
       out[0] = out[1] = out[2] = Real(0);
     }
   }
 
-  /// geomFull primitive: the per-dual-triangle ("subtetrahedron") area-Jacobian block — the building
-  /// block of the FULL coupled dA_k/dn_l (the OT/power-diagram Hessian), with NO ordering and NO
-  /// adjacency. ANALYTIC, no-recompute version: it reuses the CACHED vertex v and computes the per-triangle
-  /// intermediates (edge directions, feet) once in Real, then forms the derivatives in closed form. The
-  /// vertex derivative is the rank-1 ∂v/∂n_j = (c_j/D)(2n_j − v)^T (c_j the cofactor, D the determinant);
-  /// the area numerator N_i=det3(n_i,g_i,v) is differentiated trilinearly (∂/∂n_i = g_i×v, ∂/∂g via the
-  /// foot adjoints, ∂/∂v via the rank-1 above), and the 1/(2|n_i|) factor adds the −δ_ij A_i n_i/nn_i term.
-  /// Outputs: `pl[3]` = the (canonically ordered) plane indices; `contrib[3]` = the area contributions
-  /// (Σ over triangles reproduces facetAreasPerVertex's area[k]); `grad[i][j][c]` = ∂contrib_i/∂n_{pl[j]}[c].
+  /// geomFull primitive: the per-dual-triangle ("subtetrahedron") area-Jacobian block — the
+  /// building block of the FULL coupled dA_k/dn_l (the OT/power-diagram Hessian), with NO ordering
+  /// and NO adjacency. ANALYTIC, no-recompute version: it reuses the CACHED vertex v and computes
+  /// the per-triangle intermediates (edge directions, feet) once in Real, then forms the
+  /// derivatives in closed form. The vertex derivative is the rank-1 ∂v/∂n_j = (c_j/D)(2n_j − v)^T
+  /// (c_j the cofactor, D the determinant); the area numerator N_i=det3(n_i,g_i,v) is
+  /// differentiated trilinearly (∂/∂n_i = g_i×v, ∂/∂g via the foot adjoints, ∂/∂v via the rank-1
+  /// above), and the 1/(2|n_i|) factor adds the −δ_ij A_i n_i/nn_i term. Outputs: `pl[3]` = the
+  /// (canonically ordered) plane indices; `contrib[3]` = the area contributions (Σ over triangles
+  /// reproduces facetAreasPerVertex's area[k]); `grad[i][j][c]` = ∂contrib_i/∂n_{pl[j]}[c].
   /// Consumer gathers A_{pl[i]} += contrib[i], dA_{pl[i]}/dn_{pl[j]} += grad[i][j], in any order.
-  KOKKOS_INLINE_FUNCTION void geomVolumeAreaGrad(int t, int pl[3], Real contrib[3], Real grad[3][3][3]) const {
-    // planes + canonical swap (matches facetAreasPerVertex), reusing the cached vertex — nothing recomputed.
-    // Every loop is VOR_UNROLL'd so the small local arrays scalarize into registers on GPU (no local-memory
-    // spill from runtime indices); on CPU the macro is empty.
+  KOKKOS_INLINE_FUNCTION void geomVolumeAreaGrad(int t, int pl[3], Real contrib[3],
+                                                 Real grad[3][3][3]) const {
+    // planes + canonical swap (matches facetAreasPerVertex), reusing the cached vertex — nothing
+    // recomputed. Every loop is VOR_UNROLL'd so the small local arrays scalarize into registers on
+    // GPU (no local-memory spill from runtime indices); on CPU the macro is empty.
     int kk[3] = {t0[t], t1[t], t2[t]};
     Real Nn[3][3];
-    VOR_UNROLL for (int a = 0; a < 3; ++a) { Nn[a][0] = n[kk[a]][0]; Nn[a][1] = n[kk[a]][1]; Nn[a][2] = n[kk[a]][2]; }
-    { Real c01[3]; xprod(Nn[1], Nn[2], c01);
+    VOR_UNROLL for (int a = 0; a < 3; ++a) {
+      Nn[a][0] = n[kk[a]][0];
+      Nn[a][1] = n[kk[a]][1];
+      Nn[a][2] = n[kk[a]][2];
+    }
+    {
+      Real c01[3];
+      xprod(Nn[1], Nn[2], c01);
       if (dot3(Nn[0], c01) < Real(0)) {
-        VOR_UNROLL for (int d = 0; d < 3; ++d) { Real tm = Nn[1][d]; Nn[1][d] = Nn[2][d]; Nn[2][d] = tm; }
-        int tk = kk[1]; kk[1] = kk[2]; kk[2] = tk;
+        VOR_UNROLL for (int d = 0; d < 3; ++d) {
+          Real tm = Nn[1][d];
+          Nn[1][d] = Nn[2][d];
+          Nn[2][d] = tm;
+        }
+        int tk = kk[1];
+        kk[1] = kk[2];
+        kk[2] = tk;
       }
     }
-    pl[0] = kk[0]; pl[1] = kk[1]; pl[2] = kk[2];
+    pl[0] = kk[0];
+    pl[1] = kk[1];
+    pl[2] = kk[2];
     const Real v[3] = {vx[t], vy[t], vz[t]};
     Real nn3[3], u[3][3];  // u[a] = 2 n_a − v
-    VOR_UNROLL for (int a = 0; a < 3; ++a) { nn3[a] = dot3(Nn[a], Nn[a]); VOR_UNROLL for (int d = 0; d < 3; ++d) u[a][d] = Real(2) * Nn[a][d] - v[d]; }
-    // edge directions e[m] = N[eP]×N[eQ] for edges (0,1),(1,2),(2,0); cofactor of plane j is c_j = e[(j+1)%3]
+    VOR_UNROLL for (int a = 0; a < 3; ++a) {
+      nn3[a] = dot3(Nn[a], Nn[a]);
+      VOR_UNROLL for (int d = 0; d < 3; ++d) u[a][d] = Real(2) * Nn[a][d] - v[d];
+    }
+    // edge directions e[m] = N[eP]×N[eQ] for edges (0,1),(1,2),(2,0); cofactor of plane j is c_j =
+    // e[(j+1)%3]
     const int eP[3] = {0, 1, 2}, eQ[3] = {1, 2, 0};
     Real e[3][3], ecc[3], es[3], F[3][3];
     VOR_UNROLL for (int m = 0; m < 3; ++m) {
@@ -1042,7 +1331,8 @@ struct ConvexCell {
       ecc[m] = dot3(e[m], e[m]);
       const Real evc = dot3(v, e[m]);
       es[m] = (ecc[m] > Real(0)) ? evc / ecc[m] : Real(0);
-      VOR_UNROLL for (int d = 0; d < 3; ++d) F[m][d] = v[d] - es[m] * e[m][d];  // foot of v on edge line m
+      VOR_UNROLL for (int d = 0; d < 3; ++d) F[m][d] =
+          v[d] - es[m] * e[m][d];  // foot of v on edge line m
     }
     const Real D = dot3(Nn[0], e[1]);  // e[1] = N1×N2 = cofactor c_0;  D = det(n0,n1,n2) > 0
     Real g[3][3], den[3];
@@ -1054,13 +1344,19 @@ struct ConvexCell {
       contrib[i] = (den[i] > Real(0)) ? Ni / den[i] : Real(0);
     }
     VOR_UNROLL for (int i = 0; i < 3; ++i) {
-      Real wi[3]; xprod(v, Nn[i], wi);         // w_i = v×n_i  (∂det3(n_i,·,v)/∂g)
-      Real nixg[3]; xprod(Nn[i], g[i], nixg);  // n_i×g_i      (∂det3(n_i,g_i,·)/∂v)
+      Real wi[3];
+      xprod(v, Nn[i], wi);  // w_i = v×n_i  (∂det3(n_i,·,v)/∂g)
+      Real nixg[3];
+      xprod(Nn[i], g[i], nixg);  // n_i×g_i      (∂det3(n_i,g_i,·)/∂v)
       const int mb = (i + 2) % 3;
       VOR_UNROLL for (int j = 0; j < 3; ++j) {
         const Real* cj = e[(j + 1) % 3];  // cofactor of plane j
         Real gN[3] = {0, 0, 0};
-        if (i == j) { Real gxv[3]; xprod(g[i], v, gxv); VOR_UNROLL for (int d = 0; d < 3; ++d) gN[d] += gxv[d]; }  // ∂/∂n_i
+        if (i == j) {
+          Real gxv[3];
+          xprod(g[i], v, gxv);
+          VOR_UNROLL for (int d = 0; d < 3; ++d) gN[d] += gxv[d];
+        }  // ∂/∂n_i
         const Real alpha = dot3(nixg, cj) / D;  // ∂/∂v (rank-1)
         VOR_UNROLL for (int d = 0; d < 3; ++d) gN[d] += alpha * u[j][d];
         // ∂/∂g = (∂F[i]/∂n_j − ∂F[(i+2)%3]/∂n_j)^T w_i  — the two foot adjoints
@@ -1068,8 +1364,8 @@ struct ConvexCell {
           const int m = (s == 0) ? i : mb;
           const Real sgn = (s == 0) ? Real(1) : Real(-1);
           const int p = eP[m], q = eQ[m];
-          const Real cjw = dot3(cj, wi);     // for vAdj
-          const Real cje = dot3(cj, e[m]);   // for dS
+          const Real cjw = dot3(cj, wi);    // for vAdj
+          const Real cje = dot3(cj, e[m]);  // for dS
           const Real emw = dot3(e[m], wi);
           Real eaW[3], eaV[3], eaE[3];
           edgeCrossAdj(j, p, q, Nn, wi, eaW);
@@ -1077,11 +1373,11 @@ struct ConvexCell {
           edgeCrossAdj(j, p, q, Nn, e[m], eaE);
           const Real inv_ecc = (ecc[m] > Real(0)) ? Real(1) / ecc[m] : Real(0);
           Real dS[3];  // ∂s_m/∂n_j
-          VOR_UNROLL for (int d = 0; d < 3; ++d)
-            dS[d] = ((cje / D) * u[j][d] + eaV[d]) * inv_ecc - (es[m] * inv_ecc) * Real(2) * eaE[d];
+          VOR_UNROLL for (int d = 0; d < 3; ++d) dS[d] =
+              ((cje / D) * u[j][d] + eaV[d]) * inv_ecc - (es[m] * inv_ecc) * Real(2) * eaE[d];
           // (∂F[m]/∂n_j)^T w_i = (c_j·w_i/D) u_j − (e_m·w_i) dS − s_m (∂e_m/∂n_j)^T w_i
-          VOR_UNROLL for (int d = 0; d < 3; ++d)
-            gN[d] += sgn * ((cjw / D) * u[j][d] - emw * dS[d] - es[m] * eaW[d]);
+          VOR_UNROLL for (int d = 0; d < 3; ++d) gN[d] +=
+              sgn * ((cjw / D) * u[j][d] - emw * dS[d] - es[m] * eaW[d]);
         }
         const Real invden = (den[i] > Real(0)) ? Real(1) / den[i] : Real(0);
         VOR_UNROLL for (int d = 0; d < 3; ++d) grad[i][j][d] = gN[d] * invden;
@@ -1094,78 +1390,126 @@ struct ConvexCell {
   }
 
   /// Reference (forward-AD) implementation of the per-triangle area-Jacobian, kept only as the
-  /// machine-precision ORACLE for the analytic geomVolumeAreaGrad (it recomputes everything in dual arithmetic,
-  /// including the vertex — the redundancy the analytic version removes). Same outputs as geomVolumeAreaGrad.
-  KOKKOS_INLINE_FUNCTION void geomVolumeAreaGradAD(int t, int pl[3], Real contrib[3], Real grad[3][3][3]) const {
+  /// machine-precision ORACLE for the analytic geomVolumeAreaGrad (it recomputes everything in dual
+  /// arithmetic, including the vertex — the redundancy the analytic version removes). Same outputs
+  /// as geomVolumeAreaGrad.
+  KOKKOS_INLINE_FUNCTION void geomVolumeAreaGradAD(int t, int pl[3], Real contrib[3],
+                                                   Real grad[3][3][3]) const {
     using D = detail::Dual<Real, 9>;
     int k1 = t0[t], k2 = t1[t], k3 = t2[t];
     Real rn1[3] = {n[k1][0], n[k1][1], n[k1][2]};
     Real rn2[3] = {n[k2][0], n[k2][1], n[k2][2]};
     Real rn3[3] = {n[k3][0], n[k3][1], n[k3][2]};
-    {  // canonical D>0 swap on the real values (same as facetAreasPerVertex) so contributions land right
-      Real cc[3]; xprod(rn2, rn3, cc);
+    {  // canonical D>0 swap on the real values (same as facetAreasPerVertex) so contributions land
+       // right
+      Real cc[3];
+      xprod(rn2, rn3, cc);
       if (dot3(rn1, cc) < Real(0)) {
-        for (int a = 0; a < 3; ++a) { Real tm = rn2[a]; rn2[a] = rn3[a]; rn3[a] = tm; }
-        int tk = k2; k2 = k3; k3 = tk;
+        for (int a = 0; a < 3; ++a) {
+          Real tm = rn2[a];
+          rn2[a] = rn3[a];
+          rn3[a] = tm;
+        }
+        int tk = k2;
+        k2 = k3;
+        k3 = tk;
       }
     }
-    pl[0] = k1; pl[1] = k2; pl[2] = k3;
+    pl[0] = k1;
+    pl[1] = k2;
+    pl[2] = k3;
     D n1[3], n2[3], n3[3];
     for (int a = 0; a < 3; ++a) {  // seed: n1 <- slots 0..2, n2 <- 3..5, n3 <- 6..8
       n1[a] = detail::dseed<Real, 9>(rn1[a], a);
       n2[a] = detail::dseed<Real, 9>(rn2[a], 3 + a);
       n3[a] = detail::dseed<Real, 9>(rn3[a], 6 + a);
     }
-    const D nn1 = detail::ddot<Real, 9>(n1, n1), nn2 = detail::ddot<Real, 9>(n2, n2), nn3 = detail::ddot<Real, 9>(n3, n3);
+    const D nn1 = detail::ddot<Real, 9>(n1, n1), nn2 = detail::ddot<Real, 9>(n2, n2),
+            nn3 = detail::ddot<Real, 9>(n3, n3);
     D c1[3], c2[3], c3[3];
-    detail::dcross<Real, 9>(n2, n3, c1); detail::dcross<Real, 9>(n3, n1, c2); detail::dcross<Real, 9>(n1, n2, c3);
+    detail::dcross<Real, 9>(n2, n3, c1);
+    detail::dcross<Real, 9>(n3, n1, c2);
+    detail::dcross<Real, 9>(n1, n2, c3);
     const D Dd = detail::ddot<Real, 9>(n1, c1);  // det
     D v[3];
-    for (int a = 0; a < 3; ++a) v[a] = (nn1 * c1[a] + nn2 * c2[a] + nn3 * c3[a]) / Dd;  // Cramer vertex
+    for (int a = 0; a < 3; ++a)
+      v[a] = (nn1 * c1[a] + nn2 * c2[a] + nn3 * c3[a]) / Dd;  // Cramer vertex
     D f12[3], f23[3], f31[3];
-    detail::dedgeFoot<Real, 9>(v, c3, f12); detail::dedgeFoot<Real, 9>(v, c1, f23); detail::dedgeFoot<Real, 9>(v, c2, f31);
+    detail::dedgeFoot<Real, 9>(v, c3, f12);
+    detail::dedgeFoot<Real, 9>(v, c1, f23);
+    detail::dedgeFoot<Real, 9>(v, c2, f31);
     const D two = detail::dnum<Real, 9>(Real(2));
     D g[3], aa[3];
-    for (int a = 0; a < 3; ++a) g[a] = f12[a] - f31[a];
+    for (int a = 0; a < 3; ++a)
+      g[a] = f12[a] - f31[a];
     aa[0] = detail::ddet3<Real, 9>(n1, g, v) / (two * detail::dsqrt<Real, 9>(nn1));
-    for (int a = 0; a < 3; ++a) g[a] = f23[a] - f12[a];
+    for (int a = 0; a < 3; ++a)
+      g[a] = f23[a] - f12[a];
     aa[1] = detail::ddet3<Real, 9>(n2, g, v) / (two * detail::dsqrt<Real, 9>(nn2));
-    for (int a = 0; a < 3; ++a) g[a] = f31[a] - f23[a];
+    for (int a = 0; a < 3; ++a)
+      g[a] = f31[a] - f23[a];
     aa[2] = detail::ddet3<Real, 9>(n3, g, v) / (two * detail::dsqrt<Real, 9>(nn3));
     for (int i = 0; i < 3; ++i) {
       contrib[i] = aa[i].v;
       for (int j = 0; j < 3; ++j)
-        for (int c = 0; c < 3; ++c) grad[i][j][c] = aa[i].d[3 * j + c];
+        for (int c = 0; c < 3; ++c)
+          grad[i][j][c] = aa[i].d[3 * j + c];
     }
   }
 
-  /// MERGED vertex-local geometry: cell volume + per-facet area + per-facet first moment ∫x dA, all in
-  /// ONE pass (shares n,c,D,v,feet per vertex). The production G1+G2 kernel — sort-free, adjacency-free.
-  /// Caller zeroes the np-sized arrays. With connector r_k = 2·n[k] (so |r_k| = 2·sqrt(nn[k])), derive
-  /// per facet k:
+  /// MERGED vertex-local geometry: cell volume + per-facet area + per-facet first moment ∫x dA, all
+  /// in ONE pass (shares n,c,D,v,feet per vertex). The production G1+G2 kernel — sort-free,
+  /// adjacency-free. Caller zeroes the np-sized arrays. With connector r_k = 2·n[k] (so |r_k| =
+  /// 2·sqrt(nn[k])), derive per facet k:
   ///   areaVec_k = area[k] · r_k/|r_k| = area[k] · n[k]/|n[k]|   (outward, toward the neighbour)
   ///   centroid_k = (mx,my,mz)[k]/area[k]
   ///   force dV_k = (area[k]/|r_k|)·(r_k − centroid_k)
-  KOKKOS_INLINE_FUNCTION void geometryPerVertex(Real& vol, Real* area, Real* mx, Real* my, Real* mz) const {
+  KOKKOS_INLINE_FUNCTION void geometryPerVertex(Real& vol, Real* area, Real* mx, Real* my,
+                                                Real* mz) const {
     Real V = 0;
     for (int t = 0; t < nt; ++t) {
-      if (!alive[t]) continue;
+      if (!alive[t])
+        continue;
       int k1 = t0[t], k2 = t1[t], k3 = t2[t];
       Real n1[3], n2[3], n3[3];
-      planeN(k1, n1); planeN(k2, n2); planeN(k3, n3);
+      planeN(k1, n1);
+      planeN(k2, n2);
+      planeN(k3, n3);
       Real c1[3], c2[3], c3[3];
-      xprod(n2, n3, c1); xprod(n3, n1, c2); xprod(n1, n2, c3);
+      xprod(n2, n3, c1);
+      xprod(n3, n1, c2);
+      xprod(n1, n2, c3);
       if (dot3(n1, c1) < Real(0)) {  // canonical D>0: swap planes 2,3 (normals, cross, indices)
-        for (int a = 0; a < 3; ++a) { Real tm = n2[a]; n2[a] = n3[a]; n3[a] = tm; tm = c2[a]; c2[a] = c3[a]; c3[a] = tm; }
-        int tk = k2; k2 = k3; k3 = tk;
+        for (int a = 0; a < 3; ++a) {
+          Real tm = n2[a];
+          n2[a] = n3[a];
+          n3[a] = tm;
+          tm = c2[a];
+          c2[a] = c3[a];
+          c3[a] = tm;
+        }
+        int tk = k2;
+        k2 = k3;
+        k3 = tk;
       }
       const Real v[3] = {vx[t], vy[t], vz[t]};
       Real f12[3], f23[3], f31[3];
-      edgeFoot(v, c3, f12); edgeFoot(v, c1, f23); edgeFoot(v, c2, f31);
+      edgeFoot(v, c3, f12);
+      edgeFoot(v, c1, f23);
+      edgeFoot(v, c2, f31);
       Real e[3];
-      e[0] = n1[0] - n2[0]; e[1] = n1[1] - n2[1]; e[2] = n1[2] - n2[2]; V += det3(e, f12, v);
-      e[0] = n2[0] - n3[0]; e[1] = n2[1] - n3[1]; e[2] = n2[2] - n3[2]; V += det3(e, f23, v);
-      e[0] = n3[0] - n1[0]; e[1] = n3[1] - n1[1]; e[2] = n3[2] - n1[2]; V += det3(e, f31, v);
+      e[0] = n1[0] - n2[0];
+      e[1] = n1[1] - n2[1];
+      e[2] = n1[2] - n2[2];
+      V += det3(e, f12, v);
+      e[0] = n2[0] - n3[0];
+      e[1] = n2[1] - n3[1];
+      e[2] = n2[2] - n3[2];
+      V += det3(e, f23, v);
+      e[0] = n3[0] - n1[0];
+      e[1] = n3[1] - n1[1];
+      e[2] = n3[2] - n1[2];
+      V += det3(e, f31, v);
       scatterFacetMoment(k1, n1, f12, f31, v, area, mx, my, mz);
       scatterFacetMoment(k2, n2, f23, f12, v, area, mx, my, mz);
       scatterFacetMoment(k3, n3, f31, f23, v, area, mx, my, mz);
@@ -1182,13 +1526,16 @@ struct ConvexCell {
   /// so δV = ∫_face (−δ·(x−r_k)/|r_k|) dA = (area/|r_k|) δ·(r_k − c_k), with c_k the face
   /// centroid. Holding all other planes fixed, this is first-order exact ⇒
   ///   dV = ∂V/∂r_k = (area/|r_k|)·(r_k − c_k).
-  KOKKOS_INLINE_FUNCTION bool facetGeometry(int k, Real areaVec[3], Real dv[3], Real conn[3]) const {
+  KOKKOS_INLINE_FUNCTION bool facetGeometry(int k, Real areaVec[3], Real dv[3],
+                                            Real conn[3]) const {
     Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
     const int m = faceOrdered(k, fx, fy, fz);
-    if (m < 3) return false;
+    if (m < 3)
+      return false;
     Real A[3];
     polyAreaVec(fx, fy, fz, m, A);
-    const Real r[3] = {Real(2) * n[k][0], Real(2) * n[k][1], Real(2) * n[k][2]};  // connector r = 2·foot
+    const Real r[3] = {Real(2) * n[k][0], Real(2) * n[k][1],
+                       Real(2) * n[k][2]};                    // connector r = 2·foot
     if (A[0] * r[0] + A[1] * r[1] + A[2] * r[2] < Real(0)) {  // orient outward (toward neighbour)
       A[0] = -A[0];
       A[1] = -A[1];
@@ -1230,17 +1577,19 @@ struct ConvexCell {
 /// candidate's plane offset exceeds 2·max-vertex-rsq, no farther seed can cut. Mirrors
 /// the half-edge buildVoronoiCell, but on the compact ConvexCell.
 template <class Real, int MAXP, int MAXT, bool TrackAdj>
-KOKKOS_INLINE_FUNCTION void buildConvexCell(ConvexCell<Real, MAXP, MAXT, TrackAdj>& c, const Real L[3],
-                                            const Real* relx, const Real* rely, const Real* relz,
-                                            const int* ids, int nNbr) {
+KOKKOS_INLINE_FUNCTION void buildConvexCell(ConvexCell<Real, MAXP, MAXT, TrackAdj>& c,
+                                            const Real L[3], const Real* relx, const Real* rely,
+                                            const Real* relz, const int* ids, int nNbr) {
   c.initBox(L[0], L[1], L[2]);
   for (int i = 0; i < nNbr; ++i) {
     const Real rx = relx[i], ry = rely[i], rz = relz[i];
     const Real off = Real(0.5) * (rx * rx + ry * ry + rz * rz);  // plane: r·x <= 0.5|r|²
-    if (!(off < Real(2) * c.maxVertexRsq())) break;              // security radius
+    if (!(off < Real(2) * c.maxVertexRsq()))
+      break;  // security radius
     const Real n[3] = {rx, ry, rz};
     c.clip(n, off, ids[i]);
-    if (c.overflow) return;
+    if (c.overflow)
+      return;
   }
 }
 
