@@ -171,6 +171,18 @@ foreach(suffix "" "_f32")
   target_compile_features(bench_dynamic_update${suffix} PRIVATE cxx_std_20)
 endforeach()
 target_compile_definitions(bench_dynamic_update_f32 PRIVATE CC_FLOAT=1)
+
+# CSV performance + memory + accuracy report benchmark (cold-build N-sweep + repair displacement-sweep).
+foreach(suffix "" "_f32")
+  add_executable(bench_report${suffix} bench_report.cpp)
+  target_link_libraries(bench_report${suffix} PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+  target_compile_definitions(bench_report${suffix} PRIVATE MORTON_ENABLE_KOKKOS=1)
+  target_include_directories(bench_report${suffix} PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+  target_compile_features(bench_report${suffix} PRIVATE cxx_std_20)
+endforeach()
+target_compile_definitions(bench_report_f32 PRIVATE CC_FLOAT=1)
+
 # Phase-1 gates double as a self-test (GATE 0 corruption catch, GATE 1 subset/partner/skin).
 add_test(NAME bench_dynamic_update_gates COMMAND bench_dynamic_update 20000 4 --gates)
 set_tests_properties(bench_dynamic_update_gates PROPERTIES ENVIRONMENT "OMP_PROC_BIND=false")
