@@ -67,10 +67,9 @@ if(VORONOI_BUILD_BENCHMARKS)
 endif()
 
 # ── Python bindings ───────────────────────────────────────────────────────────
-option(VORONOI_BUILD_PYTHON "Build the pybind11 Python module (vorflow)" OFF)
-if(VORONOI_BUILD_PYTHON)
-  add_subdirectory(python)
-endif()
+# The Python surface is the device-native nanobind module `vorflow` (src/vorflow_bindings.cpp),
+# configured below with -DVORFLOW_BUILD_PYTHON=ON. The legacy pybind11 module over the retired
+# half-edge engine has been removed.
 
 # ── Kokkos / suite device build (migration) ───────────────────────────────────
 # Suite-aligned build: find_package(Kokkos/ArborX) against the bootstrapped prefix
