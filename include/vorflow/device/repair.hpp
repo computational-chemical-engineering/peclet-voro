@@ -216,8 +216,12 @@ struct MovingTessellation {
           Vv(i) = c.volumePerVertex();
           int partners[32]; int nP = 0;
           bool ok;
-          if constexpr (Local) ok = c.isLocallyConvexPartners(&Pk4((size_t)i * MAXT * 4), tolL, partners, 32, nP);
-          else ok = c.isSelfConsistentPartners(tolL, partners, 32, nP);
+          // Force-capture every lambda capture used in the branches OUTSIDE the constexpr-if (nvcc: an
+          // extended __host__ __device__ lambda cannot FIRST-capture a variable inside a constexpr-if).
+          const unsigned char* pk4 = &Pk4((size_t)i * MAXT * 4);  // poke4 is always allocated
+          const Real tl = tolL;
+          if constexpr (Local) ok = c.isLocallyConvexPartners(pk4, tl, partners, 32, nP);
+          else { (void)pk4; ok = c.isSelfConsistentPartners(tl, partners, 32, nP); }
           bool mover = false;
           if (skinOn) {
             Real dx = P(3 * i) - XR(3 * i), dy = P(3 * i + 1) - XR(3 * i + 1), dz = P(3 * i + 2) - XR(3 * i + 2);
@@ -268,8 +272,10 @@ struct MovingTessellation {
       Vv(i) = c.volumePerVertex();
       int partners[32]; int nP = 0;
       bool ok;
-      if constexpr (Local) ok = c.isLocallyConvexPartners(&Pk4((size_t)i * MAXT * 4), tolL, partners, 32, nP);
-      else ok = c.isSelfConsistentPartners(tolL, partners, 32, nP);
+      const unsigned char* pk4 = &Pk4((size_t)i * MAXT * 4);  // force-capture poke4 + tol OUTSIDE the
+      const Real tl = tolL;                                   // constexpr-if (nvcc extended-lambda rule)
+      if constexpr (Local) ok = c.isLocallyConvexPartners(pk4, tl, partners, 32, nP);
+      else { (void)pk4; ok = c.isSelfConsistentPartners(tl, partners, 32, nP); }
       if (!ok) M(i) = 1;
       for (int q = 0; q < nP; ++q) if (partners[q] < nP_) Kokkos::atomic_exchange(&M(partners[q]), 1);
     });

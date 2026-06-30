@@ -1,0 +1,6 @@
+/home/frankp/Codes/suite/vorflow/tests/kokkos/../../include/vorflow/device/tessellator.hpp(372): warning #177-D: variable "MAXF_TMP" was declared but never referenced
+    constexpr int MAXF_TMP = 50;
+                  ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
