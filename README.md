@@ -14,9 +14,8 @@ Features:
 - Multiphase interface-tension (surface-tension) forces
 - GPU and multicore execution through Kokkos backends; MPI block decomposition via `transport-core`
 
-The compact **ConvexCell** dual-triangle tessellator is the production engine. The old
-header-only half-edge engine (`include/vorflow/voronoi.hpp`) survives **only as a CPU
-oracle** used to cross-check the device path in tests; it is no longer the production code.
+The compact **ConvexCell** dual-triangle tessellator is the engine. (The original header-only
+half-edge CPU engine has been retired and removed; the device path is the whole library.)
 
 ---
 
@@ -26,35 +25,32 @@ oracle** used to cross-check the device path in tests; it is no longer the produ
 vorflow/
 ├── include/
 │   └── vorflow/
-│       ├── device/                  # Production device (Kokkos) tessellator
+│       ├── device/                  # The device (Kokkos) tessellator
 │       │   ├── convex_cell.hpp      #   compact dual-triangle ConvexCell + per-vertex geometry
-│       │   ├── convex_cell_adj.hpp  #   adjacency-aware ConvexCell variant
-│       │   ├── convex_cell_compact.hpp # packed compact-storage variant
-│       │   ├── tessellator.hpp      #   cell construction / clipping driver (worklist gather)
-│       │   ├── topology_store.hpp   #   resident, compact connectivity between steps
+│       │   ├── tessellator.hpp      #   cold build: grid + worklist gather + clip + CSR publish
+│       │   ├── repair.hpp           #   MovingTessellation: incremental two-pass repair update
+│       │   ├── topology_store.hpp   #   resident compact topology (+ poke4 cert planes) between steps
+│       │   ├── tess_grid.hpp        #   counting-sort grid + presorted worklist
+│       │   ├── subset_gather.hpp    #   the cold-build kernel restricted to an index list (repair)
+│       │   ├── dynamic_validate.hpp #   geometric invariants + oracle diff (validators)
+│       │   ├── verlet_skin.hpp      #   per-particle Verlet-skin (insertion) tracker
 │       │   ├── sdf.hpp              #   SDF half-space clipping (solid boundaries)
 │       │   ├── plane_policy.hpp     #   Voronoi / Power / SDF plane-definition policies
 │       │   └── transpose.hpp        #   neighbour<->facet reciprocal map helpers
-│       ├── physics/                 # Drive-from-Python device simulation + forces
-│       │   ├── device_simulation.hpp #  device-native Euler / Navier–Stokes facade (Sim)
+│       ├── physics/                 # Device simulation + forces over the published view
+│       │   ├── device_simulation.hpp #  device-native Euler / Navier-Stokes facade
 │       │   ├── euler_pressure.hpp   #   EOS pressure force
-│       │   ├── viscous.hpp         #   viscous Navier–Stokes term
+│       │   ├── viscous.hpp         #   viscous Navier-Stokes term
 │       │   └── interface.hpp       #   multiphase interface-tension force
 │       ├── mpi/
 │       │   └── voronoi_halo.hpp    #   distributed halo glue over transport-core
-│       ├── tessellation_view.hpp   # published read-only CSR device view (engine<->consumer seam)
-│       ├── tessellation_build.hpp  # legacy CellComplex -> HostTessellation converter
-│       ├── skin_refresh.hpp        # Verlet-skin / worklist refresh
-│       ├── nbrlist.hpp            # neighbour-list / cell-linked grid
-│       ├── vor_types.hpp          # integer type aliases and small utilities
-│       ├── voronoi.hpp           # LEGACY half-edge engine — CPU oracle only
-│       └── simulation.hpp       # LEGACY oracle-only simulation driver
+│       └── tessellation_view.hpp   # published read-only CSR device view (engine<->consumer seam)
 ├── src/vorflow_bindings.cpp     # nanobind device Python module (`vorflow`)
-├── mpi/                          # distributed validation scripts (validate_voronoi*.py)
-├── tests/                        # legacy tests + tests/kokkos device tests
-├── data/                         # sample particle-position data files
-├── docs/                         # design notes, benchmark reports, Doxygen config
-└── CMakeLists.txt                # build system (legacy header path + Kokkos device path)
+├── python/test_vorflow.py       # Python smoke test (Tessellation + Simulation)
+├── tests/kokkos/                # device unit tests + benchmarks
+├── tests/kokkos_mpi/            # distributed benchmarks
+├── docs/                        # design notes, performance_report.md, Doxygen config
+└── CMakeLists.txt               # build system (Kokkos device path)
 ```
 
 ---
@@ -63,16 +59,14 @@ vorflow/
 
 | Dependency | Version | Notes |
 |------------|---------|-------|
-| C++ compiler | C++20 (device) / C++17 (legacy) | GCC ≥ 11 recommended |
+| C++ compiler | C++20 | GCC ≥ 11 recommended |
 | CMake | ≥ 3.16 | |
-| **Kokkos** | bootstrapped | Device path (`-DVORFLOW_KOKKOS=ON`); CUDA/HIP/OpenMP backend chosen by the prefix |
+| **Kokkos** | bootstrapped | `-DVORFLOW_KOKKOS=ON`; CUDA/HIP/OpenMP backend chosen by the prefix |
 | **transport-core** | sibling repo | Shared MPI halo + array bridge; required for the distributed path |
 | **morton** | sibling repo | Z-order spatial-index primitive used by the device tessellator |
-| ArborX | optional | Strongly-polydisperse / Power neighbour search (needed from Phase 3 on) |
 | MPI | any | Distributed path (`-DVORFLOW_MPI=ON`) |
-| Boost | ≥ 1.65 | Header-only `random`/`container`, used by the legacy header path |
-| Voro++ | master | Fetched by CMake FetchContent for the legacy comparison test only |
-| OpenMP | any | Optional parallelism for the legacy oracle path |
+| nanobind | ≥ 2.0 | Python module (`-DVORFLOW_BUILD_PYTHON=ON`); found via the active interpreter |
+| Voro++ | master | Fetched by CMake FetchContent as the throughput reference for `bench_convexcell` |
 
 The Kokkos/ArborX backend and target architecture come from the bootstrapped prefix
 `../extern/install/<backend>` (built once by `../tools/bootstrap_deps.sh`), exactly as in
@@ -93,14 +87,6 @@ ctest --test-dir build --output-on-failure        # device tests under tests/kok
 ```
 
 Add `-DVORFLOW_MPI=ON` to link MPI + `transport-core` for the distributed path.
-
-### Legacy header-only / CPU-oracle path
-
-```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release          # Voro++ is fetched automatically here
-cmake --build build --parallel
-ctest --test-dir build -R "test_static_voronoi|test_voro_comparison" --output-on-failure
-```
 
 ### CMake options
 
@@ -132,9 +118,21 @@ cmake --build build --target vorflow_device -j
 PYTHONPATH=build python3 -c "import vorflow; print(vorflow.execution_space)"
 ```
 
+The module exposes two surfaces — the bare **`Tessellation`** (cold build + incremental repair of a
+moving point set) and the **`Simulation`** fluid solver:
+
 ```python
 import numpy as np, vorflow
 
+# bare moving-point Voronoi tessellation
+t = vorflow.Tessellation()
+t.set_box([1.0, 1.0, 1.0])
+t.build(pos)                         # cold build, pos = (N,3) float64
+vol = t.volumes()                    # (N,) cell volumes (sum ~= box volume)
+nbr = t.neighbor_counts()            # (N,) Voronoi neighbours per cell
+stats = t.step(pos_moved)            # incremental repair to new positions
+
+# compressible-Euler / Navier-Stokes fluid on top of it
 s = vorflow.Simulation()
 s.set_l([6.0, 6.0, 6.0])
 s.set_positions(pos)                 # (N,3) float64
@@ -159,24 +157,6 @@ For the distributed (MPI) validation scripts see [`mpi/README.md`](mpi/README.md
 
 ---
 
-## Using the legacy header-only library
-
-The legacy half-edge engine (CPU oracle) is header-only — add `include/` to your include path:
-
-```cmake
-find_package(vorflow REQUIRED)
-target_link_libraries(my_app PRIVATE vorflow::vorflow)
-```
-
-```bash
-g++ -std=c++17 -Ipath/to/vorflow/include my_app.cpp -o my_app
-```
-
-> The oracle-only C++ API (`vor::ExplicitEuler<double>` in `simulation.hpp`) is retained for
-> cross-checking the device path; new work should drive the device engine from Python (above).
-
----
-
 ## Code quality
 
 ### Formatting
@@ -184,7 +164,7 @@ g++ -std=c++17 -Ipath/to/vorflow/include my_app.cpp -o my_app
 The codebase follows the Google C++ Style Guide enforced by `clang-format`:
 
 ```bash
-clang-format --dry-run --Werror include/vorflow/*.hpp tests/*.cpp
+clang-format --dry-run --Werror include/vorflow/**/*.hpp tests/kokkos/*.cpp src/*.cpp
 ```
 
 ### Static analysis
@@ -235,8 +215,8 @@ ordered. Consumers (physics, microstructure analysis) read the results through t
 read-only **facetGeometry CSR** in `tessellation_view.hpp` (`TessellationView`: a Kokkos
 View CSR of per-cell / per-facet quantities) rather than touching the cell internals.
 
-The legacy half-edge representation (`makeLabel(facet,vertex,edge)`) used by the CPU oracle
-is documented in `docs/mainpage.dox`.
+See `docs/mainpage.dox` for the architecture overview and `docs/performance_report.md` for the
+cross-backend performance/memory/accuracy study.
 
 ---
 

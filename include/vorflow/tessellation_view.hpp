@@ -13,7 +13,7 @@
  *   - TessellationView : device-resident Kokkos Views + KOKKOS_INLINE_FUNCTION
  *                        accessors; built by upload().
  * The legacy CellComplex -> HostTessellation converter (buildHostTessellation)
- * lives in tessellation_build.hpp so view consumers need not include the engine.
+ * is done by the device tessellator; view consumers never touch the engine internals.
  *
  * Storage is an exclusive-scan facet
  * offset (mean cell ~15 facets, so CSR, not the 128 cap) plus packed facet
@@ -33,16 +33,14 @@
 #include <vector>
 
 #include "tpx/common/view.hpp"
-#include "vorflow/vor_types.hpp"  // uint1/uint2 only; the legacy engine is NOT pulled in here
-
 namespace vor {
 
-/// Seed/neighbour identifier in the published view. Signed so the legacy
-/// sentinels map cleanly to negatives: noNbr (0xFFFFFFFF) -> -1, boundaryNbr
-/// (0xFFFFFFFE) -> -2. Consumers treat facetNbr(f) < 0 as a boundary facet.
+/// Seed/neighbour identifier in the published view. Signed so the unsigned
+/// sentinels map cleanly to negatives: 0xFFFFFFFF -> -1 (no neighbour),
+/// 0xFFFFFFFE -> -2 (boundary). Consumers treat facetNbr(f) < 0 as a boundary facet.
 using gid_t = std::int32_t;
 
-inline gid_t toGid(uint2 id) {
+inline gid_t toGid(std::uint32_t id) {
   return static_cast<gid_t>(static_cast<std::int32_t>(id));
 }
 

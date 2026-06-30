@@ -30,10 +30,12 @@ add_compile_options(
 )
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
-find_package(Boost 1.65 REQUIRED)
 find_package(OpenMP)
 
 # ── Header-only interface library ────────────────────────────────────────────
+# The vorflow headers are header-only; this target just carries the include path for downstream
+# consumers. The device path (tests/kokkos, src/) sets its own include dirs against transport-core +
+# morton, so it does not link this target.
 add_library(vorflow INTERFACE)
 add_library(vorflow::vorflow ALIAS vorflow)
 
@@ -43,28 +45,16 @@ target_include_directories(vorflow
     $<INSTALL_INTERFACE:include>
 )
 
-target_link_libraries(vorflow
-  INTERFACE
-    Boost::boost
-)
-
-if(OpenMP_CXX_FOUND)
-  target_link_libraries(vorflow INTERFACE OpenMP::OpenMP_CXX)
-  target_compile_definitions(vorflow INTERFACE VORONOI_USE_OPENMP)
-endif()
-
 # ── Tests ─────────────────────────────────────────────────────────────────────
+# Only the Kokkos device tests remain (tests/kokkos, configured below). The legacy CPU half-edge
+# test suite (tests/) was retired together with the half-edge engine.
 option(VORONOI_BUILD_TESTS "Build the test programs" ON)
 if(VORONOI_BUILD_TESTS)
   enable_testing()
-  add_subdirectory(tests)
 endif()
 
 # ── Benchmarks ────────────────────────────────────────────────────────────────
-option(VORONOI_BUILD_BENCHMARKS "Build the performance benchmarks" OFF)
-if(VORONOI_BUILD_BENCHMARKS)
-  add_subdirectory(benchmarks)
-endif()
+# Device benchmarks live under tests/kokkos (bench_*); the legacy CPU benchmark suite was retired.
 
 # ── Python bindings ───────────────────────────────────────────────────────────
 # The Python surface is the device-native nanobind module `vorflow` (src/vorflow_bindings.cpp),
@@ -166,21 +156,19 @@ if(VORONOI_BUILD_DOCS)
   find_package(Doxygen)
   if(DOXYGEN_FOUND)
     set(DOXYGEN_PROJECT_NAME "vorflow")
-    set(DOXYGEN_PROJECT_BRIEF "Voronoi-dynamics simulation library")
+    set(DOXYGEN_PROJECT_BRIEF "Device-native moving-particle Voronoi dynamics")
     set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/docs")
     set(DOXYGEN_EXTRACT_ALL YES)
     set(DOXYGEN_RECURSIVE YES)
-    set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "README.md")
-    # power_cell_solver_spec.md uses LaTeX \dot{...}, which collides with Doxygen's
-    # \dot graph command; exclude that design note from the API docs.
+    # The \mainpage lives in docs/mainpage.dox (the architecture overview); the design notes under
+    # docs/ are not part of the API reference. power_cell_solver_spec.md uses LaTeX \dot{...}, which
+    # collides with Doxygen's \dot graph command.
     set(DOXYGEN_EXCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/docs/power_cell_solver_spec.md")
     doxygen_add_docs(
       docs
       "${CMAKE_CURRENT_SOURCE_DIR}/include"
       "${CMAKE_CURRENT_SOURCE_DIR}/src"
-      "${CMAKE_CURRENT_SOURCE_DIR}/python"
-      "${CMAKE_CURRENT_SOURCE_DIR}/docs"
-      "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
+      "${CMAKE_CURRENT_SOURCE_DIR}/docs/mainpage.dox"
       COMMENT "Generating Doxygen documentation"
     )
   endif()

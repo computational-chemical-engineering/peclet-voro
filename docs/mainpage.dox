@@ -1,67 +1,60 @@
 /**
  * \namespace vor
- * \brief namespace for Voronoi classes 
+ * \brief Top-level namespace for vorflow (device-native Voronoi dynamics).
  *
- * \mainpage The mainpage documentation
- * 
- * \section intro Introduction
+ * \mainpage vorflow — device-native moving-particle Voronoi dynamics
  *
- * The library of header files define classes for creation and dynamic maintenance of Voronoi cells for moving particles.
+ * \section intro Overview
  *
- * \section struct Data structure
+ * vorflow computes and dynamically maintains the 3D Voronoi tessellation of a set of moving points in
+ * a periodic box, on the **device path** (Kokkos: Serial / OpenMP / CUDA / HIP — one source, the
+ * backend fixed at build time), with optional MPI domain decomposition. It is built around a compact,
+ * register-resident cell representation and an incremental *repair* update that makes per-step
+ * tessellation of moving points several times cheaper than rebuilding.
  *
- * A (Voronoi) cell consists of vertices.
- * Each vertex has always 3 outgoing edges. If a vertices are degenerate, i.e., have an order larger than 3 then this is represented as multiple (connected) vertices all with order 3.
- * This avoids the need to tread degenerate vertices as special cases.
- * When we look at a vertex of a cell from outside the cell than the edges are always ordered counter clockwise as illustrated in the image. Whatever topological changes are performed the code takes care that this is always true.
- * \image html "edges.png"
- * \image latex "edges.png" "Numbering of edges" width=2cm
- * 
- * Each (directional) edge is codified using a label that combined three integer id's namely: label = makelabel(facet_id, vertex_id, edge_id)
- * Here the vertex_id is the id of the vertex the edge starts from.
- * The edge_is equals 0, 1, 2 for either of the three edges starting from the specified edge.
- * The facet_id is the id of the facet that is on the left-hand side of the edge. (If you look at it from outside of the cell.)
- * In the figure below we show an example of a cell.
- * This is the cell that is created by an instantation of the 'Cuboid' class.
- * The topology is specified by providing for every outgoing edge the label of the incoming edge.
- * In a Cell object this information will be stored as m_vertices[vertex_id][edge_id] = makeLabel(facet_id_in, vertex_id_in, edge_id_in).
- * For example, for the edge characterized by vertex_id=0 and edge_id=0 the incoming edge has vertex_id=1, edge_id=2 (and faced_id=2).
- * Therefore this gives: m_vertices[0][0] = makeLabel(2, 1, 2).
- * \image html "cuboid.png"
- * \image latex "cuboid.png" "Illustration of cell data structure" width=2cm
-* The full topology of the cuboid is specified by:
-* \code{.cpp}
-    this->m_facets[0] = makeLabel(0,0,0);
-    this->m_vertices[0][0] = makeLabel(2,1,2);
-    this->m_vertices[1][1] = makeLabel(4,5,2);
-    this->m_vertices[5][1] = makeLabel(5,4,0);
-    this->m_vertices[4][2] = makeLabel(1,0,1);
-    this->m_facets[1] = makeLabel(1,0,1);
-    this->m_vertices[0][1] = makeLabel(0,4,2);
-    this->m_vertices[4][1] = makeLabel(5,6,0);
-    this->m_vertices[6][2] = makeLabel(3,2,1);
-    this->m_vertices[2][0] = makeLabel(2,0,2);
-    this->m_facets[2] = makeLabel(2,0,2);
-    this->m_vertices[0][2] = makeLabel(1,2,0);
-    this->m_vertices[2][2] = makeLabel(3,3,0);
-    this->m_vertices[3][2] = makeLabel(4,1,0);
-    this->m_vertices[1][2] = makeLabel(0,0,0);
-    this->m_facets[3] = makeLabel(3,3,0);
-    this->m_vertices[3][0] = makeLabel(2,2,2);
-    this->m_vertices[2][1] = makeLabel(1,6,2);
-    this->m_vertices[6][1] = makeLabel(5,7,0);
-    this->m_vertices[7][2] = makeLabel(4,3,1);
-    this->m_facets[4] = makeLabel(4,1,0);
-    this->m_vertices[1][0] = makeLabel(2,3,2);
-    this->m_vertices[3][1] = makeLabel(3,7,2);
-    this->m_vertices[7][1] = makeLabel(5,5,0);
-    this->m_vertices[5][2] = makeLabel(0,1,1);
-    this->m_facets[5] = makeLabel(5,4,0);
-    this->m_vertices[4][0] = makeLabel(0,5,1);
-    this->m_vertices[5][0] = makeLabel(4,7,1);
-    this->m_vertices[7][0] = makeLabel(3,6,1);
-    this->m_vertices[6][0] = makeLabel(1,4,1);    
-\endcode
-* A facet i is specified by pointing to a starting edge via m_facets[i].
-* When starting from vertex id: v and edge id: e, a facet can be tracet out in a counter-clock wise way by considering label=m_vertices[v][e] where the next edge of the facet is specified by v_next = getVertex(label) and e_next = getEdge(label)+1 (modulo 3).
-*/
+ * The retired half-edge CPU engine has been removed; everything below is the device path.
+ *
+ * \section cell The cell: a compact dual ConvexCell
+ *
+ * A Voronoi cell is the intersection of half-spaces (one per neighbour, plus the box). Rather than an
+ * explicit half-edge mesh, vorflow stores the cell in the **dual** (`vor::device::ConvexCell`, see
+ * \ref convex_cell.hpp): each primal vertex is the intersection of three planes, kept as a *triple of
+ * plane indices*; the whole cell is then a small dual-triangle list that lives in registers / a tiny
+ * per-thread frame. This is what lifts GPU occupancy far above the old half-edge frame. Cell geometry
+ * (volume, per-facet area vector, volume gradient dV, connector) is computed **sort-free and
+ * adjacency-free** by a per-vertex divergence-theorem scatter.
+ *
+ * \section build Cold build
+ *
+ * `vor::device::buildTessellation` (\ref tessellator.hpp) builds the whole tessellation: a counting-sort
+ * grid + a voro++-derived presorted *worklist* gathers each cell's candidate neighbours closest-first
+ * (the dominant cost), then clips the `ConvexCell` on the fly and publishes a read-only
+ * `vor::TessellationView` (\ref tessellation_view.hpp). It optionally emits a compact resident topology
+ * store so a later step can re-evaluate/repair without re-gathering.
+ *
+ * \section repair Moving-point repair
+ *
+ * `vor::device::MovingTessellation` (\ref repair.hpp) updates a resident tessellation each step without
+ * a full rebuild: re-evaluate every cell's geometry on the fixed stored topology, run an O(nt) Lawson
+ * convexity **certificate** (`isLocallyConvex`, complete via the dual tet's four faces) to find which
+ * cells changed, then a **two-pass gather repair** of just those cells, with an adaptive **gate** that
+ * routes high-churn steps to a full rebuild (so it is never much slower than a cold build) and a verify
+ * pass that keeps it exact. Distributed across ranks via `vor::mpi::VoronoiHalo` (\ref voronoi_halo.hpp).
+ *
+ * \section physics Physics
+ *
+ * On top of the tessellation, `vor::physics` provides a device-native compressible-Euler /
+ * Navier-Stokes Voronoi fluid (`device_simulation.hpp`, plus the `euler_pressure` / `viscous` /
+ * `interface` force consumers over the published view).
+ *
+ * \section python Python
+ *
+ * The nanobind module `vorflow` (\ref vorflow_bindings.cpp) exposes two surfaces: `Tessellation` (cold
+ * build + incremental repair, volumes, neighbour counts) and `Simulation` (the fluid solver). Build with
+ * `-DVORFLOW_BUILD_PYTHON=ON` (or `pip install .`). See `python/test_vorflow.py` for usage.
+ *
+ * \section perf Performance
+ *
+ * A full cross-backend performance / memory / accuracy study (cold build + repair throughput, scaling,
+ * volume conservation) is in `docs/performance_report.md`.
+ */

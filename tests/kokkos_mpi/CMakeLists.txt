@@ -34,18 +34,6 @@ if(NOT MPIEXEC_EXECUTABLE)
 endif()
 
 enable_testing()
-foreach(t voronoi_mpi sdf_mpi)
-  add_executable(test_${t} test_${t}.cpp)
-  target_include_directories(test_${t} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include ${MORTON_INCLUDE})
-  target_compile_definitions(test_${t} PRIVATE VORFLOW_MPI MORTON_ENABLE_KOKKOS=1)
-  target_link_libraries(test_${t} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
-  foreach(np 1 2 4)
-    add_test(NAME ${t}_np${np}
-             COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_${t}>)
-    set_tests_properties(${t}_np${np} PROPERTIES ENVIRONMENT "OMP_PROC_BIND=false")
-  endforeach()
-endforeach()
 
 # Distributed benchmarks (run manually under mpirun -np <R> [N ...]).
 foreach(b bench_voronoi_mpi bench_repair_mpi)

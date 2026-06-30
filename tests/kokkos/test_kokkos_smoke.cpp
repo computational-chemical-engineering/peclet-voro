@@ -5,7 +5,7 @@
  * Proves the suite toolchain end-to-end before any real device kernels exist:
  *   - Kokkos initializes and runs a parallel_reduce on the default backend;
  *   - transport-core's tpx::View / tpx::toDevice round-trips host<->device;
- *   - vorflow's C++17-clean core types (vor_types.hpp) compile under the C++20
+ * *   - transport-core's tpx::View round-trips through a device kernel under the C++20
  *     Kokkos build and interoperate with device Views.
  * Exit non-zero on any mismatch (ctest oracle, no framework).
  */
@@ -15,7 +15,6 @@
 #include <vector>
 
 #include "tpx/common/view.hpp"
-#include "vorflow/vor_types.hpp"
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
@@ -51,18 +50,6 @@ int main(int argc, char** argv) {
       }
     }
 
-    // (3) vorflow core types/constants are usable in the Kokkos TU: pack a
-    // (facet, vertex, edge) half-edge label and unpack via the mask constants.
-    const vor::uint1 facet = 5, vert = 2, edge = 1;
-    const vor::uint1 label = (vor::uint1)((facet << vor::shiftFacet) | (vert << 2) | edge);
-    const vor::uint1 gotFacet = (vor::uint1)(label >> vor::shiftFacet);
-    const vor::uint1 gotVert = (vor::uint1)((label & vor::maskVertex) >> 2);
-    const vor::uint1 gotEdge = (vor::uint1)(label & vor::maskEdge);
-    if (gotFacet != facet || gotVert != vert || gotEdge != edge) {
-      std::fprintf(stderr, "FAIL vor_types label round-trip: f=%u v=%u e=%u\n", gotFacet, gotVert,
-                   gotEdge);
-      ++failures;
-    }
   }
   Kokkos::finalize();
   std::printf("%s\n", failures == 0 ? "kokkos smoke PASS" : "kokkos smoke FAIL");

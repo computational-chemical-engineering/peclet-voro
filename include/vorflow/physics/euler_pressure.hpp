@@ -4,7 +4,7 @@
  *
  * The first physics module written against the published TessellationView ONLY —
  * it never touches the half-edge internals (it includes tessellation_view.hpp,
- * not voronoi.hpp / simulation.hpp), which is what proves the engine/physics
+ * not the tessellator internals), which is what proves the engine/physics
  * decoupling (plan §1, §4).
  *
  * Isothermal EOS: press_i = pressEq · volAvg / vol_i. The legacy force scatters
