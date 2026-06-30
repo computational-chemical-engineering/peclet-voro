@@ -527,6 +527,10 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
   if (surgical) std::printf("[Phase 4] single-face surgical repair ENABLED (VORF_SURGICAL)\n");
   const bool bruteCert = std::getenv("VORF_BRUTECERT") != nullptr;  // force the O(nt·np) brute certificate
   std::printf("[cert] %s convexity certificate\n", bruteCert ? "BRUTE O(nt*np)" : "LOCAL-Delaunay O(nt*3)");
+  const bool noInline = std::getenv("VORF_NOINLINE") != nullptr;     // force OFF (all flagged -> gather)
+  const bool forceInline = std::getenv("VORF_INLINE") != nullptr;    // force ON (override per-backend default)
+  std::printf("[reshape] inline reshape repair: %s\n",
+              noInline ? "forced OFF" : forceInline ? "forced ON" : "per-backend default (host on, GPU off)");
   const real_t dt = 1;
 
   Kokkos::View<real_t*, Mem> x0d("x0", 3 * N), veld("vel", 3 * N), pos("pos", 3 * N);
@@ -566,7 +570,7 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
   std::printf("# backend=%s N=%d nSteps=%d gate=%s surgical=%s\n", Kokkos::DefaultExecutionSpace::name(),
               N, nSteps, noGate ? "off" : "on", surgical ? "on" : "off");
   std::printf("%-12s %9s %9s %9s %8s %8s %8s %7s %8s %9s %10s\n", "dist", "disp", "cold_ms", "repair_ms",
-              "speedup", "p1%", "p2%", "gate%", "fellbk%", "missedNbr", "maxRelV");
+              "speedup", "gath%", "reshp%", "gate%", "fellbk%", "missedNbr", "maxRelV");
 
   long exactFail = 0;
   for (int dist = 0; dist < kNumDist; ++dist) {
@@ -598,10 +602,11 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
       mt.localCert = !bruteCert;  // set before alloc (gates the poke-plane allocation)
       mt.alloc(N, Larr, tol, skin, 4, N);
       mt.surgical = surgical;
+      if (noInline) mt.inlineReshape = false; else if (forceInline) mt.inlineReshape = true;
       mt.useGate = !noGate;
       advance(scale, 0);
       mt.rebuild(pos);
-      double tRep = 0; long p1 = 0, p2 = 0, ex = 0, fb = 0, gate = 0, surg = 0;
+      double tRep = 0; long p1 = 0, p2 = 0, ex = 0, fb = 0, gate = 0, surg = 0, rsh = 0;
       for (int s = 1; s <= nSteps; ++s) {
         advance(scale, s);
         Kokkos::fence(); auto a = clk::now();
@@ -609,7 +614,7 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
         Kokkos::fence(); tRep += secs(a, clk::now());
         p1 += st.pass1; p2 += st.pass2; ex += st.extra; fb += st.fellBack ? 1 : 0;
         gate += (st.route == vor::device::RepairStats::kRebuildGate) ? 1 : 0;
-        surg += st.surgical;
+        surg += st.surgical; rsh += st.reshape;
       }
       double maxRelV = 0; long missed = 0;
       exactness(mt, maxRelV, missed);
@@ -618,10 +623,10 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
       // speed. So the exactness gate catches real divergence (>1e-2), not tol-marginal accuracy.
       if (maxRelV > 1e-2) ++exactFail;
       const double coldMs = 1e3 * tCold / nSteps, repMs = 1e3 * tRep / nSteps;
-      (void)surg;
+      (void)surg; (void)p2;
       std::printf("%-12s %9.4f %9.3f %9.3f %8.2f %8.3f %8.3f %7.1f %8.1f %9ld %10.2e\n", distName(dist),
                   (double)disp, coldMs, repMs, coldMs / repMs, 100.0 * p1 / ((double)nSteps * N),
-                  100.0 * p2 / ((double)nSteps * N), 100.0 * gate / nSteps,
+                  100.0 * rsh / ((double)nSteps * N), 100.0 * gate / nSteps,
                   100.0 * fb / nSteps, missed, maxRelV);
     }
 
@@ -632,6 +637,7 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
       mt.localCert = !bruteCert;
       mt.alloc(N, Larr, tol, skin, 4, N);
       mt.surgical = surgical;
+      if (noInline) mt.inlineReshape = false; else if (forceInline) mt.inlineReshape = true;
       advance(scale, 0);
       mt.rebuild(pos);
       advance(scale, 1);

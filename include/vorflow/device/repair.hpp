@@ -51,6 +51,7 @@ struct RepairStats {
   int pass2 = 0;       ///< cells gathered in Pass 2 (new face-neighbours of the movers)
   int extra = 0;       ///< cells gathered across the verify extra-passes
   int surgical = 0;    ///< Pass-1 cells repaired surgically (Phase 4, no grid gather)
+  int reshape = 0;     ///< Pass-1 cells repaired in place by re-clipping stored planes (no grid gather)
   int verifyPasses = 0;///< number of verify iterations run
   Route route = kTwoPass;
   bool fellBack = false;///< true if the cold-build fallback was triggered (repair did not close)
@@ -98,6 +99,19 @@ struct MovingTessellation {
   // the implemented experiment behind this flag; the production path is the Phase-3 gated two-pass gather.
   bool surgical = false;     ///< repair flip cells by re-clipping known candidates instead of gathering
   static constexpr int kExtraCap = 8;  ///< per-cell capacity for partner-discovered new neighbours
+  // ---- inline reshape repair (reduce the over-flag COST without misses) ----
+  bool inlineReshape = true; ///< a flagged cell that is NOT a partner and NOT a mover is *usually* a pure
+                             ///< reshape/loss (its true cell = the re-clip of its STORED neighbour planes,
+                             ///< no grid gather). BUT it can also harbour a sub-tol GAIN whose partner-
+                             ///< report fell under tol — and stored-plane re-clip misses that (the same
+                             ///< gain-invisibility wall as Phase 4). The miss is negligible at small per-
+                             ///< step displacement and grows with it, so the inline path is gated to a
+                             ///< churn WINDOW [reshapeMinChurn, reshapeMaxChurn] where it matches the
+                             ///< gather to ~tol; outside it every flagged cell takes the exact gather.
+  double reshapeMinChurn = 0.02;  ///< below this, the flagged set is tiny and the split's mask/compact
+                                  ///< overhead outweighs the saved gathers — just gather.
+  double reshapeMaxChurn = 0.25;  ///< above this, sub-tol gains become non-negligible -> gather everything
+                                  ///< (measured: exact to gather at churn≤0.23, diverges by churn~0.47).
   // ---- local-Delaunay certificate (the cheap convexity test) ----
   bool localCert = true;     ///< use ConvexCell::isSelfConsistentLocal (test each vertex vs its 4 poke
                              ///< planes, O(nt·4)) instead of the brute O(nt·np) form. The poke planes are
@@ -112,7 +126,7 @@ struct MovingTessellation {
   Kokkos::View<Real*, Mem> vol;   // N : cell volumes (the published geometry scalar)
   Kokkos::View<Real*, Mem> xRef;  // 3N : positions at the last (re)build (Verlet reference)
   // scratch
-  Kokkos::View<int*, Mem> mask, mask2, mover, rebuilt, wl1, wl2, wlM;
+  Kokkos::View<int*, Mem> mask, mask2, mover, partner, rebuilt, wl1, wl2, wlM;
   Kokkos::View<int*, Mem> cellFlag;        // per linear grid-cell flagged-seed count (dilation)
   Kokkos::View<int*, Mem> extraNbr, extraCnt;  // Phase-4 partner-discovered candidate neighbours
   Kokkos::View<int, Mem> counter;
@@ -134,6 +148,7 @@ struct MovingTessellation {
     mask = Kokkos::View<int*, Mem>("mt.mask", n);
     mask2 = Kokkos::View<int*, Mem>("mt.mask2", n);
     mover = Kokkos::View<int*, Mem>("mt.mover", n);
+    partner = Kokkos::View<int*, Mem>("mt.partner", n);
     rebuilt = Kokkos::View<int*, Mem>("mt.rebuilt", n);
     wl1 = Kokkos::View<int*, Mem>(view_alloc(std::string("mt.wl1"), WithoutInitializing), n);
     wl2 = Kokkos::View<int*, Mem>(view_alloc(std::string("mt.wl2"), WithoutInitializing), n);
@@ -147,6 +162,10 @@ struct MovingTessellation {
     // plan's Phase-3 tuning would fit these from logged (signals vs verify-clean) per backend.
     constexpr bool host = Kokkos::SpaceAccessibility<Kokkos::HostSpace, Mem>::accessible;
     churnThresh = host ? 0.70 : 0.50;
+    // Inline reshape splits Pass 1 into extra kernels; that pays off on the CPU paths (the gather it
+    // halves is memory-bound across threads) but loses on GPU (more kernel launches than the cheap
+    // gather it replaces). So enable it by default only on the host backends.
+    inlineReshape = host;
   }
 
   /// Full cold (re)build: the production tessellator emitting the resident topology + volume, then
@@ -184,8 +203,11 @@ struct MovingTessellation {
   /// `useSkin` gates the mover trigger (off during verify passes — movers are a once-per-step trigger
   /// already folded into Pass 1, and the verify only needs to re-close residual flips).
   void certify(const Kokkos::View<Real*, Mem>& pos, const Kokkos::View<int*, Mem>& outMask,
-               const Kokkos::View<int*, Mem>& outMover, bool useSkin) {
+               const Kokkos::View<int*, Mem>& outMover, const Kokkos::View<int*, Mem>& outPartner,
+               bool useSkin) {
     Kokkos::deep_copy(outMask, 0);
+    const bool trackPartner = inlineReshape;  // partner mask only needed by the inline-reshape split
+    if (trackPartner) Kokkos::deep_copy(outPartner, 0);
     if (useSkin) Kokkos::deep_copy(outMover, 0);
     // Phase-4: in the Pass-1 certify, also record partner-discovered new neighbours for the surgical
     // path. The gaining cells of a flip are the violated-plane partners; each pair gains the other, so
@@ -196,7 +218,7 @@ struct MovingTessellation {
     if (doExtra) Kokkos::deep_copy(extraCnt, 0);
     auto EN = extraNbr; auto EC = extraCnt;
     constexpr int kCap = kExtraCap;
-    auto P = pos; auto XR = xRef; auto Vv = vol; auto M = outMask; auto Mv = outMover;
+    auto P = pos; auto XR = xRef; auto Vv = vol; auto M = outMask; auto Mv = outMover; auto Pn = outPartner;
     Store st = store; auto Pk = store.poke;
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
     const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
@@ -223,7 +245,13 @@ struct MovingTessellation {
           }
           if (!ok || mover) M(i) = 1;
           // only mark partners we MAINTAIN (owned); a ghost partner is the owning rank's responsibility.
-          for (int q = 0; q < nP; ++q) if (partners[q] < nP_) Kokkos::atomic_exchange(&M(partners[q]), 1);
+          // Mark them in BOTH the union mask and the partner mask — the partner mask excludes a cell from
+          // the inline-reshape path (a partner is a potential GAINER, so it must go through the gather).
+          for (int q = 0; q < nP; ++q)
+            if (partners[q] < nP_) {
+              Kokkos::atomic_exchange(&M(partners[q]), 1);
+              if (trackPartner) Kokkos::atomic_exchange(&Pn(partners[q]), 1);
+            }
           if (doExtra) {  // each pair of gaining cells gains the other -> seed the surgical candidate lists
             for (int q = 0; q < nP; ++q) {
               const int cell = partners[q];
@@ -317,6 +345,45 @@ struct MovingTessellation {
       XR(3 * i) = P(3 * i); XR(3 * i + 1) = P(3 * i + 1); XR(3 * i + 2) = P(3 * i + 2);
     });
     if (pokeFresh) computePoke(wl, n, pos);  // keep poke valid for the cells whose triangulation changed
+  }
+
+  /// Inline reshape repair: rebuild each cell in wl[0..n) by re-clipping the box with its OWN STORED
+  /// neighbour planes at the current positions — NO grid gather. These cells flagged but are not partners
+  /// or movers, so no NEW (external) neighbour can have appeared (a gain always arrives as a partner or a
+  /// skin-mover); their true cell is therefore the intersection of their stored half-spaces, which this
+  /// reproduces exactly — for a pure reshape AND for a 3→2 loss (the lost neighbour's plane is in the set,
+  /// it just stops forming a face). ~1 clip per stored neighbour (≈ a cell's face count), vs the grid
+  /// gather's ~50–100 candidate examinations. A cell that overflows is flagged in `outFail` for the exact
+  /// gather. Marks repaired cells rebuilt + resets their Verlet reference; poke is refreshed via gatherSet's
+  /// sibling path (computePoke) — call computePoke(wl,n) after if pokeFresh.
+  void reshapeRepair(const Kokkos::View<int*, Mem>& wl, int n, const Kokkos::View<Real*, Mem>& pos,
+                     const Kokkos::View<int*, Mem>& outFail) {
+    if (n <= 0) return;
+    auto W = wl; auto P = pos; auto rb = rebuilt; auto XR = xRef; auto Vv = vol; auto F = outFail;
+    Store st = store;
+    const Real Lx = L[0], Ly = L[1], Lz = L[2];
+    const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
+    Kokkos::parallel_for("mt.reshape", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
+      const int i = W(s);
+      Cell c; c.initBox(Lx, Ly, Lz);
+      const Real sx = P(3 * i), sy = P(3 * i + 1), sz = P(3 * i + 2);
+      const int onp = st.np(i);
+      for (int k = 6; k < onp && !c.overflow; ++k) {  // clip the cell's own stored neighbours
+        const int j = st.pnbr((size_t)i * MAXP + k);
+        if (j < 0) continue;
+        Real rx = P(3 * j) - sx, ry = P(3 * j + 1) - sy, rz = P(3 * j + 2) - sz;
+        rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
+        ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
+        rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
+        const Real nrm[3] = {rx, ry, rz};
+        c.clip(nrm, Real(0.5) * (rx * rx + ry * ry + rz * rz), j);
+      }
+      if (c.overflow) { F(i) = 1; return; }  // fall back to the exact grid gather
+      st.save(i, c); Vv(i) = c.volumePerVertex();
+      rb(i) = 1;
+      XR(3 * i) = sx; XR(3 * i + 1) = sy; XR(3 * i + 2) = sz;
+    });
+    if (pokeFresh) computePoke(wl, n, pos);  // their triangulation changed -> refresh poke
   }
 
   /// Collect into `outMask` the face-neighbours (planes with ≥3 incident live triangles) of the `n`
@@ -445,7 +512,7 @@ struct MovingTessellation {
 
     // Pass 1: detect (flagged ∪ partners ∪ skin-movers). flagged-commons + their violated-plane partners
     // (the gaining cells) fully cover an isolated flip — no Pass 2 for flips.
-    certify(pos, mask, mover, /*useSkin=*/true);
+    certify(pos, mask, mover, partner, /*useSkin=*/true);
     int n1 = compact(mask, wl1);
     s.pass1Raw = n1;
 
@@ -482,6 +549,23 @@ struct MovingTessellation {
       s.surgical = nS;
       surgicalRepair(wl1, nS, pos);     // flips: no gather
       gatherSet(grid, wlM, nM, pos);    // movers: full gather
+    } else if (inlineReshape && (double)n1 / nProc >= reshapeMinChurn &&
+               (double)n1 / nProc <= reshapeMaxChurn) {
+      // Split Pass 1: reshape cells (flagged, not a partner, not a mover -> no gain possible) are repaired
+      // in place by re-clipping their stored planes; partners ∪ movers (∪ reshape overflow-fails) gather.
+      { auto Msk = mask; auto Pn = partner; auto Mv = mover; auto M2 = mask2;
+        Kokkos::parallel_for("mt.reshapeMask", Kokkos::RangePolicy<Exec>(0, nProc),
+                             KOKKOS_LAMBDA(int i) { M2(i) = (Msk(i) && !Pn(i) && !Mv(i)) ? 1 : 0; }); }
+      int nR = compact(mask2, wl1);  // reshape list (reuse wl1)
+      // gather base = partner ∪ mover (overwrite mask; reshapeRepair adds its overflow-fails here)
+      { auto Msk = mask; auto Pn = partner; auto Mv = mover;
+        Kokkos::parallel_for("mt.gatherMask", Kokkos::RangePolicy<Exec>(0, nProc),
+                             KOKKOS_LAMBDA(int i) { Msk(i) = (Pn(i) || Mv(i)) ? 1 : 0; }); }
+      reshapeRepair(wl1, nR, pos, mask);
+      s.reshape = nR;
+      int nG = compact(mask, wl2);   // partner ∪ mover ∪ fail
+      s.pass1 = nG;
+      gatherSet(grid, wl2, nG, pos);
     } else {
       gatherSet(grid, wl1, n1, pos);
     }

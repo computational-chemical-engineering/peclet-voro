@@ -179,6 +179,32 @@ rather than the convexity scan. (The graph is the pure two-pass / gate-off path,
 shows the poke-maintenance overhead; with the production gate on, that regime rebuilds and the local and
 brute curves coincide there.) `VORF_BRUTECERT=1` forces the brute test for A/B.
 
+## Reducing the over-flag: inline reshape repair
+
+The certificate flags ~10× more cells than actually change their neighbour set; the extra ones are
+**reshapes** — a vertex has drifted past an *already-existing* face-plane (accumulated drift, or a flip's
+common-neighbours), so the cell's neighbour SET is unchanged and only its triangulation reshaped. A
+flagged cell that is **not a partner and not a skin-mover cannot have gained an external neighbour** (a
+gain always arrives as a partner or a mover), so its true cell is just the re-clip of its **stored**
+neighbour planes — repair it in place, no grid gather (`reshapeRepair`). Measured: **~half of all flagged
+cells are reshapes** (the `gath%`/`reshp%` columns split roughly evenly), so the Pass-1 gather load
+halves.
+
+The catch is the same gain-invisibility wall as Phase 4: a flagged cell *can* also harbour a sub-tol gain
+whose partner-report fell under tol, and stored-plane re-clip misses it (the grid gather would not). That
+miss is negligible at small per-step displacement and grows with it, so the inline path is gated to a
+churn **window** (`[0.02, 0.25]`) where it is exact to the gather (identical `maxRelV`); outside it every
+flagged cell takes the exact gather. It is also **per-backend by default** — on for the CPU paths (the
+halved gather is memory-bound across threads, so it pays), **off on GPU** (the extra kernel launches cost
+more than the cheap gather they replace). Gates + repair exactness stay green; `VORF_INLINE=1` /
+`VORF_NOINLINE=1` force it.
+
+Net: on host it shaves the gather work in the δ/h ≈ 5·10⁻⁴–3·10⁻³ band (~+10% in a longer run, though
+noise-sensitive since the Pass-1 gather is not the dominant small-δ/h cost — the full-N certify is). It is
+a safe, exactness-preserving reduction of the over-flag *cost*; the over-flag *count* is unchanged, and
+the honest finding is that reducing it is a modest lever on this engine because the gather it targets is
+not the small-displacement bottleneck.
+
 ## Reproduce
 
 ```
