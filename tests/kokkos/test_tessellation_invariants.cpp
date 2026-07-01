@@ -23,9 +23,9 @@
 #include <random>
 #include <vector>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/dynamic_validate.hpp"
-#include "vorflow/device/tessellator.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/dynamic_validate.hpp"
+#include "peclet/voro/tessellator.hpp"
 
 using real_t = double;
 
@@ -40,15 +40,15 @@ int runCase(int N, real_t L, unsigned seed) {
   for (auto& v : xh)
     v = L * U(rng);
 
-  Kokkos::View<real_t*, tpx::MemSpace> pos("pos", 3 * N);
+  Kokkos::View<real_t*, peclet::core::MemSpace> pos("pos", 3 * N);
   Kokkos::deep_copy(pos, Kokkos::View<const real_t*, Kokkos::HostSpace>(xh.data(), 3 * N));
-  Kokkos::View<real_t*, tpx::MemSpace> wd;
-  Kokkos::View<long*, tpx::MemSpace> gd;
+  Kokkos::View<real_t*, peclet::core::MemSpace> wd;
+  Kokkos::View<long*, peclet::core::MemSpace> gd;
 
-  auto res = vor::device::buildTessellation<real_t, false>(
-      pos, wd, N, Larr, 4, N, gd, vor::device::NoSdf{}, /*withForceGeom=*/true);
-  auto aux = vor::device::buildAuxMaps(res.view);
-  auto inv = vor::device::checkInvariants(res.view, aux, boxVol);
+  auto res = peclet::voro::buildTessellation<real_t, false>(
+      pos, wd, N, Larr, 4, N, gd, peclet::voro::NoSdf{}, /*withForceGeom=*/true);
+  auto aux = peclet::voro::buildAuxMaps(res.view);
+  auto inv = peclet::voro::checkInvariants(res.view, aux, boxVol);
 
   // minimum cell volume + count of finished (Ok) cells.
   double minVol = 1e300;
@@ -57,12 +57,12 @@ int runCase(int N, real_t L, unsigned seed) {
     auto V = res.view.cellVolume;
     auto S = res.status;
     Kokkos::parallel_reduce(
-        "minvol", Kokkos::RangePolicy<tpx::ExecSpace>(0, N),
+        "minvol", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N),
         KOKKOS_LAMBDA(int i, double& mn) { mn = Kokkos::min(mn, (double)V(i)); },
         Kokkos::Min<double>(minVol));
     Kokkos::parallel_reduce(
-        "nok", Kokkos::RangePolicy<tpx::ExecSpace>(0, N),
-        KOKKOS_LAMBDA(int i, long& c) { c += (S(i) == vor::device::kOk) ? 1 : 0; }, nOk);
+        "nok", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N),
+        KOKKOS_LAMBDA(int i, long& c) { c += (S(i) == peclet::voro::kOk) ? 1 : 0; }, nOk);
   }
 
   // Pass on the ROBUST invariants. `maxAreaAsym` (the *relative* facet-area mismatch) is reported

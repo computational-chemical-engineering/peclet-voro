@@ -23,22 +23,21 @@
  * value into a device lambda; save()/load() are KOKKOS_INLINE_FUNCTION and templated on the
  * ConvexCell instantiation.
  */
-#ifndef VORFLOW_DEVICE_TOPOLOGY_STORE_HPP
-#define VORFLOW_DEVICE_TOPOLOGY_STORE_HPP
+#ifndef PECLET_VORO_TOPOLOGY_STORE_HPP
+#define PECLET_VORO_TOPOLOGY_STORE_HPP
 
 #include <Kokkos_Core.hpp>
 #include <string>
 
-#include "tpx/common/view.hpp"
+#include "peclet/core/common/view.hpp"
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 /// Resident compact topology for N cells of ConvexCell<Real, MAXP, MAXT>. Captured by value into
 /// kernels.
 template <int MAXP, int MAXT>
 struct TopologyStore {
-  using MemSpace = tpx::MemSpace;
+  using MemSpace = peclet::core::MemSpace;
   int N = 0;
   Kokkos::View<int*, MemSpace> np;        // N
   Kokkos::View<int*, MemSpace> nt;        // N
@@ -112,7 +111,6 @@ struct TopologyStore {
   }
 };
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_TOPOLOGY_STORE_HPP
+#endif  // PECLET_VORO_TOPOLOGY_STORE_HPP

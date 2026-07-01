@@ -10,23 +10,23 @@
  * The interface FORCE (gradFacetAreaSq) needs the per-cell half-edge mesh on the
  * device and is ported together with the planned methodological improvement.
  */
-#ifndef VORFLOW_PHYSICS_INTERFACE_HPP
-#define VORFLOW_PHYSICS_INTERFACE_HPP
+#ifndef PECLET_VORO_PHYSICS_INTERFACE_HPP
+#define PECLET_VORO_PHYSICS_INTERFACE_HPP
 
 #include <Kokkos_Core.hpp>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/tessellation_view.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/tessellation_view.hpp"
 
-namespace vor {
+namespace peclet::voro {
 namespace physics {
 
 /// Total interfacial energy Σ γ(t_i,t_j)·area over phase-boundary facets.
 template <class Real>
 Real interfaceEnergy(const TessellationView<Real>& view,
-                     const Kokkos::View<int*, tpx::MemSpace>& types,
-                     const Kokkos::View<Real*, tpx::MemSpace>& tension, int nTypes) {
-  using Exec = tpx::ExecSpace;
+                     const Kokkos::View<int*, peclet::core::MemSpace>& types,
+                     const Kokkos::View<Real*, peclet::core::MemSpace>& tension, int nTypes) {
+  using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();
   Real e = 0;
   Kokkos::parallel_reduce(
@@ -51,6 +51,6 @@ Real interfaceEnergy(const TessellationView<Real>& view,
 }
 
 }  // namespace physics
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_PHYSICS_INTERFACE_HPP
+#endif  // PECLET_VORO_PHYSICS_INTERFACE_HPP

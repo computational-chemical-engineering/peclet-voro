@@ -15,13 +15,12 @@
  * Adding a cell type (power/radical, additively-weighted spheres, SDF boundary) = a new policy with
  * its own buildNormal + chain; the geometry kernels and the combiner are unchanged.
  */
-#ifndef VORFLOW_DEVICE_PLANE_POLICY_HPP
-#define VORFLOW_DEVICE_PLANE_POLICY_HPP
+#ifndef PECLET_VORO_PLANE_POLICY_HPP
+#define PECLET_VORO_PLANE_POLICY_HPP
 
 #include <Kokkos_Core.hpp>
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 /// Voronoi plane policy: n_ij = ½(p_j − p_i). The Jacobians are constant (∓½ I), so the chain is a
 /// pure sign/scale split of the geometry gradient between the cell's own seed and the neighbour
@@ -77,7 +76,6 @@ KOKKOS_INLINE_FUNCTION void chainToDofs(const Cell& c, const Real* gx, const Rea
   }
 }
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_PLANE_POLICY_HPP
+#endif  // PECLET_VORO_PLANE_POLICY_HPP

@@ -5,7 +5,7 @@
  * The MPI sibling of bench_convexcell: it times the DISTRIBUTED cold build. Each rank owns a
  * block of the domain (transport-core ORB via VoronoiHalo), gathers ghost seeds within rcut
  * (the MPI communication), and tessellates its owned+ghost subset with the device tessellator
- * (`vor::device::buildTessellation`) — the same path validated bit-exact vs single-rank by
+ * (`peclet::voro::buildTessellation`) — the same path validated bit-exact vs single-rank by
  * test_voronoi_mpi. Reports, per rank and aggregated:
  *   - owned / ghost cell counts (the ghost fraction = the distributed overhead),
  *   - gather time (MPI halo exchange) vs build time (the cold-build compute),
@@ -31,9 +31,9 @@
 #include <random>
 #include <vector>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/tessellator.hpp"
-#include "vorflow/mpi/voronoi_halo.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/tessellator.hpp"
+#include "peclet/voro/mpi/voronoi_halo.hpp"
 
 using real_t = double;
 using Vec3 = std::array<real_t, 3>;
@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
         pos[i][d] = L[d] * U(rng);
 
     // Block decomposition + ghost gather (transport-core).
-    vor::mpi::VoronoiHalo<real_t> halo;
+    peclet::voro::mpi::VoronoiHalo<real_t> halo;
     halo.init({0, 0, 0}, {L[0], L[1], L[2]}, {16, 16, 16}, {true, true, true}, MPI_COMM_WORLD);
     std::vector<Vec3> ownedPos;
     std::vector<long> ownedGid;
@@ -90,7 +90,7 @@ int main(int argc, char** argv) {
 
     // --- gather (MPI halo exchange) timing ---
     double gatherBest = 1e30;
-    typename vor::mpi::VoronoiHalo<real_t>::Gathered g;
+    typename peclet::voro::mpi::VoronoiHalo<real_t>::Gathered g;
     for (int r = 0; r < reps; ++r) {
       MPI_Barrier(MPI_COMM_WORLD);
       double t0 = MPI_Wtime();
@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
     const int nComb = (int)g.pos.size();
 
     // device inputs (owned+ghost subset)
-    Kokkos::View<real_t*, tpx::MemSpace> dPos(
+    Kokkos::View<real_t*, peclet::core::MemSpace> dPos(
         Kokkos::view_alloc(std::string("pos"), Kokkos::WithoutInitializing), (size_t)nComb * 3);
     {
       auto h = Kokkos::create_mirror_view(dPos);
@@ -110,8 +110,8 @@ int main(int argc, char** argv) {
           h(3 * i + k) = wrap1(g.pos[i][k], L[k]);
       Kokkos::deep_copy(dPos, h);
     }
-    Kokkos::View<real_t*, tpx::MemSpace> dW("w", nComb);
-    Kokkos::View<long*, tpx::MemSpace> dGid(
+    Kokkos::View<real_t*, peclet::core::MemSpace> dW("w", nComb);
+    Kokkos::View<long*, peclet::core::MemSpace> dGid(
         Kokkos::view_alloc(std::string("gid"), Kokkos::WithoutInitializing), nComb);
     {
       auto hg = Kokkos::create_mirror_view(dGid);
@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
     for (int r = 0; r < reps + 1; ++r) {  // first = warm
       MPI_Barrier(MPI_COMM_WORLD);
       double t0 = MPI_Wtime();
-      auto res = vor::device::buildTessellation<real_t, false>(
+      auto res = peclet::voro::buildTessellation<real_t, false>(
           dPos, dW, nComb, Larr, /*sw=*/4, /*density=*/N, dGid, {}, /*withForceGeom=*/true,
           /*nBuild=*/g.nOwned);  // build only owned cells; ghosts are candidate-only
       Kokkos::fence();
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
         Kokkos::deep_copy(st, res.status);
         for (int i = 0; i < g.nOwned; ++i) {
           ownedVol += vol(i);
-          if (st(i) & (vor::device::kOverflow | vor::device::kIncomplete | vor::device::kEmpty))
+          if (st(i) & (peclet::voro::kOverflow | peclet::voro::kIncomplete | peclet::voro::kEmpty))
             ++badOwned;
         }
       }

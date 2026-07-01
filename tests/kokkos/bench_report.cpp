@@ -34,22 +34,22 @@
 #include <string>
 #include <vector>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/convex_cell.hpp"
-#include "vorflow/device/dynamic_validate.hpp"  // OracleDiff, compareVolumes, compareNeighbours
-#include "vorflow/device/repair.hpp"
-#include "vorflow/device/tessellator.hpp"
-#include "vorflow/device/topology_store.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/dynamic_validate.hpp"  // OracleDiff, compareVolumes, compareNeighbours
+#include "peclet/voro/repair.hpp"
+#include "peclet/voro/tessellator.hpp"
+#include "peclet/voro/topology_store.hpp"
 
 #ifdef CC_FLOAT
 using real_t = float;
 #else
 using real_t = double;
 #endif
-using Exec = tpx::ExecSpace;
-using Mem = tpx::MemSpace;
+using Exec = peclet::core::ExecSpace;
+using Mem = peclet::core::MemSpace;
 static constexpr int CMAXP = 64, CMAXT = 112;
-using Store = vor::device::TopologyStore<CMAXP, CMAXT>;
+using Store = peclet::voro::TopologyStore<CMAXP, CMAXT>;
 using clk = std::chrono::high_resolution_clock;
 static double secs(clk::time_point a, clk::time_point b) {
   return std::chrono::duration<double>(b - a).count();
@@ -116,15 +116,15 @@ static int coldSweep(real_t L) {
     for (int r = 0; r < reps; ++r) {
       Kokkos::fence();
       auto a = clk::now();
-      auto res = vor::device::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
-                                                               vor::device::NoSdf{}, false);
+      auto res = peclet::voro::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
+                                                               peclet::voro::NoSdf{}, false);
       Kokkos::fence();
       tPlain = std::min(tPlain, secs(a, clk::now()));
       if (r == 0)
         volErr = std::abs(sumVol(res.view.cellVolume, N) / boxVol - 1.0);
     }
     // (b) repair-ready cold build: MovingTessellation::rebuild (emits store + poke4).
-    vor::device::MovingTessellation<real_t, CMAXP, CMAXT> mt;
+    peclet::voro::MovingTessellation<real_t, CMAXP, CMAXT> mt;
     const real_t spacing = (real_t)std::cbrt(boxVol / N);
     mt.alloc(N, Larr, real_t(1e-4) * spacing, real_t(0.25) * spacing, 4, N);
     double tRepair = 1e30;
@@ -203,15 +203,15 @@ static int repairSweep(int N, int nSteps, real_t L) {
       advance(scale, s);
       Kokkos::fence();
       auto a = clk::now();
-      auto r = vor::device::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
-                                                             vor::device::NoSdf{}, false);
+      auto r = peclet::voro::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
+                                                             peclet::voro::NoSdf{}, false);
       Kokkos::fence();
       tCold += secs(a, clk::now());
       (void)r;
     }
     tCold *= (double)nSteps / coldSteps;  // scale to the per-step×nSteps basis used below
     // repair over the same trajectory
-    vor::device::MovingTessellation<real_t, CMAXP, CMAXT> mt;
+    peclet::voro::MovingTessellation<real_t, CMAXP, CMAXT> mt;
     mt.localCert = !bruteCert;
     mt.useGate = !noGate;
     mt.alloc(N, Larr, tol, skin, 4, N);
@@ -229,15 +229,15 @@ static int repairSweep(int N, int nSteps, real_t L) {
       p1 += st.pass1;
       p2 += st.pass2;
       flag += st.pass1Raw;
-      gate += (st.route == vor::device::RepairStats::kRebuildGate) ? 1 : 0;
+      gate += (st.route == peclet::voro::RepairStats::kRebuildGate) ? 1 : 0;
     }
     // accuracy vs a fresh cold oracle at the final positions
-    auto ora = vor::device::buildTessellation<real_t, false>(
-        pos, wd, N, Larr, 4, N, gd, vor::device::NoSdf{}, false, -1, oraStore.np, oraStore.nt,
+    auto ora = peclet::voro::buildTessellation<real_t, false>(
+        pos, wd, N, Larr, 4, N, gd, peclet::voro::NoSdf{}, false, -1, oraStore.np, oraStore.nt,
         oraStore.pnbr, oraStore.tri);
-    vor::device::OracleDiff d;
-    vor::device::compareVolumes(mt.vol, ora.view, d);
-    vor::device::compareNeighbours(mt.store.np, mt.store.nt, mt.store.pnbr, mt.store.tri, CMAXP,
+    peclet::voro::OracleDiff d;
+    peclet::voro::compareVolumes(mt.vol, ora.view, d);
+    peclet::voro::compareNeighbours(mt.store.np, mt.store.nt, mt.store.pnbr, mt.store.tri, CMAXP,
                                    CMAXT, ora.view, d);
     const double volErr = std::abs(sumVol(mt.vol, N) / boxVol - 1.0);
     const double coldMc = 1e-6 * N * nSteps / tCold, repMc = 1e-6 * N * nSteps / tRep;

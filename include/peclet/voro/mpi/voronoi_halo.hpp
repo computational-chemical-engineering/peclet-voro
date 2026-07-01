@@ -11,27 +11,27 @@
  * This wrapper reuses transport-core for all of that — exactly the infrastructure
  * the dem distributed step uses, and the C++ counterpart of the validated
  * mpi/validate_voronoi.py recipe:
- *   - tpx::decomp::BlockDecomposer<3> : ORB block ownership;
- *   - tpx::halo::ParticleMigrator<3>  : ownerOf() + periodic wrap;
- *   - tpx::halo::ParticleHaloTopology<3>      : gather ghost seeds within rcut and
+ *   - peclet::core::decomp::BlockDecomposer<3> : ORB block ownership;
+ *   - peclet::core::halo::ParticleMigrator<3>  : ownerOf() + periodic wrap;
+ *   - peclet::core::halo::ParticleHaloTopology<3>      : gather ghost seeds within rcut and
  *                                       forward owner fields (global id, weight)
  *                                       onto the ghost copies.
  *
- * Header-only host driver; requires MPI + transport-core (VORFLOW_MPI build).
+ * Header-only host driver; requires MPI + transport-core (PECLET_VORO_MPI build).
  */
-#ifndef VORFLOW_MPI_VORONOI_HALO_HPP
-#define VORFLOW_MPI_VORONOI_HALO_HPP
+#ifndef PECLET_VORO_MPI_VORONOI_HALO_HPP
+#define PECLET_VORO_MPI_VORONOI_HALO_HPP
 
 #include <array>
 #include <cstddef>
 #include <vector>
 
-#include "tpx/common/mpi.hpp"
-#include "tpx/decomp/block_decomposer.hpp"
-#include "tpx/halo/particle_halo_topology.hpp"
-#include "tpx/halo/particle_migrator.hpp"
+#include "peclet/core/common/mpi.hpp"
+#include "peclet/core/decomp/block_decomposer.hpp"
+#include "peclet/core/halo/particle_halo_topology.hpp"
+#include "peclet/core/halo/particle_migrator.hpp"
 
-namespace vor {
+namespace peclet::voro {
 namespace mpi {
 
 template <class Real>
@@ -56,8 +56,8 @@ class VoronoiHalo {
     int sz = 1;
     MPI_Comm_rank(comm_, &rank_);
     MPI_Comm_size(comm_, &sz);
-    dec_.init(static_cast<std::size_t>(sz), tpx::IVec<3>{gsize[0], gsize[1], gsize[2]});
-    tpx::halo::DomainMap<3> map;
+    dec_.init(static_cast<std::size_t>(sz), peclet::core::IVec<3>{gsize[0], gsize[1], gsize[2]});
+    peclet::core::halo::DomainMap<3> map;
     for (int i = 0; i < 3; ++i) {
       map.origin[i] = origin[i];
       map.cellSize[i] = size[i] / static_cast<double>(gsize[i]);
@@ -76,7 +76,7 @@ class VoronoiHalo {
 
   /// Rank that owns position x.
   int ownerOf(const Vec3& x) const {
-    tpx::Vec<3> v{x[0], x[1], x[2]};
+    peclet::core::Vec<3> v{x[0], x[1], x[2]};
     return mig_.ownerOf(v);
   }
 
@@ -85,9 +85,9 @@ class VoronoiHalo {
   Gathered gather(const std::vector<Vec3>& ownedPos, const std::vector<long>& ownedGid,
                   const std::vector<Real>& ownedWeight, double rcut) {
     const int nOwned = static_cast<int>(ownedPos.size());
-    std::vector<tpx::Vec<3>> pv(nOwned);
+    std::vector<peclet::core::Vec<3>> pv(nOwned);
     for (int i = 0; i < nOwned; ++i)
-      pv[i] = tpx::Vec<3>{ownedPos[i][0], ownedPos[i][1], ownedPos[i][2]};
+      pv[i] = peclet::core::Vec<3>{ownedPos[i][0], ownedPos[i][1], ownedPos[i][2]};
     // includePeriodicSelf=false: the tessellator is periodic-native (minimal image),
     // so two same-rank seeds interact across a periodic face directly — only
     // cross-rank neighbours (which the build still gathers, periodic images
@@ -101,7 +101,7 @@ class VoronoiHalo {
     std::vector<Real> ghostW(ng);
     halo_.forward(ownedGid.data(), ghostGid.data());
     halo_.forward(ownedWeight.data(), ghostW.data());
-    const std::vector<tpx::Vec<3>>& gpos = halo_.ghostPositions();
+    const std::vector<peclet::core::Vec<3>>& gpos = halo_.ghostPositions();
 
     Gathered g;
     g.nOwned = nOwned;
@@ -157,12 +157,12 @@ class VoronoiHalo {
   int nGhost_ = 0;
   MPI_Comm comm_ = MPI_COMM_WORLD;
   int rank_ = 0;
-  tpx::decomp::BlockDecomposer<3> dec_;
-  tpx::halo::ParticleMigrator<3> mig_;
-  tpx::halo::ParticleHaloTopology<3> halo_;
+  peclet::core::decomp::BlockDecomposer<3> dec_;
+  peclet::core::halo::ParticleMigrator<3> mig_;
+  peclet::core::halo::ParticleHaloTopology<3> halo_;
 };
 
 }  // namespace mpi
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_MPI_VORONOI_HALO_HPP
+#endif  // PECLET_VORO_MPI_VORONOI_HALO_HPP

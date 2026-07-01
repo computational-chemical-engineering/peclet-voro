@@ -23,8 +23,8 @@
  *
  * Core header: Kokkos + transport-core + the cutter, no physics.
  */
-#ifndef VORFLOW_DEVICE_TESSELLATOR_HPP
-#define VORFLOW_DEVICE_TESSELLATOR_HPP
+#ifndef PECLET_VORO_TESSELLATOR_HPP
+#define PECLET_VORO_TESSELLATOR_HPP
 
 #include <array>
 #include <cmath>
@@ -37,14 +37,13 @@
 #include <vector>
 
 #include "morton/morton.hpp"  // suite spatial-index primitive (after Kokkos_Core: MORTON_HD->KOKKOS_FUNCTION)
-#include "tpx/common/view.hpp"
-#include "vorflow/device/convex_cell.hpp"
-#include "vorflow/device/sdf.hpp"
-#include "vorflow/device/tess_grid.hpp"  // counting-sort grid + worklist (kWlOffBias, morton3, TessGrid)
-#include "vorflow/tessellation_view.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/sdf.hpp"
+#include "peclet/voro/tess_grid.hpp"  // counting-sort grid + worklist (kWlOffBias, morton3, TessGrid)
+#include "peclet/voro/tessellation_view.hpp"
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 /// Per-cell status bits written by the build pass.
 enum StatusBit { kOk = 0, kOverflow = 1, kEmpty = 2, kIncomplete = 4 };
@@ -52,7 +51,7 @@ enum StatusBit { kOk = 0, kOverflow = 1, kEmpty = 2, kIncomplete = 4 };
 template <class Real>
 struct TessellatorResult {
   TessellationView<Real> view;
-  Kokkos::View<int*, tpx::MemSpace> status;  // per-cell StatusBit mask
+  Kokkos::View<int*, peclet::core::MemSpace> status;  // per-cell StatusBit mask
 };
 
 /**
@@ -66,7 +65,7 @@ struct TessellatorResult {
  */
 template <class Real, bool Weighted, class Sdf, bool TrackAdj = false>
 struct CellBuilder {
-  using MemSpace = tpx::MemSpace;
+  using MemSpace = peclet::core::MemSpace;
   static constexpr int kMaxP = 64;     // plane cap (overflow -> kOverflow)
   static constexpr int kMaxT = 112;    // dual-triangle (vertex) cap
   static constexpr int MAXF_TMP = 50;  // max facets one cell may publish
@@ -105,7 +104,7 @@ struct CellBuilder {
   // per-cell CANDIDATE (skin) list = the neighbour ids this cell examined (within the worklist's
   // security reach), capped at candCap. Together they let a later step re-evaluate geometry
   // (ConvexCell::reevalGeometry) and locally repair off the skin list without re-gathering. See
-  // vorflow/docs/voronoi_dynamic_update_study.md.
+  // peclet/voro/docs/voronoi_dynamic_update_study.md.
   Kokkos::View<int*, MemSpace> oNp, oNt, oTopoPnbr;
   Kokkos::View<unsigned*, MemSpace> oTri;
   Kokkos::View<unsigned char*, MemSpace>
@@ -330,20 +329,20 @@ struct CellBuilder {
  *                 ghost fraction of the cold build).
  */
 template <class Real, bool Weighted, class Sdf = NoSdf>
-TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
-                                          const Kokkos::View<Real*, tpx::MemSpace>& weight, int N,
+TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, peclet::core::MemSpace>& posFlat,
+                                          const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N,
                                           const Real L[3], int sw = 4, int densityCount = -1,
-                                          Kokkos::View<long*, tpx::MemSpace> gid = {}, Sdf sdf = {},
+                                          Kokkos::View<long*, peclet::core::MemSpace> gid = {}, Sdf sdf = {},
                                           bool withForceGeom = true, int nBuild = -1,
-                                          Kokkos::View<int*, tpx::MemSpace> outNp = {},
-                                          Kokkos::View<int*, tpx::MemSpace> outNt = {},
-                                          Kokkos::View<int*, tpx::MemSpace> outPnbr = {},
-                                          Kokkos::View<unsigned*, tpx::MemSpace> outTri = {},
-                                          Kokkos::View<int*, tpx::MemSpace> outCand = {},
-                                          Kokkos::View<int*, tpx::MemSpace> outCandCnt = {},
+                                          Kokkos::View<int*, peclet::core::MemSpace> outNp = {},
+                                          Kokkos::View<int*, peclet::core::MemSpace> outNt = {},
+                                          Kokkos::View<int*, peclet::core::MemSpace> outPnbr = {},
+                                          Kokkos::View<unsigned*, peclet::core::MemSpace> outTri = {},
+                                          Kokkos::View<int*, peclet::core::MemSpace> outCand = {},
+                                          Kokkos::View<int*, peclet::core::MemSpace> outCandCnt = {},
                                           int candCap = 0, WorklistCache<Real>* wlc = nullptr) {
-  using tpx::MemSpace;
-  using Exec = tpx::ExecSpace;
+  using peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
   // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin
   // list only when the caller supplies sized views (so existing callers, passing none, are
   // byte-for-byte unaffected).
@@ -357,7 +356,7 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   // Seeds with original index >= nBuildEff are candidate-only (their cell is skipped).
   const int nBuildEff = (nBuild >= 0 && nBuild < N) ? nBuild : N;
 
-  const bool prof = std::getenv("VORFLOW_PROFILE") != nullptr;
+  const bool prof = std::getenv("PECLET_VORO_PROFILE") != nullptr;
   Kokkos::Timer ptimer;
   double tGrid = 0, tBuild = 0, tCsr = 0;
 
@@ -582,7 +581,6 @@ TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, tpx::MemSpac
   return res;
 }
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_TESSELLATOR_HPP
+#endif  // PECLET_VORO_TESSELLATOR_HPP

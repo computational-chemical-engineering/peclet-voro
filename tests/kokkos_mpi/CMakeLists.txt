@@ -40,6 +40,6 @@ foreach(b bench_voronoi_mpi bench_repair_mpi)
   add_executable(${b} ${b}.cpp)
   target_include_directories(${b} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include ${MORTON_INCLUDE})
-  target_compile_definitions(${b} PRIVATE VORFLOW_MPI MORTON_ENABLE_KOKKOS=1)
+  target_compile_definitions(${b} PRIVATE PECLET_VORO_MPI MORTON_ENABLE_KOKKOS=1)
   target_link_libraries(${b} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
 endforeach()

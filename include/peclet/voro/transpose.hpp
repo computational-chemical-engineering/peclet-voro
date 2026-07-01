@@ -12,32 +12,31 @@
  * cellSeedId(i) == i, which is what the device search uses. Periodic multi-image
  * facets are disambiguated by area-vector negation.
  */
-#ifndef VORFLOW_DEVICE_TRANSPOSE_HPP
-#define VORFLOW_DEVICE_TRANSPOSE_HPP
+#ifndef PECLET_VORO_TRANSPOSE_HPP
+#define PECLET_VORO_TRANSPOSE_HPP
 
 #include <Kokkos_Core.hpp>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/tessellation_view.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/tessellation_view.hpp"
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 template <class Real>
 struct AuxMaps {
-  Kokkos::View<int*, tpx::MemSpace> recip;        // nFacets: reciprocal facet, or -1
-  Kokkos::View<int*, tpx::MemSpace> cellOfFacet;  // nFacets: owning cell index
+  Kokkos::View<int*, peclet::core::MemSpace> recip;        // nFacets: reciprocal facet, or -1
+  Kokkos::View<int*, peclet::core::MemSpace> cellOfFacet;  // nFacets: owning cell index
 };
 
 /// Build {recip, cellOfFacet} on device from a published view (dense single-domain).
 template <class Real>
 AuxMaps<Real> buildAuxMaps(const TessellationView<Real>& view) {
-  using Exec = tpx::ExecSpace;
+  using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();
   const int nF = view.numFacets();
   AuxMaps<Real> aux;
-  aux.recip = Kokkos::View<int*, tpx::MemSpace>("recip", nF);
-  aux.cellOfFacet = Kokkos::View<int*, tpx::MemSpace>("cellOfFacet", nF);
+  aux.recip = Kokkos::View<int*, peclet::core::MemSpace>("recip", nF);
+  aux.cellOfFacet = Kokkos::View<int*, peclet::core::MemSpace>("cellOfFacet", nF);
   auto recip = aux.recip;
   auto cellOfFacet = aux.cellOfFacet;
 
@@ -77,7 +76,6 @@ AuxMaps<Real> buildAuxMaps(const TessellationView<Real>& view) {
   return aux;
 }
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_TRANSPOSE_HPP
+#endif  // PECLET_VORO_TRANSPOSE_HPP

@@ -23,8 +23,8 @@
  * Requires Kokkos; only included by the device build (-DVORFLOW_KOKKOS=ON). This
  * is a *core* header: it must never include a physics header (see §1).
  */
-#ifndef VORFLOW_TESSELLATION_VIEW_HPP
-#define VORFLOW_TESSELLATION_VIEW_HPP
+#ifndef PECLET_VORO_TESSELLATION_VIEW_HPP
+#define PECLET_VORO_TESSELLATION_VIEW_HPP
 
 #include <cmath>
 #include <cstdint>
@@ -32,8 +32,8 @@
 #include <map>
 #include <vector>
 
-#include "tpx/common/view.hpp"
-namespace vor {
+#include "peclet/core/common/view.hpp"
+namespace peclet::voro {
 
 /// Seed/neighbour identifier in the published view. Signed so the unsigned
 /// sentinels map cleanly to negatives: 0xFFFFFFFF -> -1 (no neighbour),
@@ -114,19 +114,19 @@ struct TessellationView {
   // cellFacetOffset is a per-cell base, not a prefix sum), hence the explicit count;
   // the legacy upload path fills count from its prefix-sum offsets. Consumers use
   // facetBegin/facetEnd and are agnostic to which.
-  Kokkos::View<int*, tpx::MemSpace> cellFacetOffset;  // nCells (per-cell facet base)
-  Kokkos::View<int*, tpx::MemSpace> cellFacetCount;   // nCells
-  Kokkos::View<gid_t*, tpx::MemSpace> cellSeedId;     // nCells
-  Kokkos::View<Real*, tpx::MemSpace> cellVolume;      // nCells
-  Kokkos::View<gid_t*, tpx::MemSpace> facetNeighbor;  // nFacets
-  Kokkos::View<Real*, tpx::MemSpace> facetArea;       // 3*nFacets
-  Kokkos::View<Real*, tpx::MemSpace> facetConnect;    // 3*nFacets (dV)
-  Kokkos::View<Real*, tpx::MemSpace> facetConnVec;    // 3*nFacets
+  Kokkos::View<int*, peclet::core::MemSpace> cellFacetOffset;  // nCells (per-cell facet base)
+  Kokkos::View<int*, peclet::core::MemSpace> cellFacetCount;   // nCells
+  Kokkos::View<gid_t*, peclet::core::MemSpace> cellSeedId;     // nCells
+  Kokkos::View<Real*, peclet::core::MemSpace> cellVolume;      // nCells
+  Kokkos::View<gid_t*, peclet::core::MemSpace> facetNeighbor;  // nFacets
+  Kokkos::View<Real*, peclet::core::MemSpace> facetArea;       // 3*nFacets
+  Kokkos::View<Real*, peclet::core::MemSpace> facetConnect;    // 3*nFacets (dV)
+  Kokkos::View<Real*, peclet::core::MemSpace> facetConnVec;    // 3*nFacets
   // Vertex CSR (seed-relative positions) — published when a consumer needs cell
   // geometry (rendering, the interface-tension force, future Hamiltonian solver);
   // empty otherwise.
-  Kokkos::View<int*, tpx::MemSpace> cellVertexOffset;  // nCells+1 (empty if unused)
-  Kokkos::View<Real*, tpx::MemSpace> vertexPos;        // 3*nVerts
+  Kokkos::View<int*, peclet::core::MemSpace> cellVertexOffset;  // nCells+1 (empty if unused)
+  Kokkos::View<Real*, peclet::core::MemSpace> vertexPos;        // 3*nVerts
 
   KOKKOS_INLINE_FUNCTION int numCells() const { return static_cast<int>(cellSeedId.extent(0)); }
   KOKKOS_INLINE_FUNCTION bool hasVertices() const { return cellVertexOffset.extent(0) > 0; }
@@ -148,10 +148,10 @@ struct TessellationView {
 
 namespace detail {
 template <class T>
-Kokkos::View<T*, tpx::MemSpace> deviceFrom(const std::vector<T>& h, const std::string& label) {
+Kokkos::View<T*, peclet::core::MemSpace> deviceFrom(const std::vector<T>& h, const std::string& label) {
   // NOTE: pass a std::string label — a bare const char* is interpreted by
   // Kokkos::view_alloc as a user pointer-to-memory, not an allocation label.
-  Kokkos::View<T*, tpx::MemSpace> d(Kokkos::view_alloc(label, Kokkos::WithoutInitializing),
+  Kokkos::View<T*, peclet::core::MemSpace> d(Kokkos::view_alloc(label, Kokkos::WithoutInitializing),
                                     h.size());
   if (!h.empty()) {
     using Host =
@@ -186,6 +186,6 @@ TessellationView<Real> upload(const HostTessellation<Real>& h) {
   return v;
 }
 
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_TESSELLATION_VIEW_HPP
+#endif  // PECLET_VORO_TESSELLATION_VIEW_HPP

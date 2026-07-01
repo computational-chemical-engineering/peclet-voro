@@ -4,7 +4,7 @@
  *        index list, reusing the per-step grid. The device analogue of the legacy
  *        NbrList::setupSubset, and the single primitive both repair passes will call (Phase 2).
  *
- * Given a TessGrid built once for the current positions (vorflow/device/tess_grid.hpp),
+ * Given a TessGrid built once for the current positions (peclet/voro/tess_grid.hpp),
  * `subsetGather` runs the EXACT same `CellBuilder::buildCell` the cold build runs — same worklist
  * gather, same ConvexCell clip — but only over the grid-sorted slots of the requested ORIGINAL seed
  * indices (mapped through grid.slotOf). It writes the resident topology store (np/nt/pnbr/tri) and
@@ -17,25 +17,24 @@
  *
  * Core header: Kokkos + the tessellator (CellBuilder) + tess_grid. No physics.
  */
-#ifndef VORFLOW_DEVICE_SUBSET_GATHER_HPP
-#define VORFLOW_DEVICE_SUBSET_GATHER_HPP
+#ifndef PECLET_VORO_SUBSET_GATHER_HPP
+#define PECLET_VORO_SUBSET_GATHER_HPP
 
 #include <Kokkos_Core.hpp>
 #include <string>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/tess_grid.hpp"
-#include "vorflow/device/tessellator.hpp"  // CellBuilder, StatusBit, NoSdf
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/tess_grid.hpp"
+#include "peclet/voro/tessellator.hpp"  // CellBuilder, StatusBit, NoSdf
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 /// Output bundle of a subset gather: the per-cell StatusBit mask, addressed by ORIGINAL seed index
 /// (size N, only the requested subset is written; the topology store + the caller's cellVol view
 /// are written in place). Flags the rare overflow/incomplete cell exactly as the cold build does.
 template <class Real>
 struct SubsetGatherResult {
-  Kokkos::View<int*, tpx::MemSpace> status;  // N : per-cell StatusBit mask (subset entries written)
+  Kokkos::View<int*, peclet::core::MemSpace> status;  // N : per-cell StatusBit mask (subset entries written)
 };
 
 /**
@@ -54,15 +53,15 @@ struct SubsetGatherResult {
  */
 template <class Real, bool Weighted = false, bool TrackAdj = false, class Sdf = NoSdf>
 SubsetGatherResult<Real> subsetGather(
-    const TessGrid<Real>& grid, const Kokkos::View<int*, tpx::MemSpace>& indices, int nSubset,
-    const Kokkos::View<int*, tpx::MemSpace>& outNp, const Kokkos::View<int*, tpx::MemSpace>& outNt,
-    const Kokkos::View<int*, tpx::MemSpace>& outPnbr,
-    const Kokkos::View<unsigned*, tpx::MemSpace>& outTri,
-    const Kokkos::View<Real*, tpx::MemSpace>& cellVol,
-    const Kokkos::View<unsigned char*, tpx::MemSpace>& outPoke4 = {}, Sdf sdf = {},
+    const TessGrid<Real>& grid, const Kokkos::View<int*, peclet::core::MemSpace>& indices, int nSubset,
+    const Kokkos::View<int*, peclet::core::MemSpace>& outNp, const Kokkos::View<int*, peclet::core::MemSpace>& outNt,
+    const Kokkos::View<int*, peclet::core::MemSpace>& outPnbr,
+    const Kokkos::View<unsigned*, peclet::core::MemSpace>& outTri,
+    const Kokkos::View<Real*, peclet::core::MemSpace>& cellVol,
+    const Kokkos::View<unsigned char*, peclet::core::MemSpace>& outPoke4 = {}, Sdf sdf = {},
     bool withForceGeom = false) {
-  using tpx::MemSpace;
-  using Exec = tpx::ExecSpace;
+  using peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
   using Builder = CellBuilder<Real, Weighted, Sdf, TrackAdj>;
   static_assert(!Weighted,
                 "subsetGather: Power/Laguerre on the ConvexCell device path is deferred.");
@@ -152,7 +151,6 @@ SubsetGatherResult<Real> subsetGather(
   return res;
 }
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_SUBSET_GATHER_HPP
+#endif  // PECLET_VORO_SUBSET_GATHER_HPP

@@ -27,18 +27,17 @@
  *
  * Core header: Kokkos + transport-core + the published view/aux + TopologyStore. No physics.
  */
-#ifndef VORFLOW_DEVICE_DYNAMIC_VALIDATE_HPP
-#define VORFLOW_DEVICE_DYNAMIC_VALIDATE_HPP
+#ifndef PECLET_VORO_DYNAMIC_VALIDATE_HPP
+#define PECLET_VORO_DYNAMIC_VALIDATE_HPP
 
 #include <cmath>
 #include <Kokkos_Core.hpp>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/transpose.hpp"  // AuxMaps, buildAuxMaps
-#include "vorflow/tessellation_view.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/transpose.hpp"  // AuxMaps, buildAuxMaps
+#include "peclet/voro/tessellation_view.hpp"
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 /// Per-step invariant residuals (all should be ~0 / ~machine-precision for a correct tessellation).
 struct Invariants {
@@ -54,7 +53,7 @@ struct Invariants {
 template <class Real>
 Invariants checkInvariants(const TessellationView<Real>& view, const AuxMaps<Real>& aux,
                            double boxVolume) {
-  using Exec = tpx::ExecSpace;
+  using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();
   const int nF = view.numFacets();
   Invariants inv;
@@ -132,9 +131,9 @@ struct OracleDiff {
 
 /// Compare a current per-cell volume array against the oracle view's volumes (cell i == seed i).
 template <class Real>
-void compareVolumes(const Kokkos::View<Real*, tpx::MemSpace>& volCurrent,
+void compareVolumes(const Kokkos::View<Real*, peclet::core::MemSpace>& volCurrent,
                     const TessellationView<Real>& oracle, OracleDiff& out) {
-  using Exec = tpx::ExecSpace;
+  using Exec = peclet::core::ExecSpace;
   const int N = oracle.numCells();
   double sum = 0, mx = 0;
   long mm = 0;
@@ -162,12 +161,12 @@ void compareVolumes(const Kokkos::View<Real*, tpx::MemSpace>& volCurrent,
 /// the repair must drive to zero). Needs the packed triangles (tri at stride MAXT) + nt to identify
 /// the faces.
 template <class Real>
-void compareNeighbours(const Kokkos::View<int*, tpx::MemSpace>& storeNp,
-                       const Kokkos::View<int*, tpx::MemSpace>& storeNt,
-                       const Kokkos::View<int*, tpx::MemSpace>& storePnbr,
-                       const Kokkos::View<unsigned*, tpx::MemSpace>& storeTri, int MAXP, int MAXT,
+void compareNeighbours(const Kokkos::View<int*, peclet::core::MemSpace>& storeNp,
+                       const Kokkos::View<int*, peclet::core::MemSpace>& storeNt,
+                       const Kokkos::View<int*, peclet::core::MemSpace>& storePnbr,
+                       const Kokkos::View<unsigned*, peclet::core::MemSpace>& storeTri, int MAXP, int MAXT,
                        const TessellationView<Real>& oracle, OracleDiff& out) {
-  using Exec = tpx::ExecSpace;
+  using Exec = peclet::core::ExecSpace;
   const int N = oracle.numCells();
   long changed = 0, missed = 0;
   Kokkos::parallel_reduce(
@@ -239,7 +238,6 @@ void compareNeighbours(const Kokkos::View<int*, tpx::MemSpace>& storeNp,
   out.missedNbr = missed;
 }
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_DYNAMIC_VALIDATE_HPP
+#endif  // PECLET_VORO_DYNAMIC_VALIDATE_HPP

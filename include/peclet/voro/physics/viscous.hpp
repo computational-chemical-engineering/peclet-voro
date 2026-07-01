@@ -15,26 +15,26 @@
  * neighbour cell index is facetNeighbor (dense single-domain build). Boundary
  * facets (recip < 0) are skipped — the periodic dynamics has none.
  */
-#ifndef VORFLOW_PHYSICS_VISCOUS_HPP
-#define VORFLOW_PHYSICS_VISCOUS_HPP
+#ifndef PECLET_VORO_PHYSICS_VISCOUS_HPP
+#define PECLET_VORO_PHYSICS_VISCOUS_HPP
 
 #include <Kokkos_Core.hpp>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/tessellation_view.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/tessellation_view.hpp"
 
-namespace vor {
+namespace peclet::voro {
 namespace physics {
 
 /// Per-cell velocity gradient (Green-Gauss, atomic-free). vel/grad are device
 /// Views sized 3*N and 9*N (row-major 3x3: 9*i + 3*k + m = d v_k / d x_m).
 template <class Real>
 void velocityGradient(const TessellationView<Real>& view,
-                      const Kokkos::View<int*, tpx::MemSpace>& recip,
-                      const Kokkos::View<int*, tpx::MemSpace>& cellOfFacet,
-                      const Kokkos::View<Real*, tpx::MemSpace>& vel,
-                      const Kokkos::View<Real*, tpx::MemSpace>& grad) {
-  using Exec = tpx::ExecSpace;
+                      const Kokkos::View<int*, peclet::core::MemSpace>& recip,
+                      const Kokkos::View<int*, peclet::core::MemSpace>& cellOfFacet,
+                      const Kokkos::View<Real*, peclet::core::MemSpace>& vel,
+                      const Kokkos::View<Real*, peclet::core::MemSpace>& grad) {
+  using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();
   Kokkos::parallel_for(
       "visc.grad", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
@@ -61,11 +61,11 @@ void velocityGradient(const TessellationView<Real>& view,
 
 /// Newtonian stress per cell from the gradient (τ stored 9-per-cell, symmetric).
 template <class Real>
-void viscousStress(const Kokkos::View<Real*, tpx::MemSpace>& grad,
-                   const Kokkos::View<Real*, tpx::MemSpace>& visc,
-                   const Kokkos::View<Real*, tpx::MemSpace>& bulkVisc,
-                   const Kokkos::View<Real*, tpx::MemSpace>& stress) {
-  using Exec = tpx::ExecSpace;
+void viscousStress(const Kokkos::View<Real*, peclet::core::MemSpace>& grad,
+                   const Kokkos::View<Real*, peclet::core::MemSpace>& visc,
+                   const Kokkos::View<Real*, peclet::core::MemSpace>& bulkVisc,
+                   const Kokkos::View<Real*, peclet::core::MemSpace>& stress) {
+  using Exec = peclet::core::ExecSpace;
   const int N = static_cast<int>(visc.extent(0));
   Kokkos::parallel_for(
       "visc.stress", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
@@ -91,9 +91,9 @@ void viscousStress(const Kokkos::View<Real*, tpx::MemSpace>& grad,
 ///   F_i += Σ_f (τ_nbr − τ_i) · dV_i[f].
 template <class Real>
 void addViscousForce(const TessellationView<Real>& view,
-                     const Kokkos::View<Real*, tpx::MemSpace>& stress,
-                     const Kokkos::View<Real*, tpx::MemSpace>& force) {
-  using Exec = tpx::ExecSpace;
+                     const Kokkos::View<Real*, peclet::core::MemSpace>& stress,
+                     const Kokkos::View<Real*, peclet::core::MemSpace>& force) {
+  using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();
   Kokkos::parallel_for(
       "visc.force", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
@@ -117,14 +117,14 @@ void addViscousForce(const TessellationView<Real>& view,
 /// (E4) instead of reallocating two 9*N Views every call.
 template <class Real>
 void viscousForce(const TessellationView<Real>& view,
-                  const Kokkos::View<int*, tpx::MemSpace>& recip,
-                  const Kokkos::View<int*, tpx::MemSpace>& cellOfFacet,
-                  const Kokkos::View<Real*, tpx::MemSpace>& vel,
-                  const Kokkos::View<Real*, tpx::MemSpace>& visc,
-                  const Kokkos::View<Real*, tpx::MemSpace>& bulkVisc,
-                  const Kokkos::View<Real*, tpx::MemSpace>& force,
-                  const Kokkos::View<Real*, tpx::MemSpace>& grad,
-                  const Kokkos::View<Real*, tpx::MemSpace>& stress) {
+                  const Kokkos::View<int*, peclet::core::MemSpace>& recip,
+                  const Kokkos::View<int*, peclet::core::MemSpace>& cellOfFacet,
+                  const Kokkos::View<Real*, peclet::core::MemSpace>& vel,
+                  const Kokkos::View<Real*, peclet::core::MemSpace>& visc,
+                  const Kokkos::View<Real*, peclet::core::MemSpace>& bulkVisc,
+                  const Kokkos::View<Real*, peclet::core::MemSpace>& force,
+                  const Kokkos::View<Real*, peclet::core::MemSpace>& grad,
+                  const Kokkos::View<Real*, peclet::core::MemSpace>& stress) {
   velocityGradient(view, recip, cellOfFacet, vel, grad);
   viscousStress(grad, visc, bulkVisc, stress);
   addViscousForce(view, stress, force);
@@ -133,19 +133,19 @@ void viscousForce(const TessellationView<Real>& view,
 /// Convenience overload that allocates the two 9*N scratch Views itself (tests / one-shot callers).
 template <class Real>
 void viscousForce(const TessellationView<Real>& view,
-                  const Kokkos::View<int*, tpx::MemSpace>& recip,
-                  const Kokkos::View<int*, tpx::MemSpace>& cellOfFacet,
-                  const Kokkos::View<Real*, tpx::MemSpace>& vel,
-                  const Kokkos::View<Real*, tpx::MemSpace>& visc,
-                  const Kokkos::View<Real*, tpx::MemSpace>& bulkVisc,
-                  const Kokkos::View<Real*, tpx::MemSpace>& force) {
+                  const Kokkos::View<int*, peclet::core::MemSpace>& recip,
+                  const Kokkos::View<int*, peclet::core::MemSpace>& cellOfFacet,
+                  const Kokkos::View<Real*, peclet::core::MemSpace>& vel,
+                  const Kokkos::View<Real*, peclet::core::MemSpace>& visc,
+                  const Kokkos::View<Real*, peclet::core::MemSpace>& bulkVisc,
+                  const Kokkos::View<Real*, peclet::core::MemSpace>& force) {
   const int N = view.numCells();
-  Kokkos::View<Real*, tpx::MemSpace> grad("visc.grad", (size_t)9 * N);
-  Kokkos::View<Real*, tpx::MemSpace> stress("visc.stress", (size_t)9 * N);
+  Kokkos::View<Real*, peclet::core::MemSpace> grad("visc.grad", (size_t)9 * N);
+  Kokkos::View<Real*, peclet::core::MemSpace> stress("visc.stress", (size_t)9 * N);
   viscousForce(view, recip, cellOfFacet, vel, visc, bulkVisc, force, grad, stress);
 }
 
 }  // namespace physics
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_PHYSICS_VISCOUS_HPP
+#endif  // PECLET_VORO_PHYSICS_VISCOUS_HPP

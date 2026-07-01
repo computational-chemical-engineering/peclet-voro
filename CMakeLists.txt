@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.16)
 
 project(
-  vorflow
+  peclet_voro
   VERSION 1.0.0
   DESCRIPTION "Header-only Voronoi-dynamics simulation library for moving-particle methods"
   LANGUAGES CXX
@@ -48,8 +48,8 @@ target_include_directories(vorflow
 # ── Tests ─────────────────────────────────────────────────────────────────────
 # Only the Kokkos device tests remain (tests/kokkos, configured below). The legacy CPU half-edge
 # test suite (tests/) was retired together with the half-edge engine.
-option(VORONOI_BUILD_TESTS "Build the test programs" ON)
-if(VORONOI_BUILD_TESTS)
+option(PECLET_VORO_BUILD_TESTS "Build the test programs" ON)
+if(PECLET_VORO_BUILD_TESTS)
   enable_testing()
 endif()
 
@@ -57,7 +57,7 @@ endif()
 # Device benchmarks live under tests/kokkos (bench_*); the legacy CPU benchmark suite was retired.
 
 # ── Python bindings ───────────────────────────────────────────────────────────
-# The Python surface is the device-native nanobind module `vorflow` (src/vorflow_bindings.cpp),
+# The Python surface is the device-native nanobind module `vorflow` (src/voro_bindings.cpp),
 # configured below with -DVORFLOW_BUILD_PYTHON=ON. The legacy pybind11 module over the retired
 # half-edge engine has been removed.
 
@@ -72,10 +72,10 @@ endif()
 #   cmake --build build/host-openmp -j
 #
 # Add -DVORFLOW_MPI=ON to link MPI + transport-core for the distributed path.
-option(VORFLOW_KOKKOS "Build the Kokkos device path (find_package(Kokkos))" OFF)
-option(VORFLOW_MPI "Build the distributed path against MPI + transport-core" OFF)
+option(PECLET_VORO_KOKKOS "Build the Kokkos device path (find_package(Kokkos))" OFF)
+option(PECLET_VORO_MPI "Build the distributed path against MPI + transport-core" OFF)
 
-if(VORFLOW_KOKKOS)
+if(PECLET_VORO_KOKKOS)
   # Dependencies via the vendored PecletDeps helper: installed prefix + sibling checkouts for the
   # dev/suite build, or FetchContent-built Kokkos + fetched transport-core/morton headers for a
   # self-contained sdist/wheel (cibuildwheel). See cmake/PecletDeps.cmake.
@@ -94,60 +94,60 @@ if(VORFLOW_KOKKOS)
 
   # transport-core's zero-copy bridge + the morton spatial-index primitive (the device tessellator's
   # Z-order grid uses morton::Morton<3,21>; MORTON_ENABLE_KOKKOS -> MORTON_HD is KOKKOS_FUNCTION).
-  peclet_sibling_include(transport-core "${PECLET_TPX_TAG}" "../transport-core" VORFLOW_TPX_INCLUDE)
-  peclet_sibling_include(morton         "${PECLET_MORTON_TAG}" "../morton"      VORFLOW_MORTON_INCLUDE)
+  peclet_sibling_include(transport-core "${PECLET_TPX_TAG}" "../transport-core" PECLET_VORO_TPX_INCLUDE)
+  peclet_sibling_include(morton         "${PECLET_MORTON_TAG}" "../morton"      PECLET_VORO_MORTON_INCLUDE)
 
-  if(VORFLOW_MPI)
+  if(PECLET_VORO_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
-    if(NOT EXISTS "${VORFLOW_TPX_INCLUDE}/tpx/halo/particle_halo_kokkos.hpp")
+    if(NOT EXISTS "${PECLET_VORO_TPX_INCLUDE}/peclet/core/halo/particle_halo_kokkos.hpp")
       message(FATAL_ERROR
-        "transport-core not found at ${VORFLOW_TPX_INCLUDE} (clone it as a sibling repo)")
+        "transport-core not found at ${PECLET_VORO_TPX_INCLUDE} (clone it as a sibling repo)")
     endif()
     message(STATUS "vorflow: distributed path ENABLED (MPI + transport-core)")
   endif()
 
-  if(VORONOI_BUILD_TESTS)
+  if(PECLET_VORO_BUILD_TESTS)
     add_subdirectory(tests/kokkos)
   endif()
 
   # Device-native Python module `peclet.voro` (the de-legacy surface over the device tessellator +
   # ExplicitEulerDevice). Opt-in. nanobind is found via the active interpreter (PecletDeps helper);
   # arrays use the transport-core zero-copy bridge.
-  option(VORFLOW_BUILD_PYTHON "Build the device-native vorflow Python module" OFF)
-  if(VORFLOW_BUILD_PYTHON)
+  option(PECLET_VORO_BUILD_PYTHON "Build the device-native vorflow Python module" OFF)
+  if(PECLET_VORO_BUILD_PYTHON)
     peclet_require_nanobind()
     # NOMINSIZE: nanobind's default -Os size optimization is rejected by nvcc ("'s': expected a
     # number") since Kokkos device sources compile as CXX through the launch compiler.
-    nanobind_add_module(vorflow_device NB_STATIC NOMINSIZE src/vorflow_bindings.cpp)
+    nanobind_add_module(voro NB_STATIC NOMINSIZE src/voro_bindings.cpp)
     # -> peclet.voro._voro (NB_MODULE(_voro)), re-exported by peclet/voro/__init__.py. The extension +
     # the staged __init__.py land under <build>/peclet/voro so `import peclet.voro` works both from the
     # build tree (dev loop, PYTHONPATH=<build>) and from the SKBUILD wheel install.
-    set_target_properties(vorflow_device PROPERTIES
+    set_target_properties(voro PROPERTIES
       OUTPUT_NAME _voro
       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/voro")
     # The package __init__.py is kept as a plain file OUTSIDE any importable peclet/ dir (so an
     # incomplete source package can never shadow the installed one); staged into the build tree here.
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/packaging/voro_init.py"
                    "${CMAKE_CURRENT_BINARY_DIR}/peclet/voro/__init__.py" COPYONLY)
-    target_include_directories(vorflow_device PRIVATE
-      "${CMAKE_CURRENT_SOURCE_DIR}/include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
-    target_compile_definitions(vorflow_device PRIVATE MORTON_ENABLE_KOKKOS=1)
-    target_link_libraries(vorflow_device PRIVATE Kokkos::kokkos)
-    target_compile_features(vorflow_device PRIVATE cxx_std_20)
+    target_include_directories(voro PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/include" "${PECLET_VORO_TPX_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
+    target_compile_definitions(voro PRIVATE MORTON_ENABLE_KOKKOS=1)
+    target_link_libraries(voro PRIVATE Kokkos::kokkos)
+    target_compile_features(voro PRIVATE cxx_std_20)
     # `pip install .` (scikit-build-core, via pyproject.toml) installs the module as peclet.voro. Inert
     # for a plain `cmake --build`, so the developer workflow is unchanged.
     if(DEFINED SKBUILD)
-      install(TARGETS vorflow_device LIBRARY DESTINATION peclet/voro COMPONENT python)
+      install(TARGETS voro LIBRARY DESTINATION peclet/voro COMPONENT python)
       install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/packaging/voro_init.py"
               DESTINATION peclet/voro RENAME __init__.py COMPONENT python)
     endif()
     # Python smoke test (Tessellation + Simulation) — needs numpy in the active interpreter.
-    if(VORONOI_BUILD_TESTS AND NOT DEFINED SKBUILD)
+    if(PECLET_VORO_BUILD_TESTS AND NOT DEFINED SKBUILD)
       find_package(Python3 COMPONENTS Interpreter QUIET)
       if(Python3_Interpreter_FOUND)
-        add_test(NAME test_vorflow_python
-                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_vorflow.py)
-        set_tests_properties(test_vorflow_python PROPERTIES
+        add_test(NAME test_voro_python
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_voro.py)
+        set_tests_properties(test_voro_python PROPERTIES
           ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};OMP_PROC_BIND=false")
       endif()
     endif()
@@ -155,8 +155,8 @@ if(VORFLOW_KOKKOS)
 endif()
 
 # ── Documentation ─────────────────────────────────────────────────────────────
-option(VORONOI_BUILD_DOCS "Build Doxygen documentation" OFF)
-if(VORONOI_BUILD_DOCS)
+option(PECLET_VORO_BUILD_DOCS "Build Doxygen documentation" OFF)
+if(PECLET_VORO_BUILD_DOCS)
   find_package(Doxygen)
   if(DOXYGEN_FOUND)
     set(DOXYGEN_PROJECT_NAME "vorflow")

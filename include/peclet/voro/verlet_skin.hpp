@@ -17,16 +17,15 @@
  *
  * Core header: Kokkos + transport-core, no physics. One path for CUDA/HIP/OpenMP.
  */
-#ifndef VORFLOW_DEVICE_VERLET_SKIN_HPP
-#define VORFLOW_DEVICE_VERLET_SKIN_HPP
+#ifndef PECLET_VORO_VERLET_SKIN_HPP
+#define PECLET_VORO_VERLET_SKIN_HPP
 
 #include <Kokkos_Core.hpp>
 #include <string>
 
-#include "tpx/common/view.hpp"
+#include "peclet/core/common/view.hpp"
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 /// Per-particle rebuild-trigger bits. Extensible: Phase 1 only ever sets kSkinMover; the deferred
 /// boundary trigger (Risk 1d) will add kSkinBoundary so a status-change near an SDF wall feeds the
@@ -41,8 +40,8 @@ enum SkinTrigger : int {
 /// full (re)build and the skin width; `reset` is called right after a rebuild, `flag` each step.
 template <class Real>
 struct VerletSkin {
-  using Mem = tpx::MemSpace;
-  using Exec = tpx::ExecSpace;
+  using Mem = peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
   Kokkos::View<Real*, Mem> xRef;  ///< 3N: seed positions at the last rebuild
   Real skin = 0;                  ///< skin width in absolute length units (caller picks vs spacing)
   int N = 0;
@@ -63,10 +62,10 @@ struct VerletSkin {
 /// N. The flag value is OR-combinable with future trigger bits; here it is overwritten each call
 /// (the only Phase-1 trigger). One reduce + write pass; no host round-trip beyond the final count.
 template <class Real>
-int flagSkinMovers(const Kokkos::View<Real*, tpx::MemSpace>& pos,
-                   const Kokkos::View<Real*, tpx::MemSpace>& xRef, Real skin, const Real L[3],
-                   const Kokkos::View<int*, tpx::MemSpace>& outFlags) {
-  using Exec = tpx::ExecSpace;
+int flagSkinMovers(const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
+                   const Kokkos::View<Real*, peclet::core::MemSpace>& xRef, Real skin, const Real L[3],
+                   const Kokkos::View<int*, peclet::core::MemSpace>& outFlags) {
+  using Exec = peclet::core::ExecSpace;
   const int N = (int)outFlags.extent(0);
   const Real half2 = Real(0.25) * skin * skin;  // (skin/2)^2
   const Real Lx = L[0], Ly = L[1], Lz = L[2];
@@ -94,9 +93,9 @@ int flagSkinMovers(const Kokkos::View<Real*, tpx::MemSpace>& pos,
 /// Largest per-seed displacement from xRef (minimal image), in absolute units. Diagnostics / the
 /// Verlet rebuild decision (max-disp > skin/2 -> a global rebuild is the simplest safe response).
 template <class Real>
-Real maxDisplacement(const Kokkos::View<Real*, tpx::MemSpace>& pos,
-                     const Kokkos::View<Real*, tpx::MemSpace>& xRef, const Real L[3]) {
-  using Exec = tpx::ExecSpace;
+Real maxDisplacement(const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
+                     const Kokkos::View<Real*, peclet::core::MemSpace>& xRef, const Real L[3]) {
+  using Exec = peclet::core::ExecSpace;
   const int N = (int)(xRef.extent(0) / 3);
   const Real Lx = L[0], Ly = L[1], Lz = L[2];
   const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
@@ -118,7 +117,6 @@ Real maxDisplacement(const Kokkos::View<Real*, tpx::MemSpace>& pos,
   return Kokkos::sqrt(m2);
 }
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_VERLET_SKIN_HPP
+#endif  // PECLET_VORO_VERLET_SKIN_HPP

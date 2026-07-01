@@ -16,11 +16,11 @@
 #include <random>
 #include <vector>
 
-#include "vorflow/device/convex_cell.hpp"
-#include "vorflow/device/plane_policy.hpp"
+#include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/plane_policy.hpp"
 
 using real_t = double;
-using Cell = vor::device::ConvexCell<real_t, 64, 128>;
+using Cell = peclet::voro::ConvexCell<real_t, 64, 128>;
 
 // build one cell at site `i` from its K nearest neighbours (periodic min-image, security break)
 static bool buildCell(Cell& c, int i, const std::vector<real_t>& pos, int N, real_t L,
@@ -290,7 +290,7 @@ int main(int argc, char** argv) {
             dgx[k] = dgy[k] = dgz[k] = 0.0;
           c.geomVolumeGrad(vg, dgx, dgy, dgz);
           double fSelf[3], fnx[64], fny[64], fnz[64];
-          vor::device::chainToDofs<vor::device::Voronoi>(c, dgx, dgy, dgz, fSelf, fnx, fny, fnz);
+          peclet::voro::chainToDofs<peclet::voro::Voronoi>(c, dgx, dgy, dgz, fSelf, fnx, fny, fnz);
           const double fmag =
               std::sqrt(fSelf[0] * fSelf[0] + fSelf[1] * fSelf[1] + fSelf[2] * fSelf[2]);
           const double denom = std::max(fmag, cellScale);

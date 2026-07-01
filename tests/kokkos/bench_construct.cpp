@@ -20,8 +20,8 @@
 #include <random>
 #include <vector>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/convex_cell.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/convex_cell.hpp"
 
 #ifdef CC_FLOAT
 using real_t = float;
@@ -41,8 +41,8 @@ static constexpr int KCAND = 64;  // cached closest candidates per cell
 #endif
 
 int main(int argc, char** argv) {
-  using MemSpace = tpx::MemSpace;
-  using Exec = tpx::ExecSpace;
+  using MemSpace = peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
   Kokkos::initialize(argc, argv);
   {
     std::printf("backend: %s  (%s)\n", Kokkos::DefaultExecutionSpace::name(),
@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
 
     auto run = [&](int tier) {
       auto kern = KOKKOS_LAMBDA(const int i) {
-        vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
+        peclet::voro::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
         c.initBox(L, L, L);
         const int k = ncand(i);
         for (int t = 0; t < k; ++t) {

@@ -24,14 +24,14 @@
 #include <random>
 #include <vector>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/convex_cell.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/convex_cell.hpp"
 
 using real_t = float;
-using Exec = tpx::ExecSpace;
-using Mem = tpx::MemSpace;
+using Exec = peclet::core::ExecSpace;
+using Mem = peclet::core::MemSpace;
 static constexpr int CMAXP = 64, CMAXT = 112;
-using Cell = vor::device::ConvexCell<real_t, CMAXP, CMAXT>;
+using Cell = peclet::voro::ConvexCell<real_t, CMAXP, CMAXT>;
 using clk = std::chrono::high_resolution_clock;
 static double secs(clk::time_point a, clk::time_point b) {
   return std::chrono::duration<double>(b - a).count();

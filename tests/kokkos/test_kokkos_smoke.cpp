@@ -4,8 +4,8 @@
  *
  * Proves the suite toolchain end-to-end before any real device kernels exist:
  *   - Kokkos initializes and runs a parallel_reduce on the default backend;
- *   - transport-core's tpx::View / tpx::toDevice round-trips host<->device;
- * *   - transport-core's tpx::View round-trips through a device kernel under the C++20
+ *   - transport-core's peclet::core::View / peclet::core::toDevice round-trips host<->device;
+ * *   - transport-core's peclet::core::View round-trips through a device kernel under the C++20
  *     Kokkos build and interoperate with device Views.
  * Exit non-zero on any mismatch (ctest oracle, no framework).
  */
@@ -14,7 +14,7 @@
 #include <Kokkos_Core.hpp>
 #include <vector>
 
-#include "tpx/common/view.hpp"
+#include "peclet/core/common/view.hpp"
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
     const int N = 100000;
     long sum = 0;
     Kokkos::parallel_reduce(
-        "smoke_sum", Kokkos::RangePolicy<tpx::ExecSpace>(0, N),
+        "smoke_sum", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N),
         KOKKOS_LAMBDA(const int i, long& acc) { acc += i; }, sum);
     const long expect = (long)N * (N - 1) / 2;
     if (sum != expect) {
@@ -32,13 +32,13 @@ int main(int argc, char** argv) {
       ++failures;
     }
 
-    // (2) tpx::View round-trip: upload, scale on device, copy back.
+    // (2) peclet::core::View round-trip: upload, scale on device, copy back.
     std::vector<double> h(1024);
     for (size_t i = 0; i < h.size(); ++i)
       h[i] = (double)i;
-    tpx::View<double> d = tpx::toDevice(h, "smoke_field");
+    peclet::core::View<double> d = peclet::core::toDevice(h, "smoke_field");
     Kokkos::parallel_for(
-        "smoke_scale", Kokkos::RangePolicy<tpx::ExecSpace>(0, d.extent(0)),
+        "smoke_scale", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, d.extent(0)),
         KOKKOS_LAMBDA(const int i) { d(i) *= 2.0; });
     auto hm = Kokkos::create_mirror_view(d);
     Kokkos::deep_copy(hm, d);

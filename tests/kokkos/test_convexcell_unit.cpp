@@ -3,9 +3,9 @@
 #include <cstdio>
 #include <Kokkos_Core.hpp>
 
-#include "vorflow/device/convex_cell.hpp"
+#include "peclet/voro/convex_cell.hpp"
 
-using vor::device::ConvexCell;
+using peclet::voro::ConvexCell;
 using R = double;
 
 static void report(const char* tag, ConvexCell<R>& c, double expVol, int expFaces) {

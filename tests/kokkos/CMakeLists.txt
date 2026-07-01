@@ -5,8 +5,8 @@ function(add_vorflow_kokkos_test name)
   target_link_libraries(${name} PRIVATE Kokkos::kokkos)
   target_include_directories(${name} PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
-    "${VORFLOW_TPX_INCLUDE}"
-    "${VORFLOW_MORTON_INCLUDE}")
+    "${PECLET_VORO_TPX_INCLUDE}"
+    "${PECLET_VORO_MORTON_INCLUDE}")
   target_compile_definitions(${name} PRIVATE MORTON_ENABLE_KOKKOS=1)
   target_compile_features(${name} PRIVATE cxx_std_20)
   add_test(NAME ${name} COMMAND ${name})
@@ -47,11 +47,11 @@ add_executable(bench_convexcell bench_convexcell.cpp)
 target_link_libraries(bench_convexcell PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
 target_compile_definitions(bench_convexcell PRIVATE MORTON_ENABLE_KOKKOS=1)
 target_include_directories(bench_convexcell PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${PECLET_VORO_TPX_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
 target_compile_features(bench_convexcell PRIVATE cxx_std_20)
 if(TARGET voro++)
   target_link_libraries(bench_convexcell PRIVATE voro++)
-  target_compile_definitions(bench_convexcell PRIVATE VORFLOW_HAVE_VOROPP)
+  target_compile_definitions(bench_convexcell PRIVATE PECLET_VORO_HAVE_VOROPP)
 endif()
 
 # FP32 ConvexCell variant (precision-policy lever for the crippled consumer FP64).
@@ -59,11 +59,11 @@ add_executable(bench_convexcell_f32 bench_convexcell.cpp)
 target_link_libraries(bench_convexcell_f32 PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
 target_compile_definitions(bench_convexcell_f32 PRIVATE MORTON_ENABLE_KOKKOS=1 CC_FLOAT=1)
 target_include_directories(bench_convexcell_f32 PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${PECLET_VORO_TPX_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
 target_compile_features(bench_convexcell_f32 PRIVATE cxx_std_20)
 if(TARGET voro++)
   target_link_libraries(bench_convexcell_f32 PRIVATE voro++)
-  target_compile_definitions(bench_convexcell_f32 PRIVATE VORFLOW_HAVE_VOROPP)
+  target_compile_definitions(bench_convexcell_f32 PRIVATE PECLET_VORO_HAVE_VOROPP)
 endif()
 
 # F2/F3: isolate cell construction from cached candidate planes (B+G, no gather), per tier.
@@ -72,7 +72,7 @@ foreach(suffix "" "_f32")
   target_link_libraries(bench_construct${suffix} PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
   target_compile_definitions(bench_construct${suffix} PRIVATE MORTON_ENABLE_KOKKOS=1)
   target_include_directories(bench_construct${suffix} PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${PECLET_VORO_TPX_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
   target_compile_features(bench_construct${suffix} PRIVATE cxx_std_20)
 endforeach()
 target_compile_definitions(bench_construct_f32 PRIVATE CC_FLOAT=1)
@@ -82,7 +82,7 @@ add_executable(bench_incremental bench_incremental.cpp)
 target_link_libraries(bench_incremental PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
 target_compile_definitions(bench_incremental PRIVATE MORTON_ENABLE_KOKKOS=1)
 target_include_directories(bench_incremental PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${PECLET_VORO_TPX_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
 target_compile_features(bench_incremental PRIVATE cxx_std_20)
 
 # Part II: consolidated moving-point UPDATE driver — Phase-0 validators (invariants + oracle diff) +
@@ -94,7 +94,7 @@ foreach(suffix "" "_f32")
   target_link_libraries(bench_dynamic_update${suffix} PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
   target_compile_definitions(bench_dynamic_update${suffix} PRIVATE MORTON_ENABLE_KOKKOS=1)
   target_include_directories(bench_dynamic_update${suffix} PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${PECLET_VORO_TPX_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
   target_compile_features(bench_dynamic_update${suffix} PRIVATE cxx_std_20)
 endforeach()
 target_compile_definitions(bench_dynamic_update_f32 PRIVATE CC_FLOAT=1)
@@ -105,7 +105,7 @@ foreach(suffix "" "_f32")
   target_link_libraries(bench_report${suffix} PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
   target_compile_definitions(bench_report${suffix} PRIVATE MORTON_ENABLE_KOKKOS=1)
   target_include_directories(bench_report${suffix} PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${PECLET_VORO_TPX_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
   target_compile_features(bench_report${suffix} PRIVATE cxx_std_20)
 endforeach()
 target_compile_definitions(bench_report_f32 PRIVATE CC_FLOAT=1)

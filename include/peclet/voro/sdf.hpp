@@ -7,26 +7,25 @@
  * (suite convention: sdf < 0 inside solid, > 0 in fluid, ∇sdf outward). This is a
  * faithful KOKKOS_FUNCTION port of the legacy
  * CellComplex::clipCellAgainstBoundary + SignedDistanceBoundary::closestPoint, on
- * the suite's shared geometry (transport-core tpx::geom):
+ * the suite's shared geometry (transport-core peclet::core::geom):
  *   - analytic providers (SdfSphere / SdfBox / SdfHollowCylinder) port the
- *     tpx::geom::{Sphere,Box,HollowCylinder} eval formulas verbatim;
+ *     peclet::core::geom::{Sphere,Box,HollowCylinder} eval formulas verbatim;
  *   - SdfGrid trilinearly evaluates a device-resident sampled field (any geometry,
- *     analytic baked via tpx::geom::sample or loaded from a VTI via tpx::geom::readVti).
+ *     analytic baked via peclet::core::geom::sample or loaded from a VTI via peclet::core::geom::readVti).
  * A provider is any POD with `eval(x,y,z)` and `gradH()`; gradients are central
- * differences (so a host tpx::geom adapter and the device agree bit-for-bit).
+ * differences (so a host peclet::core::geom adapter and the device agree bit-for-bit).
  *
  * Core header: Kokkos + the cutter, no physics.
  */
-#ifndef VORFLOW_DEVICE_SDF_HPP
-#define VORFLOW_DEVICE_SDF_HPP
+#ifndef PECLET_VORO_SDF_HPP
+#define PECLET_VORO_SDF_HPP
 
 #include <Kokkos_Core.hpp>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/convex_cell.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/convex_cell.hpp"
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 /// Neighbour id stamped on a facet produced by an SDF cut (a wall). Distinct from
 /// the initial-cuboid boundary (-1); published as facetNbr < 0 either way.
@@ -35,7 +34,7 @@ constexpr int kBoundaryFacet = -2;
 /// Sentinel "no geometry" provider — the default; the clip stage is skipped.
 struct NoSdf {};
 
-/// Solid ball (negative inside). eval ported from tpx::geom::Sphere.
+/// Solid ball (negative inside). eval ported from peclet::core::geom::Sphere.
 template <class Real>
 struct SdfSphere {
   Real cx = 0, cy = 0, cz = 0, radius = 1;
@@ -46,7 +45,7 @@ struct SdfSphere {
   KOKKOS_INLINE_FUNCTION Real gradH() const { return Real(1e-4); }
 };
 
-/// Axis-aligned solid box of half-extents (hx,hy,hz). eval ported from tpx::geom::Box.
+/// Axis-aligned solid box of half-extents (hx,hy,hz). eval ported from peclet::core::geom::Box.
 template <class Real>
 struct SdfBox {
   Real cx = 0, cy = 0, cz = 0, hx = Real(0.5), hy = Real(0.5), hz = Real(0.5);
@@ -63,7 +62,7 @@ struct SdfBox {
   KOKKOS_INLINE_FUNCTION Real gradH() const { return Real(1e-4); }
 };
 
-/// Solid hollow cylinder (tube wall) about `axis`. eval ported from tpx::geom::HollowCylinder.
+/// Solid hollow cylinder (tube wall) about `axis`. eval ported from peclet::core::geom::HollowCylinder.
 template <class Real>
 struct SdfHollowCylinder {
   Real cx = 0, cy = 0, cz = 0, rOuter = 1, rInner = Real(0.5), height = 1;
@@ -86,10 +85,10 @@ struct SdfHollowCylinder {
 };
 
 /// Device-resident sampled SDF (trilinear; x-fastest), the universal provider for
-/// analytic-baked or VTI geometry. eval ported from tpx::geom::GridSdf.
+/// analytic-baked or VTI geometry. eval ported from peclet::core::geom::GridSdf.
 template <class Real>
 struct SdfGrid {
-  Kokkos::View<const float*, tpx::MemSpace> values;  // i + nx*(j + ny*k)
+  Kokkos::View<const float*, peclet::core::MemSpace> values;  // i + nx*(j + ny*k)
   int nx = 0, ny = 0, nz = 0;
   Real ox = 0, oy = 0, oz = 0, sx = 1, sy = 1, sz = 1;
   KOKKOS_INLINE_FUNCTION Real at(int i, int j, int k) const {
@@ -128,7 +127,7 @@ struct SdfGrid {
   }
 };
 
-/// Central-difference gradient of any provider with eval() (matches tpx::geom::gradient).
+/// Central-difference gradient of any provider with eval() (matches peclet::core::geom::gradient).
 template <class Real, class Sdf>
 KOKKOS_INLINE_FUNCTION void sdfGradient(const Sdf& s, Real x, Real y, Real z, Real g[3]) {
   const Real h = s.gradH();
@@ -220,7 +219,6 @@ KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ConvexCell<Real, MAXP, MAXT, Trac
   return false;
 }
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_SDF_HPP
+#endif  // PECLET_VORO_SDF_HPP

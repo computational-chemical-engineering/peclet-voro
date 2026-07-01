@@ -28,22 +28,21 @@
  * distributed (MPI) driver keeps its store keyed by global id and remaps around this primitive each
  * step.
  */
-#ifndef VORFLOW_DEVICE_REPAIR_HPP
-#define VORFLOW_DEVICE_REPAIR_HPP
+#ifndef PECLET_VORO_REPAIR_HPP
+#define PECLET_VORO_REPAIR_HPP
 
 #include <cmath>
 #include <Kokkos_Core.hpp>
 #include <string>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/convex_cell.hpp"
-#include "vorflow/device/subset_gather.hpp"
-#include "vorflow/device/tess_grid.hpp"
-#include "vorflow/device/tessellator.hpp"
-#include "vorflow/device/topology_store.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/subset_gather.hpp"
+#include "peclet/voro/tess_grid.hpp"
+#include "peclet/voro/tessellator.hpp"
+#include "peclet/voro/topology_store.hpp"
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 /// Per-step repair telemetry.
 struct RepairStats {
@@ -63,8 +62,8 @@ struct RepairStats {
 /// CellBuilder::kMaxP / kMaxT (64 / 112).
 template <class Real, int MAXP = 64, int MAXT = 112>
 struct MovingTessellation {
-  using Mem = tpx::MemSpace;
-  using Exec = tpx::ExecSpace;
+  using Mem = peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
   // The certificate/load/re-eval path reads the resident `poke4` plane set by pointer and never
   // touches the edge adjacency, so it uses a LEAN cell with NO `adj` member (TrackAdj=false) —
   // ~MAXT*3*4 bytes smaller per thread, which lifts occupancy on the full-N certify (the GPU
@@ -711,7 +710,6 @@ struct MovingTessellation {
   }
 };
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_REPAIR_HPP
+#endif  // PECLET_VORO_REPAIR_HPP

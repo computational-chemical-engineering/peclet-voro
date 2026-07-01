@@ -16,15 +16,15 @@
  * This is algebraically identical to the legacy scatter (each shared facet's two
  * half-contributions are gathered by the two cells independently).
  */
-#ifndef VORFLOW_PHYSICS_EULER_PRESSURE_HPP
-#define VORFLOW_PHYSICS_EULER_PRESSURE_HPP
+#ifndef PECLET_VORO_PHYSICS_EULER_PRESSURE_HPP
+#define PECLET_VORO_PHYSICS_EULER_PRESSURE_HPP
 
 #include <Kokkos_Core.hpp>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/tessellation_view.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/tessellation_view.hpp"
 
-namespace vor {
+namespace peclet::voro {
 namespace physics {
 
 /**
@@ -38,10 +38,10 @@ namespace physics {
  */
 template <class Real>
 void eulerPressureForce(const TessellationView<Real>& view,
-                        const Kokkos::View<int*, tpx::MemSpace>& recip,
-                        const Kokkos::View<int*, tpx::MemSpace>& cellOfFacet, Real pressEq,
-                        Real volAvg, const Kokkos::View<Real*, tpx::MemSpace>& force) {
-  using Exec = tpx::ExecSpace;
+                        const Kokkos::View<int*, peclet::core::MemSpace>& recip,
+                        const Kokkos::View<int*, peclet::core::MemSpace>& cellOfFacet, Real pressEq,
+                        Real volAvg, const Kokkos::View<Real*, peclet::core::MemSpace>& force) {
+  using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();
   Kokkos::parallel_for(
       "euler.pressure", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
@@ -67,6 +67,6 @@ void eulerPressureForce(const TessellationView<Real>& view,
 }
 
 }  // namespace physics
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_PHYSICS_EULER_PRESSURE_HPP
+#endif  // PECLET_VORO_PHYSICS_EULER_PRESSURE_HPP

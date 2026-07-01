@@ -13,7 +13,7 @@
  * fluid simulation (velocity-Verlet over the tessellation) on top of that primitive.
  *
  * Particle data crosses the boundary as NumPy arrays: positions/velocities are `(N,3)` float64,
- * scalars (masses, viscosities, volumes) are `(N,)`. Arrays move through the shared `tpx::python`
+ * scalars (masses, viscosities, volumes) are `(N,)`. Arrays move through the shared `peclet::core::python`
  * bridge (transport-core): returned arrays are backed by host buffers (no extra device copy).
  *
  * Kokkos is initialized at import and finalized via a Python `atexit` hook (with every live
@@ -46,16 +46,16 @@
 #include <set>
 #include <vector>
 
-#include "tpx/common/view.hpp"
-#include "tpx/python/ndarray_interop.hpp"
-#include "vorflow/device/convex_cell.hpp"
-#include "vorflow/device/repair.hpp"
-#include "vorflow/device/topology_store.hpp"
-#include "vorflow/physics/device_simulation.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/core/python/ndarray_interop.hpp"
+#include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/repair.hpp"
+#include "peclet/voro/topology_store.hpp"
+#include "peclet/voro/physics/simulation.hpp"
 
 namespace nb = nanobind;
 using real_t = double;
-using DView = Kokkos::View<real_t*, tpx::MemSpace>;
+using DView = Kokkos::View<real_t*, peclet::core::MemSpace>;
 
 namespace {
 
@@ -69,7 +69,7 @@ std::vector<real_t> flatten3(nb::ndarray<real_t, nb::c_contig> a) {
 
 // (N,) array -> host vector of length N.
 std::vector<real_t> flatten1(nb::ndarray<real_t, nb::c_contig> a) {
-  return tpx::python::ndarray_to_vector<real_t>(nb::ndarray<>(a));
+  return peclet::core::python::ndarray_to_vector<real_t>(nb::ndarray<>(a));
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -94,7 +94,7 @@ class Tess {
     mt_.localCert = localCert_;
     mt_.useGate = useGate_;
     mt_.alloc(N_, L_.data(), tolFrac_ * spacing, real_t(0.25) * spacing, 4, N_);
-    pos_ = tpx::toDevice<real_t>(p, "pos");
+    pos_ = peclet::core::toDevice<real_t>(p, "pos");
     mt_.rebuild(pos_);
   }
 
@@ -104,14 +104,14 @@ class Tess {
     std::vector<real_t> p = flatten3(a);
     if (static_cast<int>(p.size() / 3) != N_)
       throw std::runtime_error("step(): particle count differs from build(); call build() first");
-    pos_ = tpx::toDevice<real_t>(p, "pos");
+    pos_ = peclet::core::toDevice<real_t>(p, "pos");
     auto st = mt_.step(pos_);
     nb::dict d;
     d["flagged"] = st.pass1Raw;  // cells the certificate flagged
     d["pass1"] = st.pass1;       // cells gathered in Pass 1
     d["pass2"] = st.pass2;       // cells gathered in Pass 2
     d["rebuilt"] =
-        (st.route == vor::device::RepairStats::kRebuildGate);  // gate routed to a full rebuild
+        (st.route == peclet::voro::RepairStats::kRebuildGate);  // gate routed to a full rebuild
     d["fell_back"] = st.fellBack;                              // verify failed -> cold rebuild
     return d;
   }
@@ -119,30 +119,30 @@ class Tess {
   nb::ndarray<nb::numpy, real_t> volumes() {
     const std::size_t N = static_cast<std::size_t>(N_);
     auto v = Kokkos::subview(mt_.vol, Kokkos::make_pair(std::size_t(0), N));
-    return tpx::python::vector_to_ndarray(tpx::toVector(v), {N}, {1});
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(v), {N}, {1});
   }
 
   // Per-cell Voronoi neighbour (= face) count, recomputed from the resident topology store.
   nb::ndarray<nb::numpy, int> neighbor_counts() {
-    using Cell = vor::device::ConvexCell<real_t, 64, 112, false>;
+    using Cell = peclet::voro::ConvexCell<real_t, 64, 112, false>;
     const int N = N_;
-    Kokkos::View<int*, tpx::MemSpace> cnt("nbr", N);
+    Kokkos::View<int*, peclet::core::MemSpace> cnt("nbr", N);
     auto st = mt_.store;
     auto C = cnt;
     const real_t Lx = L_[0], Ly = L_[1], Lz = L_[2];
     Kokkos::parallel_for(
-        "vorflow.nbrcount", Kokkos::RangePolicy<tpx::ExecSpace>(0, N), KOKKOS_LAMBDA(int i) {
+        "vorflow.nbrcount", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N), KOKKOS_LAMBDA(int i) {
           Cell c;
           st.load(i, c, Lx, Ly, Lz);
           C(i) = c.countFaces();
         });
-    return tpx::python::vector_to_ndarray(tpx::toVector(cnt), {static_cast<std::size_t>(N)}, {1});
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cnt), {static_cast<std::size_t>(N)}, {1});
   }
 
   int num_particles() const { return N_; }
 
   void release() {
-    mt_ = vor::device::MovingTessellation<real_t, 64, 112>{};
+    mt_ = peclet::voro::MovingTessellation<real_t, 64, 112>{};
     pos_ = DView{};
     N_ = 0;
   }
@@ -161,7 +161,7 @@ class Tess {
   bool localCert_ = true, useGate_ = true;
   int N_ = 0;
   DView pos_;
-  vor::device::MovingTessellation<real_t, 64, 112> mt_;
+  peclet::voro::MovingTessellation<real_t, 64, 112> mt_;
 };
 
 // --------------------------------------------------------------------------------------------------
@@ -174,7 +174,7 @@ class Sim {
 
   // Drop all Kokkos Views (so they free BEFORE Kokkos::finalize at shutdown).
   void release() {
-    sim_ = vor::physics::ExplicitEulerDevice<real_t>{};
+    sim_ = peclet::voro::physics::ExplicitEuler<real_t>{};
     dmass_ = DView{};
     pos_.clear();
     vel_.clear();
@@ -191,7 +191,7 @@ class Sim {
       d->release();
   }
 
-  void set_l(std::array<real_t, 3> L) { L_ = L; }
+  void set_box(std::array<real_t, 3> L) { L_ = L; }
   void set_positions(nb::ndarray<real_t, nb::c_contig> a) { pos_ = flatten3(a); }
   void set_velocities(nb::ndarray<real_t, nb::c_contig> a) { vel_ = flatten3(a); }
   void set_masses(nb::ndarray<real_t, nb::c_contig> a) { mass_ = flatten1(a); }
@@ -206,14 +206,14 @@ class Sim {
     std::vector<real_t> invm(N);
     for (int i = 0; i < N; ++i)
       invm[i] = real_t(1) / mass_[i];
-    sim_.init(tpx::toDevice<real_t>(pos_, "pos"), tpx::toDevice<real_t>(vel_, "vel"),
-              tpx::toDevice<real_t>(invm, "im"), L_, pressEq_);
+    sim_.init(peclet::core::toDevice<real_t>(pos_, "pos"), peclet::core::toDevice<real_t>(vel_, "vel"),
+              peclet::core::toDevice<real_t>(invm, "im"), L_, pressEq_);
     dmass_ =
-        tpx::toDevice<real_t>(mass_, "mass");  // resident; kinetic-energy reads it each call (E4b)
+        peclet::core::toDevice<real_t>(mass_, "mass");  // resident; kinetic-energy reads it each call (E4b)
     if (!visc_.empty()) {
       if (bulk_.empty())
         bulk_.assign(N, 0.0);
-      sim_.setViscous(tpx::toDevice<real_t>(visc_, "visc"), tpx::toDevice<real_t>(bulk_, "bulk"));
+      sim_.setViscous(peclet::core::toDevice<real_t>(visc_, "visc"), peclet::core::toDevice<real_t>(bulk_, "bulk"));
     }
   }
 
@@ -228,7 +228,7 @@ class Sim {
   nb::ndarray<nb::numpy, real_t> get_volumes() {
     const std::size_t N = static_cast<std::size_t>(sim_.numParticles());
     auto cell = Kokkos::subview(sim_.view().cellVolume, Kokkos::make_pair(std::size_t(0), N));
-    return tpx::python::vector_to_ndarray(tpx::toVector(cell), {N}, {1});
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cell), {N}, {1});
   }
 
   nb::ndarray<nb::numpy, int> get_num_neighbors() {
@@ -237,21 +237,21 @@ class Sim {
     // prefix sum (see tessellation_view.hpp), so off(i+1)-off(i) is meaningless — read the count.
     const std::size_t N = static_cast<std::size_t>(sim_.numParticles());
     auto cnt = Kokkos::subview(sim_.view().cellFacetCount, Kokkos::make_pair(std::size_t(0), N));
-    return tpx::python::vector_to_ndarray(tpx::toVector(cnt), {N}, {1});
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cnt), {N}, {1});
   }
 
  private:
   // Flat (3N,) host-or-device view -> (N,3) float64 numpy array (single D2H, no host loop — S2a).
   static nb::ndarray<nb::numpy, real_t> from3(const DView& d) {
     const std::size_t N = static_cast<std::size_t>(d.extent(0)) / 3;
-    return tpx::python::vector_to_ndarray(tpx::toVector(d), {N, std::size_t(3)}, {3, 1});
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(d), {N, std::size_t(3)}, {3, 1});
   }
 
   std::array<real_t, 3> L_{1, 1, 1};
   real_t pressEq_ = 0;
   std::vector<real_t> pos_, vel_, mass_, visc_, bulk_;
   DView dmass_;  // device-resident masses, uploaded once in init() (E4b)
-  vor::physics::ExplicitEulerDevice<real_t> sim_;
+  peclet::voro::physics::ExplicitEuler<real_t> sim_;
 };
 
 }  // namespace
@@ -338,7 +338,7 @@ NB_MODULE(_voro, m) {
       "EOS plus an optional per-particle viscous (Navier-Stokes) term, with the tessellation\n"
       "repaired each step on the device. Set the particle state, `init`, then `step`.")
       .def(nb::init<>())
-      .def("set_l", &Sim::set_l, nb::arg("L"), "Set the periodic box edge lengths (Lx, Ly, Lz).")
+      .def("set_box", &Sim::set_box, nb::arg("L"), "Set the periodic box edge lengths (Lx, Ly, Lz).")
       .def("set_positions", &Sim::set_positions, nb::arg("positions"),
            "Initial particle positions (N,3) float64.")
       .def("set_velocities", &Sim::set_velocities, nb::arg("velocities"),

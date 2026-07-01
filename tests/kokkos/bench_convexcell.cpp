@@ -18,10 +18,10 @@
 #include <random>
 #include <vector>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/convex_cell.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/convex_cell.hpp"
 
-#ifdef VORFLOW_HAVE_VOROPP
+#ifdef PECLET_VORO_HAVE_VOROPP
 #include "voro++.hh"
 #endif
 
@@ -84,10 +84,10 @@ struct Result {
   double secsBestW = -1;
 };
 
-static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, const real_t L[3],
+static Result run_once(const Kokkos::View<real_t*, peclet::core::MemSpace>& pos, int N, const real_t L[3],
                        int sw, bool timeOnly) {
-  using MemSpace = tpx::MemSpace;
-  using Exec = tpx::ExecSpace;
+  using MemSpace = peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
   // grid ~CC_DENS seeds/cell (default 1). Coarser cells = fewer offset iterations to walk
   // (less per-offset morton/modulo/cellStart overhead), at the cost of examining more candidates
   // per cell. Sweep to find the throughput optimum for the fused gather.
@@ -286,7 +286,7 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
           int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
           const real_t Lxh = 0.5 * Lx, Lyh = 0.5 * Ly, Lzh = 0.5 * Lz;
-          vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
+          peclet::voro::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
           c.initBox(Lx, Ly, Lz);
           long nclip = 0;
           for (int o = 0; o < nOff; ++o) {
@@ -363,7 +363,7 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           int cy = ((((int)Kokkos::floor(piy * icy)) % dimy) + dimy) % dimy;
           int cz = ((((int)Kokkos::floor(piz * icz)) % dimz) + dimz) % dimz;
           const real_t Lxh = 0.5 * Lx, Lyh = 0.5 * Ly, Lzh = 0.5 * Lz;
-          vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
+          peclet::voro::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
           c.initBox(Lx, Ly, Lz);
           // Sorted-offset gather with the CORRECT radius cutoff. The offsets offX/Y/Z are sorted by
           // nearest-corner dist² offD, so `break` on the first offD past the radius is provably
@@ -467,7 +467,7 @@ static Result run_once(const Kokkos::View<real_t*, tpx::MemSpace>& pos, int N, c
           (void)Lxh;
           (void)Lyh;
           (void)Lzh;
-          vor::device::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
+          peclet::voro::ConvexCell<real_t, CC_MAXP, CC_MAXT> c;
           c.initBox(Lx, Ly, Lz);
           real_t secR2 = 2.0 * c.maxVertexRsq();
           bool radiusClosed =
@@ -641,7 +641,7 @@ static void run(int N) {
   std::vector<real_t> h(3 * N);
   for (int i = 0; i < 3 * N; ++i)
     h[i] = U(rng);
-  Kokkos::View<real_t*, tpx::MemSpace> pos(
+  Kokkos::View<real_t*, peclet::core::MemSpace> pos(
       Kokkos::view_alloc(std::string("pos"), Kokkos::WithoutInitializing), (size_t)N * 3);
   {
     auto m = Kokkos::create_mirror_view(pos);
@@ -654,7 +654,7 @@ static void run(int N) {
   const double boxVol = L[0] * L[1] * L[2];
   const double volErr = std::fabs(r.volSum - boxVol) / boxVol;
 
-#ifdef VORFLOW_HAVE_VOROPP
+#ifdef PECLET_VORO_HAVE_VOROPP
   // voro++ FULL periodic tessellation, timed (single-threaded library = the serial reference). Skip
   // with CC_NOVORO=1 for large-N our-only sweeps. The put()+compute_cell() loop is the cold-build
   // work.

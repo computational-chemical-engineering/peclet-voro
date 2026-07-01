@@ -21,10 +21,10 @@
 #include <random>
 #include <vector>
 
-#include "vorflow/device/convex_cell.hpp"
+#include "peclet/voro/convex_cell.hpp"
 
 using real_t = double;
-using vor::device::ConvexCell;
+using peclet::voro::ConvexCell;
 
 // ---- Change 1: footprint (compile-time)
 // ----------------------------------------------------------

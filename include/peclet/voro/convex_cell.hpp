@@ -21,8 +21,8 @@
  * with that oracle; it is validated to ~1e-9 against voro++ and the space-filling identity
  * (Σ cell volumes == box volume). Core header: Kokkos only.
  */
-#ifndef VORFLOW_DEVICE_CONVEX_CELL_HPP
-#define VORFLOW_DEVICE_CONVEX_CELL_HPP
+#ifndef PECLET_VORO_CONVEX_CELL_HPP
+#define PECLET_VORO_CONVEX_CELL_HPP
 
 #include <Kokkos_Core.hpp>
 
@@ -35,8 +35,7 @@
 #define VOR_UNROLL
 #endif
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 namespace detail {
 // Minimal forward-mode dual number (value + K partials) used by ConvexCell::geomVolumeAreaGrad (the
@@ -1593,7 +1592,6 @@ KOKKOS_INLINE_FUNCTION void buildConvexCell(ConvexCell<Real, MAXP, MAXT, TrackAd
   }
 }
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_CONVEX_CELL_HPP
+#endif  // PECLET_VORO_CONVEX_CELL_HPP

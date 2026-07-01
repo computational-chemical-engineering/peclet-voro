@@ -15,8 +15,8 @@
  *
  * Core header: Kokkos + transport-core + morton, no physics.
  */
-#ifndef VORFLOW_DEVICE_TESS_GRID_HPP
-#define VORFLOW_DEVICE_TESS_GRID_HPP
+#ifndef PECLET_VORO_TESS_GRID_HPP
+#define PECLET_VORO_TESS_GRID_HPP
 
 #include <algorithm>
 #include <cmath>
@@ -26,11 +26,10 @@
 #include <vector>
 
 #include "morton/morton.hpp"  // suite spatial-index primitive (after Kokkos_Core: MORTON_HD->KOKKOS_FUNCTION)
-#include "tpx/common/view.hpp"
-#include "vorflow/tessellation_view.hpp"  // gid_t
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/tessellation_view.hpp"  // gid_t
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 /// Bias added to each signed block offset (dx,dy,dz) so it packs into one int (8 bits
 /// per axis) in the worklist table — a single load + bit-unpack in the hot gather loop
@@ -54,7 +53,7 @@ KOKKOS_INLINE_FUNCTION int morton3(int x, int y, int z) {
 /// reference-counted handles), so it captures by value into device lambdas.
 template <class Real>
 struct TessGrid {
-  using MemSpace = tpx::MemSpace;
+  using MemSpace = peclet::core::MemSpace;
   // Grid-sorted inputs (read by the gather).
   Kokkos::View<int*, MemSpace> binned;  // N: grid-sorted slot -> original seed index
   Kokkos::View<int*, MemSpace>
@@ -81,8 +80,8 @@ struct TessGrid {
 /// Kokkos::finalize.
 template <class Real>
 struct WorklistCache {
-  Kokkos::View<int*, tpx::MemSpace> wlOff;
-  Kokkos::View<Real*, tpx::MemSpace> wlRmin;
+  Kokkos::View<int*, peclet::core::MemSpace> wlOff;
+  Kokkos::View<Real*, peclet::core::MemSpace> wlRmin;
   int nOff = 0, wlS = 0, dimx = -1, dimy = -1, dimz = -1, sw = -1;
   Real cszx = 0, cszy = 0, cszz = 0;
   bool valid = false;
@@ -100,13 +99,13 @@ struct WorklistCache {
  * nullptr rebuilds it every call (the original behaviour, byte-for-byte).
  */
 template <class Real, bool Weighted>
-TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
-                             const Kokkos::View<Real*, tpx::MemSpace>& weight, int N,
+TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, peclet::core::MemSpace>& posFlat,
+                             const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N,
                              const Real L[3], int sw = 4, int densityCount = -1,
-                             Kokkos::View<long*, tpx::MemSpace> gid = {},
+                             Kokkos::View<long*, peclet::core::MemSpace> gid = {},
                              WorklistCache<Real>* wlc = nullptr) {
-  using tpx::MemSpace;
-  using Exec = tpx::ExecSpace;
+  using peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
   TessGrid<Real> grid;
   grid.N = N;
   grid.sw = sw;
@@ -353,7 +352,6 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, tpx::MemSpace>& posFlat,
   return grid;
 }
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_TESS_GRID_HPP
+#endif  // PECLET_VORO_TESS_GRID_HPP

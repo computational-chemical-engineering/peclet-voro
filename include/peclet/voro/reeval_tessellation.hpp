@@ -20,31 +20,30 @@
  * physics wiring/tuning on top is the user's ongoing work. Cubic-box minimal image (L = Lx), matching
  * the repair's reevalGeometry.
  */
-#ifndef VORFLOW_DEVICE_REEVAL_TESSELLATION_HPP
-#define VORFLOW_DEVICE_REEVAL_TESSELLATION_HPP
+#ifndef PECLET_VORO_REEVAL_TESSELLATION_HPP
+#define PECLET_VORO_REEVAL_TESSELLATION_HPP
 
 #include <string>
 
 #include <Kokkos_Core.hpp>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/convex_cell.hpp"
-#include "vorflow/device/topology_store.hpp"
-#include "vorflow/tessellation_view.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/topology_store.hpp"
+#include "peclet/voro/tessellation_view.hpp"
 
-namespace vor {
-namespace device {
+namespace peclet::voro {
 
 /// Re-evaluate the geometry of every cell in `store` on positions `pos` and publish a force-geometry
 /// TessellationView (facet neighbour / area / dV / connector CSR), reusing `vol` for the per-cell
 /// volume. `MAXP`/`MAXT` are the store's ConvexCell capacities; `N` cells; `L` the (cubic) box.
 template <class Real, int MAXP, int MAXT>
 TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
-                                     const Kokkos::View<Real*, tpx::MemSpace>& pos,
-                                     const Kokkos::View<Real*, tpx::MemSpace>& vol, int N,
+                                     const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
+                                     const Kokkos::View<Real*, peclet::core::MemSpace>& vol, int N,
                                      const Real L[3]) {
-  using Mem = tpx::MemSpace;
-  using Exec = tpx::ExecSpace;
+  using Mem = peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
   using Cell = ConvexCell<Real, MAXP, MAXT, false>;
   using Kokkos::view_alloc;
   using Kokkos::WithoutInitializing;
@@ -141,7 +140,6 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
   return view;
 }
 
-}  // namespace device
-}  // namespace vor
+}  // namespace peclet::voro
 
-#endif  // VORFLOW_DEVICE_REEVAL_TESSELLATION_HPP
+#endif  // PECLET_VORO_REEVAL_TESSELLATION_HPP

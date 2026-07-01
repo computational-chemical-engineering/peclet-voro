@@ -32,14 +32,14 @@
 #include <sstream>
 #include <vector>
 
-#include "tpx/common/view.hpp"
-#include "vorflow/device/repair.hpp"
-#include "vorflow/device/tessellator.hpp"
-#include "vorflow/mpi/voronoi_halo.hpp"
+#include "peclet/core/common/view.hpp"
+#include "peclet/voro/repair.hpp"
+#include "peclet/voro/tessellator.hpp"
+#include "peclet/voro/mpi/voronoi_halo.hpp"
 
 using real_t = double;
 using Vec3 = std::array<real_t, 3>;
-using Mem = tpx::MemSpace;
+using Mem = peclet::core::MemSpace;
 static constexpr int CMAXP = 64, CMAXT = 112;
 
 static real_t wrap1(real_t x, real_t L) {
@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
       for (int d = 0; d < 3; ++d)
         vel[i][d] = Ng(rng);
 
-    vor::mpi::VoronoiHalo<real_t> halo;
+    peclet::voro::mpi::VoronoiHalo<real_t> halo;
     halo.init({0, 0, 0}, {L[0], L[1], L[2]}, {16, 16, 16}, {true, true, true}, MPI_COMM_WORLD);
 
     // this rank's owned seeds (by ownership at t0) + their global ids + velocities.
@@ -164,8 +164,8 @@ int main(int argc, char** argv) {
         auto dPos = uploadCombined(g.pos, L);
         Kokkos::View<real_t*, Mem> wd;
         Kokkos::View<long*, Mem> gd;
-        auto r = vor::device::buildTessellation<real_t, false>(
-            dPos, wd, (int)g.pos.size(), L.data(), 4, N, gd, vor::device::NoSdf{}, false, g.nOwned);
+        auto r = peclet::voro::buildTessellation<real_t, false>(
+            dPos, wd, (int)g.pos.size(), L.data(), 4, N, gd, peclet::voro::NoSdf{}, false, g.nOwned);
         Kokkos::fence();
         tCold += MPI_Wtime() - t0;
         (void)r;
@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
       auto g = halo.gather(owned, ownedGid, ownedW, rcut);
       int nComb = (int)g.pos.size();
       auto dPos = uploadCombined(g.pos, L);
-      vor::device::MovingTessellation<real_t, CMAXP, CMAXT> mt;
+      peclet::voro::MovingTessellation<real_t, CMAXP, CMAXT> mt;
       mt.alloc(nComb, L.data(), tol, skin, 4, N, g.nOwned);
       mt.rebuild(dPos);
       refPos = owned;  // Verlet reference (owned positions at last (re)gather)
@@ -228,8 +228,8 @@ int main(int argc, char** argv) {
       {
         Kokkos::View<real_t*, Mem> wd;
         Kokkos::View<long*, Mem> gd;
-        auto rr = vor::device::buildTessellation<real_t, false>(
-            lastDPos, wd, mt.N, L.data(), 4, N, gd, vor::device::NoSdf{}, false, mt.nProc);
+        auto rr = peclet::voro::buildTessellation<real_t, false>(
+            lastDPos, wd, mt.N, L.data(), 4, N, gd, peclet::voro::NoSdf{}, false, mt.nProc);
         auto ov = Kokkos::create_mirror_view(rr.view.cellVolume);
         auto rv = Kokkos::create_mirror_view(mt.vol);
         Kokkos::deep_copy(ov, rr.view.cellVolume);
