@@ -256,7 +256,7 @@ class Sim {
 
 }  // namespace
 
-NB_MODULE(vorflow, m) {
+NB_MODULE(_voro, m) {
   m.attr("__doc__") =
       "vorflow (device/Kokkos): moving-particle Voronoi dynamics on the device path.\n\n"
       "Classes: Tessellation (bare cold build + incremental repair, volumes, neighbour counts);\n"

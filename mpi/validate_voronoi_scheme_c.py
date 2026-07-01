@@ -21,7 +21,7 @@ import os
 import sys
 import numpy as np
 from mpi4py import MPI
-import vorflow
+from peclet import voro as vorflow
 import tpx_mpi
 
 comm = MPI.COMM_WORLD

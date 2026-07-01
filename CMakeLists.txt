@@ -126,16 +126,27 @@ if(VORFLOW_KOKKOS)
     # NOMINSIZE: nanobind's default -Os size optimization is rejected by nvcc ("'s': expected a
     # number") since Kokkos device sources compile as CXX through the launch compiler.
     nanobind_add_module(vorflow_device NB_STATIC NOMINSIZE src/vorflow_bindings.cpp)
-    set_target_properties(vorflow_device PROPERTIES OUTPUT_NAME vorflow)
+    # -> peclet.voro._voro (NB_MODULE(_voro)), re-exported by peclet/voro/__init__.py. The extension +
+    # the staged __init__.py land under <build>/peclet/voro so `import peclet.voro` works both from the
+    # build tree (dev loop, PYTHONPATH=<build>) and from the SKBUILD wheel install.
+    set_target_properties(vorflow_device PROPERTIES
+      OUTPUT_NAME _voro
+      LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/voro")
+    # The package __init__.py is kept as a plain file OUTSIDE any importable peclet/ dir (so an
+    # incomplete source package can never shadow the installed one); staged into the build tree here.
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/packaging/voro_init.py"
+                   "${CMAKE_CURRENT_BINARY_DIR}/peclet/voro/__init__.py" COPYONLY)
     target_include_directories(vorflow_device PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/include" "${VORFLOW_TPX_INCLUDE}" "${VORFLOW_MORTON_INCLUDE}")
     target_compile_definitions(vorflow_device PRIVATE MORTON_ENABLE_KOKKOS=1)
     target_link_libraries(vorflow_device PRIVATE Kokkos::kokkos)
     target_compile_features(vorflow_device PRIVATE cxx_std_20)
-    # `pip install .` (scikit-build-core, via pyproject.toml) installs the module as top-level
-    # `vorflow`. Inert for a plain `cmake --build`, so the developer workflow is unchanged.
+    # `pip install .` (scikit-build-core, via pyproject.toml) installs the module as peclet.voro. Inert
+    # for a plain `cmake --build`, so the developer workflow is unchanged.
     if(DEFINED SKBUILD)
-      install(TARGETS vorflow_device LIBRARY DESTINATION . COMPONENT python)
+      install(TARGETS vorflow_device LIBRARY DESTINATION peclet/voro COMPONENT python)
+      install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/packaging/voro_init.py"
+              DESTINATION peclet/voro RENAME __init__.py COMPONENT python)
     endif()
     # Python smoke test (Tessellation + Simulation) — needs numpy in the active interpreter.
     if(VORONOI_BUILD_TESTS AND NOT DEFINED SKBUILD)
@@ -144,7 +155,7 @@ if(VORFLOW_KOKKOS)
         add_test(NAME test_vorflow_python
                  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_vorflow.py)
         set_tests_properties(test_vorflow_python PROPERTIES
-          ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:vorflow_device>;OMP_PROC_BIND=false")
+          ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};OMP_PROC_BIND=false")
       endif()
     endif()
   endif()

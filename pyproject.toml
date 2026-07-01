@@ -18,19 +18,29 @@ requires = ["scikit-build-core>=0.8", "nanobind>=2.0"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "vorflow"
+name = "peclet-voro"
 version = "0.1.0"
-description = "Device-native (Kokkos) moving-particle Voronoi dynamics: compressible Euler / Navier-Stokes"
+description = "peclet.voro — device-native (Kokkos) moving-particle Voronoi dynamics + unstructured mesh gen"
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Frank Peters", email = "e.a.j.f.peters@gmail.com" }]
 dependencies = ["numpy>=1.20"]
+
+[project.urls]
+Homepage = "https://github.com/computational-chemical-engineering/peclet"
+Documentation = "https://github.com/computational-chemical-engineering/peclet"
+Source = "https://github.com/computational-chemical-engineering/vorflow"
 
 [tool.scikit-build]
 minimum-version = "0.8"
 cmake.version = ">=3.24"
-# Build the device Python module (the install rule for vorflow_device is guarded by SKBUILD).
+# Build the device Python module (the install rule for vorflow_device is guarded by SKBUILD); the
+# extension + peclet/voro/__init__.py are placed by CMake install() into the peclet namespace.
 cmake.define = { VORFLOW_KOKKOS = "ON", VORFLOW_BUILD_PYTHON = "ON" }
 wheel.install-dir = "."
+wheel.packages = []
 # Note: SuiteNanobind.cmake lives in the umbrella (../cmake), so `pip install .` resolves it from a
 # suite checkout; a standalone sdist of just this repo is not self-contained (by design).
-sdist.include = ["src", "include", "CMakeLists.txt", "README.md"]
+sdist.include = ["src", "include", "packaging", "CMakeLists.txt", "README.md", "LICENSE"]

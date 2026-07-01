@@ -9,7 +9,7 @@ on PYTHONPATH, e.g.:
     PYTHONPATH=build_nb python python/test_vorflow.py
 """
 import numpy as np
-import vorflow
+from peclet import voro as vorflow
 
 
 def test_tessellation():
