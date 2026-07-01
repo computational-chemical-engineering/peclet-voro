@@ -36,10 +36,10 @@ find_package(OpenMP)
 # The voro headers are header-only; this target just carries the include path for downstream
 # consumers. The device path (tests/kokkos, src/) sets its own include dirs against core +
 # morton, so it does not link this target.
-add_library(vorflow INTERFACE)
-add_library(vorflow::vorflow ALIAS vorflow)
+add_library(voro_headers INTERFACE)
+add_library(peclet::voro ALIAS voro_headers)
 
-target_include_directories(vorflow
+target_include_directories(voro_headers
   INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:include>
@@ -183,8 +183,8 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
 install(
-  TARGETS vorflow
-  EXPORT vorflowTargets
+  TARGETS voro_headers
+  EXPORT voroTargets
 )
 
 install(
@@ -193,27 +193,27 @@ install(
 )
 
 install(
-  EXPORT vorflowTargets
-  FILE vorflowTargets.cmake
-  NAMESPACE vorflow::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/vorflow
+  EXPORT voroTargets
+  FILE voroTargets.cmake
+  NAMESPACE peclet::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/voro
 )
 
 configure_package_config_file(
-  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/vorflowConfig.cmake.in"
-  "${CMAKE_CURRENT_BINARY_DIR}/vorflowConfig.cmake"
-  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/vorflow"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/voroConfig.cmake.in"
+  "${CMAKE_CURRENT_BINARY_DIR}/voroConfig.cmake"
+  INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/voro"
 )
 
 write_basic_package_version_file(
-  "${CMAKE_CURRENT_BINARY_DIR}/vorflowConfigVersion.cmake"
+  "${CMAKE_CURRENT_BINARY_DIR}/voroConfigVersion.cmake"
   VERSION ${PROJECT_VERSION}
   COMPATIBILITY SameMajorVersion
 )
 
 install(
   FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/vorflowConfig.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/vorflowConfigVersion.cmake"
-  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/vorflow"
+    "${CMAKE_CURRENT_BINARY_DIR}/voroConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/voroConfigVersion.cmake"
+  DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/voro"
 )
