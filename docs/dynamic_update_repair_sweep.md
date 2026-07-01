@@ -1,7 +1,7 @@
 # Two-pass gather repair vs cold build — displacement sweep across devices (2026-06-29)
 
 A focused benchmark of the implemented two-pass gather repair (`MovingTessellation::step`,
-`include/vorflow/device/repair.hpp`) as a function of the **dimensionless per-step displacement
+`include/peclet/voro/repair.hpp`) as a function of the **dimensionless per-step displacement
 δ/h** (h = mean inter-seed spacing), starting at very small displacement where almost no cell is
 invalidated. Goal: the speedup that is actually achievable, and how many cells each pass re-gathers.
 

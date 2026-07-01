@@ -111,7 +111,7 @@ multicore too.
 ## Reproduce
 
 ```bash
-cd vorflow
+cd voro
 NS="10000 100000 1000000"
 OMP_NUM_THREADS=1  CC_DENS=0.3 ./build/host-openmp/tests/kokkos/bench_convexcell      $NS  # serial worklist + voro++
 OMP_NUM_THREADS=48 CC_NOVORO=1 CC_DENS=0.3 ./build/host-openmp/tests/kokkos/bench_convexcell $NS  # 24-core

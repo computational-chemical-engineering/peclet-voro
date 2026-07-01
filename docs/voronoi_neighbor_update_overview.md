@@ -1,7 +1,7 @@
-# Neighbour finding & moving-point cell updating in vorflow — method, legacy, literature, avenues
+# Neighbour finding & moving-point cell updating in voro — method, legacy, literature, avenues
 
 **Purpose & audience.** This is a **self-contained handoff** for someone (human or LLM) picking up the problem
-of *efficiently maintaining a 3D Voronoi/Power tessellation of moving points* in vorflow. It documents (1) the
+of *efficiently maintaining a 3D Voronoi/Power tessellation of moving points* in peclet.voro. It documents (1) the
 **currently implemented method** — the ConvexCell, the worklist gather, and essentially every optimisation
 already in the code; (2) the **correct framing** of the moving-point problem (the gather / neighbour set is the
 core, in the Verlet sense); (3) the **legacy pre-Kokkos CPU strategies** and what was promising; (4) a
@@ -48,9 +48,9 @@ guaranteed candidate set is and how to maintain it** — a geometric skin (dista
 ## 2. The currently implemented method (essentials)
 
 Header-only Kokkos (CUDA/HIP/OpenMP from one source). Key files:
-`include/vorflow/device/convex_cell.hpp` (the cell), `…/tessellator.hpp` (the build/gather + CSR),
+`include/peclet/voro/convex_cell.hpp` (the cell), `…/tessellator.hpp` (the build/gather + CSR),
 `…/topology_store.hpp` (resident topology, new), `…/transpose.hpp` (reciprocal-facet maps),
-`include/vorflow/tessellation_view.hpp` (the published CSR consumers read).
+`include/peclet/voro/tessellation_view.hpp` (the published CSR consumers read).
 
 ### 2.1 ConvexCell — the cell representation (`convex_cell.hpp`)
 
@@ -192,10 +192,10 @@ The current code uses (V1). The legacy CPU work pointed at (V2). (V3) is unexplo
 
 ## 4. Legacy (pre-Kokkos) CPU strategies & profiling
 
-The pre-Kokkos vorflow was an OpenMP, half-edge, data-oriented-design (DOD) CPU code. Several pieces survive or
+The pre-Kokkos voro was an OpenMP, half-edge, data-oriented-design (DOD) CPU code. Several pieces survive or
 are documented; they were **promising on CPU** and encode ideas worth porting.
 
-### 4.1 `NbrList` — cell-linked-list neighbour finder (`include/vorflow/nbrlist.hpp`, still present)
+### 4.1 `NbrList` — cell-linked-list neighbour finder (`include/peclet/voro/nbrlist.hpp`, still present)
 
 A classic **cell-linked list** over a uniform `Grid` (+`Box`/`BoxLE` for periodic & Lees–Edwards minimal image):
 `setup(pos, rcut)` bins particles by a counting sort (serial and an OpenMP per-thread-counts variant), storing
@@ -242,13 +242,13 @@ The retired data-oriented-design (DOD) storage experiments (separate Topology/Co
 chunked/arena pool, and per-cell capacity tuning around vertex≈28/facet≈20) are the structural precedent for
 keeping a *resident, compact, connectivity-only* representation between steps (the R2 idea in §6). Those
 standalone reports have since been removed; the idea now lives in the ConvexCell `TopologyStore`
-(`include/vorflow/device/topology_store.hpp`).
+(`include/peclet/voro/topology_store.hpp`).
 
 ---
 
 ## 5. Literature survey
 
-### 5.1 Convex-cell clipping family (the method vorflow implements)
+### 5.1 Convex-cell clipping family (the method voro implements)
 
 - **Ray, Sokolov, Lefebvre, Lévy, "Meshless Voronoi on the GPU," ACM TOG 37(6), 2018** — the dual ConvexCell +
   per-vertex geometry this code uses; ~12.5 M cells/s on a V100 (volume-only). https://doi.org/10.1145/3272127.3275092
@@ -306,7 +306,7 @@ standalone reports have since been removed; the idea now lives in the ConvexCell
 
 The measured 2–3× gap of our 6–7 M/s to Ray/Basselin is **the neighbour query**: we use a uniform grid +
 **isotropic** radius (so ~85 % of issued clips are no-ops); the SOTA uses a **BVH best-first traversal +
-directional culling from the cell's evolving AABB** (arXiv:2605.06408). **ArborX (already a vorflow/DEM
+directional culling from the cell's evolving AABB** (arXiv:2605.06408). **ArborX (already a voro/DEM
 dependency) provides GPU BVH for free.** Our own earlier best-first attempt failed *for the cold build* (fused
 divergent priority queue), but that was without directional bounds and as a cold-build fusion — the SOTA result
 says the directional cull is the missing ingredient, and best-first is most natural for the *incremental*
@@ -375,21 +375,21 @@ that must not regress: **derivatives + momentum conservation + robustness**, and
 
 ## 7. Quick reference
 
-- **Cell / geometry:** `include/vorflow/device/convex_cell.hpp` (clip, reevalGeometry, isSelfConsistent,
+- **Cell / geometry:** `include/peclet/voro/convex_cell.hpp` (clip, reevalGeometry, isSelfConsistent,
   geometryPerVertex/geomVolume*); `plane_policy.hpp` (Voronoi/Power/SDF policies + chain-to-DOFs).
-- **Build / gather / CSR:** `include/vorflow/device/tessellator.hpp` (worklist gather, CSR, opt-in store+skin
+- **Build / gather / CSR:** `include/peclet/voro/tessellator.hpp` (worklist gather, CSR, opt-in store+skin
   emission); `tessellation_view.hpp` (consumer CSR + `buildReciprocalMap`); `transpose.hpp` (device aux maps).
-- **Resident topology:** `include/vorflow/device/topology_store.hpp`.
-- **Legacy:** `include/vorflow/nbrlist.hpp` (cell list), `include/vorflow/voronoi.hpp` (legacy CPU half-edge
+- **Resident topology:** `include/peclet/voro/topology_store.hpp`.
+- **Legacy:** `include/peclet/voro/nbrlist.hpp` (cell list), `include/peclet/voro/voronoi.hpp` (legacy CPU half-edge
   CellMaker oracle), `docs/update_and_repair_redesign.md` (wave-BFS + ConnectivityArena).
 - **Benches/tests (`tests/kokkos/`):** `bench_convexcell[_f32]` (cold build + voro++), `bench_incremental`
   (re-eval vs rebuild), `bench_dynamic_update[_f32]` (the consolidated moving-point driver: `--gates`
   Phase-0/1 validators+primitives, `--sweep` strategy study S0–S4 over distributions × disp, `--phase0`
   topology-stability vs displacement; replaced `bench_update_strategies` + `phase0_incremental`),
   `test_pervertex_geometry` / `test_device_geometry` / `test_tessellator`.
-  `extern_bench/` builds geogram + Liu-2020 for head-to-head. Build: `cmake -S . -B build/<cfg> -DVORFLOW_KOKKOS=ON
+  `extern_bench/` builds geogram + Liu-2020 for head-to-head. Build: `cmake -S . -B build/<cfg> -DPECLET_VORO_KOKKOS=ON
   -DCMAKE_PREFIX_PATH=…/extern/install/<backend>`; CUDA on PATH for the GPU build.
-- **Key knobs (env):** `CC_DENS`, `CC_GATHER`, `CC_WLS`, `VORFLOW_TEAM`, `VORFLOW_PROFILE`, `VORFLOW_NOFORCEGEOM`.
+- **Key knobs (env):** `CC_DENS`, `CC_GATHER`, `CC_WLS`, `PECLET_VORO_TEAM`, `PECLET_VORO_PROFILE`, `PECLET_VORO_NOFORCEGEOM`.
 
 ## 8. Open questions for whoever picks this up
 

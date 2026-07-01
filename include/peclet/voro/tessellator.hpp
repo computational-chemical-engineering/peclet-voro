@@ -21,7 +21,7 @@
  * Cells that fail it (or overflow the 128 cap) are flagged in the status array
  * for a host/large-scratch fallback — the plan's overflow path.
  *
- * Core header: Kokkos + transport-core + the cutter, no physics.
+ * Core header: Kokkos + core + the cutter, no physics.
  */
 #ifndef PECLET_VORO_TESSELLATOR_HPP
 #define PECLET_VORO_TESSELLATOR_HPP

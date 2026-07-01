@@ -7,15 +7,15 @@
 # Core headers may include each other and transport-core (tpx/...); physics
 # headers may include core. A core header that includes a physics header fails.
 #
-# Usage: check_include_graph.sh [include/vorflow]
+# Usage: check_include_graph.sh [include/peclet/voro]
 set -euo pipefail
 
-INC_DIR="${1:-$(cd "$(dirname "$0")/.." && pwd)/include/vorflow}"
+INC_DIR="${1:-$(cd "$(dirname "$0")/.." && pwd)/include/peclet/voro}"
 
 # Physics (downstream) headers — extend as physics modules are added.
 PHYSICS_HEADERS=(simulation.hpp)
 
-# Core/engine headers — everything else under include/vorflow that is not physics.
+# Core/engine headers — everything else under include/peclet/voro that is not physics.
 CORE_HEADERS=(vor_types.hpp nbrlist.hpp voronoi.hpp tessellation_view.hpp device/cell_cutter.hpp device/sdf.hpp device/tessellator.hpp)
 
 status=0
@@ -64,7 +64,7 @@ for g in "$INC_DIR/device" "$INC_DIR/physics" "$INC_DIR/host" \
   [ -e "$g" ] || continue
   while IFS= read -r f; do
     # Anchor to the exact legacy paths so simulation.hpp is not a false hit.
-    if grep -Eq "^[[:space:]]*#[[:space:]]*include[[:space:]]*[<\"]vorflow/(voronoi|simulation)\.hpp" "$f"; then
+    if grep -Eq "^[[:space:]]*#[[:space:]]*include[[:space:]]*[<\"]voro/(voronoi|simulation)\.hpp" "$f"; then
       echo "VIOLATION: production file '${f#"$ROOT"/}' includes the legacy engine"
       status=1
     fi

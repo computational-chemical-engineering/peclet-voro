@@ -468,7 +468,7 @@ static int gate1b_partners(int N, real_t L) {
   // the pnbr-of-violated-plane extraction), (2) some partners were emitted, (3) the seed covers
   // (nearly) all changed cells at this small isolated displacement; a few coupled/near-degenerate
   // flips are expected per §1b — the mandatory verify pass (Phase 2) catches them. The tolerance is
-  // precision- aware: FP32 marginal-face flicker (vorflow does topology in FP64 for exactly this
+  // precision- aware: FP32 marginal-face flicker (voro does topology in FP64 for exactly this
   // reason) inflates the apparent "changed" set with sub-tol faces the certificate doesn't flag, so
   // allow ~4% uncovered in FP32 vs ~0.5% in FP64. Partner SOUNDNESS (bad==0) is the strict Phase-1
   // deliverable either way.

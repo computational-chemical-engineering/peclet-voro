@@ -7,7 +7,7 @@ given per-step displacement, how accurate it is, whether the **convexity certifi
 selection heuristic (which turns out to be device-dependent).
 
 All full rebuilds — and the ground-truth oracle — go through the **production worklist tessellator**
-`vor::device::buildTessellation`, which now (opt-in) also emits the resident `TopologyStore` (np/nt/pnbr/tri)
+`peclet::voro::buildTessellation`, which now (opt-in) also emits the resident `TopologyStore` (np/nt/pnbr/tri)
 and a per-cell candidate (skin) list. Re-eval runs `ConvexCell::reevalGeometry` over the store; local repair
 re-clips the stored skin list (no re-gather). Harness: `tests/kokkos/bench_dynamic_update.cpp --sweep`
 (consolidated from the former `bench_update_strategies.cpp`).

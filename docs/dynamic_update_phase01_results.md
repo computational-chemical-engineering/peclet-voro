@@ -6,20 +6,20 @@ and **CUDA (RTX 5080)**. Not pushed.
 
 ## What was built
 
-- **`include/vorflow/device/tess_grid.hpp`** — `TessGrid<Real>` + `buildTessGrid`: the counting-sort
+- **`include/peclet/voro/tess_grid.hpp`** — `TessGrid<Real>` + `buildTessGrid`: the counting-sort
   grid + presorted worklist, factored out of `buildTessellation` so one grid backs both the cold build
   and the subset gather. Adds `slotOf` (original-index → grid-slot, inverse of `binned`). Pure code
   motion: the cold build is **byte-identical** (verified by an order-independent fingerprint at
   `OMP_NUM_THREADS=1`; the build is not bit-deterministic across thread counts because atomic binning
   order changes the candidate-clip order → FP differences on marginal vertices).
-- **`include/vorflow/device/dynamic_validate.hpp`** — `checkInvariants` (Σvol = box vol; reciprocal
+- **`include/peclet/voro/dynamic_validate.hpp`** — `checkInvariants` (Σvol = box vol; reciprocal
   area antisymmetry `A_ij=−A_ji`; Σarea; Σ dV; pnbr-reciprocity) and `compareVolumes` /
   `compareNeighbours` (oracle diff on **face** neighbours = planes with ≥3 incident live triangles).
-- **`include/vorflow/device/subset_gather.hpp`** — `subsetGather(grid, indices, …)`: the cold-build
+- **`include/peclet/voro/subset_gather.hpp`** — `subsetGather(grid, indices, …)`: the cold-build
   `CellBuilder::buildCell` over an arbitrary index list off the shared grid.
 - **`ConvexCell::isSelfConsistent(tol, partners[], maxP, &nP)`** — the convexity certificate, now also
   emitting the violated-plane partner seeds (the `pnbr` of each poked plane).
-- **`include/vorflow/device/verlet_skin.hpp`** — `flagSkinMovers` / `maxDisplacement`, with an
+- **`include/peclet/voro/verlet_skin.hpp`** — `flagSkinMovers` / `maxDisplacement`, with an
   extensible `SkinTrigger` bitmask (the deferred SDF boundary trigger, Risk 1d, slots in here).
 - **`tests/kokkos/bench_dynamic_update.cpp`** (+`_f32`) — consolidated driver
   (`--gates`/`--sweep`/`--phase0`), replacing `bench_update_strategies.cpp` + `phase0_incremental.cpp`.
@@ -34,7 +34,7 @@ and **CUDA (RTX 5080)**. Not pushed.
 - **GATE 1b** — partner extraction is **sound** (every emitted partner is a stored neighbour of the
   flagging cell; `bad=0`) and the seed `flagged ∪ partners` covers the changed-cell set to ≈99.8%
   (FP64) at disp 0.01 — the residual is coupled/near-degenerate flips the Phase-2 verify pass handles.
-  FP32 leaves ~3% uncovered (marginal-face flicker; vorflow does topology in FP64), so the coverage
+  FP32 leaves ~3% uncovered (marginal-face flicker; voro does topology in FP64), so the coverage
   tolerance is precision-aware while soundness stays strict.
 - **GATE 1c** — the Verlet skin fires for *exactly* the movers beyond skin/2.
 
@@ -76,7 +76,7 @@ that pays on the clip-bound GPU build.
   *even for rebuild-each*). This is the Phase-0 validator doing its job — surfacing a grid-resolution
   limit. Fix when those regimes matter: raise `sw` or use a local-density grid. Not an updater bug.
 - **`polydisperse` ≡ `uniform`** on the Voronoi path (weights are inert — Power/Laguerre is deferred,
-  `static_assert(!Weighted)`; see Risk 3 and the `vorflow-power-cells-deferred` memory).
+  `static_assert(!Weighted)`; see Risk 3 and the `voro-power-cells-deferred` memory).
 - **`A_ij = −A_ji`** holds to ~1e-5..1e-6 (geometric agreement between two independently clipped cells,
   not machine-zero); **Σarea ≈ 5e-17** (the exact global conservation). `Σ dV` is *not* zero (dV is a
   volume gradient, not an antisymmetric force) — reported but not asserted.

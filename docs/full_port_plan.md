@@ -1,11 +1,11 @@
-# Plan — full de-legacy port (no legacy code; one `vorflow`)
+# Plan — full de-legacy port (no legacy code; one `voro`)
 
 **Goal.** Remove all remaining use of the legacy header-only engine
 (`voronoi.hpp`: `CellComplex` / `CellMaker` / `CellGeometry` / `Cell`) and
 `simulation.hpp` (`Simulation` / `ExplicitEuler` / `NavierStokes` / `Incompressible`
 / `IntfDyn`). Everything runs on the Kokkos device path — **multicore CPU (OpenMP)
 and GPU (CUDA/HIP) from one source** — published through `TessellationView`, with a
-single Python module named **`vorflow`** (retiring `vordyn`).
+single Python module named **`voro`** (retiring `vordyn`).
 
 **Method discipline (load-bearing).** Port the *current* numerical methods
 **faithfully** first — each ported piece validated bit-for-bit / to machine
@@ -18,7 +18,7 @@ method change with a backend change.
 
 > **Status update:** Phases **1–4 and 7 are DONE** (the device cutter is now the compact
 > **`ConvexCell`**, not the retired half-edge `ScratchCell`; viscous + interface physics, the
-> device integrator/`Simulation` facade, and the **nanobind** `vorflow` module all exist). The
+> device integrator/`Simulation` facade, and the **nanobind** `voro` module all exist). The
 > genuine remaining work is **Phase 5** (the incompressible elliptic solver — deferred, new-method)
 > and **Phase 8** (literal deletion of the legacy oracle).
 
@@ -80,15 +80,15 @@ replacing legacy `CellComplex::update`. GPU keeps full rebuild. *Accept:*
 incremental == full rebuild over a moving trajectory; measured incremental-vs-full
 (CPU) and CPU-incremental-vs-GPU-full crossovers.
 
-**7. `vorflow` Python module + rename. (DONE)** A **nanobind** module **`vorflow`** over the
+**7. `voro` Python module + rename. (DONE)** A **nanobind** module **`voro`** over the
 device tessellator + ported physics (the `Stepper`/`Simulation` facade), exposing
-the same verbs as `vordyn` plus geometry/SDF setters; **rename `vordyn` → `vorflow`**
+the same verbs as `vordyn` plus geometry/SDF setters; **rename `vordyn` → `voro`**
 and port `python/test_vordyn.py`, `mpi/validate_*.py`, and the benchmarks to it.
 *Accept:* the Python smoke + distributed validation scripts pass on the device path.
 
 **8. Retire legacy.** **Status: the PRODUCTION path is already legacy-free** — the
 shipped library (`device/`, `physics/`, `host/`, `tessellation_view.hpp`) and the
-device Python module (`src/vorflow_bindings.cpp`) include neither `voronoi.hpp` nor
+device Python module (`src/voro_bindings.cpp`) include neither `voronoi.hpp` nor
 `simulation.hpp`, and `tools/check_include_graph.sh` now **enforces** this. The
 legacy engine is retained only as (a) the **test oracle** every device test diffs
 against, (b) the Python surface the `mpi/validate_*.py` scripts still use (they need
@@ -111,7 +111,7 @@ efficiently GPU-able; the elliptic/implicit linear solves are the real work.
 
 ## Sequencing
 geometry (1) → explicit physics (2,3) → integrator/driver (4) → implicit/projection
-(5) → CPU incremental (6) → Python `vorflow` + rename (7) → delete legacy (8).
+(5) → CPU incremental (6) → Python `voro` + rename (7) → delete legacy (8).
 Phases 1–4 already remove most legacy from the *explicit* dynamics; 5 is the elliptic
 solver; 6 restores fast moving-point updates on CPU; 7–8 finish the de-legacy + rename.
 

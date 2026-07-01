@@ -1,6 +1,6 @@
-# vorflow moving-point Voronoi — performance, memory & accuracy report
+# voro moving-point Voronoi — performance, memory & accuracy report
 
-**Scope.** This report measures the vorflow device tessellator on three execution backends and the
+**Scope.** This report measures the voro device tessellator on three execution backends and the
 distributed (MPI) path, for two workloads:
 
 1. **Cold build** — building the full Voronoi tessellation of a point set from scratch (the production
@@ -128,7 +128,7 @@ the retired "poke" store it replaces, so the complete Lawson cert is **memory-ne
 
 * The **neighbour gather** is a voro++-derived worklist; on a single core the cold build is at
   **voro++ parity** (≈1.0–1.05× voro++ on the same point sets — prior measurement,
-  `vorflow-worklist-gather`).
+  `voro-worklist-gather`).
 * The **per-cell construct** (sort-free dual-triangle `ConvexCell`) is at GPU SOTA: ~14–17 Mcells/s FP32
   construct, which **beat the Liu-2020 GPU code on the same hardware** (prior measurement,
   `voronoi_build_plan`). The FP64 construct here is 8.5 Mcells/s (§4); FP32 is ~1.5–2× faster.
@@ -316,7 +316,7 @@ certificate's tolerance.
 ## 8. Reproduce
 
 ```bash
-cd vorflow
+cd voro
 # build the CSV report bench on each backend prefix (serial / host-openmp / nvidia-cuda):
 cmake --build build_<backend> --target bench_report bench_construct -j
 

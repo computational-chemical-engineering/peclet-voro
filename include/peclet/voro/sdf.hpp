@@ -7,7 +7,7 @@
  * (suite convention: sdf < 0 inside solid, > 0 in fluid, ∇sdf outward). This is a
  * faithful KOKKOS_FUNCTION port of the legacy
  * CellComplex::clipCellAgainstBoundary + SignedDistanceBoundary::closestPoint, on
- * the suite's shared geometry (transport-core peclet::core::geom):
+ * the suite's shared geometry (core peclet::core::geom):
  *   - analytic providers (SdfSphere / SdfBox / SdfHollowCylinder) port the
  *     peclet::core::geom::{Sphere,Box,HollowCylinder} eval formulas verbatim;
  *   - SdfGrid trilinearly evaluates a device-resident sampled field (any geometry,

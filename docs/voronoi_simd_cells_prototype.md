@@ -69,7 +69,7 @@ there FP32 ≡ FP64 and SIMD-width is irrelevant).
 
 ## Reproduce
 ```bash
-cd vorflow/tests/kokkos
+cd voro/tests/kokkos
 g++ -O3 -march=native            -fopenmp -std=c++20 bench_simd_cells.cpp -o bsc        # exact divide
 g++ -O3 -march=native -ffast-math -fopenmp -std=c++20 bench_simd_cells.cpp -o bsc_fast   # fast reciprocal
 g++ -O3 -march=native -DNODIV    -fopenmp -std=c++20 bench_simd_cells.cpp -o bsc_nodiv   # divide-cost diagnostic

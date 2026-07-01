@@ -1,6 +1,6 @@
 # Plan — SDF-defined geometry for the tessellation (device + suite SDF)
 
-> **Status:** the device clip now lives in `include/vorflow/device/sdf.hpp` and operates on the
+> **Status:** the device clip now lives in `include/peclet/voro/sdf.hpp` and operates on the
 > **ConvexCell** tessellator (`clipCellAgainstSdf(ConvexCell&, …)`). Device providers
 > `SdfSphere`/`SdfBox`/`SdfHollowCylinder` (analytic) and `SdfGrid` (VTI / sampled) port the
 > legacy `SignedDistanceBoundary` build. Originally validated to machine precision against the
@@ -8,7 +8,7 @@
 > device test (`tests/kokkos/test_sdf_boundary_device`) is **currently disabled** while it is
 > re-implemented on ConvexCell (see `voronoi_cpu_migration_discussion.md`). The distributed clip
 > test (`tests/kokkos_mpi/test_sdf_mpi`) follows the same path. Python exposure (Phase 3) is on the
-> device `vorflow` module surface but does not yet expose SDF geometry — a separate binding effort.
+> device `voro` module surface but does not yet expose SDF geometry — a separate binding effort.
 
 **Goal.** Embed a solid geometry defined by a signed-distance field into the Voronoi/power
 tessellation: a cell that would extend into the solid is clipped by a plane located at the
@@ -20,7 +20,7 @@ solid, sdf > 0 in fluid, ∇sdf points outward (into the fluid).**
 
 This mechanism is **already implemented on the legacy CPU path** and tested:
 
-- `SignedDistanceBoundary<real_t>` (`include/vorflow/voronoi.hpp:1211`) — abstract `value(x)`,
+- `SignedDistanceBoundary<real_t>` (`include/peclet/voro/voronoi.hpp:1211`) — abstract `value(x)`,
   `gradient(x)`, and `closestPoint(x, c, normal)` which projects `x` onto sdf=0:
   `c = x − φ·∇φ/|∇φ|²`, `normal = ∇φ/|∇φ|` — exactly "surface point at sdf=0, normal from the SDF".
 - `CellComplex::clipCellAgainstBoundary` (`voronoi.hpp:3905`) — per cell: if the seed has φ ≤ 0
@@ -30,14 +30,14 @@ This mechanism is **already implemented on the legacy CPU path** and tested:
   with the SDF normal. Iterating lets a **curved** surface be approximated by several planar cuts.
 - `tests/test_sdf_boundary.cpp` validates it for slab, spherical-hole, and cylinder boundaries.
 
-The suite also already has the shared SDF the rest of this migration reused: **`tpx::geom`**
+The suite also already has the shared SDF the rest of this migration reused: **`peclet::core::geom`**
 (`core/include/tpx/geom/sdf.hpp`) — the `Sdf` concept (`eval(p)`), analytic `Sphere`,
 `Box`, `HollowCylinder`, `Complement`, a central-difference `gradient`, plus `GridSdf` (trilinear
 sampling) and VTI read/write.
 
 **So the work is not the algorithm — it is (1) porting that clip to the device tessellator (the
 migration gap: the Phase-3 device path does Voronoi cuts but no SDF boundary yet), and (2)
-unifying on `tpx::geom::Sdf` instead of vorflow's bespoke `SignedDistanceBoundary`, so geometry is
+unifying on `peclet::core::geom::Sdf` instead of voro's bespoke `SignedDistanceBoundary`, so geometry is
 shared with sdflow/dem and can come from analytic shapes or a VTI grid.**
 
 ## Design
@@ -45,12 +45,12 @@ shared with sdflow/dem and can come from analytic shapes or a VTI grid.**
 ### A. Device-callable SDF (reuse core)
 The cutter needs `sdf(x)` and `∇sdf(x)` inside a `KOKKOS_FUNCTION`. Two interchangeable providers
 behind one tiny policy (mirrors the `Weighting` policy):
-- **GridSdf on device (primary, universal).** Sample any geometry once into a `tpx::Field3D<float>`
-  device view (`tpx::geom::sample(shape, dims, origin, spacing)` → upload), and evaluate in-kernel by
+- **GridSdf on device (primary, universal).** Sample any geometry once into a `peclet::core::Field3D<float>`
+  device view (`peclet::core::geom::sample(shape, dims, origin, spacing)` → upload), and evaluate in-kernel by
   trilinear interpolation; ∇sdf by central differences on the grid. Works for analytic shapes *and*
-  VTI-loaded geometry (`tpx::geom::readVti`), matching how sdflow/dem carry geometry.
+  VTI-loaded geometry (`peclet::core::geom::readVti`), matching how sdflow/dem carry geometry.
 - **Analytic SDF (fast path).** `KOKKOS_INLINE_FUNCTION` `eval`/`grad` for sphere/box/cylinder for
-  exact, allocation-free boundaries (the analytic `tpx::geom` shapes are trivial to mark device-callable).
+  exact, allocation-free boundaries (the analytic `peclet::core::geom` shapes are trivial to mark device-callable).
 
 ### B. Device boundary clip (faithful port of `clipCellAgainstBoundary`)
 Add an optional SDF-clip stage to the per-cell build in `device/tessellator.hpp`, after the Voronoi
@@ -75,14 +75,14 @@ a few planar facets approximating the curve.
 - **Distributed:** the SDF is read-only geometry replicated on every rank (analytic params, or the
   same VTI grid), so the Phase-6 path needs **no extra exchange** — each rank clips its owned+ghost
   cells against the same field. Seeds inside the solid simply have no owned cell.
-- **Python:** expose geometry on the `vorflow` surface (set an analytic shape, or load a VTI) so the
+- **Python:** expose geometry on the `voro` surface (set an analytic shape, or load a VTI) so the
   SDF-bounded tessellation is drivable from Python, matching the suite's geometry-from-Python pattern.
 
 ## Phases
 
-1. **Device SDF provider.** `include/vorflow/device/sdf.hpp`: `DeviceGridSdf` (trilinear eval +
-   central-diff grad over a `tpx::Field3D`) + analytic `KOKKOS_INLINE_FUNCTION` shapes; host helper
-   to sample/upload a `tpx::geom` shape or a VTI. *Accept:* device eval/grad match `tpx::geom` on a
+1. **Device SDF provider.** `include/peclet/voro/sdf.hpp`: `DeviceGridSdf` (trilinear eval +
+   central-diff grad over a `peclet::core::Field3D`) + analytic `KOKKOS_INLINE_FUNCTION` shapes; host helper
+   to sample/upload a `peclet::core::geom` shape or a VTI. *Accept:* device eval/grad match `peclet::core::geom` on a
    point cloud to interpolation tolerance.
 2. **Device boundary clip.** Port `clipCellAgainstBoundary` into a `ConvexCell` method + a clip
    stage in `buildTessellation` (sentinel `kBoundary`, empty-on-φ≤0). *Accept:* device SDF-clipped
@@ -90,18 +90,18 @@ a few planar facets approximating the curve.
    `test_sdf_boundary` geometries (slab / sphere-hole / cylinder); space-filling over the fluid
    region; seed-in-solid ⇒ empty.
 3. **Distributed + Python.** Replicated SDF across ranks (owned cells == serial with the boundary);
-   `vorflow` geometry setters (analytic + VTI). *Accept:* distributed SDF tessellation == single-rank;
+   `voro` geometry setters (analytic + VTI). *Accept:* distributed SDF tessellation == single-rank;
    a Python smoke test bounds a packing by a sphere/box.
 
 ## Critical files
 - Reuse: `core/include/tpx/geom/{sdf,grid_sdf,vti_io}.hpp`, `tpx/common/view.hpp` (`Field3D`).
-- Port from: `include/vorflow/voronoi.hpp` (`SignedDistanceBoundary`, `clipCellAgainstBoundary`),
+- Port from: `include/peclet/voro/voronoi.hpp` (`SignedDistanceBoundary`, `clipCellAgainstBoundary`),
   `tests/test_sdf_boundary.cpp` (golden geometries + tolerances).
-- New: `include/vorflow/device/sdf.hpp`, clip stage in `include/vorflow/device/{cell_cutter,tessellator}.hpp`,
+- New: `include/peclet/voro/sdf.hpp`, clip stage in `include/peclet/voro/{cell_cutter,tessellator}.hpp`,
   `tests/kokkos/test_sdf_boundary_device.cpp`.
 
 ## Verification
-Build `-DVORFLOW_KOKKOS=ON`; new ctest diffs device SDF-clipped cells against the legacy
+Build `-DPECLET_VORO_KOKKOS=ON`; new ctest diffs device SDF-clipped cells against the legacy
 `test_sdf_boundary` reference (slab/sphere/cylinder) for volume, boundary-facet count, and
 space-filling of the fluid region; `mpirun` np=1,2,4 confirms distributed == single-rank with the
 boundary; Python smoke test bounds a seed set by an analytic shape and a VTI.
@@ -111,5 +111,5 @@ boundary; Python smoke test bounds a seed set by an analytic shape and a VTI.
   tangent planes per cell — keep that faithful port, or expose `maxCuts`/tol as accuracy knobs.
 - **Grid vs analytic** crossover (resolution vs exactness) — default to GridSdf for generality, analytic
   for exact spheres/boxes.
-- **sdf sign source:** use the suite convention (negative-inside) end-to-end; vorflow's legacy
-  `SignedDistanceBoundary` uses the same (φ ≤ 0 ⇒ solid), so no flip is needed when moving to `tpx::geom`.
+- **sdf sign source:** use the suite convention (negative-inside) end-to-end; voro's legacy
+  `SignedDistanceBoundary` uses the same (φ ≤ 0 ⇒ solid), so no flip is needed when moving to `peclet::core::geom`.

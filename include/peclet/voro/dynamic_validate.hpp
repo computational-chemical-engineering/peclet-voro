@@ -25,7 +25,7 @@
  *   - missedNbr      : cells with a TRUE (oracle) neighbour absent from the stored set (real
  * staleness).
  *
- * Core header: Kokkos + transport-core + the published view/aux + TopologyStore. No physics.
+ * Core header: Kokkos + core + the published view/aux + TopologyStore. No physics.
  */
 #ifndef PECLET_VORO_DYNAMIC_VALIDATE_HPP
 #define PECLET_VORO_DYNAMIC_VALIDATE_HPP

@@ -4,7 +4,7 @@
  * dimensionless displacement — the "serial + MPI, one process per core" configuration (run
  * OMP_NUM_THREADS=1).
  *
- * Each rank owns an ORB block (transport-core, via VoronoiHalo). The distributed COLD build, per
+ * Each rank owns an ORB block (core, via VoronoiHalo). The distributed COLD build, per
  * step: gather every seed within rcut of the block (the MPI halo exchange), then tessellate the
  * owned cells over owned+ghost. The distributed REPAIR keeps a resident topology of the owned cells
  * and, while no owned seed has moved beyond the Verlet skin, only *refreshes* the ghost positions

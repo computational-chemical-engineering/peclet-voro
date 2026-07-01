@@ -1,4 +1,4 @@
-# Kokkos device tests + benchmarks for vorflow (built only when -DVORFLOW_KOKKOS=ON).
+# Kokkos device tests + benchmarks for peclet.voro (built only when -DPECLET_VORO_KOKKOS=ON).
 
 function(add_vorflow_kokkos_test name)
   add_executable(${name} ${name}.cpp)
@@ -120,4 +120,4 @@ set_tests_properties(bench_dynamic_update_gates PROPERTIES ENVIRONMENT "OMP_PROC
 add_test(NAME test_include_graph
   COMMAND ${CMAKE_COMMAND} -E env bash
           "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/check_include_graph.sh"
-          "${CMAKE_CURRENT_SOURCE_DIR}/../../include/vorflow")
+          "${CMAKE_CURRENT_SOURCE_DIR}/../../include/peclet/voro")

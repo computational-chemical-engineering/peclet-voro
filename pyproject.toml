@@ -1,7 +1,7 @@
-# Python packaging for the device-native `vorflow` module (moving-particle Voronoi dynamics on Kokkos).
+# Python packaging for the `peclet.voro` module (moving-particle Voronoi dynamics on Kokkos).
 #
 # `pip install .` builds the Kokkos device extension via scikit-build-core and installs it as the
-# top-level `vorflow` module. The Kokkos prefix is NOT pulled from PyPI (it is GPU-arch / backend
+# top-level `peclet.voro` module. The Kokkos prefix is NOT pulled from PyPI (it is GPU-arch / backend
 # specific): point the build at a prefix you bootstrapped once with ../tools/bootstrap_deps.sh by
 # exporting CMAKE_PREFIX_PATH, and the morton sibling must be checked out alongside (../morton).
 #

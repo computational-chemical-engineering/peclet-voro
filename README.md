@@ -1,6 +1,6 @@
-# vorflow
+# peclet.voro
 
-[![CI](https://github.com/computational-chemical-engineering/vorflow/actions/workflows/ci.yml/badge.svg)](https://github.com/computational-chemical-engineering/vorflow/actions/workflows/ci.yml)
+[![CI](https://github.com/computational-chemical-engineering/peclet-voro/actions/workflows/ci.yml/badge.svg)](https://github.com/computational-chemical-engineering/peclet-voro/actions/workflows/ci.yml)
 
 A **Kokkos** engine for dynamic Voronoi tessellation of moving particles in three
 dimensions, part of the `peclet` suite. The same sources run on **CUDA / HIP / OpenMP**
@@ -22,31 +22,30 @@ half-edge CPU engine has been retired and removed; the device path is the whole 
 ## Repository layout
 
 ```
-vorflow/
+voro/
 ├── include/
-│   └── vorflow/
-│       ├── device/                  # The device (Kokkos) tessellator
-│       │   ├── convex_cell.hpp      #   compact dual-triangle ConvexCell + per-vertex geometry
-│       │   ├── tessellator.hpp      #   cold build: grid + worklist gather + clip + CSR publish
-│       │   ├── repair.hpp           #   MovingTessellation: incremental two-pass repair update
-│       │   ├── topology_store.hpp   #   resident compact topology (+ poke4 cert planes) between steps
-│       │   ├── tess_grid.hpp        #   counting-sort grid + presorted worklist
-│       │   ├── subset_gather.hpp    #   the cold-build kernel restricted to an index list (repair)
-│       │   ├── dynamic_validate.hpp #   geometric invariants + oracle diff (validators)
-│       │   ├── verlet_skin.hpp      #   per-particle Verlet-skin (insertion) tracker
-│       │   ├── sdf.hpp              #   SDF half-space clipping (solid boundaries)
-│       │   ├── plane_policy.hpp     #   Voronoi / Power / SDF plane-definition policies
-│       │   └── transpose.hpp        #   neighbour<->facet reciprocal map helpers
-│       ├── physics/                 # Device simulation + forces over the published view
-│       │   ├── simulation.hpp #  device-native Euler / Navier-Stokes facade
+│   └── peclet/voro/                 # the Kokkos tessellator engine (namespace peclet::voro)
+│       ├── convex_cell.hpp          #   compact dual-triangle ConvexCell + per-vertex geometry
+│       ├── tessellator.hpp          #   cold build: grid + worklist gather + clip + CSR publish
+│       ├── repair.hpp               #   MovingTessellation: incremental two-pass repair update
+│       ├── topology_store.hpp       #   resident compact topology (+ poke4 cert planes) between steps
+│       ├── tess_grid.hpp            #   counting-sort grid + presorted worklist
+│       ├── subset_gather.hpp        #   the cold-build kernel restricted to an index list (repair)
+│       ├── dynamic_validate.hpp     #   geometric invariants + oracle diff (validators)
+│       ├── verlet_skin.hpp          #   per-particle Verlet-skin (insertion) tracker
+│       ├── sdf.hpp                  #   SDF half-space clipping (solid boundaries)
+│       ├── plane_policy.hpp         #   Voronoi / Power / SDF plane-definition policies
+│       ├── transpose.hpp            #   neighbour<->facet reciprocal map helpers
+│       ├── physics/                 # simulation + forces over the published view
+│       │   ├── simulation.hpp       #   Euler / Navier-Stokes facade (ExplicitEuler)
 │       │   ├── euler_pressure.hpp   #   EOS pressure force
-│       │   ├── viscous.hpp         #   viscous Navier-Stokes term
-│       │   └── interface.hpp       #   multiphase interface-tension force
+│       │   ├── viscous.hpp          #   viscous Navier-Stokes term
+│       │   └── interface.hpp        #   multiphase interface-tension force
 │       ├── mpi/
-│       │   └── voronoi_halo.hpp    #   distributed halo glue over core
-│       └── tessellation_view.hpp   # published read-only CSR device view (engine<->consumer seam)
-├── src/vorflow_bindings.cpp     # nanobind device Python module (`vorflow`)
-├── python/test_vorflow.py       # Python smoke test (Tessellation + Simulation)
+│       │   └── voronoi_halo.hpp     #   distributed halo glue over core
+│       └── tessellation_view.hpp    # published read-only CSR device view (engine<->consumer seam)
+├── src/voro_bindings.cpp     # nanobind Python module (`peclet.voro`)
+├── python/test_voro.py       # Python smoke test (Tessellation + Simulation)
 ├── tests/kokkos/                # device unit tests + benchmarks
 ├── tests/kokkos_mpi/            # distributed benchmarks
 ├── docs/                        # design notes, performance_report.md, Doxygen config
@@ -61,11 +60,11 @@ vorflow/
 |------------|---------|-------|
 | C++ compiler | C++20 | GCC ≥ 11 recommended |
 | CMake | ≥ 3.16 | |
-| **Kokkos** | bootstrapped | `-DVORFLOW_KOKKOS=ON`; CUDA/HIP/OpenMP backend chosen by the prefix |
+| **Kokkos** | bootstrapped | `-DPECLET_VORO_KOKKOS=ON`; CUDA/HIP/OpenMP backend chosen by the prefix |
 | **core** | sibling repo | Shared MPI halo + array bridge; required for the distributed path |
 | **morton** | sibling repo | Z-order spatial-index primitive used by the device tessellator |
-| MPI | any | Distributed path (`-DVORFLOW_MPI=ON`) |
-| nanobind | ≥ 2.0 | Python module (`-DVORFLOW_BUILD_PYTHON=ON`); found via the active interpreter |
+| MPI | any | Distributed path (`-DPECLET_VORO_MPI=ON`) |
+| nanobind | ≥ 2.0 | Python module (`-DPECLET_VORO_BUILD_PYTHON=ON`); found via the active interpreter |
 | Voro++ | master | Fetched by CMake FetchContent as the throughput reference for `bench_convexcell` |
 
 The Kokkos/ArborX backend and target architecture come from the bootstrapped prefix
@@ -80,52 +79,53 @@ The Kokkos/ArborX backend and target architecture come from the bootstrapped pre
 
 ```bash
 # Point at the bootstrapped Kokkos prefix; clone core and morton as siblings.
-cmake -B build -DVORFLOW_KOKKOS=ON \
+cmake -B build -DPECLET_VORO_KOKKOS=ON \
       -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda"
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure        # device tests under tests/kokkos
 ```
 
-Add `-DVORFLOW_MPI=ON` to link MPI + `core` for the distributed path.
+Add `-DPECLET_VORO_MPI=ON` to link MPI + `core` for the distributed path.
 
 ### CMake options
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `VORFLOW_KOKKOS` | `OFF` | Build the Kokkos device path (`find_package(Kokkos)`) |
-| `VORFLOW_MPI` | `OFF` | Build the distributed path against MPI + core |
-| `VORFLOW_BUILD_PYTHON` | `OFF` | Build the device-native nanobind module `vorflow` (under `VORFLOW_KOKKOS`) |
-| `VORONOI_BUILD_TESTS` | `ON` | Build the test executables |
-| `VORONOI_BUILD_BENCHMARKS` | `OFF` | Build the performance benchmarks |
-| `VORONOI_BUILD_DOCS` | `OFF` | Build Doxygen HTML documentation |
+| `PECLET_VORO_KOKKOS` | `OFF` | Build the Kokkos device path (`find_package(Kokkos)`) |
+| `PECLET_VORO_MPI` | `OFF` | Build the distributed path against MPI + core |
+| `PECLET_VORO_BUILD_PYTHON` | `OFF` | Build the device-native nanobind module `peclet.voro` (under `PECLET_VORO_KOKKOS`) |
+| `PECLET_VORO_BUILD_TESTS` | `ON` | Build the test executables |
+| `PECLET_VORO_BUILD_BENCHMARKS` | `OFF` | Build the performance benchmarks |
+| `PECLET_VORO_BUILD_DOCS` | `OFF` | Build Doxygen HTML documentation |
 
 ---
 
-## Python bindings (`vorflow`)
+## Python bindings (`peclet.voro`)
 
 The device tessellator is exposed to Python through a **nanobind** module that uses the
 shared `core` **zero-copy** array bridge (numpy `(N,3)` / `(N,)` arrays alias the
 device-staged buffers — no per-call copies). This is the same drive-from-Python pattern as
 the rest of the suite (`sdflow`/`pnm`, `dem`). The module is **not** pybind11 and is **not**
 fetched automatically: nanobind is located via the active interpreter through the suite's
-`cmake/SuiteNanobind.cmake`. The built module is importable as `vorflow` (it was formerly
+`cmake/SuiteNanobind.cmake`. The built module is importable as `peclet.voro` (formerly
 `vordyn`).
 
 ```bash
-cmake -B build -DVORFLOW_KOKKOS=ON -DVORFLOW_BUILD_PYTHON=ON \
+cmake -B build -DPECLET_VORO_KOKKOS=ON -DPECLET_VORO_BUILD_PYTHON=ON \
       -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda"
-cmake --build build --target vorflow_device -j
-PYTHONPATH=build python3 -c "import vorflow; print(vorflow.execution_space)"
+cmake --build build --target voro -j
+PYTHONPATH=build python3 -c "import peclet.voro; print(peclet.voro.execution_space)"
 ```
 
 The module exposes two surfaces — the bare **`Tessellation`** (cold build + incremental repair of a
 moving point set) and the **`Simulation`** fluid solver:
 
 ```python
-import numpy as np, vorflow
+import numpy as np
+import peclet.voro as voro
 
 # bare moving-point Voronoi tessellation
-t = vorflow.Tessellation()
+t = voro.Tessellation()
 t.set_box([1.0, 1.0, 1.0])
 t.build(pos)                         # cold build, pos = (N,3) float64
 vol = t.volumes()                    # (N,) cell volumes (sum ~= box volume)
@@ -133,8 +133,8 @@ nbr = t.neighbor_counts()            # (N,) Voronoi neighbours per cell
 stats = t.step(pos_moved)            # incremental repair to new positions
 
 # compressible-Euler / Navier-Stokes fluid on top of it
-s = vorflow.Simulation()
-s.set_l([6.0, 6.0, 6.0])
+s = voro.Simulation()
+s.set_box([6.0, 6.0, 6.0])
 s.set_positions(pos)                 # (N,3) float64
 s.set_velocities(vel)                # (N,3) float64
 s.set_masses(masses)                 # (N,) float64
@@ -149,7 +149,7 @@ ke   = s.get_kinetic_energy()
 ```
 
 Array shapes follow the suite convention (`../docs/CONVENTIONS.md` §6): positions/velocities
-`(N,3)` float64, masses/viscosities/volumes `(N,)`. Call `vorflow.finalize()` for
+`(N,3)` float64, masses/viscosities/volumes `(N,)`. Call `peclet.voro.finalize()` for
 deterministic Kokkos teardown (also run from an `atexit` hook).
 
 For the distributed (MPI) validation scripts see [`mpi/README.md`](mpi/README.md) and
@@ -164,20 +164,20 @@ For the distributed (MPI) validation scripts see [`mpi/README.md`](mpi/README.md
 The codebase follows the Google C++ Style Guide enforced by `clang-format`:
 
 ```bash
-clang-format --dry-run --Werror include/vorflow/**/*.hpp tests/kokkos/*.cpp src/*.cpp
+clang-format --dry-run --Werror include/peclet/voro/**/*.hpp tests/kokkos/*.cpp src/*.cpp
 ```
 
 ### Static analysis
 
 ```bash
 cmake -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-clang-tidy -p build include/vorflow/*.hpp
+clang-tidy -p build include/peclet/voro/*.hpp
 ```
 
 ### Documentation
 
 ```bash
-cmake -B build -DVORONOI_BUILD_DOCS=ON
+cmake -B build -DPECLET_VORO_BUILD_DOCS=ON
 cmake --build build --target docs
 # HTML output: build/docs/html/index.html
 ```
@@ -187,7 +187,7 @@ cmake --build build --target docs
 ## Data structure overview
 
 The production engine stores a Voronoi *cell* as a compact **ConvexCell** in the **dual**
-representation (`include/vorflow/device/convex_cell.hpp`). The cell is the intersection of
+representation (`include/peclet/voro/convex_cell.hpp`). The cell is the intersection of
 half-spaces `{x : n_k·x ≤ n_k·n_k}` — one plane per neighbour (`n_k` is the foot-point
 normal: `x = n_k` is the foot of the perpendicular from the seed, so the connector to the
 neighbour is `2·n_k`), plus the six bounding-box planes. Instead of explicit half-edge

@@ -26,7 +26,7 @@ is the piece I was missing, and it makes the per-vertex contribution genuinely l
 
 ## 1. What was implemented
 
-In `include/vorflow/device/convex_cell.hpp`:
+In `include/peclet/voro/convex_cell.hpp`:
 
 - `planeN(k, n)` — the plane's non-unit normal `n` with interior `{x : n·x ≤ n·n}`, so `x = n` is the
   foot of the perpendicular from the origin (the facet point). Our cell stores `(pn, pd)` as
@@ -146,7 +146,7 @@ observed in 120 000 test cells — worth a production assert.
 
 ## 6. Files
 
-- `include/vorflow/device/convex_cell.hpp` — `planeN`, `volumePerVertex`, `facetAreasPerVertex`,
+- `include/peclet/voro/convex_cell.hpp` — `planeN`, `volumePerVertex`, `facetAreasPerVertex`,
   `facetMomentsPerVertex` (area + first moment → centroid → force `dV`), helpers; also
   `volumeWalk`/`volumeAdj`/`buildAdjacency` from the prior order-free investigation, kept as documented
   variants.

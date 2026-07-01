@@ -13,7 +13,7 @@
  * of the legacy NbrList::setupSubset). The cold-build output stays byte-for-byte identical (pure
  * code motion — the kernels and their launch order are unchanged).
  *
- * Core header: Kokkos + transport-core + morton, no physics.
+ * Core header: Kokkos + core + morton, no physics.
  */
 #ifndef PECLET_VORO_TESS_GRID_HPP
 #define PECLET_VORO_TESS_GRID_HPP

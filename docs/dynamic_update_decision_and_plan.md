@@ -1,4 +1,4 @@
-# Dynamic Voronoi/Power Tessellation Update — Decision & Implementation Plan (vorflow)
+# Dynamic Voronoi/Power Tessellation Update — Decision & Implementation Plan (voro)
 
 **Status:** decision + phased plan. **Phase 0 + Phase 1 IMPLEMENTED 2026-06-29** (not pushed) — see the
 "Implementation status" box below; Phase 2 (the two-pass repair loop) is the next prompt (§8 templates).
@@ -6,7 +6,7 @@
 **Companion context:** `voronoi_neighbor_update_overview.md` (method/legacy/literature/avenues), `voronoi_dynamic_update_study.md` (the S0–S6 numbers), `performance.md`, `update_and_repair_redesign.md` (legacy wave/ConnectivityArena design).
 
 > **Implementation status (Phase 0 + Phase 1, 2026-06-29).** Done and gated on OpenMP + CUDA (RTX 5080);
-> MPI np=1,2,4 green. The cold-build grid/worklist was factored into `include/vorflow/device/tess_grid.hpp`
+> MPI np=1,2,4 green. The cold-build grid/worklist was factored into `include/peclet/voro/tess_grid.hpp`
 > (`TessGrid`/`buildTessGrid`, + a `slotOf` inverse map) so one grid backs both the cold build and the
 > subset gather — proved byte-identical (single-thread fingerprint; the build is not bit-deterministic
 > across thread counts because atomic binning order changes the candidate-clip order). New headers:
@@ -191,7 +191,7 @@ Sweep `δ/h ∈ {0.001…0.05}` × {uniform, lattice+jitter, clustered, near-wal
 
 ## 7. Kickoff prompt for Claude Code (Phase 0 + Phase 1)
 
-Paste the block in §8 into Claude Code running in the vorflow repo. Scope is deliberately limited to the foundation + repair primitives, with hard correctness gates and no premature optimization. Subsequent phases get their own short prompts (templates below).
+Paste the block in §8 into Claude Code running in the voro repo. Scope is deliberately limited to the foundation + repair primitives, with hard correctness gates and no premature optimization. Subsequent phases get their own short prompts (templates below).
 
 ### Subsequent-phase prompt templates
 - **Phase 2:** "Wire the two-pass gather repair (S3) per §1/§3/§4 of `dynamic_update_decision_and_plan.md`: Pass 1 = subset-gather over (flagged ∪ violated-plane partners ∪ Verlet-skin movers); collect each repaired cell's new neighbours not already rebuilt; Pass 2 = subset-gather over those; re-run the certificate to **verify** (one more pass or full rebuild if still dirty). No fusion, no tuning, no single-face repair, no arena. Gate: EXACT vs the Phase-0 oracle across all distributions including power, plus a far-jump (teleport) stress case; verify must be clean within ≤1 extra pass. Add an `S3` path to `bench_update_strategies`."
@@ -207,12 +207,12 @@ Paste the block in §8 into Claude Code running in the vorflow repo. Scope is de
 Read these first and confirm you understand the interfaces before editing anything:
 - docs/dynamic_update_decision_and_plan.md (this plan)
 - docs/voronoi_neighbor_update_overview.md
-- include/vorflow/device/convex_cell.hpp (reevalGeometry, isSelfConsistent, clip,
+- include/peclet/voro/convex_cell.hpp (reevalGeometry, isSelfConsistent, clip,
   geometryPerVertex/geomVolume*)
-- include/vorflow/device/tessellator.hpp (buildTessellation, worklist gather, CSR,
+- include/peclet/voro/tessellator.hpp (buildTessellation, worklist gather, CSR,
   topology-store + skin emission)
-- include/vorflow/device/topology_store.hpp (pnbr/tri/np/nt)
-- include/vorflow/tessellation_view.hpp + transpose.hpp (CSR, buildReciprocalMap)
+- include/peclet/voro/topology_store.hpp (pnbr/tri/np/nt)
+- include/peclet/voro/tessellation_view.hpp + transpose.hpp (CSR, buildReciprocalMap)
 - tests/kokkos/bench_update_strategies*, phase0_incremental, bench_incremental
 
 Non-negotiables that must not regress: analytic derivatives (dV/dn, dA/dn),

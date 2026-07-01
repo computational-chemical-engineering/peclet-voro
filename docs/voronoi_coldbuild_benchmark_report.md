@@ -87,7 +87,7 @@ build parity (not a win) is the *gather*, where voro++'s coarse-block container 
 **There was no distributed cold-build benchmark, so one was written**: `tests/kokkos_mpi/bench_voronoi_mpi.cpp`
 (the timing sibling of the validated `test_voronoi_mpi`). Each rank owns a block (core ORB via
 `VoronoiHalo`), gathers ghost seeds within `rcut` (the MPI halo exchange), and tessellates its owned+ghost
-subset with the **device tessellator** (`vor::device::buildTessellation`). One MPI rank per core
+subset with the **device tessellator** (`peclet::voro::buildTessellation`). One MPI rank per core
 (`OMP_NUM_THREADS=1`, `--bind-to core`).
 
 > **Important:** the distributed path uses the device tessellator's **own grid gather** and emits **full
@@ -186,7 +186,7 @@ worklist is applied on the CPU only. `nBuild` + the tighter `rcut` are backend-a
 
 ### Reproduce
 ```bash
-cd vorflow
+cd voro
 # serial + voro++, multicore, clip head-to-head (pin away from any background load):
 OMP_NUM_THREADS=1 taskset -c 44 CC_DENS=0.3 build/host-openmp/tests/kokkos/bench_convexcell 1000000
 OMP_NUM_THREADS=24 CC_DENS=0.3 CC_NOVORO=1 build/host-openmp/tests/kokkos/bench_convexcell 1000000

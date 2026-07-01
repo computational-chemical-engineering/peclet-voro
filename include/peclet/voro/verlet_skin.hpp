@@ -15,7 +15,7 @@
  * mask (`SkinTrigger`) so the deferred SDF boundary-contact trigger (Risk 1d: |SDF(p)| <
  * security-radius status change) can be OR'd in later without reworking the repair driver.
  *
- * Core header: Kokkos + transport-core, no physics. One path for CUDA/HIP/OpenMP.
+ * Core header: Kokkos + core, no physics. One path for CUDA/HIP/OpenMP.
  */
 #ifndef PECLET_VORO_VERLET_SKIN_HPP
 #define PECLET_VORO_VERLET_SKIN_HPP

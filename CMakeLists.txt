@@ -33,7 +33,7 @@ add_compile_options(
 find_package(OpenMP)
 
 # ── Header-only interface library ────────────────────────────────────────────
-# The vorflow headers are header-only; this target just carries the include path for downstream
+# The voro headers are header-only; this target just carries the include path for downstream
 # consumers. The device path (tests/kokkos, src/) sets its own include dirs against core +
 # morton, so it does not link this target.
 add_library(vorflow INTERFACE)
@@ -57,7 +57,7 @@ endif()
 # Device benchmarks live under tests/kokkos (bench_*); the legacy CPU benchmark suite was retired.
 
 # ── Python bindings ───────────────────────────────────────────────────────────
-# The Python surface is the device-native nanobind module `vorflow` (src/voro_bindings.cpp),
+# The Python surface is the device-native nanobind module `peclet.voro` (src/voro_bindings.cpp),
 # configured below with -DVORFLOW_BUILD_PYTHON=ON. The legacy pybind11 module over the retired
 # half-edge engine has been removed.
 
@@ -87,9 +87,9 @@ if(PECLET_VORO_KOKKOS)
   # present) to keep the Phase 0-2 toolchain and the lean CPU wheel small.
   find_package(ArborX CONFIG QUIET)
   if(ArborX_FOUND)
-    message(STATUS "vorflow: ArborX ${ArborX_VERSION}")
+    message(STATUS "voro: ArborX ${ArborX_VERSION}")
   else()
-    message(STATUS "vorflow: ArborX not found (required from Phase 3 onward)")
+    message(STATUS "voro: ArborX not found (required from Phase 3 onward)")
   endif()
 
   # core's zero-copy bridge + the morton spatial-index primitive (the device tessellator's
@@ -103,7 +103,7 @@ if(PECLET_VORO_KOKKOS)
       message(FATAL_ERROR
         "core not found at ${PECLET_VORO_TPX_INCLUDE} (clone it as a sibling repo)")
     endif()
-    message(STATUS "vorflow: distributed path ENABLED (MPI + core)")
+    message(STATUS "voro: distributed path ENABLED (MPI + core)")
   endif()
 
   if(PECLET_VORO_BUILD_TESTS)
@@ -113,7 +113,7 @@ if(PECLET_VORO_KOKKOS)
   # Device-native Python module `peclet.voro` (the de-legacy surface over the device tessellator +
   # ExplicitEulerDevice). Opt-in. nanobind is found via the active interpreter (PecletDeps helper);
   # arrays use the core zero-copy bridge.
-  option(PECLET_VORO_BUILD_PYTHON "Build the device-native vorflow Python module" OFF)
+  option(PECLET_VORO_BUILD_PYTHON "Build the peclet.voro nanobind Python module" OFF)
   if(PECLET_VORO_BUILD_PYTHON)
     peclet_require_nanobind()
     # NOMINSIZE: nanobind's default -Os size optimization is rejected by nvcc ("'s': expected a
@@ -159,7 +159,7 @@ option(PECLET_VORO_BUILD_DOCS "Build Doxygen documentation" OFF)
 if(PECLET_VORO_BUILD_DOCS)
   find_package(Doxygen)
   if(DOXYGEN_FOUND)
-    set(DOXYGEN_PROJECT_NAME "vorflow")
+    set(DOXYGEN_PROJECT_NAME "peclet.voro")
     set(DOXYGEN_PROJECT_BRIEF "Device-native moving-particle Voronoi dynamics")
     set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/docs")
     set(DOXYGEN_EXTRACT_ALL YES)

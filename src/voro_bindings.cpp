@@ -1,32 +1,32 @@
 /**
- * @file vorflow_bindings.cpp
- * @brief Device-native (Kokkos) nanobind Python module `vorflow`.
+ * @file voro_bindings.cpp
+ * @brief Kokkos nanobind Python module `peclet.voro`.
  *
  * Drives the production device path — multicore CPU (OpenMP), or GPU (CUDA/HIP), selected by the
  * Kokkos backend the extension was built against — from Python. Two surfaces:
  *
- *  - @ref Tess "vorflow.Tessellation" — the bare moving-particle Voronoi tessellator: a cold build
+ *  - @ref Tess "peclet.voro.Tessellation" — the bare moving-particle Voronoi tessellator: a cold build
  *    plus the incremental two-pass *repair* update (the fast per-step path for moving points),
  * exposing per-cell volumes and neighbour counts. This is the core primitive all the geometry work
  * builds on.
- *  - @ref Sim "vorflow.Simulation" — a device-native compressible-Euler / Navier–Stokes Voronoi
+ *  - @ref Sim "peclet.voro.Simulation" — a device-native compressible-Euler / Navier–Stokes Voronoi
  * fluid simulation (velocity-Verlet over the tessellation) on top of that primitive.
  *
  * Particle data crosses the boundary as NumPy arrays: positions/velocities are `(N,3)` float64,
  * scalars (masses, viscosities, volumes) are `(N,)`. Arrays move through the shared `peclet::core::python`
- * bridge (transport-core): returned arrays are backed by host buffers (no extra device copy).
+ * bridge (core): returned arrays are backed by host buffers (no extra device copy).
  *
  * Kokkos is initialized at import and finalized via a Python `atexit` hook (with every live
- * object's Views released first — required on CUDA). Call `vorflow.finalize()` for deterministic
+ * object's Views released first — required on CUDA). Call `peclet.voro.finalize()` for deterministic
  * teardown.
  *
  * Example
  * -------
  * @code{.py}
- *   import numpy as np, vorflow
+ *   import numpy as np, peclet.voro
  *   rng = np.random.default_rng(0)
  *   pos = rng.random((100_000, 3))            # uniform points in the unit box
- *   t = vorflow.Tessellation()
+ *   t = peclet.voro.Tessellation()
  *   t.set_box((1.0, 1.0, 1.0))
  *   t.build(pos)                              # cold tessellation
  *   vol = t.volumes()                         # (N,) cell volumes; sum ~= box volume
@@ -131,7 +131,7 @@ class Tess {
     auto C = cnt;
     const real_t Lx = L_[0], Ly = L_[1], Lz = L_[2];
     Kokkos::parallel_for(
-        "vorflow.nbrcount", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N), KOKKOS_LAMBDA(int i) {
+        "peclet.voro.nbrcount", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N), KOKKOS_LAMBDA(int i) {
           Cell c;
           st.load(i, c, Lx, Ly, Lz);
           C(i) = c.countFaces();
@@ -258,12 +258,12 @@ class Sim {
 
 NB_MODULE(_voro, m) {
   m.attr("__doc__") =
-      "vorflow (device/Kokkos): moving-particle Voronoi dynamics on the device path.\n\n"
+      "peclet.voro (device/Kokkos): moving-particle Voronoi dynamics on the device path.\n\n"
       "Classes: Tessellation (bare cold build + incremental repair, volumes, neighbour counts);\n"
       "Simulation (compressible-Euler / Navier-Stokes Voronoi fluid). Arrays are NumPy: "
       "positions/\n"
       "velocities (N,3) float64, scalars (N,). The backend (Serial/OpenMP/CUDA) is fixed at build\n"
-      "time; see vorflow.execution_space.";
+      "time; see peclet.voro.execution_space.";
   if (!Kokkos::is_initialized())
     Kokkos::initialize();
   // Teardown order matters on CUDA: releaseAll() drops every live object's Views FIRST (so none

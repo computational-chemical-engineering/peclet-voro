@@ -1,6 +1,6 @@
 /**
  * Head-to-head: geogram VBW::ConvexCell (the SOTA cell, Ray et al. TOG 2018) vs our
- * vor::device::ConvexCell, SAME workload, SAME machine. Construct-from-cache, FP64, CPU
+ * peclet::voro::ConvexCell, SAME workload, SAME machine. Construct-from-cache, FP64, CPU
  * (single-thread + OpenMP). Mirrors our bench_construct: N random points in a unit periodic
  * box, K nearest neighbours per point (sorted, min-imaged), clip the cell by all K bisectors,
  * compute the cell volume. Validates Σvol == box volume for both. Reports Mcells/s.
@@ -8,7 +8,7 @@
  * Build: see build.sh (g++ -O3 -fopenmp, geogram standalone + our header via a Kokkos shim).
  */
 #include <geogram/voronoi/convex_cell.h>      // VBW::ConvexCell (STANDALONE_CONVEX_CELL)
-#include "vorflow/device/convex_cell.hpp"      // vor::device::ConvexCell (via Kokkos shim)
+#include "peclet/voro/convex_cell.hpp"      // peclet::voro::ConvexCell (via Kokkos shim)
 #include "voro++.hh"                            // voro++ voronoicell (clip-only, no container/gather)
 
 #include <algorithm>
@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
 
   // --- our ConvexCell (FP64) ---
   auto our_one = [&](int i) -> double {
-    vor::device::ConvexCell<real_t, 64, 112> c;
+    peclet::voro::ConvexCell<real_t, 64, 112> c;
     c.initBox(1.0, 1.0, 1.0);
     const int k = ncand[i];
     for (int t = 0; t < k; ++t) {

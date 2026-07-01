@@ -15,14 +15,14 @@ Two distributed schemes for the same compressible-Euler dynamics, both compared 
 
 Reports, for each scheme: max owned-position error vs serial, and the MPI/communication time and total
 wall time per step. Run:
-  PYTHONPATH=<vorflow>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_voronoi_scheme_c.py
+  PYTHONPATH=<voro>/python:<core>/python/build mpirun -np 4 python3 mpi/validate_voronoi_scheme_c.py
 """
 import os
 import sys
 import numpy as np
 from mpi4py import MPI
-from peclet import voro as vorflow
-import tpx_mpi
+from peclet import voro
+import peclet.core.mpi
 
 comm = MPI.COMM_WORLD
 rank, size = comm.rank, comm.size
@@ -48,7 +48,7 @@ ids = np.arange(N)
 
 
 def make_sim(pos, vel):
-    s = vorflow.ExplicitEuler()
+    s = voro.ExplicitEuler()
     s.set_l([L, L, L])
     s.set_mass_density(dens)
     s.set_positions(np.ascontiguousarray(pos % L))
@@ -68,7 +68,7 @@ if rank == 0:
 
 
 def own_initial():
-    mig = tpx_mpi.Migrator(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
+    mig = peclet.core.mpi.Migrator(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
     o = np.array([mig.owner_of(tuple(p)) for p in g_pos])
     m = np.where(o == rank)[0]
     return mig, g_pos[m].copy(), g_vel[m].copy(), ids[m].astype(np.float64)
@@ -95,7 +95,7 @@ def run_regather():
 
 def run_scheme_c():
     mig, pos, vel, idd = own_initial()
-    halo = tpx_mpi.Halo(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
+    halo = peclet.core.mpi.Halo(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
     t_mpi = 0.0
     s = None
     x = v = F = None

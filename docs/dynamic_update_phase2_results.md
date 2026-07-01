@@ -1,6 +1,6 @@
 # Dynamic updater — Phase 2 results: two-pass repair vs cold build (2026-06-29)
 
-Phase 2 wires the **two-pass gather repair** (`include/vorflow/device/repair.hpp`,
+Phase 2 wires the **two-pass gather repair** (`include/peclet/voro/repair.hpp`,
 `MovingTessellation`) and benchmarks it against the production cold build as a function of the
 dimensionless per-step displacement δ/h (h = mean spacing), across the four requested device
 configurations. All FP64.
@@ -68,9 +68,9 @@ flag set (the over-flagging) is the Phase-3 adaptive-gate lever.
 
 ## Files
 
-- `include/vorflow/device/repair.hpp` — `MovingTessellation` (single-domain + a distributed `nProc`
+- `include/peclet/voro/repair.hpp` — `MovingTessellation` (single-domain + a distributed `nProc`
   mode where cells [0,nProc) are maintained and [nProc,N) are ghost cut-candidates).
-- `include/vorflow/mpi/voronoi_halo.hpp` — `refreshPositions` (position-only halo refresh) + `numGhost`.
+- `include/peclet/voro/mpi/voronoi_halo.hpp` — `refreshPositions` (position-only halo refresh) + `numGhost`.
 - `tests/kokkos/bench_dynamic_update.cpp --repair` — single-domain sweep (serial/OpenMP/CUDA).
 - `tests/kokkos_mpi/bench_repair_mpi.cpp` — distributed sweep (`mpirun -np R`, OMP_NUM_THREADS=1).
 

@@ -10,7 +10,7 @@ context, not a plan.
 ## 1. What exists today (the thing to migrate)
 
 A GPU Voronoi/power-tessellation engine for physics (volumes, face areas, force derivatives `dV`),
-header-only C++ + Kokkos, in `vorflow/include/vorflow/device/`. Two phases:
+header-only C++ + Kokkos, in `voro/include/peclet/voro/`. Two phases:
 
 **Cold build (Part I).** `ConvexCell<Real,MAXP,MAXT>` (`convex_cell.hpp`) — dual-triangle cell:
 each vertex = a triple of plane indices, planes = neighbour bisectors. Built by clipping the K≈64
@@ -84,7 +84,7 @@ the CPU win has to come from SIMD + threads + the Part II topology reuse, not ra
 ---
 
 ## 4. Key files / entry points
-- `include/vorflow/device/convex_cell.hpp` — the cell + clip + `*PerVertex` geometry (planeN,
+- `include/peclet/voro/convex_cell.hpp` — the cell + clip + `*PerVertex` geometry (planeN,
   volumePerVertex, facetAreasPerVertex, facetMomentsPerVertex, geometryPerVertex; ordered `volume()`/
   `facetGeometry()`/`faceOrdered` kept only as the FP64 oracle).
 - `tests/kokkos/test_pervertex_geometry.cpp` — the 8 acceptance criteria (FP64).

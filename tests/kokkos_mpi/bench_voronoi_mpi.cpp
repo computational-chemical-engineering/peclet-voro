@@ -3,7 +3,7 @@
  * \brief Distributed cold-build throughput benchmark for the Voronoi tessellator.
  *
  * The MPI sibling of bench_convexcell: it times the DISTRIBUTED cold build. Each rank owns a
- * block of the domain (transport-core ORB via VoronoiHalo), gathers ghost seeds within rcut
+ * block of the domain (core ORB via VoronoiHalo), gathers ghost seeds within rcut
  * (the MPI communication), and tessellates its owned+ghost subset with the device tessellator
  * (`peclet::voro::buildTessellation`) — the same path validated bit-exact vs single-rank by
  * test_voronoi_mpi. Reports, per rank and aggregated:
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
       for (int d = 0; d < 3; ++d)
         pos[i][d] = L[d] * U(rng);
 
-    // Block decomposition + ghost gather (transport-core).
+    // Block decomposition + ghost gather (core).
     peclet::voro::mpi::VoronoiHalo<real_t> halo;
     halo.init({0, 0, 0}, {L[0], L[1], L[2]}, {16, 16, 16}, {true, true, true}, MPI_COMM_WORLD);
     std::vector<Vec3> ownedPos;

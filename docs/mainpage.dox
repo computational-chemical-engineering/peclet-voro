@@ -1,12 +1,12 @@
 /**
  * \namespace vor
- * \brief Top-level namespace for vorflow (device-native Voronoi dynamics).
+ * \brief Top-level namespace for peclet.voro (device-native Voronoi dynamics).
  *
- * \mainpage vorflow — device-native moving-particle Voronoi dynamics
+ * \mainpage peclet.voro — Kokkos moving-particle Voronoi dynamics
  *
  * \section intro Overview
  *
- * vorflow computes and dynamically maintains the 3D Voronoi tessellation of a set of moving points in
+ * peclet.voro computes and dynamically maintains the 3D Voronoi tessellation of a set of moving points in
  * a periodic box, on the **device path** (Kokkos: Serial / OpenMP / CUDA / HIP — one source, the
  * backend fixed at build time), with optional MPI domain decomposition. It is built around a compact,
  * register-resident cell representation and an incremental *repair* update that makes per-step
@@ -17,7 +17,7 @@
  * \section cell The cell: a compact dual ConvexCell
  *
  * A Voronoi cell is the intersection of half-spaces (one per neighbour, plus the box). Rather than an
- * explicit half-edge mesh, vorflow stores the cell in the **dual** (`vor::device::ConvexCell`, see
+ * explicit half-edge mesh, peclet.voro stores the cell in the **dual** (`peclet::voro::ConvexCell`, see
  * \ref convex_cell.hpp): each primal vertex is the intersection of three planes, kept as a *triple of
  * plane indices*; the whole cell is then a small dual-triangle list that lives in registers / a tiny
  * per-thread frame. This is what lifts GPU occupancy far above the old half-edge frame. Cell geometry
@@ -26,32 +26,32 @@
  *
  * \section build Cold build
  *
- * `vor::device::buildTessellation` (\ref tessellator.hpp) builds the whole tessellation: a counting-sort
+ * `peclet::voro::buildTessellation` (\ref tessellator.hpp) builds the whole tessellation: a counting-sort
  * grid + a voro++-derived presorted *worklist* gathers each cell's candidate neighbours closest-first
  * (the dominant cost), then clips the `ConvexCell` on the fly and publishes a read-only
- * `vor::TessellationView` (\ref tessellation_view.hpp). It optionally emits a compact resident topology
+ * `peclet::voro::TessellationView` (\ref tessellation_view.hpp). It optionally emits a compact resident topology
  * store so a later step can re-evaluate/repair without re-gathering.
  *
  * \section repair Moving-point repair
  *
- * `vor::device::MovingTessellation` (\ref repair.hpp) updates a resident tessellation each step without
+ * `peclet::voro::MovingTessellation` (\ref repair.hpp) updates a resident tessellation each step without
  * a full rebuild: re-evaluate every cell's geometry on the fixed stored topology, run an O(nt) Lawson
  * convexity **certificate** (`isLocallyConvex`, complete via the dual tet's four faces) to find which
  * cells changed, then a **two-pass gather repair** of just those cells, with an adaptive **gate** that
  * routes high-churn steps to a full rebuild (so it is never much slower than a cold build) and a verify
- * pass that keeps it exact. Distributed across ranks via `vor::mpi::VoronoiHalo` (\ref voronoi_halo.hpp).
+ * pass that keeps it exact. Distributed across ranks via `peclet::voro::mpi::VoronoiHalo` (\ref voronoi_halo.hpp).
  *
  * \section physics Physics
  *
- * On top of the tessellation, `vor::physics` provides a device-native compressible-Euler /
+ * On top of the tessellation, `peclet::voro::physics` provides a device-native compressible-Euler /
  * Navier-Stokes Voronoi fluid (`simulation.hpp`, plus the `euler_pressure` / `viscous` /
  * `interface` force consumers over the published view).
  *
  * \section python Python
  *
- * The nanobind module `vorflow` (\ref vorflow_bindings.cpp) exposes two surfaces: `Tessellation` (cold
+ * The nanobind module `peclet.voro` (\ref voro_bindings.cpp) exposes two surfaces: `Tessellation` (cold
  * build + incremental repair, volumes, neighbour counts) and `Simulation` (the fluid solver). Build with
- * `-DVORFLOW_BUILD_PYTHON=ON` (or `pip install .`). See `python/test_vorflow.py` for usage.
+ * `-DPECLET_VORO_BUILD_PYTHON=ON` (or `pip install .`). See `python/test_vorflow.py` for usage.
  *
  * \section perf Performance
  *

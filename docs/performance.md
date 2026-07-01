@@ -16,9 +16,9 @@ keeping CPU + GPU parallelism and the physics-extension surface intact.
 All numbers below are on a **Threadripper PRO 5965WX (24 cores)** + **RTX 5080**, random
 uniform seeds, `double`. Benchmarks: `tests/kokkos/bench_device.cpp` (vs voro++ and the
 legacy CPU builder) and `tests/kokkos/bench_cutter.cpp` (per-cell sub-phase profiler,
-counters gated by `-DVORFLOW_CUTTER_PROFILE`). Reproduce a comparison with
-`OMP_NUM_THREADS=1 ./bench_device 1000000` (env knobs: `VORFLOW_NOFORCEGEOM`,
-`VORFLOW_DENS`, `VORFLOW_SW`, `VORFLOW_DEVONLY`).
+counters gated by `-DPECLET_VORO_CUTTER_PROFILE`). Reproduce a comparison with
+`OMP_NUM_THREADS=1 ./bench_device 1000000` (env knobs: `PECLET_VORO_NOFORCEGEOM`,
+`PECLET_VORO_DENS`, `PECLET_VORO_SW`, `PECLET_VORO_DEVONLY`).
 
 ## Where the time goes (Phase-0 profile, serial)
 
@@ -237,7 +237,7 @@ mainly because Morton ordering *also* benefits the multicore and GPU paths.
 ## Team/warp-per-cell — implemented + shrunk: now cut-parallelism-bound (~0.6× default)
 
 The team-per-cell redesign was implemented incrementally and is gated behind
-`VORFLOW_TEAM=<teamSize>` (the default GPU path stays the per-thread RangePolicy build, so
+`PECLET_VORO_TEAM=<teamSize>` (the default GPU path stays the per-thread RangePolicy build, so
 production throughput is unchanged and bit-identical). The per-cell numerics are factored into
 one `CellBuilder` functor used by both paths, so they stay bit-exact (validated on the device +
 MPI ctests, Voronoi and Power, volErr 1e-15; the published geometry matches the legacy oracle
@@ -281,13 +281,13 @@ cut-streams/SM), the team path one cut per *team* (~the teams/SM, now ~6–8 aft
 Cell-shrinking narrowed that gap (more teams/SM) but cannot close a ~50× cut-parallelism deficit.
 **The only remaining lever is a cooperative (warp-parallel) `cutCell2`** — a genuinely parallel
 half-edge plane cut. Until that exists, the per-thread RangePolicy stays the production GPU path;
-the team path is a validated, gated platform (tune via `VORFLOW_TEAM`, `VORFLOW_MAXCAND`;
-`VORFLOW_PROFILE` reports the fallback rate and max facets/cell).
+the team path is a validated, gated platform (tune via `PECLET_VORO_TEAM`, `PECLET_VORO_MAXCAND`;
+`PECLET_VORO_PROFILE` reports the fallback rate and max facets/cell).
 
 ### Cooperative cut — attempted (parallel distance precompute), measured: does NOT help
 
 The one part of `cutCell2` that is genuinely data-parallel is the **distance evaluation**: the
-cutter profiler (`bench_cutter`, `-DVORFLOW_CUTTER_PROFILE`) shows ~42 cut attempts/cell doing
+cutter profiler (`bench_cutter`, `-DPECLET_VORO_CUTTER_PROFILE`) shows ~42 cut attempts/cell doing
 ~598 `cdist` calls (≈14 signed-distance dot-products per cut) plus ~130 sequential trace steps.
 So the cooperative attempt precomputed those distances across the warp: per cut the leader pops the
 closest candidate, bumps the dist-cache generation and broadcasts the candidate index; the warp
@@ -296,7 +296,7 @@ fills every alive vertex's signed distance in parallel (one lane per vertex); th
 from the candidate via `relVec`, `off = ½|pv|²` = the heap key, so the cached distances equal what
 `cdist` would compute; Voronoi volErr 1e-15, all device ctests pass).
 
-**Measured (RTX 5080, N=1M, VORFLOW_TEAM=32): it is ~1% *slower*** — pure-tess 1554 → 1529,
+**Measured (RTX 5080, N=1M, PECLET_VORO_TEAM=32): it is ~1% *slower*** — pure-tess 1554 → 1529,
 with-forces 1235 → 1223. The per-cut team synchronisation (the leader-pop → warp-precompute →
 leader-cut hand-off needs ~3 `team_barrier`s + a `TeamThreadRange` launch per cut, ×~42 cuts/cell)
 costs as much as the ~14 saved dot-products. The parallelisable fraction of the cut is simply too
@@ -317,7 +317,7 @@ parallel-clip representation only if GPU tessellation throughput becomes a hard 
 
 The analysis above projected that the GPU's ~98 % idle headroom is reachable not by intra-cell
 parallelism but by a **compact, register-resident cell** kept one-per-thread (the optimal layout for
-a sequential clip). This is now **built and measured** — `include/vorflow/device/convex_cell.hpp`
+a sequential clip). This is now **built and measured** — `include/peclet/voro/convex_cell.hpp`
 (`bench_convexcell`, validated by `test_convexcell_unit`).
 
 **Representation.** The cell is the intersection of half-spaces stored in the **dual**: each primal

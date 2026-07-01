@@ -6,14 +6,14 @@ interaction radius deep, tessellate owned+ghost and advance one step, keep the o
 The force on an owned cell uses its full neighbourhood (owned or ghost), so the owned trajectory
 matches the serial run. Voronoi analogue of packing-gpu/mpi/validate_exact.py.
 
-Run: PYTHONPATH=<vorflow>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_vorflow.py
+Run: PYTHONPATH=<voro>/python:<core>/python/build mpirun -np 4 python3 mpi/validate_voronoi_dynamics.py
 """
 import os
 import sys
 import numpy as np
 from mpi4py import MPI
-from peclet import voro as vorflow
-import tpx_mpi
+from peclet import voro
+import peclet.core.mpi
 
 comm = MPI.COMM_WORLD
 rank, size = comm.rank, comm.size
@@ -37,7 +37,7 @@ SOLVER = os.environ.get("SOLVER", "euler")  # "euler" or "ns" (NavierStokes, vis
 
 
 def make_sim(pos, vel):
-    s = vorflow.NavierStokes() if SOLVER == "ns" else vorflow.ExplicitEuler()
+    s = voro.NavierStokes() if SOLVER == "ns" else voro.ExplicitEuler()
     s.set_l([L, L, L])
     s.set_mass_density(dens)
     s.set_positions(np.ascontiguousarray(pos % L))
@@ -66,7 +66,7 @@ if rank == 0:
     ref = np.array(s.get_positions()) % L
 
 # distributed
-mig = tpx_mpi.Migrator(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
+mig = peclet.core.mpi.Migrator(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
 own = np.array([mig.owner_of(tuple(p)) for p in g_pos])
 mine = np.where(own == rank)[0]
 pos, vel, idd = g_pos[mine].copy(), g_vel[mine].copy(), ids[mine].astype(np.float64)

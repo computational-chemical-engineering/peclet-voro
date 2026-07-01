@@ -1,6 +1,6 @@
 # Project brief: voro++-style worklist gather for the cold Voronoi build (CPU)
 
-> **STATUS — DONE (2026-06-26), pushed to main** (vorflow `0b26278`, umbrella `e36fb05`). The worklist
+> **STATUS — DONE (2026-06-26), pushed to main** (voro `0b26278`, umbrella `e36fb05`). The worklist
 > gather is now the **default on both backends** (`CC_GATHER` overrides) and **wins on each**:
 > - **Serial CPU FP64:** **voro++ parity (≈1.0–1.05×)** — worklist ≈0.074–0.075 M/s vs voro++ ≈0.071–0.076,
 >   up from the 0.89× the sorted-offset walk trailed by. Machine-exact (Σvol err ~1e-14), clip untouched.

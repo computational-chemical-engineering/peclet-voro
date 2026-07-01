@@ -5,7 +5,7 @@ set -e
 cd "$(dirname "$0")"
 [ -d geogram ] || git clone --depth 1 https://github.com/BrunoLevy/geogram.git geogram
 GEO=geogram/src/lib
-# voro++ (voronoicell::plane clip-only path) from the vorflow build's FetchContent deps
+# voro++ (voronoicell::plane clip-only path) from the voro build's FetchContent deps
 VOROSRC=$(ls -d ../build/*/_deps/voropp-src/src 2>/dev/null | head -1)
 VOROLIB=$(ls ../build/*/_deps/voropp-build/libvoro++.a 2>/dev/null | head -1)
 FLAGS="-O3 -std=c++17 -fopenmp -DNDEBUG -DSTANDALONE_CONVEX_CELL -DGEOGRAM_API= -include prelude.h"

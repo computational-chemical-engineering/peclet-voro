@@ -4,8 +4,8 @@
  *
  * Proves the suite toolchain end-to-end before any real device kernels exist:
  *   - Kokkos initializes and runs a parallel_reduce on the default backend;
- *   - transport-core's peclet::core::View / peclet::core::toDevice round-trips host<->device;
- * *   - transport-core's peclet::core::View round-trips through a device kernel under the C++20
+ *   - core's peclet::core::View / peclet::core::toDevice round-trips host<->device;
+ * *   - core's peclet::core::View round-trips through a device kernel under the C++20
  *     Kokkos build and interoperate with device Views.
  * Exit non-zero on any mismatch (ctest oracle, no framework).
  */

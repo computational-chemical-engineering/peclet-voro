@@ -189,7 +189,7 @@ Monte-Carlo cell validator (`test_convexcell_unit`), the OpenMP incremental test
 (`test_incremental_device`), and ArborX (already a dependency) for BVH queries.
 
 **Phase 0 — characterise the real workload (do this first; it sets every target).**
-Drive a representative moving-point simulation (the vorflow Euler/NS driver, or a Lennard-Jones / SPH
+Drive a representative moving-point simulation (the voro Euler/NS driver, or a Lennard-Jones / SPH
 proxy) and **measure, per step:** the fraction of cells whose **topology** changes vs. only geometry;
 the cost split *clip : geometry : neighbour-query*; and how the topology-stable fraction varies with
 time step / skin. **Deliverable:** the actual figure of merit (e.g. "98 % geometry-only at typical
@@ -281,7 +281,7 @@ Mean faces/cell = 15.53; cold rebuild ≈ 2.4 M cells/s.
 2. **Cells that *do* change topology change by ~one face** (symmetric-difference ≈ 1.0–1.2 in the
    realistic regime — a single neighbour swap). So the unstable set does **not** need a full rebuild:
    a **local incremental repair** (drop one face, insert one face) suffices — far cheaper than
-   re-clipping from the box. This is the GPU analogue of the legacy vorflow "incremental cell repair,"
+   re-clipping from the box. This is the GPU analogue of the legacy voro "incremental cell repair,"
    and it adds a **third tier** to the per-step model.
 
 **Revised per-step cost model (and the speedup it implies).** Three tiers, not two:

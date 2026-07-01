@@ -1,20 +1,20 @@
 """Distributed Voronoi tessellation validated against the serial tessellation.
 
-Block-decompose a periodic particle set across ranks (transport-core `tpx_mpi`), gather ghost
-particles one interaction radius deep, and have each rank tessellate its owned+ghost set with vorflow,
+Block-decompose a periodic particle set across ranks (core `peclet.core.mpi`), gather ghost
+particles one interaction radius deep, and have each rank tessellate its owned+ghost set with peclet.voro,
 keeping the OWNED cells. Because the domain is periodic, the ghosts need no special imaging: each rank
 tessellates in the full periodic [0,L] box (`put_in_box` wraps the gathered images back to canonical
 positions), and the far particles it omits are never neighbours of its owned cells -- so the owned
 cells are identical to the serial full-box tessellation (down to machine precision).
 
 This is the Voronoi analogue of packing-gpu/mpi/validate_exact.py. Run:
-    PYTHONPATH=<vorflow build>/python:<transport-core>/python/build mpirun -np 4 python3 mpi/validate_voronoi.py
+    PYTHONPATH=<voro build>/python:<core>/python/build mpirun -np 4 python3 mpi/validate_voronoi.py
 """
 import sys
 import numpy as np
 from mpi4py import MPI
-from peclet import voro as vorflow
-import tpx_mpi
+from peclet import voro
+import peclet.core.mpi
 
 comm = MPI.COMM_WORLD
 rank, size = comm.rank, comm.size
@@ -26,7 +26,7 @@ gs = [16, 16, 16]
 
 
 def tessellate(pos, box=L):
-    s = vorflow.ExplicitEuler()
+    s = voro.ExplicitEuler()
     s.set_l([box, box, box])
     s.set_mass_density(1.0)
     s.set_positions(np.ascontiguousarray(pos))
@@ -51,7 +51,7 @@ if rank == 0:
     vfull, nfull = tessellate(g_pos)
 
 # distributed: own a block, gather ghosts, tessellate owned+ghost, keep owned cells
-mig = tpx_mpi.Migrator(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
+mig = peclet.core.mpi.Migrator(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
 own = np.array([mig.owner_of(tuple(p)) for p in g_pos])
 mine = np.where(own == rank)[0]
 pos = g_pos[mine].copy()

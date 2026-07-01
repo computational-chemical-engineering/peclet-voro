@@ -1,7 +1,7 @@
-# vorflow — distributed (MPI) Voronoi tessellation test (migration Phase 6).
+# peclet.voro — distributed (MPI) Voronoi tessellation test (migration Phase 6).
 #
 # Standalone find_package project (mirrors dem/tests/kokkos_mpi): Kokkos + MPI +
-# the header-only core + the vorflow headers (include/). It validates
+# the header-only core + the voro headers (include/). It validates
 # that the owned-cell tessellation is identical single-rank vs multi-rank.
 #   cmake -S tests/kokkos_mpi -B build_kmpi \
 #         -DCMAKE_PREFIX_PATH="<suite>/extern/install/<backend>" \

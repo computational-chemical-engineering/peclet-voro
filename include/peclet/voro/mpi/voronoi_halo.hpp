@@ -1,6 +1,6 @@
 /**
  * @file mpi/voronoi_halo.hpp
- * \brief Distributed Voronoi halo over transport-core (migration Phase 6).
+ * \brief Distributed Voronoi halo over core (migration Phase 6).
  *
  * A Voronoi/power cell is fully determined by its local neighbourhood, so the
  * distributed tessellation needs ONE ghost exchange and no iteration: decompose
@@ -8,7 +8,7 @@
  * of the block, tessellate owned+ghost locally, and keep the owned cells (they
  * are bit-identical to the serial cells, since all their neighbours are present).
  *
- * This wrapper reuses transport-core for all of that — exactly the infrastructure
+ * This wrapper reuses core for all of that — exactly the infrastructure
  * the dem distributed step uses, and the C++ counterpart of the validated
  * mpi/validate_voronoi.py recipe:
  *   - peclet::core::decomp::BlockDecomposer<3> : ORB block ownership;
@@ -17,7 +17,7 @@
  *                                       forward owner fields (global id, weight)
  *                                       onto the ghost copies.
  *
- * Header-only host driver; requires MPI + transport-core (PECLET_VORO_MPI build).
+ * Header-only host driver; requires MPI + core (PECLET_VORO_MPI build).
  */
 #ifndef PECLET_VORO_MPI_VORONOI_HALO_HPP
 #define PECLET_VORO_MPI_VORONOI_HALO_HPP

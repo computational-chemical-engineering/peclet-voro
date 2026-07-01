@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Smoke test for the device-native `vorflow` nanobind module.
+"""Smoke test for the device-native `peclet.voro` nanobind module.
 
 Exercises the two surfaces — the bare Tessellation (cold build + incremental repair) and the
 compressible-Euler Simulation — on a small uniform point set and checks the basic invariants
@@ -9,7 +9,7 @@ on PYTHONPATH, e.g.:
     PYTHONPATH=build_nb python python/test_vorflow.py
 """
 import numpy as np
-from peclet import voro as vorflow
+from peclet import voro
 
 
 def test_tessellation():
@@ -17,7 +17,7 @@ def test_tessellation():
     N, L = 20_000, 1.0
     pos = rng.random((N, 3)) * L
 
-    t = vorflow.Tessellation()
+    t = voro.Tessellation()
     t.set_box((L, L, L))
     t.build(pos)
     assert t.num_particles == N
@@ -52,7 +52,7 @@ def test_simulation():
     vel = np.zeros((N, 3))
     mass = np.ones(N)
 
-    s = vorflow.Simulation()
+    s = voro.Simulation()
     s.set_l((L, L, L))
     s.set_positions(pos)
     s.set_velocities(vel)
@@ -70,7 +70,7 @@ def test_simulation():
 
 
 if __name__ == "__main__":
-    print(f"vorflow execution_space = {vorflow.execution_space}")
+    print(f"peclet.voro execution_space = {voro.execution_space}")
     test_tessellation()
     test_simulation()
-    print("vorflow python smoke test: PASS")
+    print("peclet.voro python smoke test: PASS")
