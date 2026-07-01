@@ -40,8 +40,8 @@ jobs:
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DVORONOI_BUILD_TESTS=OFF \
-            -DVORONOI_BUILD_DOCS=ON \
+            -DPECLET_VORO_BUILD_TESTS=OFF \
+            -DPECLET_VORO_BUILD_DOCS=ON \
             -G Ninja
 
       - name: Build Doxygen HTML
