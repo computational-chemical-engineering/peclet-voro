@@ -19,6 +19,8 @@
 #include <Kokkos_Core.hpp>
 
 #include "tpx/common/view.hpp"
+#include "vorflow/device/reeval_tessellation.hpp"  // reevalPublish (E1 repair -> force geometry)
+#include "vorflow/device/repair.hpp"               // MovingTessellation (incremental update)
 #include "vorflow/device/tessellator.hpp"
 #include "vorflow/device/transpose.hpp"
 #include "vorflow/physics/euler_pressure.hpp"
@@ -128,17 +130,41 @@ class ExplicitEulerDevice {
   int numParticles() const { return N_; }
   Real time() const { return time_; }
 
+ public:
+  /// Opt-in (E1 scaffolding, default off): use the incremental moving-point repair for the topology
+  /// each step and reeval-publish the force geometry, instead of a full rebuild. Same physics
+  /// contract; ~10× cheaper geometry per the repair benches. Set before init(). The physics
+  /// wiring/tuning on top of this scaffolding is ongoing work.
+  void setRepair(bool on) { useRepair_ = on; }
+  bool repair() const { return useRepair_; }
+
  private:
   void buildAndForce() {
     const Real Larr[3] = {L_[0], L_[1], L_[2]};
-    // Pass the persistent worklist cache (last arg) so the step-invariant worklist table is built
-    // once and reused across steps (E3). All intermediate args are the buildTessellation defaults;
-    // the Sdf template arg is named explicitly because a defaulted `{}` Sdf cannot be deduced.
-    auto res = device::buildTessellation<Real, false, device::NoSdf>(
-        pos_, w_, N_, Larr, /*sw=*/4, /*densityCount=*/-1, /*gid=*/{}, device::NoSdf{},
-        /*withForceGeom=*/true, /*nBuild=*/-1, /*outNp=*/{}, /*outNt=*/{}, /*outPnbr=*/{},
-        /*outTri=*/{}, /*outCand=*/{}, /*outCandCnt=*/{}, /*candCap=*/0, &wlCache_);
-    view_ = res.view;
+    if (useRepair_) {
+      // Incremental path: cold-build the resident tessellation once (establishes the topology store
+      // + volumes), then repair it in place each subsequent step. Either way the force geometry is
+      // re-evaluated from the store and published into the same facet-CSR view the full build emits.
+      if (!mtInit_) {
+        const double boxVol = static_cast<double>(L_[0]) * L_[1] * L_[2];
+        const Real spacing = static_cast<Real>(std::cbrt(boxVol / (N_ > 0 ? N_ : 1)));
+        mt_.alloc(N_, Larr, Real(1e-4) * spacing, Real(0.25) * spacing, /*sw=*/4, /*density=*/N_);
+        mt_.rebuild(pos_);
+        mtInit_ = true;
+      } else {
+        mt_.step(pos_);
+      }
+      view_ = device::reevalPublish<Real, 64, 112>(mt_.store, pos_, mt_.vol, N_, Larr);
+    } else {
+      // Pass the persistent worklist cache (last arg) so the step-invariant worklist table is built
+      // once and reused across steps (E3). All intermediate args are the buildTessellation defaults;
+      // the Sdf template arg is named explicitly because a defaulted `{}` Sdf cannot be deduced.
+      auto res = device::buildTessellation<Real, false, device::NoSdf>(
+          pos_, w_, N_, Larr, /*sw=*/4, /*densityCount=*/-1, /*gid=*/{}, device::NoSdf{},
+          /*withForceGeom=*/true, /*nBuild=*/-1, /*outNp=*/{}, /*outNt=*/{}, /*outPnbr=*/{},
+          /*outTri=*/{}, /*outCand=*/{}, /*outCandCnt=*/{}, /*candCap=*/0, &wlCache_);
+      view_ = res.view;
+    }
     aux_ = device::buildAuxMaps(view_);
     volAvg_ = (L_[0] * L_[1] * L_[2]) / static_cast<Real>(N_);
     Kokkos::deep_copy(force_, Real(0));
@@ -157,6 +183,10 @@ class ExplicitEulerDevice {
   device::WorklistCache<Real> wlCache_;  // step-invariant worklist table, reused across steps (E3)
   TessellationView<Real> view_;
   device::AuxMaps<Real> aux_;
+  // E1 opt-in incremental path (default off): resident moving-point tessellation + its cold/repair
+  // state. Kept as members (Views free before Kokkos::finalize).
+  bool useRepair_ = false, mtInit_ = false;
+  device::MovingTessellation<Real, 64, 112> mt_;
 };
 
 }  // namespace physics

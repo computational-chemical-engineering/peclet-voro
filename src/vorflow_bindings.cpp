@@ -198,6 +198,8 @@ class Sim {
   void set_pressure(real_t p) { pressEq_ = p; }
   void set_viscosities(nb::ndarray<real_t, nb::c_contig> a) { visc_ = flatten1(a); }
   void set_bulk_viscosities(nb::ndarray<real_t, nb::c_contig> a) { bulk_ = flatten1(a); }
+  // Opt-in incremental-repair path (E1 scaffolding, default off). Set before init().
+  void set_repair(bool on) { sim_.setRepair(on); }
 
   void init() {
     const int N = static_cast<int>(mass_.size());
@@ -346,6 +348,9 @@ NB_MODULE(vorflow, m) {
            "Equation-of-state pressure constant (the stiffness of the barotropic EOS).")
       .def("set_viscosities", &Sim::set_viscosities, nb::arg("viscosities"),
            "Per-particle shear viscosity (N,) — enables the viscous Navier-Stokes term.")
+      .def("set_repair", &Sim::set_repair, nb::arg("on") = true,
+           "Opt-in (default off): use the incremental moving-point repair + reeval-published force "
+           "geometry each step instead of a full rebuild. Call before init().")
       .def("set_bulk_viscosities", &Sim::set_bulk_viscosities, nb::arg("viscosities"),
            "Per-particle bulk viscosity (N,) float64 (defaults to zero if unset).")
       .def("init", &Sim::init,
