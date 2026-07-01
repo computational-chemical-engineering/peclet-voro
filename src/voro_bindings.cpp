@@ -113,6 +113,9 @@ class Tess {
     d["rebuilt"] =
         (st.route == peclet::voro::RepairStats::kRebuildGate);  // gate routed to a full rebuild
     d["fell_back"] = st.fellBack;                              // verify failed -> cold rebuild
+    d["extra"] = st.extra;                  // cells gathered across the verify extra-passes
+    d["surgical"] = st.surgical;            // Pass-1 cells repaired surgically (no grid gather)
+    d["verify_passes"] = st.verifyPasses;   // number of verify iterations run
     return d;
   }
 
@@ -221,9 +224,11 @@ class Sim {
 
   nb::ndarray<nb::numpy, real_t> get_positions() { return from3(sim_.positions()); }
   nb::ndarray<nb::numpy, real_t> get_velocities() { return from3(sim_.velocities()); }
+  nb::ndarray<nb::numpy, real_t> get_forces() { return from3(sim_.force()); }
   real_t get_kinetic_energy() { return sim_.kineticEnergy(dmass_); }
   real_t get_internal_energy() { return sim_.internalEnergy(); }
   real_t get_time() { return sim_.time(); }
+  int num_particles() const { return sim_.numParticles(); }
 
   nb::ndarray<nb::numpy, real_t> get_volumes() {
     const std::size_t N = static_cast<std::size_t>(sim_.numParticles());
@@ -319,10 +324,13 @@ NB_MODULE(_voro, m) {
            "`build`).\n"
            "Returns a dict of per-step work stats: 'flagged' (cells the certificate flagged), "
            "'pass1'\n"
-           "and 'pass2' (cells re-gathered in each pass), 'rebuilt' (True if the gate routed this "
-           "step\n"
-           "to a full rebuild), 'fell_back' (True if the verify failed and a cold rebuild was "
-           "forced).")
+           "and 'pass2' (cells re-gathered in each pass), 'extra' (cells gathered across verify "
+           "extra-passes),\n"
+           "'surgical' (Pass-1 cells repaired surgically), 'verify_passes' (verify iterations run), "
+           "'rebuilt'\n"
+           "(True if the gate routed this step to a full rebuild), 'fell_back' (True if the verify "
+           "failed and\n"
+           "a cold rebuild was forced).")
       .def("volumes", &Tess::volumes,
            "Per-particle Voronoi cell volume (N,) float64. Sums to the box volume (space-filling).")
       .def("neighbor_counts", &Tess::neighbor_counts,
@@ -359,6 +367,11 @@ NB_MODULE(_voro, m) {
            "Advance the velocity-Verlet dynamics by `num_steps` steps of size `dt`.")
       .def("get_positions", &Sim::get_positions, "Current particle positions (N,3) float64.")
       .def("get_velocities", &Sim::get_velocities, "Current particle velocities (N,3) float64.")
+      .def("get_forces", &Sim::get_forces,
+           "Current per-particle force (N,3) float64 — the pressure (EOS) force plus the optional\n"
+           "viscous Navier-Stokes term, as used by the last velocity-Verlet kick. Useful for\n"
+           "force-field analysis, equilibrium/convergence checks, and coupling.")
+      .def_prop_ro("num_particles", &Sim::num_particles, "Particle count N.")
       .def("get_kinetic_energy", &Sim::get_kinetic_energy, "Total kinetic energy (scalar).")
       .def("get_internal_energy", &Sim::get_internal_energy,
            "Total internal (EOS) energy (scalar).")
