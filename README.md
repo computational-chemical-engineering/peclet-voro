@@ -38,7 +38,7 @@ vorflow/
 │       │   ├── plane_policy.hpp     #   Voronoi / Power / SDF plane-definition policies
 │       │   └── transpose.hpp        #   neighbour<->facet reciprocal map helpers
 │       ├── physics/                 # Device simulation + forces over the published view
-│       │   ├── device_simulation.hpp #  device-native Euler / Navier-Stokes facade
+│       │   ├── simulation.hpp #  device-native Euler / Navier-Stokes facade
 │       │   ├── euler_pressure.hpp   #   EOS pressure force
 │       │   ├── viscous.hpp         #   viscous Navier-Stokes term
 │       │   └── interface.hpp       #   multiphase interface-tension force

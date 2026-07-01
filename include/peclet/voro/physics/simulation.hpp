@@ -1,5 +1,5 @@
 /**
- * @file physics/device_simulation.hpp
+ * @file physics/simulation.hpp
  * \brief Device-native compressible-Euler simulation facade (de-legacy Phase 4).
  *
  * Replaces the legacy Simulation/ExplicitEuler driver: holds the particle state on

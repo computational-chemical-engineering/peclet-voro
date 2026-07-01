@@ -148,7 +148,7 @@ struct TessellationView {
 
 namespace detail {
 template <class T>
-Kokkos::View<T*, peclet::core::MemSpace> deviceFrom(const std::vector<T>& h, const std::string& label) {
+Kokkos::View<T*, peclet::core::MemSpace> viewFrom(const std::vector<T>& h, const std::string& label) {
   // NOTE: pass a std::string label — a bare const char* is interpreted by
   // Kokkos::view_alloc as a user pointer-to-memory, not an allocation label.
   Kokkos::View<T*, peclet::core::MemSpace> d(Kokkos::view_alloc(label, Kokkos::WithoutInitializing),
@@ -169,20 +169,20 @@ TessellationView<Real> upload(const HostTessellation<Real>& h) {
   TessellationView<Real> v;
   // Legacy CSR is a prefix sum (nCells+1); derive the per-cell count so facetEnd
   // works (the device path instead writes base + count directly).
-  v.cellFacetOffset = detail::deviceFrom(h.cellFacetOffset, "tess.cellFacetOffset");
+  v.cellFacetOffset = detail::viewFrom(h.cellFacetOffset, "tess.cellFacetOffset");
   {
     const int nC = static_cast<int>(h.cellSeedId.size());
     std::vector<int> cnt(nC);
     for (int i = 0; i < nC; ++i)
       cnt[i] = h.cellFacetOffset[i + 1] - h.cellFacetOffset[i];
-    v.cellFacetCount = detail::deviceFrom(cnt, "tess.cellFacetCount");
+    v.cellFacetCount = detail::viewFrom(cnt, "tess.cellFacetCount");
   }
-  v.cellSeedId = detail::deviceFrom(h.cellSeedId, "tess.cellSeedId");
-  v.cellVolume = detail::deviceFrom(h.cellVolume, "tess.cellVolume");
-  v.facetNeighbor = detail::deviceFrom(h.facetNeighbor, "tess.facetNeighbor");
-  v.facetArea = detail::deviceFrom(h.facetArea, "tess.facetArea");
-  v.facetConnect = detail::deviceFrom(h.facetConnect, "tess.facetConnect");
-  v.facetConnVec = detail::deviceFrom(h.facetConnVec, "tess.facetConnVec");
+  v.cellSeedId = detail::viewFrom(h.cellSeedId, "tess.cellSeedId");
+  v.cellVolume = detail::viewFrom(h.cellVolume, "tess.cellVolume");
+  v.facetNeighbor = detail::viewFrom(h.facetNeighbor, "tess.facetNeighbor");
+  v.facetArea = detail::viewFrom(h.facetArea, "tess.facetArea");
+  v.facetConnect = detail::viewFrom(h.facetConnect, "tess.facetConnect");
+  v.facetConnVec = detail::viewFrom(h.facetConnVec, "tess.facetConnVec");
   return v;
 }
 

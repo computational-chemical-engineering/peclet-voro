@@ -38,7 +38,7 @@ fi
 # Reference physics modules must compile against the published view ONLY — they
 # must not reach into the legacy engine (voronoi.hpp) or other physics
 # (simulation.hpp). This is the plan §4 "compiles against TessellationView only".
-VIEW_ONLY=(physics/euler_pressure.hpp physics/viscous.hpp physics/interface.hpp physics/device_simulation.hpp)
+VIEW_ONLY=(physics/euler_pressure.hpp physics/viscous.hpp physics/interface.hpp physics/simulation.hpp)
 FORBIDDEN=(voronoi.hpp simulation.hpp)
 for mod in "${VIEW_ONLY[@]}"; do
   f="$INC_DIR/$mod"
@@ -63,7 +63,7 @@ for g in "$INC_DIR/device" "$INC_DIR/physics" "$INC_DIR/host" \
          "$INC_DIR/tessellation_view.hpp" "$ROOT/src"; do
   [ -e "$g" ] || continue
   while IFS= read -r f; do
-    # Anchor to the exact legacy paths so device_simulation.hpp is not a false hit.
+    # Anchor to the exact legacy paths so simulation.hpp is not a false hit.
     if grep -Eq "^[[:space:]]*#[[:space:]]*include[[:space:]]*[<\"]vorflow/(voronoi|simulation)\.hpp" "$f"; then
       echo "VIOLATION: production file '${f#"$ROOT"/}' includes the legacy engine"
       status=1

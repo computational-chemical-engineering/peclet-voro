@@ -44,7 +44,7 @@
  * \section physics Physics
  *
  * On top of the tessellation, `vor::physics` provides a device-native compressible-Euler /
- * Navier-Stokes Voronoi fluid (`device_simulation.hpp`, plus the `euler_pressure` / `viscous` /
+ * Navier-Stokes Voronoi fluid (`simulation.hpp`, plus the `euler_pressure` / `viscous` /
  * `interface` force consumers over the published view).
  *
  * \section python Python
