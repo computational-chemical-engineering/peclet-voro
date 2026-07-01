@@ -134,6 +134,10 @@ if(PECLET_VORO_KOKKOS)
     target_compile_definitions(voro PRIVATE MORTON_ENABLE_KOKKOS=1)
     target_link_libraries(voro PRIVATE Kokkos::kokkos)
     target_compile_features(voro PRIVATE cxx_std_20)
+    # HIP/lld: keep sections so Kokkos SharedAllocationRecord<HIPSpace> vtables aren't gc'd (see flow).
+    if(Kokkos_ENABLE_HIP)
+      target_link_options(voro PRIVATE -Wl,--no-gc-sections)
+    endif()
     # Distributed surface: compile the VoronoiHalo binding (guarded by PECLET_VORO_MPI) and link MPI +
     # the core particle halo. Default (OFF) leaves the single-rank module untouched.
     if(PECLET_VORO_MPI)
