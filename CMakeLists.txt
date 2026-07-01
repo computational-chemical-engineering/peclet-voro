@@ -34,7 +34,7 @@ find_package(OpenMP)
 
 # ── Header-only interface library ────────────────────────────────────────────
 # The vorflow headers are header-only; this target just carries the include path for downstream
-# consumers. The device path (tests/kokkos, src/) sets its own include dirs against transport-core +
+# consumers. The device path (tests/kokkos, src/) sets its own include dirs against core +
 # morton, so it does not link this target.
 add_library(vorflow INTERFACE)
 add_library(vorflow::vorflow ALIAS vorflow)
@@ -71,13 +71,13 @@ endif()
 #     -DCMAKE_PREFIX_PATH="$PWD/../extern/install/host-openmp"
 #   cmake --build build/host-openmp -j
 #
-# Add -DVORFLOW_MPI=ON to link MPI + transport-core for the distributed path.
+# Add -DVORFLOW_MPI=ON to link MPI + core for the distributed path.
 option(PECLET_VORO_KOKKOS "Build the Kokkos device path (find_package(Kokkos))" OFF)
-option(PECLET_VORO_MPI "Build the distributed path against MPI + transport-core" OFF)
+option(PECLET_VORO_MPI "Build the distributed path against MPI + core" OFF)
 
 if(PECLET_VORO_KOKKOS)
   # Dependencies via the vendored PecletDeps helper: installed prefix + sibling checkouts for the
-  # dev/suite build, or FetchContent-built Kokkos + fetched transport-core/morton headers for a
+  # dev/suite build, or FetchContent-built Kokkos + fetched core/morton headers for a
   # self-contained sdist/wheel (cibuildwheel). See cmake/PecletDeps.cmake.
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
   include(PecletDeps)
@@ -92,18 +92,18 @@ if(PECLET_VORO_KOKKOS)
     message(STATUS "vorflow: ArborX not found (required from Phase 3 onward)")
   endif()
 
-  # transport-core's zero-copy bridge + the morton spatial-index primitive (the device tessellator's
+  # core's zero-copy bridge + the morton spatial-index primitive (the device tessellator's
   # Z-order grid uses morton::Morton<3,21>; MORTON_ENABLE_KOKKOS -> MORTON_HD is KOKKOS_FUNCTION).
-  peclet_sibling_include(transport-core "${PECLET_TPX_TAG}" "../transport-core" PECLET_VORO_TPX_INCLUDE)
-  peclet_sibling_include(morton         "${PECLET_MORTON_TAG}" "../morton"      PECLET_VORO_MORTON_INCLUDE)
+  peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../core" PECLET_VORO_TPX_INCLUDE)
+  peclet_sibling_include(peclet-morton         "${PECLET_MORTON_TAG}" "../morton"      PECLET_VORO_MORTON_INCLUDE)
 
   if(PECLET_VORO_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
     if(NOT EXISTS "${PECLET_VORO_TPX_INCLUDE}/peclet/core/halo/particle_halo_kokkos.hpp")
       message(FATAL_ERROR
-        "transport-core not found at ${PECLET_VORO_TPX_INCLUDE} (clone it as a sibling repo)")
+        "core not found at ${PECLET_VORO_TPX_INCLUDE} (clone it as a sibling repo)")
     endif()
-    message(STATUS "vorflow: distributed path ENABLED (MPI + transport-core)")
+    message(STATUS "vorflow: distributed path ENABLED (MPI + core)")
   endif()
 
   if(PECLET_VORO_BUILD_TESTS)
@@ -112,7 +112,7 @@ if(PECLET_VORO_KOKKOS)
 
   # Device-native Python module `peclet.voro` (the de-legacy surface over the device tessellator +
   # ExplicitEulerDevice). Opt-in. nanobind is found via the active interpreter (PecletDeps helper);
-  # arrays use the transport-core zero-copy bridge.
+  # arrays use the core zero-copy bridge.
   option(PECLET_VORO_BUILD_PYTHON "Build the device-native vorflow Python module" OFF)
   if(PECLET_VORO_BUILD_PYTHON)
     peclet_require_nanobind()

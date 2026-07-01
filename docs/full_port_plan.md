@@ -24,7 +24,7 @@ method change with a backend change.
 
 **Already on Kokkos (CPU+GPU), validated:** device cutter (`ConvexCell`), full
 tessellator (grid + CSR + SDF clip), `TessellationView`, reciprocal-facet
-transpose, distributed halo (transport-core), and **one** reference physics — the
+transpose, distributed halo (core), and **one** reference physics — the
 atomic-free Euler pressure force.
 
 **Still legacy (to remove):**

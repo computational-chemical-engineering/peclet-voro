@@ -1,7 +1,7 @@
 # vorflow — distributed (MPI) Voronoi tessellation test (migration Phase 6).
 #
 # Standalone find_package project (mirrors dem/tests/kokkos_mpi): Kokkos + MPI +
-# the header-only transport-core + the vorflow headers (include/). It validates
+# the header-only core + the vorflow headers (include/). It validates
 # that the owned-cell tessellation is identical single-rank vs multi-rank.
 #   cmake -S tests/kokkos_mpi -B build_kmpi \
 #         -DCMAKE_PREFIX_PATH="<suite>/extern/install/<backend>" \
@@ -19,7 +19,7 @@ endif()
 find_package(Kokkos CONFIG REQUIRED)
 find_package(MPI REQUIRED)
 
-set(TPX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../transport-core" CACHE PATH "transport-core repo")
+set(TPX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../core" CACHE PATH "core repo")
 # The device tessellator's Z-order grid ordering uses morton::Morton<3,21> (a sibling
 # suite repo). Mirror the main build's include + MORTON_ENABLE_KOKKOS define so the
 # software bit path is device-callable (MORTON_HD -> KOKKOS_FUNCTION).

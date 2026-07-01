@@ -1,11 +1,11 @@
-# vorflow — distributed tessellation (transport-core halo)
+# vorflow — distributed tessellation (core halo)
 
-Block-decomposed Voronoi tessellation across MPI ranks, built on the shared `transport-core` halo
+Block-decomposed Voronoi tessellation across MPI ranks, built on the shared `core` halo
 (migration + ghost particles) via its `tpx_mpi` Python shim, and the `vorflow` Python module.
 
 ```bash
-# build vorflow (this repo) and tpx_mpi (transport-core), then:
-PYTHONPATH=../build_suite/python:../../transport-core/python/build \
+# build vorflow (this repo) and tpx_mpi (core), then:
+PYTHONPATH=../build_suite/python:../../core/python/build \
     mpirun -np 4 python3 mpi/validate_voronoi.py
 ```
 

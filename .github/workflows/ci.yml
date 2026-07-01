@@ -11,8 +11,8 @@ permissions:
 
 jobs:
   # ── Kokkos device build & test ───────────────────────────────────────────────
-  # The library is the Kokkos device path; it depends on the transport-core and morton
-  # sibling repos (checked out next to vorflow) and a Kokkos install. This builds the
+  # The library is the Kokkos device path; it depends on the core and morton
+  # sibling repos (checked out next to voro) and a Kokkos install. This builds the
   # OpenMP backend from source and runs the device test suite.
   kokkos-openmp:
     name: Build & test (Kokkos OpenMP)
@@ -20,21 +20,21 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout vorflow
+      - name: Checkout voro
         uses: actions/checkout@v4
         with:
-          path: vorflow
+          path: voro
 
-      - name: Checkout transport-core (sibling)
+      - name: Checkout core (sibling)
         uses: actions/checkout@v4
         with:
-          repository: computational-chemical-engineering/transport-core
-          path: transport-core
+          repository: computational-chemical-engineering/peclet-core
+          path: core
 
       - name: Checkout morton (sibling)
         uses: actions/checkout@v4
         with:
-          repository: computational-chemical-engineering/morton
+          repository: computational-chemical-engineering/peclet-morton
           path: morton
 
       - name: Install dependencies
@@ -54,7 +54,7 @@ jobs:
           cmake --install /tmp/kokkos/build
 
       - name: Configure (VORFLOW_KOKKOS=ON)
-        working-directory: vorflow
+        working-directory: voro
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -63,11 +63,11 @@ jobs:
             -DCMAKE_PREFIX_PATH=$HOME/kokkos-install
 
       - name: Build
-        working-directory: vorflow
+        working-directory: voro
         run: cmake --build build --parallel
 
       - name: Run device tests
-        working-directory: vorflow
+        working-directory: voro
         run: |
           export OMP_PROC_BIND=false
           ctest --test-dir build \

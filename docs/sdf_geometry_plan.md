@@ -31,7 +31,7 @@ This mechanism is **already implemented on the legacy CPU path** and tested:
 - `tests/test_sdf_boundary.cpp` validates it for slab, spherical-hole, and cylinder boundaries.
 
 The suite also already has the shared SDF the rest of this migration reused: **`tpx::geom`**
-(`transport-core/include/tpx/geom/sdf.hpp`) — the `Sdf` concept (`eval(p)`), analytic `Sphere`,
+(`core/include/tpx/geom/sdf.hpp`) — the `Sdf` concept (`eval(p)`), analytic `Sphere`,
 `Box`, `HollowCylinder`, `Complement`, a central-difference `gradient`, plus `GridSdf` (trilinear
 sampling) and VTI read/write.
 
@@ -42,7 +42,7 @@ shared with sdflow/dem and can come from analytic shapes or a VTI grid.**
 
 ## Design
 
-### A. Device-callable SDF (reuse transport-core)
+### A. Device-callable SDF (reuse core)
 The cutter needs `sdf(x)` and `∇sdf(x)` inside a `KOKKOS_FUNCTION`. Two interchangeable providers
 behind one tiny policy (mirrors the `Weighting` policy):
 - **GridSdf on device (primary, universal).** Sample any geometry once into a `tpx::Field3D<float>`
@@ -94,7 +94,7 @@ a few planar facets approximating the curve.
    a Python smoke test bounds a packing by a sphere/box.
 
 ## Critical files
-- Reuse: `transport-core/include/tpx/geom/{sdf,grid_sdf,vti_io}.hpp`, `tpx/common/view.hpp` (`Field3D`).
+- Reuse: `core/include/tpx/geom/{sdf,grid_sdf,vti_io}.hpp`, `tpx/common/view.hpp` (`Field3D`).
 - Port from: `include/vorflow/voronoi.hpp` (`SignedDistanceBoundary`, `clipCellAgainstBoundary`),
   `tests/test_sdf_boundary.cpp` (golden geometries + tolerances).
 - New: `include/vorflow/device/sdf.hpp`, clip stage in `include/vorflow/device/{cell_cutter,tessellator}.hpp`,

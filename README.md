@@ -5,14 +5,14 @@
 A **Kokkos** engine for dynamic Voronoi tessellation of moving particles in three
 dimensions, part of the `peclet` suite. The same sources run on **CUDA / HIP / OpenMP**
 (the backend is chosen by the bootstrapped Kokkos prefix the build is pointed at, not
-hard-coded), and the distributed path is built on the shared `transport-core` MPI halo.
+hard-coded), and the distributed path is built on the shared `core` MPI halo.
 Features:
 
 - Periodic boundary conditions (cubic and Lees–Edwards shear boxes)
 - Incremental cell updates under particle motion (persistent Verlet-skin worklist)
 - Compressible and incompressible Euler / Navier–Stokes dynamics
 - Multiphase interface-tension (surface-tension) forces
-- GPU and multicore execution through Kokkos backends; MPI block decomposition via `transport-core`
+- GPU and multicore execution through Kokkos backends; MPI block decomposition via `core`
 
 The compact **ConvexCell** dual-triangle tessellator is the engine. (The original header-only
 half-edge CPU engine has been retired and removed; the device path is the whole library.)
@@ -43,7 +43,7 @@ vorflow/
 │       │   ├── viscous.hpp         #   viscous Navier-Stokes term
 │       │   └── interface.hpp       #   multiphase interface-tension force
 │       ├── mpi/
-│       │   └── voronoi_halo.hpp    #   distributed halo glue over transport-core
+│       │   └── voronoi_halo.hpp    #   distributed halo glue over core
 │       └── tessellation_view.hpp   # published read-only CSR device view (engine<->consumer seam)
 ├── src/vorflow_bindings.cpp     # nanobind device Python module (`vorflow`)
 ├── python/test_vorflow.py       # Python smoke test (Tessellation + Simulation)
@@ -62,7 +62,7 @@ vorflow/
 | C++ compiler | C++20 | GCC ≥ 11 recommended |
 | CMake | ≥ 3.16 | |
 | **Kokkos** | bootstrapped | `-DVORFLOW_KOKKOS=ON`; CUDA/HIP/OpenMP backend chosen by the prefix |
-| **transport-core** | sibling repo | Shared MPI halo + array bridge; required for the distributed path |
+| **core** | sibling repo | Shared MPI halo + array bridge; required for the distributed path |
 | **morton** | sibling repo | Z-order spatial-index primitive used by the device tessellator |
 | MPI | any | Distributed path (`-DVORFLOW_MPI=ON`) |
 | nanobind | ≥ 2.0 | Python module (`-DVORFLOW_BUILD_PYTHON=ON`); found via the active interpreter |
@@ -79,21 +79,21 @@ The Kokkos/ArborX backend and target architecture come from the bootstrapped pre
 ### Device (production) path
 
 ```bash
-# Point at the bootstrapped Kokkos prefix; clone transport-core and morton as siblings.
+# Point at the bootstrapped Kokkos prefix; clone core and morton as siblings.
 cmake -B build -DVORFLOW_KOKKOS=ON \
       -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda"
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure        # device tests under tests/kokkos
 ```
 
-Add `-DVORFLOW_MPI=ON` to link MPI + `transport-core` for the distributed path.
+Add `-DVORFLOW_MPI=ON` to link MPI + `core` for the distributed path.
 
 ### CMake options
 
 | Option | Default | Description |
 |--------|---------|-------------|
 | `VORFLOW_KOKKOS` | `OFF` | Build the Kokkos device path (`find_package(Kokkos)`) |
-| `VORFLOW_MPI` | `OFF` | Build the distributed path against MPI + transport-core |
+| `VORFLOW_MPI` | `OFF` | Build the distributed path against MPI + core |
 | `VORFLOW_BUILD_PYTHON` | `OFF` | Build the device-native nanobind module `vorflow` (under `VORFLOW_KOKKOS`) |
 | `VORONOI_BUILD_TESTS` | `ON` | Build the test executables |
 | `VORONOI_BUILD_BENCHMARKS` | `OFF` | Build the performance benchmarks |
@@ -104,7 +104,7 @@ Add `-DVORFLOW_MPI=ON` to link MPI + `transport-core` for the distributed path.
 ## Python bindings (`vorflow`)
 
 The device tessellator is exposed to Python through a **nanobind** module that uses the
-shared `transport-core` **zero-copy** array bridge (numpy `(N,3)` / `(N,)` arrays alias the
+shared `core` **zero-copy** array bridge (numpy `(N,3)` / `(N,)` arrays alias the
 device-staged buffers — no per-call copies). This is the same drive-from-Python pattern as
 the rest of the suite (`sdflow`/`pnm`, `dem`). The module is **not** pybind11 and is **not**
 fetched automatically: nanobind is located via the active interpreter through the suite's

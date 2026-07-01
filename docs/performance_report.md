@@ -25,7 +25,7 @@ All numbers are FP64 unless noted. Reproduction commands are in the last section
 |---|---|
 | CPU | 48-core x86-64 (Serial = 1 core, OpenMP = 8 cores unless noted) |
 | GPU | NVIDIA GeForce RTX 5080 (Blackwell, `sm_120`), CUDA 13.2 |
-| Backends | Kokkos Serial, OpenMP, CUDA; MPI via Open MPI 5.0.7 + transport-core ORB decomposition |
+| Backends | Kokkos Serial, OpenMP, CUDA; MPI via Open MPI 5.0.7 + core ORB decomposition |
 | Cell caps | `MAXP = 64` planes, `MAXT = 112` dual triangles |
 | Distribution | uniform Poisson in a periodic unit box (the canonical, device-comparable reference) |
 | Tolerance | repair certificate tolerance `VORF_TOL = 1e-7` (the accuracy-limiting knob) |
@@ -139,7 +139,7 @@ the retired "poke" store it replaces, so the complete Lawson cert is **memory-ne
 
 ## 3. Distributed build (MPI: full-MPI and MPI+OpenMP)
 
-The distributed path uses the transport-core ORB block decomposition + async ghost-layer exchange (NBX);
+The distributed path uses the core ORB block decomposition + async ghost-layer exchange (NBX);
 each rank cold-builds its owned cells (ghosts are cut candidates), and the moving-point step refreshes
 ghost positions on the established halo topology, re-gathering only on a (global) skin trip.
 

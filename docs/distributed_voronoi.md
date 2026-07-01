@@ -3,7 +3,7 @@
 Suite roadmap Phase 5: decompose the periodic domain into blocks across MPI ranks; each rank gathers
 **ghost particles** one interaction radius deep so the Voronoi cells touching its block boundary close
 correctly; validate the owned cells against the serial tessellation. The Lagrangian halo (migration +
-ghost particles) is reused from `transport-core` via its `tpx_mpi` Python shim, exactly as in
+ghost particles) is reused from `core` via its `tpx_mpi` Python shim, exactly as in
 `dem`. The per-cell observables (`vorflow.get_volumes()` / `get_num_neighbors()`, the latter reading the
 `cellFacetCount` view) give the serial-vs-distributed comparison.
 

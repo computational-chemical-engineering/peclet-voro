@@ -85,7 +85,7 @@ build parity (not a win) is the *gather*, where voro++'s coarse-block container 
 ## 5. MPI — distributed cold build
 
 **There was no distributed cold-build benchmark, so one was written**: `tests/kokkos_mpi/bench_voronoi_mpi.cpp`
-(the timing sibling of the validated `test_voronoi_mpi`). Each rank owns a block (transport-core ORB via
+(the timing sibling of the validated `test_voronoi_mpi`). Each rank owns a block (core ORB via
 `VoronoiHalo`), gathers ghost seeds within `rcut` (the MPI halo exchange), and tessellates its owned+ghost
 subset with the **device tessellator** (`vor::device::buildTessellation`). One MPI rank per core
 (`OMP_NUM_THREADS=1`, `--bind-to core`).
