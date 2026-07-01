@@ -58,8 +58,8 @@ jobs:
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DVORFLOW_KOKKOS=ON \
-            -DVORONOI_BUILD_TESTS=ON \
+            -DPECLET_VORO_KOKKOS=ON \
+            -DPECLET_VORO_BUILD_TESTS=ON \
             -DCMAKE_PREFIX_PATH=$HOME/kokkos-install
 
       - name: Build
@@ -112,8 +112,8 @@ jobs:
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
-            -DVORONOI_BUILD_TESTS=OFF \
-            -DVORONOI_BUILD_DOCS=ON \
+            -DPECLET_VORO_BUILD_TESTS=OFF \
+            -DPECLET_VORO_BUILD_DOCS=ON \
             -G Ninja
 
       - name: Build documentation
