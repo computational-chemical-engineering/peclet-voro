@@ -99,7 +99,7 @@ if(PECLET_VORO_KOKKOS)
 
   if(PECLET_VORO_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
-    if(NOT EXISTS "${PECLET_VORO_TPX_INCLUDE}/peclet/core/halo/particle_halo_kokkos.hpp")
+    if(NOT EXISTS "${PECLET_VORO_TPX_INCLUDE}/peclet/core/halo/particle_halo.hpp")
       message(FATAL_ERROR
         "core not found at ${PECLET_VORO_TPX_INCLUDE} (clone it as a sibling repo)")
     endif()
@@ -134,6 +134,12 @@ if(PECLET_VORO_KOKKOS)
     target_compile_definitions(voro PRIVATE MORTON_ENABLE_KOKKOS=1)
     target_link_libraries(voro PRIVATE Kokkos::kokkos)
     target_compile_features(voro PRIVATE cxx_std_20)
+    # Distributed surface: compile the VoronoiHalo binding (guarded by PECLET_VORO_MPI) and link MPI +
+    # the core particle halo. Default (OFF) leaves the single-rank module untouched.
+    if(PECLET_VORO_MPI)
+      target_compile_definitions(voro PRIVATE PECLET_VORO_MPI)
+      target_link_libraries(voro PRIVATE MPI::MPI_CXX)
+    endif()
     # `pip install .` (scikit-build-core, via pyproject.toml) installs the module as peclet.voro. Inert
     # for a plain `cmake --build`, so the developer workflow is unchanged.
     if(DEFINED SKBUILD)

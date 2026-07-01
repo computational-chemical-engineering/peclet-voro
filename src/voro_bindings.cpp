@@ -53,6 +53,14 @@
 #include "peclet/voro/topology_store.hpp"
 #include "peclet/voro/physics/simulation.hpp"
 
+#ifdef PECLET_VORO_MPI
+#include <mpi.h>
+
+#include <nanobind/stl/tuple.h>
+
+#include "peclet/voro/mpi/voronoi_halo.hpp"
+#endif
+
 namespace nb = nanobind;
 using real_t = double;
 using DView = Kokkos::View<real_t*, peclet::core::MemSpace>;
@@ -259,6 +267,115 @@ class Sim {
   peclet::voro::physics::ExplicitEuler<real_t> sim_;
 };
 
+#ifdef PECLET_VORO_MPI
+// --------------------------------------------------------------------------------------------------
+// VoronoiHalo: distributed (MPI) ghost-gather for the multi-rank Voronoi tessellation.
+//
+// A Voronoi cell is fully determined by its local neighbourhood, so the distributed tessellation is
+// one ORB block decomposition + one ghost exchange (no iteration): each rank owns a block, gathers
+// every seed within `rcut`, tessellates its owned+ghost subset with the SINGLE-RANK `Tessellation`
+// building only the first `n_owned` cells, and keeps those cells — they are bit-identical to the
+// serial cells. This binds `peclet::voro::mpi::VoronoiHalo<double>`; drive it from mpi4py.
+// --------------------------------------------------------------------------------------------------
+class VHalo {
+ public:
+  using Vec3 = std::array<real_t, 3>;
+
+  VHalo(std::array<real_t, 3> origin, std::array<real_t, 3> size, std::array<long, 3> gsize,
+        std::array<bool, 3> periodic) {
+    int inited = 0;
+    MPI_Initialized(&inited);
+    if (!inited) {
+      int argc = 0;
+      char** argv = nullptr;
+      MPI_Init(&argc, &argv);
+    }
+    halo_.init(origin, size, gsize, periodic, MPI_COMM_WORLD);
+  }
+
+  int rank() const { return halo_.rank(); }
+  int size() const { return halo_.size(); }
+
+  // Per-point mask (N,) int32: 1 if this rank owns the point, else 0.
+  nb::ndarray<nb::numpy, int32_t> owned_mask(nb::ndarray<real_t, nb::c_contig> a) {
+    if (a.ndim() != 2 || a.shape(1) != 3)
+      throw std::runtime_error("owned_mask: expected an (N,3) array");
+    const std::size_t N = a.shape(0);
+    const real_t* p = a.data();
+    const int r = halo_.rank();
+    std::vector<int32_t> m(N);
+    for (std::size_t i = 0; i < N; ++i)
+      m[i] = (halo_.ownerOf(Vec3{p[3 * i], p[3 * i + 1], p[3 * i + 2]}) == r) ? 1 : 0;
+    return peclet::core::python::vector_to_ndarray(std::move(m), {N}, {1});
+  }
+
+  // Owning rank of a single point.
+  int owner_of(real_t x, real_t y, real_t z) { return halo_.ownerOf(Vec3{x, y, z}); }
+
+  // Gather ghost seeds within rcut. Returns (pos (M,3), gid (M,), weight (M,), n_owned); the first
+  // n_owned rows are this rank's owned seeds, the rest are gathered ghosts (periodic images incl.).
+  nb::tuple gather(nb::ndarray<real_t, nb::c_contig> pos, nb::ndarray<int64_t, nb::c_contig> gid,
+                   nb::ndarray<real_t, nb::c_contig> weight, double rcut) {
+    if (pos.ndim() != 2 || pos.shape(1) != 3)
+      throw std::runtime_error("gather: positions must be (N,3)");
+    const std::size_t N = pos.shape(0);
+    if (gid.shape(0) != N || weight.shape(0) != N)
+      throw std::runtime_error("gather: gid/weight length must match positions");
+    const real_t* pp = pos.data();
+    const int64_t* gp = gid.data();
+    const real_t* wp = weight.data();
+    std::vector<Vec3> ownedPos(N);
+    std::vector<long> ownedGid(N);
+    std::vector<real_t> ownedW(N);
+    for (std::size_t i = 0; i < N; ++i) {
+      ownedPos[i] = Vec3{pp[3 * i], pp[3 * i + 1], pp[3 * i + 2]};
+      ownedGid[i] = static_cast<long>(gp[i]);
+      ownedW[i] = wp[i];
+    }
+    auto g = halo_.gather(ownedPos, ownedGid, ownedW, rcut);
+    const std::size_t M = g.pos.size();
+    std::vector<real_t> op(3 * M);
+    std::vector<int64_t> og(M);
+    std::vector<real_t> ow(M);
+    for (std::size_t i = 0; i < M; ++i) {
+      op[3 * i] = g.pos[i][0];
+      op[3 * i + 1] = g.pos[i][1];
+      op[3 * i + 2] = g.pos[i][2];
+      og[i] = static_cast<int64_t>(g.gid[i]);
+      ow[i] = g.weight[i];
+    }
+    return nb::make_tuple(
+        peclet::core::python::vector_to_ndarray(std::move(op), {M, std::size_t(3)}, {3, 1}),
+        peclet::core::python::vector_to_ndarray(std::move(og), {M}, {1}),
+        peclet::core::python::vector_to_ndarray(std::move(ow), {M}, {1}), g.nOwned);
+  }
+
+  // Position-only halo refresh (Verlet fast path): re-forward the CURRENT owned positions onto the
+  // topology of the last gather(); returns the combined owned+ghost positions (M,3) in that order.
+  nb::ndarray<nb::numpy, real_t> refresh_positions(nb::ndarray<real_t, nb::c_contig> pos) {
+    if (pos.ndim() != 2 || pos.shape(1) != 3)
+      throw std::runtime_error("refresh_positions: positions must be (N,3)");
+    const std::size_t N = pos.shape(0);
+    const real_t* pp = pos.data();
+    std::vector<Vec3> ownedPos(N), out;
+    for (std::size_t i = 0; i < N; ++i)
+      ownedPos[i] = Vec3{pp[3 * i], pp[3 * i + 1], pp[3 * i + 2]};
+    halo_.refreshPositions(ownedPos, out);
+    const std::size_t M = out.size();
+    std::vector<real_t> op(3 * M);
+    for (std::size_t i = 0; i < M; ++i) {
+      op[3 * i] = out[i][0];
+      op[3 * i + 1] = out[i][1];
+      op[3 * i + 2] = out[i][2];
+    }
+    return peclet::core::python::vector_to_ndarray(std::move(op), {M, std::size_t(3)}, {3, 1});
+  }
+
+ private:
+  peclet::voro::mpi::VoronoiHalo<real_t> halo_;
+};
+#endif  // PECLET_VORO_MPI
+
 }  // namespace
 
 NB_MODULE(_voro, m) {
@@ -379,4 +496,39 @@ NB_MODULE(_voro, m) {
       .def("get_volumes", &Sim::get_volumes, "Per-particle Voronoi cell volume (N,) float64.")
       .def("get_num_neighbors", &Sim::get_num_neighbors,
            "Per-particle Voronoi neighbour (facet) count (N,) int32.");
+
+#ifdef PECLET_VORO_MPI
+  // ---- VoronoiHalo (distributed) ----------------------------------------------------------------
+  nb::class_<VHalo>(
+      m, "VoronoiHalo",
+      "Distributed (MPI) ghost-gather for the multi-rank Voronoi tessellation.\n\n"
+      "ORB block-decomposes a periodic box across MPI ranks and gathers, for each rank, every seed\n"
+      "within a cutoff `rcut` of its owned block (periodic images included). The recipe: select this\n"
+      "rank's owned seeds with `owned_mask`, `gather(...)` the owned+ghost set, tessellate it with the\n"
+      "single-rank `Tessellation` building only the first `n_owned` cells, and keep those cells — they\n"
+      "are bit-identical to a serial full-box tessellation (each owned cell has all its neighbours\n"
+      "present). `rcut` must exceed the largest owned-cell interaction distance (a few mean spacings).\n"
+      "Auto-initialises MPI (MPI_COMM_WORLD). Drive it from mpi4py.")
+      .def(nb::init<std::array<real_t, 3>, std::array<real_t, 3>, std::array<long, 3>,
+                    std::array<bool, 3>>(),
+           nb::arg("origin"), nb::arg("size"), nb::arg("gsize"), nb::arg("periodic"),
+           "Build the ORB decomposition of the box [origin, origin+size) on `gsize` ORB cells with\n"
+           "per-axis `periodic` flags, over MPI_COMM_WORLD.")
+      .def("rank", &VHalo::rank, "This rank's MPI index.")
+      .def("size", &VHalo::size, "Number of MPI ranks.")
+      .def("owned_mask", &VHalo::owned_mask, nb::arg("positions"),
+           "Mask (N,) int32 over the given positions (N,3): 1 where this rank owns the point, else 0.")
+      .def("owner_of", &VHalo::owner_of, nb::arg("x"), nb::arg("y"), nb::arg("z"),
+           "Owning rank of a single point (x, y, z).")
+      .def("gather", &VHalo::gather, nb::arg("owned_pos"), nb::arg("owned_gid"),
+           nb::arg("owned_weight"), nb::arg("rcut"),
+           "Gather ghost seeds within `rcut` of this rank's owned seeds. Inputs: owned_pos (N,3)\n"
+           "float64, owned_gid (N,) int64, owned_weight (N,) float64. Returns a tuple\n"
+           "(pos (M,3) float64, gid (M,) int64, weight (M,) float64, n_owned): rows [0,n_owned) are the\n"
+           "owned seeds, [n_owned,M) the gathered ghosts (with their owners' global ids/weights).")
+      .def("refresh_positions", &VHalo::refresh_positions, nb::arg("owned_pos"),
+           "Position-only halo refresh (Verlet fast path): re-forward the current owned positions\n"
+           "(N,3) onto the topology of the last `gather`, returning the combined owned+ghost positions\n"
+           "(M,3) in the same order as that gather (no re-decomposition / ghost re-selection).");
+#endif
 }
