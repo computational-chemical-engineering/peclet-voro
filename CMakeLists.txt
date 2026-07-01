@@ -76,30 +76,26 @@ option(VORFLOW_KOKKOS "Build the Kokkos device path (find_package(Kokkos))" OFF)
 option(VORFLOW_MPI "Build the distributed path against MPI + transport-core" OFF)
 
 if(VORFLOW_KOKKOS)
-  find_package(Kokkos CONFIG REQUIRED)
-  # ArborX is the strongly-polydisperse / Power neighbour-search policy; it is not
-  # needed until Phase 3 (the cell-linked grid covers near-monodisperse seeds), so
-  # it is optional here to keep the Phase 0-2 toolchain (and standalone CI) lean.
+  # Dependencies via the vendored PecletDeps helper: installed prefix + sibling checkouts for the
+  # dev/suite build, or FetchContent-built Kokkos + fetched transport-core/morton headers for a
+  # self-contained sdist/wheel (cibuildwheel). See cmake/PecletDeps.cmake.
+  list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+  include(PecletDeps)
+  peclet_require_kokkos()
+  # ArborX is the strongly-polydisperse / Power neighbour-search policy; it is not needed until Phase 3
+  # (the cell-linked grid covers near-monodisperse seeds), so it stays optional (found from a prefix if
+  # present) to keep the Phase 0-2 toolchain and the lean CPU wheel small.
   find_package(ArborX CONFIG QUIET)
   if(ArborX_FOUND)
-    message(STATUS "vorflow: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES}), ArborX ${ArborX_VERSION}")
+    message(STATUS "vorflow: ArborX ${ArborX_VERSION}")
   else()
-    message(STATUS "vorflow: Kokkos ${Kokkos_VERSION} (${Kokkos_DEVICES}); ArborX not found "
-                   "(required from Phase 3 onward)")
+    message(STATUS "vorflow: ArborX not found (required from Phase 3 onward)")
   endif()
 
-  set(VORFLOW_TPX_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../transport-core/include"
-      CACHE PATH "transport-core include dir")
-
-  # The morton spatial-index primitive: the device tessellator's Z-order grid
-  # ordering uses morton::Morton<3,21> (MORTON_ENABLE_KOKKOS -> MORTON_HD is
-  # KOKKOS_FUNCTION, so it is callable from the device kernels on any backend).
-  set(VORFLOW_MORTON_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../morton/include"
-      CACHE PATH "morton include dir")
-  if(NOT EXISTS "${VORFLOW_MORTON_INCLUDE}/morton/morton.hpp")
-    message(FATAL_ERROR
-      "vorflow: morton not found at ${VORFLOW_MORTON_INCLUDE} (clone it as a sibling repo)")
-  endif()
+  # transport-core's zero-copy bridge + the morton spatial-index primitive (the device tessellator's
+  # Z-order grid uses morton::Morton<3,21>; MORTON_ENABLE_KOKKOS -> MORTON_HD is KOKKOS_FUNCTION).
+  peclet_sibling_include(transport-core "${PECLET_TPX_TAG}" "../transport-core" VORFLOW_TPX_INCLUDE)
+  peclet_sibling_include(morton         "${PECLET_MORTON_TAG}" "../morton"      VORFLOW_MORTON_INCLUDE)
 
   if(VORFLOW_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
@@ -114,15 +110,12 @@ if(VORFLOW_KOKKOS)
     add_subdirectory(tests/kokkos)
   endif()
 
-  # Device-native Python module `vorflow` (the de-legacy surface over the device
-  # tessellator + ExplicitEulerDevice). Opt-in; shares the name with the legacy
-  # python/ module (build only one). nanobind is found via the active interpreter
-  # (cmake/SuiteNanobind.cmake at the suite root); arrays use the transport-core bridge.
+  # Device-native Python module `peclet.voro` (the de-legacy surface over the device tessellator +
+  # ExplicitEulerDevice). Opt-in. nanobind is found via the active interpreter (PecletDeps helper);
+  # arrays use the transport-core zero-copy bridge.
   option(VORFLOW_BUILD_PYTHON "Build the device-native vorflow Python module" OFF)
   if(VORFLOW_BUILD_PYTHON)
-    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
-    include(SuiteNanobind)
-    suite_require_nanobind()
+    peclet_require_nanobind()
     # NOMINSIZE: nanobind's default -Os size optimization is rejected by nvcc ("'s': expected a
     # number") since Kokkos device sources compile as CXX through the launch compiler.
     nanobind_add_module(vorflow_device NB_STATIC NOMINSIZE src/vorflow_bindings.cpp)

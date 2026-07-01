@@ -43,4 +43,20 @@ wheel.install-dir = "."
 wheel.packages = []
 # Note: SuiteNanobind.cmake lives in the umbrella (../cmake), so `pip install .` resolves it from a
 # suite checkout; a standalone sdist of just this repo is not self-contained (by design).
-sdist.include = ["src", "include", "packaging", "CMakeLists.txt", "README.md", "LICENSE"]
+sdist.include = ["src", "include", "packaging", "cmake", "CMakeLists.txt", "README.md", "LICENSE"]
+
+# ---------------------------------------------------------------------------
+# Self-contained redistributable CPU wheels (cibuildwheel). PECLET_VENDOR_DEPS=ON FetchContent-builds
+# Kokkos (OpenMP+Serial) + fetches the transport-core & morton headers, so the wheel needs no prefix and
+# runs multicore on any x86-64 Linux. The distributed (MPI) path stays OFF in the wheel; GPU/HIP stay a
+# source (sdist) / container build.
+# ---------------------------------------------------------------------------
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux* *_i686 pp*"
+build-frontend = "build"
+manylinux-x86_64-image = "manylinux_2_28"
+test-command = "python -c \"import peclet.voro as v; assert hasattr(v,'Tessellation'); print('peclet.voro', v.execution_space)\""
+
+[tool.cibuildwheel.environment]
+PECLET_VENDOR_DEPS = "ON"

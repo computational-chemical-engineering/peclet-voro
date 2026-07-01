@@ -46,3 +46,6 @@ Thumbs.db
 build_*.log
 cuda_report_*.log
 .venv/
+
+# keep the vendored deps helper (the *.cmake rule above would ignore it)
+!cmake/PecletDeps.cmake
