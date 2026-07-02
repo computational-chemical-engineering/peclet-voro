@@ -46,7 +46,18 @@
 namespace peclet::voro {
 
 /// Per-cell status bits written by the build pass.
-enum StatusBit { kOk = 0, kOverflow = 1, kEmpty = 2, kIncomplete = 4 };
+enum StatusBit {
+  kOk = 0,
+  kOverflow = 1,
+  kEmpty = 2,
+  kIncomplete = 4,
+  // Power only: a candidate's radical offset d = ½(|r|²+w_i−w_j) went ≤ 0, i.e. the seed lies
+  // outside its own cell w.r.t. that neighbour. The ConvexCell foot-point half-space {n·x ≤ n·n}
+  // always contains the seed, so it cannot represent such a plane; the cut is skipped and the cell
+  // flagged (never silently mis-clipped). Full support needs a generalized (origin-excluding)
+  // half-space representation — a follow-up to this weighted build.
+  kNegOffset = 8
+};
 
 template <class Real>
 struct TessellatorResult {
@@ -95,6 +106,7 @@ struct CellBuilder {
   Kokkos::View<int*, MemSpace> facetCursor;
   // Grid scalars.
   Real icx, icy, icz, Lx, Ly, Lz, minCsz;
+  Real wMaxAll;  // global max weight (Power only) — bounds the weight-aware worklist reach
   int dimx, dimy, dimz, sw, nOff, wlS;
   bool useMorton, haveGid, withForceGeom;
   size_t facetCap;
@@ -165,8 +177,8 @@ struct CellBuilder {
   /// Finish a built cell: completeness flag (judged on the un-clipped cell), optional SDF
   /// boundary clip, status/volume, and the per-facet CSR write (one atomic reservation into
   /// the over-buffer). covSq is the attained coverage^2; covSq > 4*rSqMax => complete.
-  KOKKOS_INLINE_FUNCTION void finishCell(Cell& c, int i, Real pix, Real piy, Real piz,
-                                         Real covSq) const {
+  KOKKOS_INLINE_FUNCTION void finishCell(Cell& c, int i, Real pix, Real piy, Real piz, Real covSq,
+                                         Real wSelf = Real(0)) const {
     if (c.overflow) {
       status(i) = kOverflow;
       facetCount(i) = 0;
@@ -174,7 +186,11 @@ struct CellBuilder {
       cellVol(i) = Real(0);
       return;
     }
-    const bool incomplete = !(covSq > Real(4) * c.maxVertexRsq());
+    // Complete iff the gathered coverage inscribes past the reachability radius. Voronoi:
+    // blockReachSq = 4·rSqMax (unchanged). Power: the larger weight-aware reach, so a cell whose
+    // heavy far neighbour lies beyond the coverage is correctly flagged kIncomplete.
+    const bool incomplete =
+        !(covSq > PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll));
     (void)sdf;
     if constexpr (!std::is_same_v<Sdf, NoSdf>) {
       const Real seedW[3] = {pix, piy, piz};
@@ -270,19 +286,23 @@ struct CellBuilder {
     c.initBox(Lx, Ly, Lz);
     Real wSelf = Real(0);
     if constexpr (Weighted) wSelf = wSorted(pi);
+    bool buried = false;  // Power: some neighbour dominates the seed at its own location (d≤0)
 
-    // The worklist is sorted by nearest-corner dist², so (Voronoi only) once wlRmin exceeds the
-    // security radius (4·rSqMax) every remaining block is too far to cut — break. The per-candidate
-    // cull skips seeds past the radius; secR2 is recomputed only on a real cut.
-    Real secR2 = Real(2) * c.maxVertexRsq();
+    // The worklist is sorted by nearest-corner dist², so once wlRmin exceeds the reachability radius
+    // every remaining block is too far to cut — break. Voronoi keeps the exact bisector certificate
+    // (secR2 = 2·rSqMax, break at wlRmin > 2·secR2 = 4·rSqMax) so the unweighted path stays
+    // byte-identical. Power uses the weight-aware reach (blockReachSq) with the global max weight.
+    Real secR2 = Real(2) * c.maxVertexRsq();                                              // Voronoi
+    Real reachSq = PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll);  // Pow
     int ncRec = 0;  // Part-II: count of recorded candidate (skin) ids for this cell
-    for (int g = 0; g < nOff && !c.overflow; ++g) {
-      if constexpr (!Weighted) {
-        if (wlRmin(base + g) > Real(2) * secR2)
-          break;  // sorted ⇒ rest are farther; cell closed
+    for (int g = 0; g < nOff && !c.overflow && !buried; ++g) {
+      if constexpr (Weighted) {
+        if (wlRmin(base + g) > reachSq) break;
+      } else {
+        if (wlRmin(base + g) > Real(2) * secR2) break;  // sorted ⇒ rest are farther; cell closed
       }
       const int gc = worklistCell(base, g, cx, cy, cz);
-      for (int q = cellStart(gc); q < cellStart(gc + 1) && !c.overflow; ++q) {
+      for (int q = cellStart(gc); q < cellStart(gc + 1) && !c.overflow && !buried; ++q) {
         if (q == pi)
           continue;
         if (haveGid && gidSorted(q) == gidSorted(pi))
@@ -296,13 +316,35 @@ struct CellBuilder {
         Real wNbr = Real(0);
         if constexpr (Weighted) wNbr = wSorted(q);
         const Real off = PlanePolicy::template offsetFromRel<Real>(pv, wSelf, wNbr);
-        if constexpr (!Weighted) {
+        if constexpr (Weighted) {
+          // Power: d = ½(|r|²+w_i−w_j) ≤ 0 means neighbour j has lower power than i at the seed's
+          // own location — the seed is not in its own power cell, so cell i is BURIED (empty). The
+          // foot-point half-space cannot represent this plane anyway; empty the cell and stop.
+          if (off <= Real(0)) {
+            buried = true;
+            break;
+          }
+          // Conservative cull: r·v ≤ |r|·√rSqMax, so |r|²·rSqMax ≤ d² ⇒ the plane cannot cut.
+          const Real rho = pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2];
+          if (rho * c.maxVertexRsq() <= off * off)
+            continue;  // provably beyond reach
+          if (c.clip(pv, off, binned(q)))
+            reachSq = PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll);
+        } else {
           if (off >= secR2)
             continue;  // beyond the radius: cannot cut (bisector certificate)
+          if (c.clip(pv, off, binned(q)))
+            secR2 = Real(2) * c.maxVertexRsq();
         }
-        if (c.clip(pv, off, binned(q))) {
-          if constexpr (!Weighted) secR2 = Real(2) * c.maxVertexRsq();
-        }
+      }
+    }
+    if constexpr (Weighted) {
+      if (buried) {  // buried power cell: emit as empty (kEmpty), like an in-solid SDF seed
+        status(i) = kEmpty;
+        facetCount(i) = 0;
+        cellFacetBase(i) = 0;
+        cellVol(i) = Real(0);
+        return;
       }
     }
     if (emitCand)
@@ -310,7 +352,7 @@ struct CellBuilder {
     // Completeness uses the conservative inscribed-sphere coverage (sw·minCsz)², the same
     // criterion the legacy gather used: complete iff (sw·minCsz)² > 4·rSqMax.
     const Real covSq = Real(sw) * minCsz * Real(sw) * minCsz;
-    finishCell(c, i, pix, piy, piz, covSq);
+    finishCell(c, i, pix, piy, piz, covSq, wSelf);
   }
 };
 
@@ -424,6 +466,18 @@ TessellatorResult<Real> buildTessellation(
   // lean enough that the worklist + geometry run well on the GPU without a team variant).
   Kokkos::View<unsigned char*, MemSpace>
       noPoke4;  // cold build does not emit the cert plane set (TrackAdj=false)
+
+  // Global max weight bounds the weight-aware worklist reach (Power only; 0 for Voronoi).
+  Real wMaxAll = Real(0);
+  if constexpr (Weighted) {
+    if (weight.extent(0) == static_cast<size_t>(N)) {
+      Kokkos::parallel_reduce(
+          "wmax", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(int idx, Real& m) { m = weight(idx) > m ? weight(idx) : m; },
+          Kokkos::Max<Real>(wMaxAll));
+    }
+  }
+
   CellBuilder<Real, Weighted, Sdf> op{grid.binned,
                                       grid.posSorted,
                                       grid.wSorted,
@@ -447,6 +501,7 @@ TessellatorResult<Real> buildTessellation(
                                       Ly,
                                       Lz,
                                       minCsz,
+                                      wMaxAll,
                                       dimx,
                                       dimy,
                                       dimz,

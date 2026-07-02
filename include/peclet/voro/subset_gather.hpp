@@ -119,6 +119,7 @@ SubsetGatherResult<Real> subsetGather(
              grid.Ly,
              grid.Lz,
              grid.minCsz,
+             Real(0),  // wMaxAll — subsetGather is Voronoi-only (static_assert !Weighted)
              grid.dimx,
              grid.dimy,
              grid.dimz,

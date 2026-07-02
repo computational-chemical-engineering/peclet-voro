@@ -49,6 +49,18 @@ struct Voronoi {
     return Real(0.5) * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
   }
 
+  /// Squared reachability radius for the sorted-worklist early-out: no candidate at min-image
+  /// dist² ≥ blockReachSq can cut a cell whose farthest dual vertex is at rSqMax = maxVertexRsq.
+  /// A plane cuts iff some vertex v has r·v > off; Cauchy–Schwarz gives r·v ≤ |r|·√rSqMax, and the
+  /// Voronoi off = ½|r|², so a cut needs |r| < 2√rSqMax ⇒ |r|² < 4·rSqMax. Weights are absent, so
+  /// the max-weight span is unused.
+  template <class Real>
+  KOKKOS_INLINE_FUNCTION static Real blockReachSq(Real rSqMax, Real wSelf, Real wMaxAll) {
+    (void)wSelf;
+    (void)wMaxAll;
+    return Real(4) * rSqMax;
+  }
+
   /// FORWARD clip: half-space {x : pdir·x ≤ off} cutting off the neighbour at pNbr. For a Voronoi
   /// bisector pdir = r (min-image p_j − p_i), off = ½|r|². Weights are ignored.
   template <class Real>
@@ -106,6 +118,19 @@ struct Power {
   template <class Real>
   KOKKOS_INLINE_FUNCTION static Real offsetFromRel(const Real r[3], Real wSelf, Real wNbr) {
     return Real(0.5) * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + wSelf - wNbr);
+  }
+
+  /// Squared reachability radius for the sorted-worklist early-out (weight-aware). A radical plane
+  /// to a neighbour with weight w_nbr ≤ W_max cuts iff some vertex v has r·v > d = ½(|r|²+w_self−
+  /// w_nbr) ≥ ½(|r|²+w_self−W_max). With |r|·√rSqMax ≥ r·v the worst (heaviest) neighbour can cut
+  /// only while |r| < √rSqMax + √(rSqMax + max(0, W_max−w_self)); beyond that block, break. Reduces
+  /// to 4·rSqMax when weights are equal (W_max = w_self), matching the Voronoi bound.
+  template <class Real>
+  KOKKOS_INLINE_FUNCTION static Real blockReachSq(Real rSqMax, Real wSelf, Real wMaxAll) {
+    const Real rm = Kokkos::sqrt(rSqMax);
+    const Real span = wMaxAll - wSelf > Real(0) ? wMaxAll - wSelf : Real(0);
+    const Real t = rm + Kokkos::sqrt(rSqMax + span);
+    return t * t;
   }
 
   /// FORWARD clip: pdir = r (min-image), off = d = ½(|r|² + w_self − w_nbr). ConvexCell::clip then
