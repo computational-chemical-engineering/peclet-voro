@@ -28,6 +28,10 @@ add_vorflow_kokkos_test(test_tessellation_invariants)
 # and an independent host brute-force radical-plane oracle (per-cell volume + neighbour set).
 add_vorflow_kokkos_test(test_power_cells)
 
+# P5: differentiable SDF wall force (seed-foot J_wall). FD-vs-analytic — flat wall exact, sphere
+# first-order.
+add_vorflow_kokkos_test(test_sdf_policy)
+
 # voro++ reference (fetched once; the serial throughput target for bench_convexcell).
 include(FetchContent)
 FetchContent_Declare(voropp

@@ -21,6 +21,7 @@
 #define PECLET_VORO_SDF_HPP
 
 #include <Kokkos_Core.hpp>
+#include <type_traits>
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/convex_cell.hpp"
@@ -135,6 +136,80 @@ KOKKOS_INLINE_FUNCTION void sdfGradient(const Sdf& s, Real x, Real y, Real z, Re
   g[0] = (s.eval(x + h, y, z) - s.eval(x - h, y, z)) / (2 * h);
   g[1] = (s.eval(x, y + h, z) - s.eval(x, y - h, z)) / (2 * h);
   g[2] = (s.eval(x, y, z + h) - s.eval(x, y, z - h)) / (2 * h);
+}
+
+/// Central-difference Hessian H_ab = ∂²φ/∂x_a∂x_b (symmetrised), via differences of the gradient
+/// (same stencil as sdfGradient, so host/device agree). Used by the differentiable SDF wall force.
+template <class Real, class Sdf>
+KOKKOS_INLINE_FUNCTION void sdfHessian(const Sdf& s, Real x, Real y, Real z, Real H[3][3]) {
+  const Real h = s.gradH();
+  Real gp[3], gm[3];
+  sdfGradient<Real>(s, x + h, y, z, gp);
+  sdfGradient<Real>(s, x - h, y, z, gm);
+  for (int r = 0; r < 3; ++r) H[r][0] = (gp[r] - gm[r]) / (2 * h);
+  sdfGradient<Real>(s, x, y + h, z, gp);
+  sdfGradient<Real>(s, x, y - h, z, gm);
+  for (int r = 0; r < 3; ++r) H[r][1] = (gp[r] - gm[r]) / (2 * h);
+  sdfGradient<Real>(s, x, y, z + h, gp);
+  sdfGradient<Real>(s, x, y, z - h, gm);
+  for (int r = 0; r < 3; ++r) H[r][2] = (gp[r] - gm[r]) / (2 * h);
+  for (int a = 0; a < 3; ++a)
+    for (int b = a + 1; b < 3; ++b) {
+      const Real m = Real(0.5) * (H[a][b] + H[b][a]);
+      H[a][b] = H[b][a] = m;
+    }
+}
+
+/// Differentiable SDF wall force (Effort 2, Option A — the seed-foot model). A wall facet
+/// (pnbr == kBoundaryFacet) is modelled as the tangent plane at the seed's foot point on sdf=0, so
+/// its seed-relative foot-point normal is n_wall(s) = −φ(s) û(s), û = ∇φ/|∇φ|. Its Jacobian is
+///   J_wall = ∂n_wall/∂s = −|∇φ| û ûᵀ − (φ/|∇φ|)(I − û ûᵀ) H,   H = ∇²φ,
+/// so the wall's contribution to dGeom/dseed is J_wallᵀ g summed over the cell's wall facets
+/// (g = dGeom/dn_k from geomVolumeGrad). EXACT for a flat wall (φ linear ⇒ H=0, one facet);
+/// first-order for a curved wall (the clip approximates the curve by several vertex-anchored tangent
+/// facets, modelled here as one effective seed-foot plane). Call AFTER chainToDofs<Policy> (which
+/// zeroes pnbr<0 planes); this adds the wall self-force into fSelf. No-op for NoSdf.
+template <class Real, int MAXP, int MAXT, bool TrackAdj, class Sdf>
+KOKKOS_INLINE_FUNCTION void addSdfWallForce(const ConvexCell<Real, MAXP, MAXT, TrackAdj>& c,
+                                            const Real seed[3], const Sdf& sdf, const Real* gx,
+                                            const Real* gy, const Real* gz, Real fSelf[3]) {
+  if constexpr (std::is_same_v<Sdf, NoSdf>) {
+    (void)c;
+    (void)seed;
+    (void)sdf;
+    (void)gx;
+    (void)gy;
+    (void)gz;
+    (void)fSelf;
+    return;
+  } else {
+    // Aggregate the wall facets' geometry gradients (all move together under the seed-foot model).
+    Real gw[3] = {Real(0), Real(0), Real(0)};
+    bool any = false;
+    for (int k = 0; k < c.np; ++k)
+      if (c.pnbr[k] == kBoundaryFacet) {
+        gw[0] += gx[k];
+        gw[1] += gy[k];
+        gw[2] += gz[k];
+        any = true;
+      }
+    if (!any) return;
+    const Real phi = sdf.eval(seed[0], seed[1], seed[2]);
+    Real g[3];
+    sdfGradient<Real>(sdf, seed[0], seed[1], seed[2], g);
+    const Real gn = Kokkos::sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+    if (gn <= Real(1e-12)) return;  // degenerate gradient (box crease/corner) — no wall force (guard)
+    const Real u[3] = {g[0] / gn, g[1] / gn, g[2] / gn};
+    Real H[3][3];
+    sdfHessian<Real>(sdf, seed[0], seed[1], seed[2], H);
+    const Real ug = u[0] * gw[0] + u[1] * gw[1] + u[2] * gw[2];
+    const Real perp[3] = {gw[0] - ug * u[0], gw[1] - ug * u[1], gw[2] - ug * u[2]};
+    const Real Hp[3] = {H[0][0] * perp[0] + H[0][1] * perp[1] + H[0][2] * perp[2],
+                        H[1][0] * perp[0] + H[1][1] * perp[1] + H[1][2] * perp[2],
+                        H[2][0] * perp[0] + H[2][1] * perp[1] + H[2][2] * perp[2]};
+    const Real cH = phi / gn;
+    for (int d = 0; d < 3; ++d) fSelf[d] += -gn * ug * u[d] - cH * Hp[d];
+  }
 }
 
 /**
