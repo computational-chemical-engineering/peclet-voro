@@ -289,8 +289,13 @@ int main(int argc, char** argv) {
           for (int k = 0; k < c.np; ++k)
             dgx[k] = dgy[k] = dgz[k] = 0.0;
           c.geomVolumeGrad(vg, dgx, dgy, dgz);
-          double fSelf[3], fnx[64], fny[64], fnz[64];
-          peclet::voro::chainToDofs<peclet::voro::Voronoi>(c, dgx, dgy, dgz, fSelf, fnx, fny, fnz);
+          double fSelf[3], fwSelf, fnx[64], fny[64], fnz[64], fwn[64];
+          const double seed3[3] = {(double)pos[3 * i], (double)pos[3 * i + 1],
+                                   (double)pos[3 * i + 2]};
+          peclet::voro::chainToDofs<peclet::voro::Voronoi>(c, seed3, (const double*)nullptr, 0.0,
+                                                           (const double*)nullptr, (double)L, dgx,
+                                                           dgy, dgz, fSelf, fwSelf, fnx, fny, fnz,
+                                                           fwn);
           const double fmag =
               std::sqrt(fSelf[0] * fSelf[0] + fSelf[1] * fSelf[1] + fSelf[2] * fSelf[2]);
           const double denom = std::max(fmag, cellScale);

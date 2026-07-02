@@ -70,6 +70,7 @@ struct CellBuilder {
   static constexpr int kMaxT = 112;    // dual-triangle (vertex) cap
   static constexpr int MAXF_TMP = 50;  // max facets one cell may publish
   using Cell = ConvexCell<Real, kMaxP, kMaxT, TrackAdj>;
+  using PlanePolicy = std::conditional_t<Weighted, Power, Voronoi>;  // radical vs bisector planes
 
   // Grid-sorted inputs (read).
   Kokkos::View<int*, MemSpace> binned;
@@ -254,14 +255,11 @@ struct CellBuilder {
   /// Build the cell owning grid-sorted slot pi, writing the published outputs at the original
   /// seed index binned(pi). Worklist gather, ConvexCell clip on the fly (no candidate buffer).
   KOKKOS_INLINE_FUNCTION void buildCell(int pi) const {
-    // Voronoi only. Power/Laguerre is NOT supported on the ConvexCell device path: its
-    // foot-point half-space ({x : nf·x ≤ |nf|²}) always contains the seed, but a radical
-    // plane can put the seed OUTSIDE its own cell (negative offset), which this
-    // representation cannot express. Full Laguerre needs ConvexCell radical-plane geometry
-    // (the planned-but-unbuilt Power policy in convex_cell.hpp); no production path uses it.
-    static_assert(!Weighted,
-                  "Power/Laguerre on the device is pending ConvexCell radical-plane geometry; "
-                  "buildTessellation currently supports Voronoi (Weighted=false) only.");
+    // Voronoi (Weighted=false) uses the bisector plane + security-radius early-out. Power
+    // (Weighted=true) uses the radical plane offset ½(|r|²+w_self−w_nbr) — which can be negative
+    // (the seed can lie OUTSIDE its own cell) so the bisector security certificate is invalid.
+    // P1 keeps the trivially-correct APPLY-ALL path for Power (every worklist candidate, no
+    // early-out); the weight-aware security gate is P2.
     const int i = binned(pi);
     const Real pix = posSorted(3 * pi + 0), piy = posSorted(3 * pi + 1),
                piz = posSorted(3 * pi + 2);
@@ -270,15 +268,19 @@ struct CellBuilder {
     const int base = subBase(pix, piy, piz);
     Cell c;
     c.initBox(Lx, Ly, Lz);
+    Real wSelf = Real(0);
+    if constexpr (Weighted) wSelf = wSorted(pi);
 
-    // The worklist is sorted by nearest-corner dist², so once wlRmin exceeds the security
-    // radius (4·rSqMax) every remaining block is too far to cut — break. The per-candidate
+    // The worklist is sorted by nearest-corner dist², so (Voronoi only) once wlRmin exceeds the
+    // security radius (4·rSqMax) every remaining block is too far to cut — break. The per-candidate
     // cull skips seeds past the radius; secR2 is recomputed only on a real cut.
     Real secR2 = Real(2) * c.maxVertexRsq();
     int ncRec = 0;  // Part-II: count of recorded candidate (skin) ids for this cell
     for (int g = 0; g < nOff && !c.overflow; ++g) {
-      if (wlRmin(base + g) > Real(2) * secR2)
-        break;  // sorted ⇒ rest are farther; cell closed
+      if constexpr (!Weighted) {
+        if (wlRmin(base + g) > Real(2) * secR2)
+          break;  // sorted ⇒ rest are farther; cell closed
+      }
       const int gc = worklistCell(base, g, cx, cy, cz);
       for (int q = cellStart(gc); q < cellStart(gc + 1) && !c.overflow; ++q) {
         if (q == pi)
@@ -291,11 +293,16 @@ struct CellBuilder {
           oCand[(size_t)i * candCap + ncRec++] = binned(q);
         Real pv[3];
         relVec(q, pix, piy, piz, pv);
-        const Real off = Real(0.5) * (pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2]);
-        if (off >= secR2)
-          continue;  // beyond the radius: cannot cut
-        if (c.clip(pv, off, binned(q)))
-          secR2 = Real(2) * c.maxVertexRsq();
+        Real wNbr = Real(0);
+        if constexpr (Weighted) wNbr = wSorted(q);
+        const Real off = PlanePolicy::template offsetFromRel<Real>(pv, wSelf, wNbr);
+        if constexpr (!Weighted) {
+          if (off >= secR2)
+            continue;  // beyond the radius: cannot cut (bisector certificate)
+        }
+        if (c.clip(pv, off, binned(q))) {
+          if constexpr (!Weighted) secR2 = Real(2) * c.maxVertexRsq();
+        }
       }
     }
     if (emitCand)

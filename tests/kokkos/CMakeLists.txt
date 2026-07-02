@@ -23,6 +23,11 @@ add_vorflow_kokkos_test(test_kokkos_smoke)
 # exercised end-to-end by the Python smoke test (python/test_vorflow.py).
 add_vorflow_kokkos_test(test_tessellation_invariants)
 
+# P1 acceptance for the POWER (Laguerre) tessellation: equal-weights regression to Voronoi
+# (machine-exact), oracle-free power-diagram invariants (space-filling / radical-facet reciprocity),
+# and an independent host brute-force radical-plane oracle (per-cell volume + neighbour set).
+add_vorflow_kokkos_test(test_power_cells)
+
 # voro++ reference (fetched once; the serial throughput target for bench_convexcell).
 include(FetchContent)
 FetchContent_Declare(voropp

@@ -26,6 +26,8 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "peclet/voro/plane_policy.hpp"  // Voronoi/Power plane-from-DOF policies (leaf: Kokkos only)
+
 // Loop unroll hint, applied ONLY in the CUDA/HIP device passes (where it lets the compiler
 // scalarize small dynamically-indexed local arrays into registers); a no-op on the host so gcc sees
 // no unknown pragma.
@@ -244,22 +246,41 @@ struct ConvexCell {
   /// when the topology is unchanged (the common case for small per-step displacement); a topology
   /// flip must be detected + repaired separately (Phase 1.5). `pos` is the global seed array (x-
   /// fastest, 3*N); `L` the periodic box length for min-imaging.
-  KOKKOS_INLINE_FUNCTION void reevalGeometry(Real sx, Real sy, Real sz, const Real* pos, Real L) {
+  ///
+  /// Policy = Voronoi (default) rebuilds the bisector foot point n = ½r (byte-identical to the
+  /// historical path). Policy = Power rebuilds the radical foot point n = α r with offset
+  /// d = ½(|r|²+w_self−w_nbr); pass the cell's own weight `wSelf` and the global `weight` array
+  /// (indexed by pnbr[k]). `weight` may be null for Voronoi.
+  template <class Policy = Voronoi>
+  KOKKOS_INLINE_FUNCTION void reevalGeometry(Real sx, Real sy, Real sz, const Real* pos, Real L,
+                                             Real wSelf = Real(0), const Real* weight = nullptr) {
     const Real Lh = Real(0.5) * L;
     for (int k = 0; k < np; ++k) {
       if (pnbr[k] < 0)
-        continue;  // bounding-box plane — does not move
+        continue;  // bounding-box / SDF-wall plane — does not move
       const int g = pnbr[k];
       Real rx = pos[3 * g] - sx, ry = pos[3 * g + 1] - sy, rz = pos[3 * g + 2] - sz;
       rx = rx > Lh ? rx - L : (rx < -Lh ? rx + L : rx);
       ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
       rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
-      // foot point of the Voronoi bisector: n = ½r, offset nn = |n|² = ¼|r|²
-      const Real hx = Real(0.5) * rx, hy = Real(0.5) * ry, hz = Real(0.5) * rz;
-      n[k][0] = hx;
-      n[k][1] = hy;
-      n[k][2] = hz;
-      nn[k] = hx * hx + hy * hy + hz * hz;
+      if constexpr (Policy::kHasWeightDof) {
+        // radical foot point: n = (d/|r|²) r,  d = ½(|r|² + w_self − w_nbr)
+        const Real r[3] = {rx, ry, rz};
+        const Real rho = rx * rx + ry * ry + rz * rz;
+        const Real off = Policy::template offsetFromRel<Real>(r, wSelf, weight[g]);
+        const Real a = rho > Real(0) ? off / rho : Real(0);
+        n[k][0] = a * rx;
+        n[k][1] = a * ry;
+        n[k][2] = a * rz;
+        nn[k] = n[k][0] * n[k][0] + n[k][1] * n[k][1] + n[k][2] * n[k][2];
+      } else {
+        // foot point of the Voronoi bisector: n = ½r, offset nn = |n|² = ¼|r|²
+        const Real hx = Real(0.5) * rx, hy = Real(0.5) * ry, hz = Real(0.5) * rz;
+        n[k][0] = hx;
+        n[k][1] = hy;
+        n[k][2] = hz;
+        nn[k] = hx * hx + hy * hy + hz * hz;
+      }
     }
     for (int t = 0; t < nt; ++t)
       if (alive[t])
@@ -1571,21 +1592,28 @@ struct ConvexCell {
   }
 };
 
-/// Build a Voronoi cell from neighbour relative positions sorted by ascending distance
-/// (rSqHalf). Clips closest-first with the security-radius early-out: once the next
-/// candidate's plane offset exceeds 2·max-vertex-rsq, no farther seed can cut. Mirrors
-/// the half-edge buildVoronoiCell, but on the compact ConvexCell.
-template <class Real, int MAXP, int MAXT, bool TrackAdj>
+/// Build a cell from neighbour relative positions sorted by ascending distance (rSqHalf).
+/// Policy = Voronoi (default) clips closest-first with the security-radius early-out: once the next
+/// candidate's plane offset exceeds 2·max-vertex-rsq, no farther seed can cut. Policy = Power uses
+/// the radical-plane offset ½(|r|²+w_self−w_nbr) and — in this reference builder — applies EVERY
+/// candidate (no early-out; the bisector security certificate is invalid once the offset can go
+/// negative, so P1 keeps the trivially-correct apply-all path). `weights` is indexed like `ids`
+/// (neighbour weights); it may be null for Voronoi. Mirrors the half-edge buildVoronoiCell.
+template <class Real, int MAXP, int MAXT, bool TrackAdj, class Policy = Voronoi>
 KOKKOS_INLINE_FUNCTION void buildConvexCell(ConvexCell<Real, MAXP, MAXT, TrackAdj>& c,
                                             const Real L[3], const Real* relx, const Real* rely,
-                                            const Real* relz, const int* ids, int nNbr) {
+                                            const Real* relz, const int* ids, int nNbr,
+                                            Real wSelf = Real(0), const Real* weights = nullptr) {
   c.initBox(L[0], L[1], L[2]);
   for (int i = 0; i < nNbr; ++i) {
-    const Real rx = relx[i], ry = rely[i], rz = relz[i];
-    const Real off = Real(0.5) * (rx * rx + ry * ry + rz * rz);  // plane: r·x <= 0.5|r|²
-    if (!(off < Real(2) * c.maxVertexRsq()))
-      break;  // security radius
-    const Real n[3] = {rx, ry, rz};
+    const Real n[3] = {relx[i], rely[i], relz[i]};
+    Real wNbr = Real(0);
+    if constexpr (Policy::kHasWeightDof) wNbr = weights[i];
+    const Real off = Policy::template offsetFromRel<Real>(n, wSelf, wNbr);
+    if constexpr (!Policy::kHasWeightDof) {
+      if (!(off < Real(2) * c.maxVertexRsq()))
+        break;  // security radius (bisector certificate; Voronoi only)
+    }
     c.clip(n, off, ids[i]);
     if (c.overflow)
       return;
