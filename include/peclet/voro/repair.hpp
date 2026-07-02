@@ -268,10 +268,11 @@ struct MovingTessellation {
         "mt.certify", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
           CertCell c;
           st.load(i, c, Lx, Ly, Lz);
+          const Real* wPtr = Wt.data();  // force-capture Wt OUTSIDE the constexpr-if (nvcc rule)
           Real wSelfI = Real(0);
           if constexpr (Weighted) wSelfI = Wt(i);
           c.template reevalGeometry<PlanePolicy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
-                                                 wSelfI, Wt.data());
+                                                 wSelfI, wPtr);
           Vv(i) = c.volumePerVertex();
           int partners[32];
           int nP = 0;
@@ -354,10 +355,11 @@ struct MovingTessellation {
           const int i = list(s);
           CertCell c;
           st.load(i, c, Lx, Ly, Lz);
+          const Real* wPtr = Wt.data();  // force-capture Wt OUTSIDE the constexpr-if (nvcc rule)
           Real wSelfI = Real(0);
           if constexpr (Weighted) wSelfI = Wt(i);
           c.template reevalGeometry<PlanePolicy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
-                                                 wSelfI, Wt.data());
+                                                 wSelfI, wPtr);
           Vv(i) = c.volumePerVertex();
           int partners[32];
           int nP = 0;
@@ -397,10 +399,11 @@ struct MovingTessellation {
           BuildCell c;
           st.load(i, c, Lx, Ly,
                   Lz);  // load brings topology; adj is rebuilt to derive the cert planes
+          const Real* wPtr = Wt.data();  // force-capture Wt OUTSIDE the constexpr-if (nvcc rule)
           Real wSelfI = Real(0);
           if constexpr (Weighted) wSelfI = Wt(i);
           c.template reevalGeometry<PlanePolicy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
-                                                 wSelfI, Wt.data());  // computePoke4 needs vertices
+                                                 wSelfI, wPtr);  // computePoke4 needs vertices
           c.rebuildAdjacency();
           c.computePoke4(&Pk4((size_t)i * MAXT *
                               4));  // the only thing this pass produces (topology unchanged)
