@@ -21,18 +21,18 @@ jobs:
       contents: read
     steps:
       - name: Checkout voro
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           path: voro
 
       - name: Checkout core (sibling)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: computational-chemical-engineering/peclet-core
           path: core
 
       - name: Checkout morton (sibling)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: computational-chemical-engineering/peclet-morton
           path: morton
@@ -82,7 +82,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install clang-format
         run: |
@@ -101,7 +101,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install dependencies
         run: |
