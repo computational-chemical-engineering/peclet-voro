@@ -84,8 +84,8 @@ struct Result {
   double secsBestW = -1;
 };
 
-static Result run_once(const Kokkos::View<real_t*, peclet::core::MemSpace>& pos, int N, const real_t L[3],
-                       int sw, bool timeOnly) {
+static Result run_once(const Kokkos::View<real_t*, peclet::core::MemSpace>& pos, int N,
+                       const real_t L[3], int sw, bool timeOnly) {
   using MemSpace = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   // grid ~CC_DENS seeds/cell (default 1). Coarser cells = fewer offset iterations to walk

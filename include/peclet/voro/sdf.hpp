@@ -11,9 +11,9 @@
  *   - analytic providers (SdfSphere / SdfBox / SdfHollowCylinder) port the
  *     peclet::core::geom::{Sphere,Box,HollowCylinder} eval formulas verbatim;
  *   - SdfGrid trilinearly evaluates a device-resident sampled field (any geometry,
- *     analytic baked via peclet::core::geom::sample or loaded from a VTI via peclet::core::geom::readVti).
- * A provider is any POD with `eval(x,y,z)` and `gradH()`; gradients are central
- * differences (so a host peclet::core::geom adapter and the device agree bit-for-bit).
+ *     analytic baked via peclet::core::geom::sample or loaded from a VTI via
+ * peclet::core::geom::readVti). A provider is any POD with `eval(x,y,z)` and `gradH()`; gradients
+ * are central differences (so a host peclet::core::geom adapter and the device agree bit-for-bit).
  *
  * Core header: Kokkos + the cutter, no physics.
  */
@@ -62,7 +62,8 @@ struct SdfBox {
   KOKKOS_INLINE_FUNCTION Real gradH() const { return Real(1e-4); }
 };
 
-/// Solid hollow cylinder (tube wall) about `axis`. eval ported from peclet::core::geom::HollowCylinder.
+/// Solid hollow cylinder (tube wall) about `axis`. eval ported from
+/// peclet::core::geom::HollowCylinder.
 template <class Real>
 struct SdfHollowCylinder {
   Real cx = 0, cy = 0, cz = 0, rOuter = 1, rInner = Real(0.5), height = 1;

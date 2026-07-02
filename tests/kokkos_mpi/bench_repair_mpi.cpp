@@ -33,9 +33,9 @@
 #include <vector>
 
 #include "peclet/core/common/view.hpp"
+#include "peclet/voro/mpi/voronoi_halo.hpp"
 #include "peclet/voro/repair.hpp"
 #include "peclet/voro/tessellator.hpp"
-#include "peclet/voro/mpi/voronoi_halo.hpp"
 
 using real_t = double;
 using Vec3 = std::array<real_t, 3>;
@@ -165,7 +165,8 @@ int main(int argc, char** argv) {
         Kokkos::View<real_t*, Mem> wd;
         Kokkos::View<long*, Mem> gd;
         auto r = peclet::voro::buildTessellation<real_t, false>(
-            dPos, wd, (int)g.pos.size(), L.data(), 4, N, gd, peclet::voro::NoSdf{}, false, g.nOwned);
+            dPos, wd, (int)g.pos.size(), L.data(), 4, N, gd, peclet::voro::NoSdf{}, false,
+            g.nOwned);
         Kokkos::fence();
         tCold += MPI_Wtime() - t0;
         (void)r;

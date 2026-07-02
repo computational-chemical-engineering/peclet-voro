@@ -3,40 +3,40 @@
  * \brief Publish a force-geometry TessellationView from a resident topology store (E1 scaffolding).
  *
  * The moving-point repair (MovingTessellation::step) maintains the per-cell topology + volumes in a
- * TopologyStore but, for speed, does NOT emit the per-facet force geometry (area vector, dV, connector)
- * that the physics modules (euler_pressure / viscous) read through a TessellationView. `reevalPublish`
- * fills that gap: it re-evaluates each cell's geometry over the stored topology on the current positions
- * (ConvexCell::reevalGeometry) and packs the same facet-CSR a full buildTessellation would — so the
- * fluid step can use the cheap incremental repair for the topology and this reeval for the forces,
- * instead of a full rebuild every step.
+ * TopologyStore but, for speed, does NOT emit the per-facet force geometry (area vector, dV,
+ * connector) that the physics modules (euler_pressure / viscous) read through a TessellationView.
+ * `reevalPublish` fills that gap: it re-evaluates each cell's geometry over the stored topology on
+ * the current positions (ConvexCell::reevalGeometry) and packs the same facet-CSR a full
+ * buildTessellation would — so the fluid step can use the cheap incremental repair for the topology
+ * and this reeval for the forces, instead of a full rebuild every step.
  *
- * It reproduces buildCell's publish half exactly (the >=3-incident-live-triangle face criterion, the
- * facetGeometry(k) call with conn = 2·n[k]), differing only in that the per-cell facet base is a
- * deterministic exclusive prefix sum (contiguous by cell index) rather than the build's atomic
+ * It reproduces buildCell's publish half exactly (the >=3-incident-live-triangle face criterion,
+ * the facetGeometry(k) call with conn = 2·n[k]), differing only in that the per-cell facet base is
+ * a deterministic exclusive prefix sum (contiguous by cell index) rather than the build's atomic
  * cell-finish order — both are valid facetBegin/facetEnd bases, and the physics + buildAuxMaps are
  * agnostic to which. The repair's already-computed volumes are reused for cellVolume.
  *
- * NOTE (physics still WIP): this is the scaffolding to let the incremental repair feed the physics; the
- * physics wiring/tuning on top is the user's ongoing work. Cubic-box minimal image (L = Lx), matching
- * the repair's reevalGeometry.
+ * NOTE (physics still WIP): this is the scaffolding to let the incremental repair feed the physics;
+ * the physics wiring/tuning on top is the user's ongoing work. Cubic-box minimal image (L = Lx),
+ * matching the repair's reevalGeometry.
  */
 #ifndef PECLET_VORO_REEVAL_TESSELLATION_HPP
 #define PECLET_VORO_REEVAL_TESSELLATION_HPP
 
-#include <string>
-
 #include <Kokkos_Core.hpp>
+#include <string>
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/convex_cell.hpp"
-#include "peclet/voro/topology_store.hpp"
 #include "peclet/voro/tessellation_view.hpp"
+#include "peclet/voro/topology_store.hpp"
 
 namespace peclet::voro {
 
-/// Re-evaluate the geometry of every cell in `store` on positions `pos` and publish a force-geometry
-/// TessellationView (facet neighbour / area / dV / connector CSR), reusing `vol` for the per-cell
-/// volume. `MAXP`/`MAXT` are the store's ConvexCell capacities; `N` cells; `L` the (cubic) box.
+/// Re-evaluate the geometry of every cell in `store` on positions `pos` and publish a
+/// force-geometry TessellationView (facet neighbour / area / dV / connector CSR), reusing `vol` for
+/// the per-cell volume. `MAXP`/`MAXT` are the store's ConvexCell capacities; `N` cells; `L` the
+/// (cubic) box.
 template <class Real, int MAXP, int MAXT>
 TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
                                      const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
@@ -61,8 +61,10 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
         for (int k = 0; k < c.np; ++k) {
           int cnt = 0;
           for (int t = 0; t < c.nt; ++t)
-            if (c.alive[t] && (c.t0[t] == k || c.t1[t] == k || c.t2[t] == k)) ++cnt;
-          if (cnt >= 3) ++nf;
+            if (c.alive[t] && (c.t0[t] == k || c.t1[t] == k || c.t2[t] == k))
+              ++cnt;
+          if (cnt >= 3)
+            ++nf;
         }
         facetCount(i) = nf;
       });
@@ -76,7 +78,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
     Kokkos::parallel_scan(
         "reevalPublish.scan", N,
         KOKKOS_LAMBDA(const int i, int& upd, const bool final_pass) {
-          if (final_pass) bs(i) = upd;
+          if (final_pass)
+            bs(i) = upd;
           upd += fc(i);
         },
         nFacets);
@@ -100,8 +103,10 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
           for (int k = 0; k < c.np; ++k) {
             int cnt = 0;
             for (int t = 0; t < c.nt; ++t)
-              if (c.alive[t] && (c.t0[t] == k || c.t1[t] == k || c.t2[t] == k)) ++cnt;
-            if (cnt < 3) continue;  // not a polygon face — same criterion as the count pass
+              if (c.alive[t] && (c.t0[t] == k || c.t1[t] == k || c.t2[t] == k))
+                ++cnt;
+            if (cnt < 3)
+              continue;  // not a polygon face — same criterion as the count pass
             Real area[3] = {0, 0, 0}, dv[3] = {0, 0, 0}, conn[3];
             conn[0] = Real(2) * c.n[k][0];
             conn[1] = Real(2) * c.n[k][1];
@@ -124,9 +129,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
   view.cellFacetOffset = base;
   view.cellFacetCount = facetCount;
   view.cellVolume = vol;
-  view.cellSeedId =
-      Kokkos::View<gid_t*, Mem>(view_alloc(std::string("rp.seedId"), WithoutInitializing),
-                                static_cast<std::size_t>(N));
+  view.cellSeedId = Kokkos::View<gid_t*, Mem>(
+      view_alloc(std::string("rp.seedId"), WithoutInitializing), static_cast<std::size_t>(N));
   {
     Kokkos::View<gid_t*, Mem> vSeed = view.cellSeedId;
     Kokkos::parallel_for(

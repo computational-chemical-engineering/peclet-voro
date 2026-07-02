@@ -329,18 +329,18 @@ struct CellBuilder {
  *                 ghost fraction of the cold build).
  */
 template <class Real, bool Weighted, class Sdf = NoSdf>
-TessellatorResult<Real> buildTessellation(const Kokkos::View<Real*, peclet::core::MemSpace>& posFlat,
-                                          const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N,
-                                          const Real L[3], int sw = 4, int densityCount = -1,
-                                          Kokkos::View<long*, peclet::core::MemSpace> gid = {}, Sdf sdf = {},
-                                          bool withForceGeom = true, int nBuild = -1,
-                                          Kokkos::View<int*, peclet::core::MemSpace> outNp = {},
-                                          Kokkos::View<int*, peclet::core::MemSpace> outNt = {},
-                                          Kokkos::View<int*, peclet::core::MemSpace> outPnbr = {},
-                                          Kokkos::View<unsigned*, peclet::core::MemSpace> outTri = {},
-                                          Kokkos::View<int*, peclet::core::MemSpace> outCand = {},
-                                          Kokkos::View<int*, peclet::core::MemSpace> outCandCnt = {},
-                                          int candCap = 0, WorklistCache<Real>* wlc = nullptr) {
+TessellatorResult<Real> buildTessellation(
+    const Kokkos::View<Real*, peclet::core::MemSpace>& posFlat,
+    const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N, const Real L[3], int sw = 4,
+    int densityCount = -1, Kokkos::View<long*, peclet::core::MemSpace> gid = {}, Sdf sdf = {},
+    bool withForceGeom = true, int nBuild = -1,
+    Kokkos::View<int*, peclet::core::MemSpace> outNp = {},
+    Kokkos::View<int*, peclet::core::MemSpace> outNt = {},
+    Kokkos::View<int*, peclet::core::MemSpace> outPnbr = {},
+    Kokkos::View<unsigned*, peclet::core::MemSpace> outTri = {},
+    Kokkos::View<int*, peclet::core::MemSpace> outCand = {},
+    Kokkos::View<int*, peclet::core::MemSpace> outCandCnt = {}, int candCap = 0,
+    WorklistCache<Real>* wlc = nullptr) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin

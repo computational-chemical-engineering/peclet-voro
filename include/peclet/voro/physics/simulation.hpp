@@ -19,12 +19,12 @@
 #include <Kokkos_Core.hpp>
 
 #include "peclet/core/common/view.hpp"
+#include "peclet/voro/physics/euler_pressure.hpp"
+#include "peclet/voro/physics/viscous.hpp"
 #include "peclet/voro/reeval_tessellation.hpp"  // reevalPublish (E1 repair -> force geometry)
 #include "peclet/voro/repair.hpp"               // MovingTessellation (incremental update)
 #include "peclet/voro/tessellator.hpp"
 #include "peclet/voro/transpose.hpp"
-#include "peclet/voro/physics/euler_pressure.hpp"
-#include "peclet/voro/physics/viscous.hpp"
 
 namespace peclet::voro {
 namespace physics {
@@ -144,7 +144,8 @@ class ExplicitEuler {
     if (useRepair_) {
       // Incremental path: cold-build the resident tessellation once (establishes the topology store
       // + volumes), then repair it in place each subsequent step. Either way the force geometry is
-      // re-evaluated from the store and published into the same facet-CSR view the full build emits.
+      // re-evaluated from the store and published into the same facet-CSR view the full build
+      // emits.
       if (!mtInit_) {
         const double boxVol = static_cast<double>(L_[0]) * L_[1] * L_[2];
         const Real spacing = static_cast<Real>(std::cbrt(boxVol / (N_ > 0 ? N_ : 1)));
@@ -157,8 +158,9 @@ class ExplicitEuler {
       view_ = peclet::voro::reevalPublish<Real, 64, 112>(mt_.store, pos_, mt_.vol, N_, Larr);
     } else {
       // Pass the persistent worklist cache (last arg) so the step-invariant worklist table is built
-      // once and reused across steps (E3). All intermediate args are the buildTessellation defaults;
-      // the Sdf template arg is named explicitly because a defaulted `{}` Sdf cannot be deduced.
+      // once and reused across steps (E3). All intermediate args are the buildTessellation
+      // defaults; the Sdf template arg is named explicitly because a defaulted `{}` Sdf cannot be
+      // deduced.
       auto res = peclet::voro::buildTessellation<Real, false, peclet::voro::NoSdf>(
           pos_, w_, N_, Larr, /*sw=*/4, /*densityCount=*/-1, /*gid=*/{}, peclet::voro::NoSdf{},
           /*withForceGeom=*/true, /*nBuild=*/-1, /*outNp=*/{}, /*outNt=*/{}, /*outPnbr=*/{},
@@ -179,8 +181,9 @@ class ExplicitEuler {
   Real pressEq_ = 0, volAvg_ = 0, time_ = 0;
   bool viscous_ = false;
   DView pos_, vel_, invMass_, w_, force_, visc_, bulkVisc_;
-  DView viscGrad_, viscStress_;          // persistent 9*N viscous scratch (E4)
-  peclet::voro::WorklistCache<Real> wlCache_;  // step-invariant worklist table, reused across steps (E3)
+  DView viscGrad_, viscStress_;  // persistent 9*N viscous scratch (E4)
+  peclet::voro::WorklistCache<Real>
+      wlCache_;  // step-invariant worklist table, reused across steps (E3)
   TessellationView<Real> view_;
   peclet::voro::AuxMaps<Real> aux_;
   // E1 opt-in incremental path (default off): resident moving-point tessellation + its cold/repair

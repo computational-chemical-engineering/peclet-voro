@@ -117,7 +117,7 @@ static int coldSweep(real_t L) {
       Kokkos::fence();
       auto a = clk::now();
       auto res = peclet::voro::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
-                                                               peclet::voro::NoSdf{}, false);
+                                                                peclet::voro::NoSdf{}, false);
       Kokkos::fence();
       tPlain = std::min(tPlain, secs(a, clk::now()));
       if (r == 0)
@@ -204,7 +204,7 @@ static int repairSweep(int N, int nSteps, real_t L) {
       Kokkos::fence();
       auto a = clk::now();
       auto r = peclet::voro::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
-                                                             peclet::voro::NoSdf{}, false);
+                                                              peclet::voro::NoSdf{}, false);
       Kokkos::fence();
       tCold += secs(a, clk::now());
       (void)r;
@@ -238,7 +238,7 @@ static int repairSweep(int N, int nSteps, real_t L) {
     peclet::voro::OracleDiff d;
     peclet::voro::compareVolumes(mt.vol, ora.view, d);
     peclet::voro::compareNeighbours(mt.store.np, mt.store.nt, mt.store.pnbr, mt.store.tri, CMAXP,
-                                   CMAXT, ora.view, d);
+                                    CMAXT, ora.view, d);
     const double volErr = std::abs(sumVol(mt.vol, N) / boxVol - 1.0);
     const double coldMc = 1e-6 * N * nSteps / tCold, repMc = 1e-6 * N * nSteps / tRep;
     std::printf("%.4f,%.3f,%.3f,%.2f,%.3f,%.3f,%.1f,%.3f,%.3e,%.3e,%ld\n", (double)disp, coldMc,

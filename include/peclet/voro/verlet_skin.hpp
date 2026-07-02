@@ -63,8 +63,8 @@ struct VerletSkin {
 /// (the only Phase-1 trigger). One reduce + write pass; no host round-trip beyond the final count.
 template <class Real>
 int flagSkinMovers(const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
-                   const Kokkos::View<Real*, peclet::core::MemSpace>& xRef, Real skin, const Real L[3],
-                   const Kokkos::View<int*, peclet::core::MemSpace>& outFlags) {
+                   const Kokkos::View<Real*, peclet::core::MemSpace>& xRef, Real skin,
+                   const Real L[3], const Kokkos::View<int*, peclet::core::MemSpace>& outFlags) {
   using Exec = peclet::core::ExecSpace;
   const int N = (int)outFlags.extent(0);
   const Real half2 = Real(0.25) * skin * skin;  // (skin/2)^2

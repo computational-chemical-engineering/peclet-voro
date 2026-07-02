@@ -177,7 +177,7 @@ static int gate0_corruption(int N, real_t L) {
   peclet::voro::OracleDiff d0;
   peclet::voro::compareVolumes(vol, res.view, d0);
   peclet::voro::compareNeighbours(store.np, store.nt, store.pnbr, store.tri, CMAXP, CMAXT, res.view,
-                                 d0);
+                                  d0);
   std::printf("[clean]     vs-oracle: changedNbrFrac=%.3e missedNbr=%ld maxVolRelErr=%.3e\n",
               d0.changedNbrFrac, d0.missedNbr, d0.maxVolRelErr);
 
@@ -201,7 +201,7 @@ static int gate0_corruption(int N, real_t L) {
   peclet::voro::OracleDiff dc;
   peclet::voro::compareVolumes(vol, res.view, dc);
   peclet::voro::compareNeighbours(store.np, store.nt, store.pnbr, store.tri, CMAXP, CMAXT, res.view,
-                                 dc);
+                                  dc);
   std::printf(
       "[corrupted] vs-oracle: changedNbrFrac=%.3e (=%ld cell) missedNbr=%ld maxVolRelErr=%.3e "
       "volMismatch=%ld\n",
@@ -247,8 +247,8 @@ static int gate1a_subset(int N, real_t L) {
   fullStore.alloc(N);
   Kokkos::View<real_t*, Mem> fullVol("fullVol", N);
   peclet::voro::subsetGather<real_t, false>(grid, allIdx, N, fullStore.np, fullStore.nt,
-                                           fullStore.pnbr, fullStore.tri, fullVol, {},
-                                           peclet::voro::NoSdf{}, /*withForceGeom=*/true);
+                                            fullStore.pnbr, fullStore.tri, fullVol, {},
+                                            peclet::voro::NoSdf{}, /*withForceGeom=*/true);
 
   const int nSub = std::max(1, N / 7);
   std::vector<int> hidx(nSub);
@@ -265,9 +265,10 @@ static int gate1a_subset(int N, real_t L) {
   Store subStore;
   subStore.alloc(N);
   Kokkos::View<real_t*, Mem> subVol("subVol", N);
-  peclet::voro::subsetGather<real_t, false>(grid, idx, nSub, subStore.np, subStore.nt, subStore.pnbr,
-                                           subStore.tri, subVol, {}, peclet::voro::NoSdf{},
-                                           /*withForceGeom=*/true);
+  peclet::voro::subsetGather<real_t, false>(grid, idx, nSub, subStore.np, subStore.nt,
+                                            subStore.pnbr, subStore.tri, subVol, {},
+                                            peclet::voro::NoSdf{},
+                                            /*withForceGeom=*/true);
 
   // Bit-for-bit: np, nt, every pnbr, every packed triangle, and the volume — for each chosen index.
   Kokkos::View<int*, Mem> dChosen("chosen", N);
@@ -333,8 +334,8 @@ static int gate1b_partners(int N, real_t L) {
   Store store;
   store.alloc(N);
   peclet::voro::buildTessellation<real_t, false>(pos, wdummy, N, Larr, 4, N, gdummy,
-                                                peclet::voro::NoSdf{}, false, -1, store.np, store.nt,
-                                                store.pnbr, store.tri);
+                                                 peclet::voro::NoSdf{}, false, -1, store.np,
+                                                 store.nt, store.pnbr, store.tri);
 
   // Move by a small isolated displacement, then run the partner certificate on the re-evaluated
   // cells.
@@ -402,8 +403,8 @@ static int gate1b_partners(int N, real_t L) {
   Store oraStore;
   oraStore.alloc(N);
   auto ora = peclet::voro::buildTessellation<real_t, false>(
-      pos, wdummy, N, Larr, 4, N, gdummy, peclet::voro::NoSdf{}, false, -1, oraStore.np, oraStore.nt,
-      oraStore.pnbr, oraStore.tri);
+      pos, wdummy, N, Larr, 4, N, gdummy, peclet::voro::NoSdf{}, false, -1, oraStore.np,
+      oraStore.nt, oraStore.pnbr, oraStore.tri);
   // changed(i) = stored nbr set (at P0) differs from oracle nbr set (at moved P).
   Kokkos::View<int*, Mem> changed("changed", N);
   {
@@ -578,9 +579,9 @@ static int gate2_localcert(int N, real_t L) {
   for (real_t disp :
        {real_t(0.0005), real_t(0.001), real_t(0.002), real_t(0.005), real_t(0.02), real_t(0.05)}) {
     Kokkos::deep_copy(pos, x0d);  // build store at P0
-    peclet::voro::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd, peclet::voro::NoSdf{},
-                                                  false, -1, store.np, store.nt, store.pnbr,
-                                                  store.tri);
+    peclet::voro::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
+                                                   peclet::voro::NoSdf{}, false, -1, store.np,
+                                                   store.nt, store.pnbr, store.tri);
     // Build adj + the 4th-face plane at the BUILD config (P0) and persist them — exactly how the
     // gather populates them for the repair. The cert below then tests the DISPLACED vertices
     // against this proxy.
@@ -703,7 +704,7 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
     peclet::voro::OracleDiff d;
     peclet::voro::compareVolumes(mt.vol, ora.view, d);
     peclet::voro::compareNeighbours(mt.store.np, mt.store.nt, mt.store.pnbr, mt.store.tri, CMAXP,
-                                   CMAXT, ora.view, d);
+                                    CMAXT, ora.view, d);
     maxRelV = d.maxVolRelErr;
     missed = d.missedNbr;
   };
@@ -757,7 +758,7 @@ static int repairBench(int N, int nSteps, real_t L, real_t spacing) {
         Kokkos::fence();
         auto a = clk::now();
         auto r = peclet::voro::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
-                                                               peclet::voro::NoSdf{}, false);
+                                                                peclet::voro::NoSdf{}, false);
         Kokkos::fence();
         tCold += secs(a, clk::now());
         (void)r;
@@ -1134,8 +1135,8 @@ int main(int argc, char** argv) {
         buildOracle();
         peclet::voro::OracleDiff d;
         peclet::voro::compareVolumes(cx.vol, cx.oraView, d);
-        peclet::voro::compareNeighbours(cx.store.np, cx.store.nt, cx.store.pnbr, cx.store.tri, CMAXP,
-                                       CMAXT, cx.oraView, d);
+        peclet::voro::compareNeighbours(cx.store.np, cx.store.nt, cx.store.pnbr, cx.store.tri,
+                                        CMAXP, CMAXT, cx.oraView, d);
         std::printf("%-12s %-7s %5.3f %8.2f %7.1f %7.1f %8ld %10.2e %10ld %10.2e\n", distName(dist),
                     name, (double)disp, 1e3 * t / nSteps, 100.0 * rebuilds / nSteps,
                     100.0 * touch / ((double)nSteps * N), skinTot, d.changedNbrFrac, d.missedNbr,
@@ -1172,8 +1173,8 @@ int main(int argc, char** argv) {
       s0.alloc(N);
       auto t0 = clk::now();
       auto r0 = peclet::voro::buildTessellation<real_t, false>(pos, wd, N, Larr, 4, N, gd,
-                                                              peclet::voro::NoSdf{}, false, -1,
-                                                              s0.np, s0.nt, s0.pnbr, s0.tri);
+                                                               peclet::voro::NoSdf{}, false, -1,
+                                                               s0.np, s0.nt, s0.pnbr, s0.tri);
       Kokkos::fence();
       double tb = secs(t0, clk::now());
       std::printf("full-build=%.3fs (%.0f kcells/s)\n", tb, N / tb / 1e3);
@@ -1192,8 +1193,8 @@ int main(int argc, char** argv) {
         }
         Kokkos::deep_copy(p1, Kokkos::View<real_t*, Kokkos::HostSpace>(hp.data(), 3 * N));
         auto r1 = peclet::voro::buildTessellation<real_t, false>(p1, wd, N, Larr, 4, N, gd,
-                                                                peclet::voro::NoSdf{}, false, -1,
-                                                                s1.np, s1.nt, s1.pnbr, s1.tri);
+                                                                 peclet::voro::NoSdf{}, false, -1,
+                                                                 s1.np, s1.nt, s1.pnbr, s1.tri);
         long stable = 0, flipSum = 0;
         auto a = s0.np, ap = s0.pnbr, b = s1.np, bp = s1.pnbr;
         Kokkos::parallel_reduce(

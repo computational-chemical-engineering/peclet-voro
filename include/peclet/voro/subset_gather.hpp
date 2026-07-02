@@ -34,7 +34,8 @@ namespace peclet::voro {
 /// are written in place). Flags the rare overflow/incomplete cell exactly as the cold build does.
 template <class Real>
 struct SubsetGatherResult {
-  Kokkos::View<int*, peclet::core::MemSpace> status;  // N : per-cell StatusBit mask (subset entries written)
+  Kokkos::View<int*, peclet::core::MemSpace>
+      status;  // N : per-cell StatusBit mask (subset entries written)
 };
 
 /**
@@ -53,8 +54,9 @@ struct SubsetGatherResult {
  */
 template <class Real, bool Weighted = false, bool TrackAdj = false, class Sdf = NoSdf>
 SubsetGatherResult<Real> subsetGather(
-    const TessGrid<Real>& grid, const Kokkos::View<int*, peclet::core::MemSpace>& indices, int nSubset,
-    const Kokkos::View<int*, peclet::core::MemSpace>& outNp, const Kokkos::View<int*, peclet::core::MemSpace>& outNt,
+    const TessGrid<Real>& grid, const Kokkos::View<int*, peclet::core::MemSpace>& indices,
+    int nSubset, const Kokkos::View<int*, peclet::core::MemSpace>& outNp,
+    const Kokkos::View<int*, peclet::core::MemSpace>& outNt,
     const Kokkos::View<int*, peclet::core::MemSpace>& outPnbr,
     const Kokkos::View<unsigned*, peclet::core::MemSpace>& outTri,
     const Kokkos::View<Real*, peclet::core::MemSpace>& cellVol,

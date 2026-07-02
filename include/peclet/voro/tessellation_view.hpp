@@ -148,11 +148,12 @@ struct TessellationView {
 
 namespace detail {
 template <class T>
-Kokkos::View<T*, peclet::core::MemSpace> viewFrom(const std::vector<T>& h, const std::string& label) {
+Kokkos::View<T*, peclet::core::MemSpace> viewFrom(const std::vector<T>& h,
+                                                  const std::string& label) {
   // NOTE: pass a std::string label — a bare const char* is interpreted by
   // Kokkos::view_alloc as a user pointer-to-memory, not an allocation label.
   Kokkos::View<T*, peclet::core::MemSpace> d(Kokkos::view_alloc(label, Kokkos::WithoutInitializing),
-                                    h.size());
+                                             h.size());
   if (!h.empty()) {
     using Host =
         Kokkos::View<const T*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged> >;

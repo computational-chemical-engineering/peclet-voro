@@ -32,8 +32,8 @@
 #include <vector>
 
 #include "peclet/core/common/view.hpp"
-#include "peclet/voro/tessellator.hpp"
 #include "peclet/voro/mpi/voronoi_halo.hpp"
+#include "peclet/voro/tessellator.hpp"
 
 using real_t = double;
 using Vec3 = std::array<real_t, 3>;

@@ -34,8 +34,8 @@
 #include <Kokkos_Core.hpp>
 
 #include "peclet/core/common/view.hpp"
-#include "peclet/voro/transpose.hpp"  // AuxMaps, buildAuxMaps
 #include "peclet/voro/tessellation_view.hpp"
+#include "peclet/voro/transpose.hpp"  // AuxMaps, buildAuxMaps
 
 namespace peclet::voro {
 
@@ -164,8 +164,8 @@ template <class Real>
 void compareNeighbours(const Kokkos::View<int*, peclet::core::MemSpace>& storeNp,
                        const Kokkos::View<int*, peclet::core::MemSpace>& storeNt,
                        const Kokkos::View<int*, peclet::core::MemSpace>& storePnbr,
-                       const Kokkos::View<unsigned*, peclet::core::MemSpace>& storeTri, int MAXP, int MAXT,
-                       const TessellationView<Real>& oracle, OracleDiff& out) {
+                       const Kokkos::View<unsigned*, peclet::core::MemSpace>& storeTri, int MAXP,
+                       int MAXT, const TessellationView<Real>& oracle, OracleDiff& out) {
   using Exec = peclet::core::ExecSpace;
   const int N = oracle.numCells();
   long changed = 0, missed = 0;
