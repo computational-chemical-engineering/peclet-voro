@@ -65,11 +65,22 @@ SubsetGatherResult<Real> subsetGather(
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Builder = CellBuilder<Real, Weighted, Sdf, TrackAdj>;
-  static_assert(!Weighted,
-                "subsetGather: Power/Laguerre on the ConvexCell device path is deferred.");
   const int N = grid.N;
   using Kokkos::view_alloc;
   using Kokkos::WithoutInitializing;
+
+  // Power reach needs the global max weight (see CellBuilder::blockReachSq); 0 for Voronoi. The grid
+  // carries the per-slot weights (wSorted), so reduce over those.
+  Real wMaxAll = Real(0);
+  if constexpr (Weighted) {
+    if (grid.wSorted.extent(0) == static_cast<size_t>(N)) {
+      auto ws = grid.wSorted;
+      Kokkos::parallel_reduce(
+          "subset.wmax", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(int idx, Real& m) { m = ws(idx) > m ? ws(idx) : m; },
+          Kokkos::Max<Real>(wMaxAll));
+    }
+  }
 
   SubsetGatherResult<Real> res;
   res.status = Kokkos::View<int*, MemSpace>("subset.status", N);  // zero-init (unwritten = kOk)
@@ -94,11 +105,10 @@ SubsetGatherResult<Real> subsetGather(
 
   // Empty candidate-list outputs (skin emission is not wanted for the subset gather).
   Kokkos::View<int*, MemSpace> noCand, noCandCnt;
-  Kokkos::View<Real*, MemSpace> noW;  // unused weights (Weighted==false)
 
   Builder op{grid.binned,
              grid.posSorted,
-             noW,
+             grid.wSorted,  // per-slot weights (empty for Voronoi; read only when Weighted)
              grid.gidSorted,
              grid.cellStart,
              grid.wlOff,
@@ -119,7 +129,7 @@ SubsetGatherResult<Real> subsetGather(
              grid.Ly,
              grid.Lz,
              grid.minCsz,
-             Real(0),  // wMaxAll — subsetGather is Voronoi-only (static_assert !Weighted)
+             wMaxAll,
              grid.dimx,
              grid.dimy,
              grid.dimz,

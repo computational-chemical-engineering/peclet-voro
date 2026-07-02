@@ -60,10 +60,11 @@ struct RepairStats {
 
 /// Resident moving-point tessellation with two-pass gather repair. MAXP/MAXT must match
 /// CellBuilder::kMaxP / kMaxT (64 / 112).
-template <class Real, int MAXP = 64, int MAXT = 112>
+template <class Real, int MAXP = 64, int MAXT = 112, bool Weighted = false>
 struct MovingTessellation {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
+  using PlanePolicy = std::conditional_t<Weighted, Power, Voronoi>;  // radical vs bisector planes
   // The certificate/load/re-eval path reads the resident `poke4` plane set by pointer and never
   // touches the edge adjacency, so it uses a LEAN cell with NO `adj` member (TrackAdj=false) —
   // ~MAXT*3*4 bytes smaller per thread, which lifts occupancy on the full-N certify (the GPU
@@ -133,6 +134,11 @@ struct MovingTessellation {
   Store store;
   Kokkos::View<Real*, Mem> vol;   // N : cell volumes (the published geometry scalar)
   Kokkos::View<Real*, Mem> xRef;  // 3N : positions at the last (re)build (Verlet reference)
+  Kokkos::View<Real*, Mem> weight;  // N : per-seed power weights (empty for Voronoi); DOFs alongside
+                                    // positions. Set via setWeights before rebuild/step.
+
+  /// Set the per-seed power weights (Weighted only). Held by reference; the caller keeps it alive.
+  void setWeights(const Kokkos::View<Real*, Mem>& w) { weight = w; }
   // scratch
   Kokkos::View<int*, Mem> mask, mask2, mover, rebuilt, wl1, wl2, wlM;
   Kokkos::View<int*, Mem> cellFlag;            // per linear grid-cell flagged-seed count (dilation)
@@ -190,13 +196,12 @@ struct MovingTessellation {
   ///                  brute certificate until churn drops, then maybeBuildAdj rebuilds the
   ///                  adjacency once.
   void rebuild(const Kokkos::View<Real*, Mem>& pos, bool eagerAdj = true) {
-    Kokkos::View<Real*, Mem> wd;
     Kokkos::View<long*, Mem> gd;
     const int nBuild =
         (nProc == N) ? -1 : nProc;  // build only the owned cells; ghosts are candidates
-    auto res = buildTessellation<Real, false>(pos, wd, N, L, sw, densityCount, gd, NoSdf{},
-                                              /*withForceGeom=*/false, nBuild, store.np, store.nt,
-                                              store.pnbr, store.tri);
+    auto res = buildTessellation<Real, Weighted>(pos, weight, N, L, sw, densityCount, gd, NoSdf{},
+                                                 /*withForceGeom=*/false, nBuild, store.np, store.nt,
+                                                 store.pnbr, store.tri);
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(xRef, pos);
     adjFresh = false;  // the cold build does not emit adjacency
@@ -258,11 +263,15 @@ struct MovingTessellation {
     const Real tolL = tol, half2 = Real(0.25) * skin * skin;
     const bool skinOn = useSkin;
     const int nP_ = nProc;
+    auto Wt = weight;  // power weights (empty for Voronoi; captured for reevalGeometry<PlanePolicy>)
     Kokkos::parallel_for(
         "mt.certify", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
           CertCell c;
           st.load(i, c, Lx, Ly, Lz);
-          c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
+          Real wSelfI = Real(0);
+          if constexpr (Weighted) wSelfI = Wt(i);
+          c.template reevalGeometry<PlanePolicy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
+                                                 wSelfI, Wt.data());
           Vv(i) = c.volumePerVertex();
           int partners[32];
           int nP = 0;
@@ -339,12 +348,16 @@ struct MovingTessellation {
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
     const Real tolL = tol;
     const int nP_ = nProc;
+    auto Wt = weight;
     Kokkos::parallel_for(
         "mt.certifyList", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
           const int i = list(s);
           CertCell c;
           st.load(i, c, Lx, Ly, Lz);
-          c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
+          Real wSelfI = Real(0);
+          if constexpr (Weighted) wSelfI = Wt(i);
+          c.template reevalGeometry<PlanePolicy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
+                                                 wSelfI, Wt.data());
           Vv(i) = c.volumePerVertex();
           int partners[32];
           int nP = 0;
@@ -378,13 +391,16 @@ struct MovingTessellation {
     auto P = pos;
     auto Pk4 = store.poke4;
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
+    auto Wt = weight;
     Kokkos::parallel_for(
         "mt.rebuildAdjAll", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
           BuildCell c;
           st.load(i, c, Lx, Ly,
                   Lz);  // load brings topology; adj is rebuilt to derive the cert planes
-          c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(),
-                           Lx);  // computePoke4 needs vertices
+          Real wSelfI = Real(0);
+          if constexpr (Weighted) wSelfI = Wt(i);
+          c.template reevalGeometry<PlanePolicy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
+                                                 wSelfI, Wt.data());  // computePoke4 needs vertices
           c.rebuildAdjacency();
           c.computePoke4(&Pk4((size_t)i * MAXT *
                               4));  // the only thing this pass produces (topology unchanged)
@@ -414,8 +430,8 @@ struct MovingTessellation {
     // TrackAdj gather: clip stitches the edge adjacency incrementally; the builder derives the cert
     // plane set from it (computePoke4, no findSharing) into store.poke4, so the local cert stays
     // valid for the gathered cells with no separate maintenance pass.
-    subsetGather<Real, false, true>(grid, wl, n, store.np, store.nt, store.pnbr, store.tri, vol,
-                                    store.poke4, NoSdf{}, /*withForceGeom=*/false);
+    subsetGather<Real, Weighted, true>(grid, wl, n, store.np, store.nt, store.pnbr, store.tri, vol,
+                                       store.poke4, NoSdf{}, /*withForceGeom=*/false);
     auto W = wl;
     auto rb = rebuilt;
     auto P = pos;
@@ -606,8 +622,8 @@ struct MovingTessellation {
   /// One moving-point update step. Updates store + vol in place from `pos`.
   RepairStats step(const Kokkos::View<Real*, Mem>& pos) {
     RepairStats s;
-    auto grid = buildTessGrid<Real, false>(pos, Kokkos::View<Real*, Mem>(), N, L, sw, densityCount,
-                                           Kokkos::View<long*, Mem>());
+    auto grid = buildTessGrid<Real, Weighted>(pos, weight, N, L, sw, densityCount,
+                                              Kokkos::View<long*, Mem>());
     Kokkos::deep_copy(rebuilt, 0);
     // Use the cheap local certificate whenever store.poke4 is valid for the current topology. With
     // the 4th-face plane included the local cert matches the brute flag set (it is complete, not a

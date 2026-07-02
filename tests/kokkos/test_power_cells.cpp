@@ -28,6 +28,7 @@
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/convex_cell.hpp"
 #include "peclet/voro/dynamic_validate.hpp"
+#include "peclet/voro/repair.hpp"
 #include "peclet/voro/tessellator.hpp"
 
 using real_t = double;
@@ -296,6 +297,65 @@ int caseGradients(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   return pass ? 0 : 1;
 }
 
+// (E) dynamic power tessellation infrastructure: cold-build a power tessellation, move the seeds a
+// little, and require MovingTessellation<...,Weighted=true>::step() to reproduce a cold power
+// rebuild at the new positions — per-cell volume and buried/empty membership. Small weights (d>0).
+int caseDynamic(int N, real_t L, unsigned seed, real_t wSpreadFrac, real_t dispFrac) {
+  using Mem = peclet::core::MemSpace;
+  const real_t Larr[3] = {L, L, L};
+  const real_t spacing = L / std::cbrt(real_t(N));
+  const real_t wMax = wSpreadFrac * spacing * spacing;
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<real_t> U(0.0, 1.0);
+  std::vector<real_t> x0(3 * N), x1(3 * N), wh(N);
+  for (auto& v : x0) v = L * U(rng);
+  for (auto& v : wh) v = wMax * U(rng);
+  const real_t disp = dispFrac * spacing;
+  for (int k = 0; k < 3 * N; ++k) {
+    real_t p = x0[k] + disp * (2 * U(rng) - 1);
+    p = p < 0 ? p + L : (p >= L ? p - L : p);
+    x1[k] = p;
+  }
+
+  Kokkos::View<real_t*, Mem> pos0("p0", 3 * N), pos1("p1", 3 * N), wd("w", N);
+  Kokkos::deep_copy(pos0, Kokkos::View<const real_t*, Kokkos::HostSpace>(x0.data(), 3 * N));
+  Kokkos::deep_copy(pos1, Kokkos::View<const real_t*, Kokkos::HostSpace>(x1.data(), 3 * N));
+  Kokkos::deep_copy(wd, Kokkos::View<const real_t*, Kokkos::HostSpace>(wh.data(), N));
+
+  const real_t tol = real_t(1e-4) * spacing, skin = real_t(0.25) * spacing;
+  peclet::voro::MovingTessellation<real_t, 64, 112, true> mt;
+  mt.alloc(N, Larr, tol, skin, 4, N);
+  mt.setWeights(wd);
+  mt.rebuild(pos0);
+  auto stats = mt.step(pos1);
+  auto volRepair = toHost(mt.vol);
+
+  Kokkos::View<long*, Mem> gd;
+  auto cold = peclet::voro::buildTessellation<real_t, true>(pos1, wd, N, Larr, 4, N, gd,
+                                                            peclet::voro::NoSdf{}, true);
+  auto volCold = toHost(cold.view.cellVolume);
+
+  double maxRel = 0.0;
+  long nMism = 0, nBuriedMism = 0, nEmpty = 0;
+  for (int i = 0; i < N; ++i) {
+    if ((volCold[i] <= 0.0) != (volRepair[i] <= 0.0)) ++nBuriedMism;
+    if (volCold[i] <= 0.0) {
+      ++nEmpty;
+      continue;
+    }
+    if (volRepair[i] <= 0.0) continue;
+    const double rel = std::abs(volCold[i] - volRepair[i]) / std::max(volCold[i], 1e-30);
+    maxRel = std::max(maxRel, rel);
+    if (rel > 1e-9) ++nMism;
+  }
+  const bool pass = maxRel < 1e-9 && nMism == 0 && nBuriedMism == 0;
+  std::printf("  (E) dyn   N=%-6d seed=%u wSpread=%.2f disp=%.2f | step vs cold: maxRelVol=%.2e "
+              "nMism=%ld buriedMism=%ld nEmpty=%ld fellBack=%d  %s\n",
+              N, seed, wSpreadFrac, dispFrac, maxRel, nMism, nBuriedMism, nEmpty,
+              (int)stats.fellBack, pass ? "OK" : "FAIL");
+  return pass ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -312,6 +372,10 @@ int main(int argc, char** argv) {
     }
     rc |= caseEqualWeights(20000, 1.0, 123u);
     rc |= caseVarWeights(20000, 1.0, 123u, 0.40f);
+    for (unsigned seed : {1u, 7u}) {
+      rc |= caseDynamic(4000, 1.0, seed, 0.05f, 0.02f);  // small weights, small motion
+      rc |= caseDynamic(4000, 1.0, seed, 0.10f, 0.05f);  // more weight + motion
+    }
     std::printf("%s\n", rc == 0 ? "ALL POWER-CELL CHECKS PASS" : "POWER-CELL CHECKS FAILED");
   }
   Kokkos::finalize();
