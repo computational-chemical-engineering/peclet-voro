@@ -1,5 +1,8 @@
 # peclet.voro
 
+[![PyPI version](https://img.shields.io/pypi/v/peclet-voro.svg)](https://pypi.org/project/peclet-voro/)
+[![Python versions](https://img.shields.io/pypi/pyversions/peclet-voro.svg)](https://pypi.org/project/peclet-voro/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![CI](https://github.com/computational-chemical-engineering/peclet-voro/actions/workflows/ci.yml/badge.svg)](https://github.com/computational-chemical-engineering/peclet-voro/actions/workflows/ci.yml)
 
 A **Kokkos** engine for dynamic Voronoi tessellation of moving particles in three
