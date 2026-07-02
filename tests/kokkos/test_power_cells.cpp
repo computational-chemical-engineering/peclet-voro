@@ -34,14 +34,14 @@ using real_t = double;
 
 namespace {
 
-// Host brute-force power-cell volume for seed i: clip the box by every other seed's radical plane
-// {x : r·x ≤ ½(|r|²+w_i−w_j)}, closest-first (keeps the live-plane count bounded). Fills `nbrOut`
-// with the surviving face neighbours when requested. Generous plane/vertex caps for the O(N) oracle.
-double bruteVol(int i, const std::vector<real_t>& x, const std::vector<real_t>& w, int N, real_t L,
-                std::vector<int>* nbrOut = nullptr) {
-  using OracleCell = peclet::voro::ConvexCell<real_t, 200, 400>;
+using OracleCell = peclet::voro::ConvexCell<real_t, 200, 400>;
+
+// Host brute-force power cell for seed i: clip the box by every other seed's radical plane
+// {x : r·x ≤ ½(|r|²+w_i−w_j)}, closest-first (keeps the live-plane count bounded). Returns
+// 0 = ok, 1 = buried (seed outside its own cell), -1 = overflow. Generous caps for the O(N) oracle.
+int buildPowerCell(int i, const std::vector<real_t>& x, const std::vector<real_t>& w, int N,
+                   real_t L, OracleCell& c) {
   const real_t Lh = real_t(0.5) * L;
-  // order neighbours by min-image distance² so early cuts dominate (bounded live-plane set)
   std::vector<std::pair<real_t, int>> ord;
   ord.reserve(N - 1);
   for (int j = 0; j < N; ++j) {
@@ -56,7 +56,6 @@ double bruteVol(int i, const std::vector<real_t>& x, const std::vector<real_t>& 
   }
   std::sort(ord.begin(), ord.end());
 
-  OracleCell c;
   c.initBox(L, L, L);
   for (auto& pr : ord) {
     const int j = pr.second;
@@ -67,10 +66,20 @@ double bruteVol(int i, const std::vector<real_t>& x, const std::vector<real_t>& 
       r[d] = rr;
     }
     const real_t off = real_t(0.5) * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + w[i] - w[j]);
-    if (off <= real_t(0)) return 0.0;  // seed outside its own cell ⇒ buried (empty) power cell
+    if (off <= real_t(0)) return 1;  // buried
     c.clip(r, off, j);
-    if (c.overflow) return -1.0;
+    if (c.overflow) return -1;
   }
+  return 0;
+}
+
+// Volume of the brute-force power cell (0 buried, -1 overflow).
+double bruteVol(int i, const std::vector<real_t>& x, const std::vector<real_t>& w, int N, real_t L,
+                std::vector<int>* nbrOut = nullptr) {
+  OracleCell c;
+  const int rc = buildPowerCell(i, x, w, N, L, c);
+  if (rc == 1) return 0.0;
+  if (rc < 0) return -1.0;
   if (nbrOut) {
     nbrOut->clear();
     for (int k = 0; k < c.np; ++k)
@@ -198,6 +207,95 @@ int caseVarWeights(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   return pass ? 0 : 1;
 }
 
+// (D) FD-vs-analytic power gradients: dV_i/dx_self, dV_i/dw_self, dV_i/dx_nbr, dV_i/dw_nbr from
+// geomVolumeGrad (dV/dn_k) chained through the Power policy (dn_k/dDOF) via chainToDofs<Power>.
+// Compact interior cells only (a box-wall face would move with the seed-centred oracle box and
+// contaminate the position FD).
+int caseGradients(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
+  const real_t spacing = L / std::cbrt(real_t(N));
+  const real_t wMax = wSpreadFrac * spacing * spacing;
+  std::mt19937 rng(seed);
+  std::uniform_real_distribution<real_t> U(0.0, 1.0);
+  std::vector<real_t> xh(3 * N), wh(N);
+  for (auto& v : xh) v = L * U(rng);
+  for (auto& v : wh) v = wMax * U(rng);
+
+  auto volAt = [&](int i, const std::vector<real_t>& x, const std::vector<real_t>& w) -> double {
+    OracleCell cc;
+    return buildPowerCell(i, x, w, N, L, cc) == 0 ? cc.volumePerVertex() : -1.0;
+  };
+
+  const real_t eps = 1e-6;
+  const double relTol = 3e-3;               // FD-limited
+  const double sig = 5e-3 * spacing * spacing;  // significant-gradient floor (dV/dx ~ face area)
+  double maxRel = 0.0;
+  long nTot = 0, nPass = 0, nCellsChecked = 0;
+  const int nCheck = std::min(N, 300);
+  for (int i = 0; i < nCheck; ++i) {
+    OracleCell c;
+    if (buildPowerCell(i, xh, wh, N, L, c) != 0) continue;  // buried/overflow
+    // interior filter: skip cells with any nonzero-area box-wall face (pnbr<0).
+    double area[200];
+    for (int k = 0; k < c.np; ++k) area[k] = 0.0;
+    c.facetAreasPerVertex(area);
+    bool wall = false;
+    double cellArea = 0.0;
+    for (int k = 0; k < c.np; ++k) {
+      cellArea = std::max(cellArea, area[k]);
+      if (c.pnbr[k] < 0 && area[k] > 1e-12) wall = true;
+    }
+    if (wall) continue;
+    ++nCellsChecked;
+
+    // analytic: dV/dn_k then chain to DOFs.
+    double vg = 0, dgx[200], dgy[200], dgz[200];
+    for (int k = 0; k < c.np; ++k) dgx[k] = dgy[k] = dgz[k] = 0.0;
+    c.geomVolumeGrad(vg, dgx, dgy, dgz);
+    double fSelf[3], fwSelf, fnx[200], fny[200], fnz[200], fwn[200];
+    const double seed3[3] = {xh[3 * i], xh[3 * i + 1], xh[3 * i + 2]};
+    peclet::voro::chainToDofs<peclet::voro::Power>(c, seed3, xh.data(), (double)wh[i], wh.data(),
+                                                   (double)L, dgx, dgy, dgz, fSelf, fwSelf, fnx, fny,
+                                                   fnz, fwn);
+
+    auto check = [&](double analytic, int idx, double eps2, bool weightDof) {
+      // central-difference the volume of cell i w.r.t. DOF (perturbing xh/wh entry `idx`).
+      std::vector<real_t>& arr = weightDof ? wh : xh;
+      const real_t save = arr[idx];
+      arr[idx] = save + (real_t)eps2;
+      const double vp = volAt(i, xh, wh);
+      arr[idx] = save - (real_t)eps2;
+      const double vm = volAt(i, xh, wh);
+      arr[idx] = save;
+      if (vp < 0 || vm < 0) return;  // topology changed under perturbation: skip
+      const double fd = (vp - vm) / (2 * eps2);
+      if (std::abs(fd) < sig) return;  // not FD-resolvable
+      ++nTot;
+      const double rel = std::abs(fd - analytic) / std::max(std::abs(fd), 1e-30);
+      maxRel = std::max(maxRel, rel);
+      if (rel < relTol) ++nPass;
+    };
+
+    // self position (3) + self weight (1)
+    for (int cc = 0; cc < 3; ++cc) check(fSelf[cc], 3 * i + cc, eps, false);
+    check(fwSelf, i, eps, true);
+    // one significant real-neighbour face: its position (3) + weight (1)
+    for (int k = 0; k < c.np; ++k) {
+      const int j = c.pnbr[k];
+      if (j < 0 || area[k] < 0.1 * cellArea) continue;
+      for (int cc = 0; cc < 3; ++cc) check(fnx[k] * (cc == 0) + fny[k] * (cc == 1) + fnz[k] * (cc == 2),
+                                           3 * j + cc, eps, false);
+      check(fwn[k], j, eps, true);
+      break;
+    }
+  }
+  const bool pass = nTot > 0 && (double)nPass / nTot > 0.98 && maxRel < 5e-2;
+  std::printf("  (D) grad  N=%-6d seed=%u wSpread=%.2f | cells=%ld comps=%ld pass=%ld/%ld "
+              "maxRel=%.2e  %s\n",
+              N, seed, wSpreadFrac, nCellsChecked, nTot, nPass, nTot, maxRel,
+              pass ? "OK" : "FAIL");
+  return pass ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -210,6 +308,7 @@ int main(int argc, char** argv) {
       rc |= caseEqualWeights(2000, 1.0, seed);
       rc |= caseVarWeights(2000, 1.0, seed, 0.25f);
       rc |= caseVarWeights(2000, 1.0, seed, 0.60f);
+      rc |= caseGradients(2000, 1.0, seed, 0.25f);
     }
     rc |= caseEqualWeights(20000, 1.0, 123u);
     rc |= caseVarWeights(20000, 1.0, 123u, 0.40f);
