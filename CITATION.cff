@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it using the metadata below."
+title: "peclet-voro: dynamic 3D Voronoi tessellation of moving particles"
+abstract: >-
+  A Kokkos engine for dynamic three-dimensional Voronoi tessellation of moving particles, supporting
+  periodic and Lees–Edwards boxes with incremental cell repair. The same sources run on CUDA/HIP/OpenMP
+  backends and the distributed path is built on the shared peclet-core MPI halo. Cells are stored as a
+  compact dual-triangle ConvexCell plus a facet-geometry CSR; a legacy half-edge engine is kept as a CPU
+  oracle. Part of the peclet suite, with nanobind Python bindings.
+type: software
+authors:
+  - family-names: Peters
+    given-names: Frank
+    email: e.a.j.f.peters@gmail.com
+    affiliation: "Eindhoven University of Technology"
+version: 0.2.0
+date-released: "2026-07-02"
+license: MIT
+doi: 10.5281/zenodo.21132443
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.21132443
+    description: "Concept DOI (all versions) — always resolves to the latest release"
+  - type: doi
+    value: 10.5281/zenodo.21132444
+    description: "Version DOI for v0.2.0"
+repository-code: "https://github.com/computational-chemical-engineering/peclet-voro"
+keywords:
+  - Voronoi tessellation
+  - computational geometry
+  - moving particles
+  - Lees–Edwards
+  - Kokkos
+  - GPU computing
+  - MPI
