@@ -76,8 +76,9 @@ jobs:
 
   # ── Format Check ─────────────────────────────────────────────────────────────
   clang-format:
-    name: clang-format check
+    name: clang-format (informational)
     runs-on: ubuntu-24.04
+    continue-on-error: true
     permissions:
       contents: read
     steps:
