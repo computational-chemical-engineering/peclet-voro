@@ -26,6 +26,7 @@
 #include <cstdio>
 #include <Kokkos_Core.hpp>
 #include <numeric>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -139,6 +140,30 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
 
   Geo G;
   build(pos, weight, G);
+  // Renormalise the targets to the ACTUAL total cell volume from the first build — the box volume for
+  // a pure/periodic Voronoi partition, but the FLUID volume when an SDF clips the cells against a
+  // solid (seeds meshing a pore space). Targeting the box volume there makes every target ~1/porosity
+  // too large, so the gradient is dominated by an unachievable uniform-growth mode and the line search
+  // rejects every step. For NoSdf the total is the box volume ⇒ this is an exact no-op (sc == 1).
+  {
+    double totVol = 0.0, sVset = 0.0;
+    for (int i = 0; i < N; ++i) {
+      totVol += G.vol[i];
+      sVset += vset[i];
+    }
+    const double sc = (sVset > 0.0) ? totVol / sVset : 1.0;
+    for (int i = 0; i < N; ++i) vset[i] *= sc;
+    G.E = G.maxErr = G.meanErr = 0;
+    G.nBad = 0;
+    for (int i = 0; i < N; ++i) {
+      const double e = G.vol[i] - vset[i];
+      G.E += gamma * e * e;
+      G.maxErr = std::max(G.maxErr, std::fabs(e));
+      G.meanErr += std::fabs(e);
+      if (G.vol[i] <= 0.0) ++G.nBad;
+    }
+    G.meanErr /= N;
+  }
   auto pack = [&](const std::vector<Real>& x, const std::vector<Real>& w, std::vector<Real>& q) {
     q.assign(x.begin(), x.end());
     if constexpr (Weighted) q.insert(q.end(), w.begin(), w.end());
@@ -325,7 +350,16 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       for (int i = 0; i < nD; ++i) qtry[i] = q[i] + (Real)(alpha * dq[i]);
       unpack(qtry, xt, wt);
       build(xt, wt, Gt);
-      if (Gt.nBad == 0 && Gt.E <= G.E + 1e-4 * alpha * gdq) {
+      // Validity gate on the trial cells. Without an SDF the (power-)Voronoi partition always has
+      // every V>0, so we keep the strict Gt.nBad==0 gate — it stops the optimiser wandering into an
+      // invalid configuration. With an SDF (pore-space meshing) that gate deadlocks: the clipped
+      // tessellation of random interstitial seeds always carries ~1% empty cells (a seed in a tight
+      // throat) and that count fluctuates by a few as seeds move, rejecting otherwise-good steps — so
+      // accept on the Armijo energy decrease alone (E already penalises an empty cell, V=0 ⇒ error
+      // −vset, so minimising E shrinks the bad set on its own).
+      constexpr bool kHasSdf = !std::is_same_v<Sdf, peclet::voro::NoSdf>;
+      const bool cellsValid = kHasSdf ? std::isfinite(Gt.E) : (Gt.nBad == 0);
+      if (cellsValid && Gt.E <= G.E + 1e-4 * alpha * gdq) {
         pos = xt;
         if constexpr (Weighted) weight = wt;
         G = Gt;

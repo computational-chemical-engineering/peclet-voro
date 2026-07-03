@@ -112,6 +112,16 @@ foreach(suffix "" "_f32")
 endforeach()
 target_compile_definitions(bench_dynamic_update_f32 PRIVATE CC_FLOAT=1)
 
+# Interstitial-packing volume-equalisation solver study (Newton preconditioners: CG / Jacobi /
+# colored-GS / Chebyshev / GraphAMG, plus first-order steepest-descent & nonlinear-CG). Needs a
+# packing.txt produced by ../pack_bed.py (peclet.dem). Uses PECLET_CORE_HAVE_MORTON for GraphAMG.
+add_executable(bench_mesh_optimizer bench_mesh_optimizer.cpp)
+target_link_libraries(bench_mesh_optimizer PRIVATE Kokkos::kokkos OpenMP::OpenMP_CXX)
+target_compile_definitions(bench_mesh_optimizer PRIVATE MORTON_ENABLE_KOKKOS=1 PECLET_CORE_HAVE_MORTON=1)
+target_include_directories(bench_mesh_optimizer PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../include" "${PECLET_VORO_TPX_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
+target_compile_features(bench_mesh_optimizer PRIVATE cxx_std_20)
+
 # CSV performance + memory + accuracy report benchmark (cold-build N-sweep + repair displacement-sweep).
 foreach(suffix "" "_f32")
   add_executable(bench_report${suffix} bench_report.cpp)
