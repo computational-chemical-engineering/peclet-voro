@@ -7,7 +7,7 @@ function(add_vorflow_kokkos_test name)
     "${CMAKE_CURRENT_SOURCE_DIR}/../../include"
     "${PECLET_VORO_TPX_INCLUDE}"
     "${PECLET_VORO_MORTON_INCLUDE}")
-  target_compile_definitions(${name} PRIVATE MORTON_ENABLE_KOKKOS=1)
+  target_compile_definitions(${name} PRIVATE MORTON_ENABLE_KOKKOS=1 PECLET_CORE_HAVE_MORTON=1)
   target_compile_features(${name} PRIVATE cxx_std_20)
   add_test(NAME ${name} COMMAND ${name})
   set_tests_properties(${name} PROPERTIES ENVIRONMENT "OMP_PROC_BIND=false")
@@ -31,6 +31,10 @@ add_vorflow_kokkos_test(test_power_cells)
 # P5: differentiable SDF wall force (seed-foot J_wall). FD-vs-analytic — flat wall exact, sphere
 # first-order.
 add_vorflow_kokkos_test(test_sdf_policy)
+
+# Semi-discrete OT volume-control optimiser: Newton on the power weights (L δw = Vset−V) via the core
+# MomentumSolver, driving cells to target volumes (uniform + spatially-graded refinement).
+add_vorflow_kokkos_test(test_mesh_optimizer)
 
 # voro++ reference (fetched once; the serial throughput target for bench_convexcell).
 include(FetchContent)
