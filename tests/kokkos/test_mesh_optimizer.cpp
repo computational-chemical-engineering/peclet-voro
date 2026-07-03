@@ -77,24 +77,28 @@ int main(int argc, char** argv) {
     for (auto& v : pos0) v = L * U(rng);
     std::vector<real_t> noW;
 
-    // (A) uniform target — Jacobi vs colored-GS, both Voronoi positions.
-    double sp_jac = 1, sp_gs = 1;
-    int it_jac = 0, it_gs = 0;
-    for (int mode = 0; mode < 2; ++mode) {
+    // (A) uniform target — Jacobi vs colored-GS vs smoothed-aggregation AMG, all Voronoi positions.
+    double sp[3] = {1, 1, 1};
+    int itn[3] = {0, 0, 0};
+    const peclet::voro::Precond precs[3] = {peclet::voro::Precond::Jacobi,
+                                            peclet::voro::Precond::ColoredGS,
+                                            peclet::voro::Precond::GraphAMG};
+    for (int mode = 0; mode < 3; ++mode) {
       std::vector<real_t> pos = pos0, vol1;
       std::vector<real_t> vset(N, boxVol / N);
-      const auto prec = mode == 0 ? peclet::voro::Precond::Jacobi : peclet::voro::Precond::ColoredGS;
       auto R = peclet::voro::meshVolumeOptimize<real_t, false>(
-          pos, noW, vset, (real_t[3]){L, L, L}, N, sw, peclet::voro::NoSdf{}, 60, 1e-10, 300, prec,
-          mode == 0);
+          pos, noW, vset, (real_t[3]){L, L, L}, N, sw, peclet::voro::NoSdf{}, 60, 1e-10, 300,
+          precs[mode], mode == 0);
       volumes<false>(pos, noW, N, L, sw, vol1);
-      (mode == 0 ? sp_jac : sp_gs) = spread(vol1);
-      (mode == 0 ? it_jac : it_gs) = R.iters;
+      sp[mode] = spread(vol1);
+      itn[mode] = R.iters;
     }
     {
-      const bool pass = sp_jac < 0.02 && sp_gs < 0.02;
-      std::printf("  (A) uniform  Jacobi: spread=%.4f (%d it)   coloredGS: spread=%.4f (%d it)  %s\n",
-                  sp_jac, it_jac, sp_gs, it_gs, pass ? "OK" : "FAIL");
+      const bool pass = sp[0] < 0.02 && sp[1] < 0.02 && sp[2] < 0.02;
+      std::printf(
+          "  (A) uniform  Jacobi: spread=%.4f (%d it)   coloredGS: spread=%.4f (%d it)   "
+          "graphAMG: spread=%.4f (%d it)  %s\n",
+          sp[0], itn[0], sp[1], itn[1], sp[2], itn[2], pass ? "OK" : "FAIL");
       rc |= pass ? 0 : 1;
     }
 

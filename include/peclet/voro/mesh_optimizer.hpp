@@ -29,14 +29,19 @@
 #include <unordered_map>
 #include <vector>
 
-#include "peclet/core/amr/momentum.hpp"  // greedyColoring
-#include "peclet/voro/ot_optimizer.hpp"  // OtResult + detail::toHostVec/toHostVecT
+#include "peclet/core/amr/momentum.hpp"     // greedyColoring
+#include "peclet/core/solver/graph_amg.hpp"  // smoothed-aggregation AMG (O(N) CG preconditioner)
+#include "peclet/voro/ot_optimizer.hpp"      // OtResult + detail::toHostVec/toHostVecT
 #include "peclet/voro/sdf.hpp"
 #include "peclet/voro/tessellator.hpp"
 
 namespace peclet::voro {
 
-enum class Precond { Jacobi, ColoredGS };
+// CG preconditioner for the Gauss-Newton Hessian solve. Jacobi = O(N^4/3) (iterations grow with N);
+// ColoredGS = a stronger single-level smoother; GraphAMG = smoothed-aggregation multigrid, the only
+// one whose iteration count stays mesh-independent ⇒ an O(N) solve at large N (see
+// peclet::core::solver::GraphAMG).
+enum class Precond { Jacobi, ColoredGS, GraphAMG };
 
 /**
  * Minimise E = Σ γ (V_i − V_set,i)² by damped Gauss-Newton over positions (and weights when
@@ -230,9 +235,36 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       col = peclet::core::amr::greedyColoring(ostart, onbr, (Index)nD);
       colIdxHost = detail::toHostVecT<Index>(col.idx);
     }
+    // Smoothed-aggregation AMG: rebuilt each Newton step (H moves with the geometry) from the same
+    // assembled Hessian CSR. Nodal aggregation over the 3-DOF-per-seed position blocks (the weighted
+    // path segregates the N weight DOFs after the 3N positions, so it falls back to scalar
+    // aggregation, s=1 — correct, just not block-aware; a block-aware weighted variant is a later
+    // refinement). One V-cycle per CG iteration keeps the iteration count flat as N grows.
+    peclet::core::solver::GraphAMG amg;
+    if (prec == Precond::GraphAMG) {
+      peclet::core::solver::HostCsrOp Aop;
+      Aop.n = nD;
+      Aop.diag = Hdiag;
+      Aop.start.assign((std::size_t)nD + 1, 0);
+      for (int i = 0; i < nD; ++i) {
+        for (Index k = Hstart[i]; k < Hstart[i + 1]; ++k)
+          if (Hcol[k] != i) {
+            Aop.nbr.push_back(Hcol[k]);
+            Aop.coef.push_back(Hval[k]);
+          }
+        Aop.start[(std::size_t)i + 1] = (Index)Aop.nbr.size();
+      }
+      peclet::core::solver::AmgParams ap;
+      ap.ndofPerNode = Weighted ? 1 : 3;
+      amg.build(Aop, ap);
+    }
     auto precond = [&](const std::vector<double>& r, std::vector<double>& z) {
       if (prec == Precond::Jacobi) {
         for (int i = 0; i < nD; ++i) z[i] = std::fabs(Hdiag[i]) > 1e-30 ? r[i] / Hdiag[i] : r[i];
+        return;
+      }
+      if (prec == Precond::GraphAMG) {
+        amg.apply(r, z);
         return;
       }
       // symmetric multicolour Gauss–Seidel (forward + backward sweep), z = 0 start.
