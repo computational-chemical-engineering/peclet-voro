@@ -43,7 +43,7 @@ namespace peclet::voro {
 // ColoredGS = a stronger single-level smoother; GraphAMG = smoothed-aggregation multigrid, the only
 // one whose iteration count stays mesh-independent ⇒ an O(N) solve at large N (see
 // peclet::core::solver::GraphAMG).
-enum class Precond { Jacobi, ColoredGS, GraphAMG };
+enum class Precond { Jacobi, ColoredGS, GraphAMG, SteepestDescent };
 
 /**
  * Minimise the DIMENSIONLESS relative volume energy E = Σ (V_i/V_ref,i − 1)² by damped Gauss-Newton
@@ -222,24 +222,40 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     if constexpr (Weighted) w.assign(q.begin() + 3 * N, q.end());
   };
 
-  // Log-barrier −μ Σ log(V_i/V_ref,i): +∞ as any cell shrinks to V=0, so the optimiser cannot collapse
-  // a cell (its −A_wall clip against a solid can otherwise drive V→0). This makes E infinite for an
-  // infeasible trial ⇒ the line search auto-rejects it (no ad-hoc nBad gate needed), and with μ→0
-  // continuation the minimiser approaches the true equal-volume mesh from the strictly-feasible
-  // interior. Off (μ=0) ⇒ exactly the plain relative energy (NoSdf and all existing callers).
+  // RELAXED log-barrier against cell collapse: −μ log(V_i/V_ref,i) for t=V/V_ref > ε, continued by the
+  // quadratic that matches its value/1st/2nd derivative at t=ε for t ≤ ε. It → large (not ∞) as V→0,
+  // so it strongly discourages collapse yet tolerates a slightly-infeasible start (the parallel
+  // tessellation flickers a few borderline cells to V≤0) and drives it feasible; with μ→0 continuation
+  // the minimiser approaches the true equal-volume mesh. Off (μ=0) ⇒ the plain relative energy.
+  // barCell returns {energy, dE/dV, d²E/dV²} for one cell.
+  const double barEps = 0.1;
+  auto barCell = [&](double V, double vref, double mu) {
+    struct { double e, d1, d2; } r{0.0, 0.0, 0.0};
+    if (mu <= 0.0) return r;
+    const double t = V / vref;
+    if (t > barEps) {
+      r.e = -mu * std::log(t);
+      r.d1 = -mu / V;
+      r.d2 = mu / (V * V);
+    } else {
+      const double dt = t - barEps, ie = 1.0 / barEps;
+      r.e = mu * (-std::log(barEps) - dt * ie + 0.5 * dt * dt * ie * ie);
+      r.d1 = mu * (-ie + dt * ie * ie) / vref;
+      r.d2 = mu * ie * ie / (vref * vref);
+    }
+    return r;
+  };
   auto barrierE = [&](const Geo& G, double mu) -> double {
     if (mu <= 0.0) return 0.0;
     double b = 0.0;
-    for (int i = 0; i < N; ++i) {
-      if (G.vol[i] <= 0.0) return std::numeric_limits<double>::infinity();
-      b -= mu * std::log(G.vol[i] / vset[i]);
-    }
+    for (int i = 0; i < N; ++i) b += barCell(G.vol[i], vset[i], mu).e;
     return b;
   };
 
   OtResult R;
   std::vector<double> g(nD), dq(nD);
   std::vector<std::pair<int, double>> st;
+  const bool useHessian = (prec != Precond::SteepestDescent);
   for (int it = 0; it < maxNewton; ++it) {
     // Barrier-continuation weight for this Newton step: μ_it = μ0·decay^it → 0.
     const double muCur = (double)muBarrier * std::pow((double)muDecay, it);
@@ -254,15 +270,18 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       // GN term +μ/V_c² to Hw (both ∝ ∇V_c, so they ride the same stencil).
       double Rc = 2.0 * (G.vol[c] / vset[c] - 1.0) / vset[c];
       double Hw = 2.0 / (vset[c] * vset[c]);
-      if (muCur > 0.0 && G.vol[c] > 0.0) {
-        Rc -= muCur / G.vol[c];
-        Hw += muCur / (G.vol[c] * G.vol[c]);
+      if (muCur > 0.0) {
+        const auto bc = barCell(G.vol[c], vset[c], muCur);
+        Rc += bc.d1;  // add the (relaxed) barrier's dE/dV and GN Hessian weight d²E/dV²
+        Hw += bc.d2;
       }
       stencil(G, c, st);
       for (auto& [a, va] : st) {
         g[a] += Rc * va;
-        auto& ra = row[a];
-        for (auto& [b, vb] : st) ra[b] += Hw * va * vb;
+        if (useHessian) {
+          auto& ra = row[a];
+          for (auto& [b, vb] : st) ra[b] += Hw * va * vb;
+        }
       }
     }
     double gnorm = 0;
@@ -304,6 +323,14 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       break;
     }
 
+    // Search direction. Steepest descent uses dq = −g directly (the "volume-pressure" force
+    // −Σ_c (∂E/∂V_c)∇V_c) — a guaranteed descent direction, no Hessian solve, robust where the
+    // rank-deficient Gauss-Newton Hessian sends Newton into infeasible territory. Otherwise solve
+    // H dq = −g by preconditioned CG.
+    double rz0 = 0, rz = 0;  // (reported in the verbose line below; set on the CG path)
+    if (!useHessian) {
+      for (int i = 0; i < nD; ++i) dq[i] = -g[i];
+    } else {
     // flatten to CSR (Hcol/Hval incl. diagonal; Hdiag separate; off-diagonal CSR for colouring).
     std::vector<Index> Hstart(nD + 1, 0), Hcol, ostart(nD + 1, 0), onbr;
     std::vector<double> Hval, Hdiag(nD, 0.0);
@@ -393,9 +420,9 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     for (int i = 0; i < nD; ++i) rr[i] = -g[i];
     precond(rr, z);
     p = z;
-    double rz = 0;
+    rz = 0;
     for (int i = 0; i < nD; ++i) rz += rr[i] * z[i];
-    const double rz0 = rz;
+    rz0 = rz;
     for (int k = 0; k < cgIters && rz > 1e-18 * rz0; ++k) {
       matvec(p, Ap);
       double pAp = 0;
@@ -413,6 +440,7 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       for (int i = 0; i < nD; ++i) p[i] = z[i] + beta * p[i];
       rz = rzn;
     }
+    }  // else (Gauss-Newton CG path)
 
     // Armijo backtracking on the TOTAL energy E + barrier along dq.
     double gdq = 0;
