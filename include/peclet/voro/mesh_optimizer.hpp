@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
+#include <limits>
 #include <numeric>
 #include <type_traits>
 #include <unordered_map>
@@ -62,7 +63,8 @@ template <class Real, bool Weighted = false, class Sdf = NoSdf>
 OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
                             const std::vector<Real>& vsetIn, const Real L[3], int N, int sw,
                             const Sdf& sdf, int maxNewton, Real tol, int cgIters = 300,
-                            Precond prec = Precond::Jacobi, bool verbose = false) {
+                            Precond prec = Precond::Jacobi, bool verbose = false,
+                            Real muBarrier = 0, Real muDecay = (Real)0.7) {
   using peclet::core::Index;
   using MemSpace = peclet::core::MemSpace;
   const Real Larr[3] = {L[0], L[1], L[2]};
@@ -220,10 +222,27 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     if constexpr (Weighted) w.assign(q.begin() + 3 * N, q.end());
   };
 
+  // Log-barrier −μ Σ log(V_i/V_ref,i): +∞ as any cell shrinks to V=0, so the optimiser cannot collapse
+  // a cell (its −A_wall clip against a solid can otherwise drive V→0). This makes E infinite for an
+  // infeasible trial ⇒ the line search auto-rejects it (no ad-hoc nBad gate needed), and with μ→0
+  // continuation the minimiser approaches the true equal-volume mesh from the strictly-feasible
+  // interior. Off (μ=0) ⇒ exactly the plain relative energy (NoSdf and all existing callers).
+  auto barrierE = [&](const Geo& G, double mu) -> double {
+    if (mu <= 0.0) return 0.0;
+    double b = 0.0;
+    for (int i = 0; i < N; ++i) {
+      if (G.vol[i] <= 0.0) return std::numeric_limits<double>::infinity();
+      b -= mu * std::log(G.vol[i] / vset[i]);
+    }
+    return b;
+  };
+
   OtResult R;
   std::vector<double> g(nD), dq(nD);
   std::vector<std::pair<int, double>> st;
   for (int it = 0; it < maxNewton; ++it) {
+    // Barrier-continuation weight for this Newton step: μ_it = μ0·decay^it → 0.
+    const double muCur = (double)muBarrier * std::pow((double)muDecay, it);
     // gradient + assembled Gauss-Newton Hessian (rows as maps → CSR).
     std::fill(g.begin(), g.end(), 0.0);
     std::vector<std::unordered_map<int, double>> row(nD);
@@ -231,9 +250,14 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       // Relative energy E = Σ (V_c/V_ref − 1)²: residual r_c = V_c/V_ref − 1, so the objective
       // gradient picks up ∇V_c with coefficient Rc = 2 r_c/V_ref and the Gauss-Newton rank-1 weight
       // is Hw = 2/V_ref². (V_ref = vset, renormalised to the total cell volume above; per-cell so a
-      // graded V_ref is a drop-in.)
-      const double Rc = 2.0 * (G.vol[c] / vset[c] - 1.0) / vset[c];
-      const double Hw = 2.0 / (vset[c] * vset[c]);
+      // graded V_ref is a drop-in.) The log-barrier adds ∂(−μ log V_c)/∂V_c = −μ/V_c to Rc and the
+      // GN term +μ/V_c² to Hw (both ∝ ∇V_c, so they ride the same stencil).
+      double Rc = 2.0 * (G.vol[c] / vset[c] - 1.0) / vset[c];
+      double Hw = 2.0 / (vset[c] * vset[c]);
+      if (muCur > 0.0 && G.vol[c] > 0.0) {
+        Rc -= muCur / G.vol[c];
+        Hw += muCur / (G.vol[c] * G.vol[c]);
+      }
       stencil(G, c, st);
       for (auto& [a, va] : st) {
         g[a] += Rc * va;
@@ -253,7 +277,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       build(xp, wp, Gp);
       xp[d] -= (Real)(2 * h);
       build(xp, wp, Gm);
-      std::printf("      FD dE/dx_%d: analytic=%.4e fd=%.4e\n", d, g[d], (Gp.E - Gm.E) / (2 * h));
+      std::printf("      FD dE/dx_%d: analytic=%.4e fd=%.4e\n", d, g[d],
+                  ((Gp.E + barrierE(Gp, muCur)) - (Gm.E + barrierE(Gm, muCur))) / (2 * h));
       if constexpr (Weighted) {  // also validate a weight-DOF gradient
         const int dw = wdof(N / 3);
         std::vector<Real> wq = weight;
@@ -272,8 +297,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     R.meanVolErr = G.meanErr;
     R.nEmpty = G.nBad;
     if (verbose)
-      std::printf("  [vmesh] iter %2d  E=%.4e maxVolErr=%.3e gnorm=%.3e nBad=%ld\n", it, G.E,
-                  G.maxErr, gnorm, G.nBad);
+      std::printf("  [vmesh] iter %2d  E=%.4e maxVolErr=%.3e gnorm=%.3e nBad=%ld mu=%.2e\n", it, G.E,
+                  G.maxErr, gnorm, G.nBad, muCur);
     if (gnorm < tol) {
       R.converged = true;
       break;
@@ -389,9 +414,10 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       rz = rzn;
     }
 
-    // Armijo backtracking on E along dq.
+    // Armijo backtracking on the TOTAL energy E + barrier along dq.
     double gdq = 0;
     for (int i = 0; i < nD; ++i) gdq += g[i] * dq[i];
+    const double Ecur = G.E + barrierE(G, muCur);
     std::vector<Real> q, qtry, xt, wt;
     pack(pos, weight, q);
     double alpha = 1.0;
@@ -402,14 +428,14 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       for (int i = 0; i < nD; ++i) qtry[i] = q[i] + (Real)(alpha * dq[i]);
       unpack(qtry, xt, wt);
       build(xt, wt, Gt);
-      // Validity gate on the trial cells. Without an SDF the (power-)Voronoi partition always has
-      // every V>0, so require Gt.nBad==0. With an SDF (pore-space meshing) accept on the Armijo
-      // energy decrease alone: the clipped tessellation of random interstitial seeds always carries a
-      // few empty cells, and a strict "no new empty cell" gate deadlocks. NOTE: this lets the
-      // aggressive Newton step collapse a fraction of the cells (nBad grows); full pore equalisation
-      // needs a volume barrier / trust region on top of the wall-aware gradient — a follow-up.
-      const bool cellsValid = kHasSdf ? std::isfinite(Gt.E) : (Gt.nBad == 0);
-      if (cellsValid && Gt.E <= G.E + 1e-4 * alpha * gdq) {
+      const double Etry = Gt.E + barrierE(Gt, muCur);
+      // Validity gate. With the barrier on (μ>0) a collapsed trial has Etry=+∞ ⇒ rejected by isfinite,
+      // so feasibility (all V>0) is enforced automatically. With no barrier: NoSdf requires nBad==0;
+      // the SDF-without-barrier case accepts on the energy decrease alone.
+      const bool cellsValid = (muCur > 0.0)
+                                  ? std::isfinite(Etry)
+                                  : (kHasSdf ? std::isfinite(Gt.E) : (Gt.nBad == 0));
+      if (cellsValid && Etry <= Ecur + 1e-4 * alpha * gdq) {
         pos = xt;
         if constexpr (Weighted) weight = wt;
         G = Gt;

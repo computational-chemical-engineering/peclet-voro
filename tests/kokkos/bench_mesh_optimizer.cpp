@@ -177,22 +177,33 @@ template <class Sdf>
 std::vector<Real> seedClean(const Packing& pk, int Nreq, Real margin, int sw, const Sdf& sdf,
                             Kokkos::View<long*, peclet::core::MemSpace>& gd, unsigned seed) {
   std::vector<Real> pos = seedInterstitial(pk, (int)(1.2 * Nreq), margin, seed);
-  for (int round = 0; round < 6; ++round) {
+  // Prune to a strictly-feasible set (every V > a margin fraction of the mean cell volume), so the
+  // log-barrier optimiser can start from the interior. A plain V>0 cut leaves borderline cells that
+  // flicker sign under the parallel tessellation and never fully clear; the margin removes them.
+  for (int round = 0; round < 12; ++round) {
     int n = (int)(pos.size() / 3);
     Tess T = buildTess(pos, n, pk.L, sw, sdf, gd);
+    double sV = 0;
+    int m = 0;
+    for (int c = 0; c < n; ++c)
+      if (T.vol[c] > 0.0) {
+        sV += T.vol[c];
+        ++m;
+      }
+    const double thr = 0.15 * (m > 0 ? sV / m : 0.0);  // drop cells below 15% of the mean volume
     std::vector<Real> keep;
     keep.reserve(pos.size());
     for (int c = 0; c < n; ++c)
-      if (T.vol[c] > 0.0) {
+      if (T.vol[c] > thr) {
         keep.push_back(pos[3 * c]);
         keep.push_back(pos[3 * c + 1]);
         keep.push_back(pos[3 * c + 2]);
       }
     const int removed = n - (int)(keep.size() / 3);
     pos.swap(keep);
-    if (removed == 0) break;  // no trim afterwards — trimming re-tessellates and can re-sliver
+    if (removed == 0) break;
   }
-  std::printf("  -> %d clean interstitial seeds after pruning degenerate cells\n",
+  std::printf("  -> %d clean interstitial seeds after pruning small cells\n",
               (int)(pos.size() / 3));
   return pos;
 }
@@ -403,11 +414,20 @@ int main(int argc, char** argv) {
         Tess T = buildTess(p1, Nc, L, sw, peclet::voro::NoSdf{}, gd);
         std::printf("   NoSdf final variance = %.3e\n", volumeSpread(T, Nc));
       }
-      std::printf("\n---- SDF (pore walls), Newton+AMG, verbose ----\n");
+      // Graded reference volume V_ref = clamp(sdf, sLo, sHi)³ (relative; renormalised inside): small
+      // cells hugging the walls (inflation layer), growing to a capped bulk size — and it makes the
+      // naturally-small wall cells ON-TARGET so the log-barrier no longer fights them.
+      std::vector<Real> vsetG(Nc);
+      for (int i = 0; i < Nc; ++i) {
+        double phi = hostSdf(pk, seeds[3 * i], seeds[3 * i + 1], seeds[3 * i + 2]);
+        phi = std::min(0.35, std::max(0.06, phi));
+        vsetG[i] = (Real)(phi * phi * phi);
+      }
+      std::printf("\n---- SDF (pore walls), graded V_ref=sdf^3 + log-barrier, Newton+AMG, verbose ----\n");
       std::vector<Real> p2 = seeds;
       peclet::voro::meshVolumeOptimize<Real, false, SdfSpheres>(
-          p2, noW, vset, (Real[3]){L, L, L}, Nc, sw, sdf, 40, 1e-9, 400,
-          peclet::voro::Precond::GraphAMG, true);
+          p2, noW, vsetG, (Real[3]){L, L, L}, Nc, sw, sdf, 40, 1e-9, 400,
+          peclet::voro::Precond::GraphAMG, true, 0.05);
       {
         Tess T = buildTess(p2, Nc, L, sw, sdf, gd);
         std::printf("   SDF final variance = %.3e\n", volumeSpread(T, Nc));
