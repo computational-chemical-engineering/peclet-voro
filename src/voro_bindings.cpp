@@ -49,6 +49,7 @@
 #include "peclet/core/common/view.hpp"
 #include "peclet/core/python/ndarray_interop.hpp"
 #include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/mesh_optimizer.hpp"
 #include "peclet/voro/repair.hpp"
 #include "peclet/voro/topology_store.hpp"
 #include "peclet/voro/physics/simulation.hpp"
@@ -405,6 +406,54 @@ NB_MODULE(_voro, m) {
         "run automatically at interpreter exit).");
   m.attr("execution_space") = nb::str(Kokkos::DefaultExecutionSpace::name());
   nb::module_::import_("atexit").attr("register")(nb::cpp_function(shutdown));
+
+  // ---- mesh optimiser ---------------------------------------------------------------------------
+  m.def(
+      "optimize_volume_mesh",
+      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> vset_in,
+         real_t L, int sw, int max_newton, real_t tol, int cg_iters, bool use_weights,
+         bool colored_gs) {
+        auto pos = flatten3(pos_in);
+        auto vset = flatten1(vset_in);
+        const int N = (int)vset.size();
+        const real_t Larr[3] = {L, L, L};
+        const auto prec =
+            colored_gs ? peclet::voro::Precond::ColoredGS : peclet::voro::Precond::Jacobi;
+        peclet::voro::OtResult R;
+        std::vector<real_t> w;
+        if (use_weights) {
+          w.assign(N, 0.0);
+          R = peclet::voro::meshVolumeOptimize<real_t, true>(pos, w, vset, Larr, N, sw,
+                                                             peclet::voro::NoSdf{}, max_newton, tol,
+                                                             cg_iters, prec, false);
+        } else {
+          std::vector<real_t> noW;
+          R = peclet::voro::meshVolumeOptimize<real_t, false>(pos, noW, vset, Larr, N, sw,
+                                                              peclet::voro::NoSdf{}, max_newton, tol,
+                                                              cg_iters, prec, false);
+        }
+        nb::dict d;
+        d["positions"] = peclet::core::python::vector_to_ndarray(
+            std::move(pos), {static_cast<std::size_t>(N), 3}, {3, 1});
+        if (use_weights)
+          d["weights"] = peclet::core::python::vector_to_ndarray(
+              std::move(w), {static_cast<std::size_t>(N)}, {1});
+        d["iters"] = R.iters;
+        d["max_vol_err"] = R.maxVolErr;
+        d["mean_vol_err"] = R.meanVolErr;
+        d["converged"] = R.converged;
+        d["n_empty"] = R.nEmpty;
+        return d;
+      },
+      nb::arg("positions"), nb::arg("vset"), nb::arg("L") = 1.0, nb::arg("sw") = 5,
+      nb::arg("max_newton") = 60, nb::arg("tol") = 1e-9, nb::arg("cg_iters") = 300,
+      nb::arg("use_weights") = false, nb::arg("colored_gs") = false,
+      "Move seeds (N,3) — and optionally the power weights — to minimise Σ(V_i − vset_i)² by damped\n"
+      "Gauss-Newton (Newton–Raphson + CG with a Jacobi or colored-Gauss-Seidel preconditioner).\n"
+      "vset (N,) are the target cell volumes (renormalised to the box volume). Returns a dict with\n"
+      "the updated 'positions' (and 'weights' if use_weights), plus iters/max_vol_err/converged.\n"
+      "Pure Voronoi (use_weights=False) reaches equal/graded volumes well; weights add fuller volume\n"
+      "control but are limited by the periodic tessellation's ~1% min-image floor.");
 
   // ---- Tessellation -----------------------------------------------------------------------------
   nb::class_<Tess>(

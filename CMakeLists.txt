@@ -131,7 +131,7 @@ if(PECLET_VORO_KOKKOS)
                    "${CMAKE_CURRENT_BINARY_DIR}/peclet/voro/__init__.py" COPYONLY)
     target_include_directories(voro PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/include" "${PECLET_VORO_TPX_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
-    target_compile_definitions(voro PRIVATE MORTON_ENABLE_KOKKOS=1)
+    target_compile_definitions(voro PRIVATE MORTON_ENABLE_KOKKOS=1 PECLET_CORE_HAVE_MORTON=1)
     target_link_libraries(voro PRIVATE Kokkos::kokkos)
     target_compile_features(voro PRIVATE cxx_std_20)
     # HIP/lld: keep sections so Kokkos SharedAllocationRecord<HIPSpace> vtables aren't gc'd (see flow).
