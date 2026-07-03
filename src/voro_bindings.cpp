@@ -39,6 +39,7 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
+#include <nanobind/stl/string.h>
 
 #include <array>
 #include <cmath>
@@ -79,6 +80,77 @@ std::vector<real_t> flatten3(nb::ndarray<real_t, nb::c_contig> a) {
 // (N,) array -> host vector of length N.
 std::vector<real_t> flatten1(nb::ndarray<real_t, nb::c_contig> a) {
   return peclet::core::python::ndarray_to_vector<real_t>(nb::ndarray<>(a));
+}
+
+// ---- pore-space meshing helpers (SDF-walled interstitial Voronoi + geometry export) --------------
+using PoreCell = peclet::voro::ConvexCell<real_t, 128, 256>;
+
+// Build a periodic union-of-balls SDF from (M,3) centres + (M,) radii; the Views must outlive its use.
+peclet::voro::SdfSpheres<real_t> makeSpheresSdf(nb::ndarray<real_t, nb::c_contig> centres,
+                                                nb::ndarray<real_t, nb::c_contig> radii, real_t L,
+                                                DView& cenHold, DView& radHold) {
+  const int M = (int)radii.shape(0);
+  auto cflat = flatten3(centres);
+  cenHold = DView("sph.cen", 3 * M);
+  radHold = DView("sph.rad", M);
+  Kokkos::deep_copy(cenHold, Kokkos::View<const real_t*, Kokkos::HostSpace>(cflat.data(), 3 * M));
+  Kokkos::deep_copy(radHold, Kokkos::View<const real_t*, Kokkos::HostSpace>(radii.data(), M));
+  return peclet::voro::SdfSpheres<real_t>{cenHold, radHold, M, L};
+}
+
+// Ordered alive-triangle indices for face k (watertight by triangle index). Port of the one in
+// examples/packed_bed_voronoi/pore_mesh_stages.cpp.
+int faceOrderedIdx(const PoreCell& c, int k, int out[PoreCell::MAXFV]) {
+  int m = 0;
+  real_t fx[PoreCell::MAXFV], fy[PoreCell::MAXFV], fz[PoreCell::MAXFV];
+  for (int t = 0; t < c.nt; ++t) {
+    if (!c.alive[t]) continue;
+    if (c.t0[t] != k && c.t1[t] != k && c.t2[t] != k) continue;
+    if (m < PoreCell::MAXFV) {
+      out[m] = t;
+      fx[m] = c.vx[t];
+      fy[m] = c.vy[t];
+      fz[m] = c.vz[t];
+      ++m;
+    }
+  }
+  if (m < 3) return m;
+  const real_t nx = c.n[k][0], ny = c.n[k][1], nz = c.n[k][2];
+  const real_t nlen = std::sqrt(nx * nx + ny * ny + nz * nz);
+  if (nlen == real_t(0)) return 0;
+  const real_t un[3] = {nx / nlen, ny / nlen, nz / nlen};
+  real_t e1[3];
+  if (std::fabs(un[0]) <= std::fabs(un[1]) && std::fabs(un[0]) <= std::fabs(un[2])) {
+    e1[0] = 0; e1[1] = -un[2]; e1[2] = un[1];
+  } else if (std::fabs(un[1]) <= std::fabs(un[2])) {
+    e1[0] = -un[2]; e1[1] = 0; e1[2] = un[0];
+  } else {
+    e1[0] = -un[1]; e1[1] = un[0]; e1[2] = 0;
+  }
+  const real_t e1l = std::sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
+  e1[0] /= e1l; e1[1] /= e1l; e1[2] /= e1l;
+  const real_t e2[3] = {un[1] * e1[2] - un[2] * e1[1], un[2] * e1[0] - un[0] * e1[2],
+                        un[0] * e1[1] - un[1] * e1[0]};
+  real_t cx = 0, cy = 0, cz = 0;
+  for (int i = 0; i < m; ++i) { cx += fx[i]; cy += fy[i]; cz += fz[i]; }
+  cx /= m; cy /= m; cz /= m;
+  real_t ang[PoreCell::MAXFV];
+  for (int i = 0; i < m; ++i) {
+    const real_t dx = fx[i] - cx, dy = fy[i] - cy, dz = fz[i] - cz;
+    const real_t pu = dx * e1[0] + dy * e1[1] + dz * e1[2];
+    const real_t pv = dx * e2[0] + dy * e2[1] + dz * e2[2];
+    const real_t s = std::fabs(pu) + std::fabs(pv);
+    const real_t tt = (s > real_t(0)) ? pv / s : real_t(0);
+    ang[i] = (pu < real_t(0)) ? (real_t(2) - tt) : (pv < real_t(0) ? real_t(4) + tt : tt);
+  }
+  for (int i = 1; i < m; ++i) {
+    const real_t ka = ang[i];
+    const int ki = out[i];
+    int j = i - 1;
+    while (j >= 0 && ang[j] > ka) { ang[j + 1] = ang[j]; out[j + 1] = out[j]; --j; }
+    ang[j + 1] = ka; out[j + 1] = ki;
+  }
+  return m;
 }
 
 // --------------------------------------------------------------------------------------------------
@@ -454,6 +526,142 @@ NB_MODULE(_voro, m) {
       "the updated 'positions' (and 'weights' if use_weights), plus iters/max_vol_err/converged.\n"
       "Pure Voronoi (use_weights=False) reaches equal/graded volumes well; weights add fuller volume\n"
       "control but are limited by the periodic tessellation's ~1% min-image floor.");
+
+  // ---- pore-space (SDF-walled) mesh optimiser + geometry export ---------------------------------
+  m.def(
+      "optimize_pore_mesh",
+      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> vref_in,
+         nb::ndarray<real_t, nb::c_contig> sph_c, nb::ndarray<real_t, nb::c_contig> sph_r, real_t L,
+         int sw, int max_iter, real_t tol, int cg_iters, const std::string& method, real_t mu_barrier,
+         bool free_energy) {
+        auto pos = flatten3(pos_in);
+        auto vref = flatten1(vref_in);
+        const int N = (int)vref.size();
+        const real_t Larr[3] = {L, L, L};
+        DView cenH, radH;
+        auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
+        peclet::voro::Precond prec = peclet::voro::Precond::GraphAMG;
+        if (method == "steepest") prec = peclet::voro::Precond::SteepestDescent;
+        else if (method == "jacobi") prec = peclet::voro::Precond::Jacobi;
+        else if (method == "colored_gs") prec = peclet::voro::Precond::ColoredGS;
+        std::vector<real_t> noW;
+        auto R = peclet::voro::meshVolumeOptimize<real_t, false, peclet::voro::SdfSpheres<real_t>>(
+            pos, noW, vref, Larr, N, sw, sdf, max_iter, tol, cg_iters, prec, false, mu_barrier,
+            (real_t)0.7, free_energy);
+        nb::dict d;
+        d["positions"] = peclet::core::python::vector_to_ndarray(
+            std::move(pos), {static_cast<std::size_t>(N), 3}, {3, 1});
+        d["iters"] = R.iters;
+        d["max_vol_err"] = R.maxVolErr;
+        d["converged"] = R.converged;
+        d["n_empty"] = R.nEmpty;
+        return d;
+      },
+      nb::arg("positions"), nb::arg("vref"), nb::arg("sphere_centres"), nb::arg("sphere_radii"),
+      nb::arg("L"), nb::arg("sw") = 6, nb::arg("max_iter") = 80, nb::arg("tol") = 1e-9,
+      nb::arg("cg_iters") = 400, nb::arg("method") = "graphamg", nb::arg("mu_barrier") = 0.0,
+      nb::arg("free_energy") = false,
+      "Relax interstitial seeds (N,3) so their SDF-clipped Voronoi cell volumes approach the per-cell\n"
+      "targets vref (N,), with the sphere packing (sphere_centres (M,3), sphere_radii (M,)) as periodic\n"
+      "walls. method: 'graphamg'|'jacobi'|'colored_gs' (Gauss-Newton CG) or 'steepest' (descent).\n"
+      "free_energy=True uses E=-Σ V_ref·log V (pressure V_ref/V, resists collapse); mu_barrier>0 adds a\n"
+      "log-barrier. EXPERIMENTAL (pore-space meshing; see the pore-mesh-voronoi example).");
+
+  m.def(
+      "sdf_voronoi_cells",
+      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
+         nb::ndarray<real_t, nb::c_contig> sph_r, real_t L) {
+        auto seed = flatten3(pos_in);
+        const int N = (int)(seed.size() / 3);
+        DView cenH, radH;
+        auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
+        // Reconstruct each interstitial cell (periodic min-image neighbours + SDF clip) and pack the
+        // clipped polyhedra as flat arrays (VTK_POLYHEDRON layout) for host-side slicing/plotting.
+        std::vector<real_t> px, py, pz, vol;
+        std::vector<int64_t> faces, faceOff(1, 0);
+        std::vector<int32_t> boundary, cellSeed;
+        const real_t Lh = real_t(0.5) * L, big = 4 * L;
+        std::vector<std::pair<real_t, int>> ord;
+        for (int i = 0; i < N; ++i) {
+          const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
+          ord.clear();
+          for (int j = 0; j < N; ++j) {
+            if (j == i) continue;
+            real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
+            dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
+            dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
+            dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
+            ord.emplace_back(dx * dx + dy * dy + dz * dz, j);
+          }
+          std::sort(ord.begin(), ord.end());
+          const int M = std::min((int)ord.size(), 80);
+          std::vector<real_t> rx(M), ry(M), rz(M);
+          std::vector<int> ids(M);
+          for (int k = 0; k < M; ++k) {
+            const int j = ord[k].second;
+            real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
+            dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
+            dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
+            dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
+            rx[k] = dx; ry[k] = dy; rz[k] = dz; ids[k] = j;
+          }
+          PoreCell c;
+          const real_t Lbig[3] = {big, big, big};
+          peclet::voro::buildConvexCell(c, Lbig, rx.data(), ry.data(), rz.data(), ids.data(), M);
+          const real_t seedW[3] = {sx, sy, sz};
+          peclet::voro::clipCellAgainstSdf<real_t, 128, 256, false>(c, seedW, sdf);
+          if (c.empty() || c.overflow) continue;
+          const int64_t base = (int64_t)px.size();
+          std::vector<int> triToPt(c.nt, -1);
+          int np = 0;
+          for (int t = 0; t < c.nt; ++t) {
+            if (!c.alive[t]) continue;
+            triToPt[t] = np++;
+            px.push_back(sx + c.vx[t]); py.push_back(sy + c.vy[t]); pz.push_back(sz + c.vz[t]);
+          }
+          if (np < 4) continue;
+          std::vector<std::vector<int64_t>> cellFaces;
+          bool wall = false;
+          for (int k = 0; k < c.np; ++k) {
+            int fidx[PoreCell::MAXFV];
+            const int m = faceOrderedIdx(c, k, fidx);
+            if (m < 3) continue;
+            std::vector<int64_t> face;
+            for (int q = 0; q < m; ++q)
+              if (triToPt[fidx[q]] >= 0) face.push_back(base + triToPt[fidx[q]]);
+            if ((int)face.size() >= 3) {
+              cellFaces.push_back(std::move(face));
+              if (c.pnbr[k] == peclet::voro::kBoundaryFacet) wall = true;
+            }
+          }
+          if (cellFaces.size() < 4) continue;
+          faces.push_back((int64_t)cellFaces.size());
+          for (auto& f : cellFaces) {
+            faces.push_back((int64_t)f.size());
+            for (int64_t id : f) faces.push_back(id);
+          }
+          faceOff.push_back((int64_t)faces.size());
+          vol.push_back(c.volumePerVertex());
+          boundary.push_back(wall ? 1 : 0);
+          cellSeed.push_back(i);
+        }
+        const std::size_t nPts = px.size(), nCells = vol.size();
+        std::vector<real_t> pts(3 * nPts);
+        for (std::size_t p = 0; p < nPts; ++p) { pts[3 * p] = px[p]; pts[3 * p + 1] = py[p]; pts[3 * p + 2] = pz[p]; }
+        nb::dict d;
+        d["points"] = peclet::core::python::vector_to_ndarray(std::move(pts), {nPts, 3}, {3, 1});
+        d["faces"] = peclet::core::python::vector_to_ndarray(std::move(faces), {faces.size()}, {1});
+        d["face_offsets"] =
+            peclet::core::python::vector_to_ndarray(std::move(faceOff), {faceOff.size()}, {1});
+        d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nCells}, {1});
+        d["boundary"] = peclet::core::python::vector_to_ndarray(std::move(boundary), {nCells}, {1});
+        d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nCells}, {1});
+        return d;
+      },
+      nb::arg("positions"), nb::arg("sphere_centres"), nb::arg("sphere_radii"), nb::arg("L"),
+      "Reconstruct the SDF-clipped interstitial Voronoi cells and return their polyhedra as flat\n"
+      "arrays (VTK_POLYHEDRON layout): 'points' (Np,3), 'faces' + 'face_offsets' (per-cell face lists,\n"
+      "global point ids), 'volume' (Nc,), 'boundary' (Nc, 1 where the cell touches a sphere wall).");
 
   m.def(
       "minimize_interface",

@@ -129,6 +129,33 @@ struct SdfGrid {
   }
 };
 
+/// Periodic UNION of solid balls: sdf(x) = min_i(|x−c_i|_minimage − r_i) (<0 inside a ball, >0 in the
+/// fluid). Device-callable; holds Views of the centres (3M, x-fastest c_{ix},c_{iy},c_{iz}) and radii
+/// (M). L > 0 ⇒ periodic min-image (L = box edge); L ≤ 0 ⇒ non-periodic. The packed-bed / pore-space
+/// wall geometry for the volume mesh optimiser.
+template <class Real>
+struct SdfSpheres {
+  Kokkos::View<const Real*, peclet::core::MemSpace> cen;  // 3*M
+  Kokkos::View<const Real*, peclet::core::MemSpace> rad;  // M
+  int n = 0;
+  Real L = 0;
+  KOKKOS_INLINE_FUNCTION Real eval(Real x, Real y, Real z) const {
+    Real m = Real(1e30);
+    for (int i = 0; i < n; ++i) {
+      Real dx = x - cen(3 * i), dy = y - cen(3 * i + 1), dz = z - cen(3 * i + 2);
+      if (L > Real(0)) {
+        dx -= L * Kokkos::round(dx / L);
+        dy -= L * Kokkos::round(dy / L);
+        dz -= L * Kokkos::round(dz / L);
+      }
+      const Real d = Kokkos::sqrt(dx * dx + dy * dy + dz * dz) - rad(i);
+      if (d < m) m = d;
+    }
+    return m;
+  }
+  KOKKOS_INLINE_FUNCTION Real gradH() const { return Real(1e-4); }
+};
+
 /// Central-difference gradient of any provider with eval() (matches peclet::core::geom::gradient).
 template <class Real, class Sdf>
 KOKKOS_INLINE_FUNCTION void sdfGradient(const Sdf& s, Real x, Real y, Real z, Real g[3]) {
