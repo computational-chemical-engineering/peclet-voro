@@ -66,6 +66,7 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
   using peclet::core::Index;
   using MemSpace = peclet::core::MemSpace;
   const Real Larr[3] = {L[0], L[1], L[2]};
+  constexpr bool kHasSdf = !std::is_same_v<Sdf, peclet::voro::NoSdf>;
   const int nD = Weighted ? 4 * N : 3 * N;  // DOFs: [0,3N) positions 3i+d ; [3N,4N) weights 3N+i
   auto wdof = [N](int i) { return 3 * N + i; };
 
@@ -136,6 +137,46 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
         const double wgt = (d > 0) ? A / (2 * d) : 0;
         st.emplace_back(wdof((int)j), -wgt);
         sw2 += wgt;
+      }
+    }
+    // SDF WALL-FACET term of ∂V_c/∂x_c (pore-space meshing). dV/dn for a facet is its outward area
+    // vector, which the tessellator already publishes (facetArea) for the wall facets of its own EXACT
+    // clipped cell — no cell rebuild. Sum those into gw = Σ_wall A_k û_k, then chain through the
+    // seed-foot wall model n_wall(x) = −φ(x)·û, û = ∇φ/|∇φ|: dn = −∇φ (dx·∇φ)/|∇φ|² (+ a curvature
+    // term ∝ ∇²φ for a curved wall). This is exactly addSdfWallForce's Jacobian J_wallᵀ evaluated at
+    // the seed. Added into the own-seed force (sx,sy,sz) so the Gauss-Newton outer product stays
+    // consistent. Guarded to the SDF case (NoSdf has no eval / no wall facets).
+    if constexpr (kHasSdf) {
+      // gw = Σ_wall (dV/dn_k) = Σ of the published wall-facet outward area vectors (facetArea).
+      double gw[3] = {0, 0, 0};
+      for (int f = G.off[c]; f < G.off[c] + G.cnt[c] && f < nF; ++f)
+        if (G.nbr[f] == kBoundaryFacet) {  // wall facet (SDF cut); box faces are −1, real nbrs ≥ 0
+          gw[0] += G.area[3 * f];
+          gw[1] += G.area[3 * f + 1];
+          gw[2] += G.area[3 * f + 2];
+        }
+      if (gw[0] != 0.0 || gw[1] != 0.0 || gw[2] != 0.0) {
+        Real gg[3];
+        sdfGradient<Real>(sdf, pos[3 * c], pos[3 * c + 1], pos[3 * c + 2], gg);
+        const double gn = std::sqrt((double)gg[0] * gg[0] + (double)gg[1] * gg[1] + (double)gg[2] * gg[2]);
+        if (gn > 1e-12) {
+          const double u[3] = {gg[0] / gn, gg[1] / gn, gg[2] / gn};
+          const double ug = u[0] * gw[0] + u[1] * gw[1] + u[2] * gw[2];
+          const double perp[3] = {gw[0] - ug * u[0], gw[1] - ug * u[1], gw[2] - ug * u[2]};
+          Real Hm[3][3];
+          sdfHessian<Real>(sdf, pos[3 * c], pos[3 * c + 1], pos[3 * c + 2], Hm);
+          const double Hp[3] = {Hm[0][0] * perp[0] + Hm[0][1] * perp[1] + Hm[0][2] * perp[2],
+                                Hm[1][0] * perp[0] + Hm[1][1] * perp[1] + Hm[1][2] * perp[2],
+                                Hm[2][0] * perp[0] + Hm[2][1] * perp[1] + Hm[2][2] * perp[2]};
+          // Foot vector n = −φ ∇φ/|∇φ|² (Newton step to sdf(x+n)=0), valid for a general level-set
+          // function — NOT the |∇φ|=1 shortcut n=−φû. Its leading Jacobian dn/dx = −û ûᵀ is
+          // |∇φ|-INDEPENDENT (the |∇φ|² cancels), so the leading wall force is −(û·gw)û with no gn
+          // factor; the φ/|∇φ| curvature term (∝ ∇²φ) handles a curved wall to first order.
+          const double cH = (double)sdf.eval(pos[3 * c], pos[3 * c + 1], pos[3 * c + 2]) / gn;
+          sx += -ug * u[0] - cH * Hp[0];
+          sy += -ug * u[1] - cH * Hp[1];
+          sz += -ug * u[2] - cH * Hp[2];
+        }
       }
     }
     st.emplace_back(3 * c, sx);
@@ -362,13 +403,11 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       unpack(qtry, xt, wt);
       build(xt, wt, Gt);
       // Validity gate on the trial cells. Without an SDF the (power-)Voronoi partition always has
-      // every V>0, so we keep the strict Gt.nBad==0 gate — it stops the optimiser wandering into an
-      // invalid configuration. With an SDF (pore-space meshing) that gate deadlocks: the clipped
-      // tessellation of random interstitial seeds always carries ~1% empty cells (a seed in a tight
-      // throat) and that count fluctuates by a few as seeds move, rejecting otherwise-good steps — so
-      // accept on the Armijo energy decrease alone (E already penalises an empty cell, V=0 ⇒ error
-      // −vset, so minimising E shrinks the bad set on its own).
-      constexpr bool kHasSdf = !std::is_same_v<Sdf, peclet::voro::NoSdf>;
+      // every V>0, so require Gt.nBad==0. With an SDF (pore-space meshing) accept on the Armijo
+      // energy decrease alone: the clipped tessellation of random interstitial seeds always carries a
+      // few empty cells, and a strict "no new empty cell" gate deadlocks. NOTE: this lets the
+      // aggressive Newton step collapse a fraction of the cells (nBad grows); full pore equalisation
+      // needs a volume barrier / trust region on top of the wall-aware gradient — a follow-up.
       const bool cellsValid = kHasSdf ? std::isfinite(Gt.E) : (Gt.nBad == 0);
       if (cellsValid && Gt.E <= G.E + 1e-4 * alpha * gdq) {
         pos = xt;
