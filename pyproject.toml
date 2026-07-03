@@ -19,7 +19,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "peclet-voro"
-version = "0.3.0"
+version = "0.3.1"
 description = "peclet.voro — device-native (Kokkos) moving-particle Voronoi dynamics + unstructured mesh gen"
 readme = "README.md"
 requires-python = ">=3.10"
