@@ -347,7 +347,8 @@ struct SgsPrec {
   }
 };
 
-double volumeSpread(const Tess& T, int N) {  // std(V)/mean(V) over real cells
+// Volume variance ⟨(V − ⟨V⟩)²⟩ over the real cells — the equalisation objective; → 0 as cells equalise.
+double volumeSpread(const Tess& T, int N) {
   double s = 0, s2 = 0;
   int m = 0;
   for (int c = 0; c < N; ++c) {
@@ -357,7 +358,7 @@ double volumeSpread(const Tess& T, int N) {  // std(V)/mean(V) over real cells
     ++m;
   }
   const double mean = s / m;
-  return std::sqrt(std::max(0.0, s2 / m - mean * mean)) / mean;
+  return std::max(0.0, s2 / m - mean * mean);
 }
 
 }  // namespace
@@ -382,6 +383,38 @@ int main(int argc, char** argv) {
     Kokkos::View<long*, peclet::core::MemSpace> gd;
     const Real meanR = std::accumulate(pk.r.begin(), pk.r.end(), 0.0) / pk.M;
     const Real margin = 0.05 * meanR;
+
+    // --------- diagnostic: is the SDF pore case STALLING or CONVERGED? Trace it, and compare to the
+    // same seeds tessellated with NO walls (pure Voronoi, which equalises to ~0). --------------------
+    bool trace = false;
+    for (int i = 2; i < argc; ++i)
+      if (std::string(argv[i]) == "--trace") trace = true;
+    if (trace) {
+      const int N = 3000;
+      auto seeds = seedClean(pk, N, margin, sw, sdf, gd, 777u);
+      const int Nc = (int)(seeds.size() / 3);
+      std::vector<Real> vset(Nc, boxVol / Nc), noW;
+      std::printf("\n---- NoSdf (no walls, pure Voronoi of the same seeds), Newton+AMG, verbose ----\n");
+      std::vector<Real> p1 = seeds;
+      peclet::voro::meshVolumeOptimize<Real, false, peclet::voro::NoSdf>(
+          p1, noW, vset, (Real[3]){L, L, L}, Nc, sw, peclet::voro::NoSdf{}, 40, 1e-9, 400,
+          peclet::voro::Precond::GraphAMG, true);
+      {
+        Tess T = buildTess(p1, Nc, L, sw, peclet::voro::NoSdf{}, gd);
+        std::printf("   NoSdf final variance = %.3e\n", volumeSpread(T, Nc));
+      }
+      std::printf("\n---- SDF (pore walls), Newton+AMG, verbose ----\n");
+      std::vector<Real> p2 = seeds;
+      peclet::voro::meshVolumeOptimize<Real, false, SdfSpheres>(
+          p2, noW, vset, (Real[3]){L, L, L}, Nc, sw, sdf, 40, 1e-9, 400,
+          peclet::voro::Precond::GraphAMG, true);
+      {
+        Tess T = buildTess(p2, Nc, L, sw, sdf, gd);
+        std::printf("   SDF final variance = %.3e\n", volumeSpread(T, Nc));
+      }
+      Kokkos::finalize();
+      return 0;
+    }
 
     // =========================== PART 1 — inner solver for one Newton step =======================
     std::printf(
@@ -473,8 +506,8 @@ int main(int argc, char** argv) {
     const int Nend = Ns.front();
     std::printf(
         "\n================ PART 2: end-to-end volume equalisation, N=%d ================\n", Nend);
-    std::printf("target: reduce volume spread std(V)/mean(V); tol on ‖g‖_inf = 1e-9, max 60 steps\n");
-    std::printf("%-26s | %6s | %10s | %12s\n", "method", "outer", "wall[s]", "spread std/mean");
+    std::printf("target: reduce volume variance <(V-<V>)^2>; tol on ‖g‖_inf = 1e-9, max 60 steps\n");
+    std::printf("%-26s | %6s | %10s | %12s\n", "method", "outer", "wall[s]", "variance");
     std::printf("---------------------------+--------+------------+----------------\n");
 
     auto pos0 = seedClean(pk, Nend, margin, sw, sdf, gd, 777u);
@@ -486,7 +519,7 @@ int main(int argc, char** argv) {
       double E0 = gradEnergy(T0, Nend, vset, g0, nBad0);
       double gmax = 0;
       for (double v : g0) gmax = std::max(gmax, std::fabs(v));
-      std::printf("%-26s | %6s | %10s | %12.4f  (nBad=%ld  E=%.3e  |g|inf=%.3e)\n",
+      std::printf("%-26s | %6s | %10s | %12.3e  (nBad=%ld  E=%.3e  |g|inf=%.3e)\n",
                   "initial (random seeds)", "-", "-", volumeSpread(T0, Nend), nBad0, E0, gmax);
     }
 
@@ -501,7 +534,7 @@ int main(int argc, char** argv) {
           pos, noW, vset, (Real[3]){L, L, L}, Nend, sw, sdf, 60, 1e-9, 400, pc.second, false);
       const double t = secs(t0, clk::now());
       Tess Tf = buildTess(pos, Nend, L, sw, sdf, gd);
-      std::printf("%-26s | %6d | %10.2f | %12.4f\n", pc.first, R.iters, t, volumeSpread(Tf, Nend));
+      std::printf("%-26s | %6d | %10.2f | %12.3e\n", pc.first, R.iters, t, volumeSpread(Tf, Nend));
     }
 
     // First-order methods (steepest descent + nonlinear Polak–Ribière CG) with Armijo line search.
@@ -565,7 +598,7 @@ int main(int argc, char** argv) {
         E = Et;
       }
       const double t = secs(t0, clk::now());
-      std::printf("%-26s | %6d | %10.2f | %12.4f\n", name, it, t, volumeSpread(T, Nend));
+      std::printf("%-26s | %6d | %10.2f | %12.3e\n", name, it, t, volumeSpread(T, Nend));
     };
     firstOrder("steepest descent", false);
     firstOrder("nonlinear CG (PR)", true);

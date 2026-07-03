@@ -45,10 +45,17 @@ namespace peclet::voro {
 enum class Precond { Jacobi, ColoredGS, GraphAMG };
 
 /**
- * Minimise E = Σ γ (V_i − V_set,i)² by damped Gauss-Newton over positions (and weights when
- * Weighted). `pos` (3N) and `weight` (N; used only when Weighted) are updated in place.
+ * Minimise the DIMENSIONLESS relative volume energy E = Σ (V_i/V_ref,i − 1)² by damped Gauss-Newton
+ * over positions (and weights when Weighted). `vsetIn` is the per-cell reference volume V_ref (may be
+ * non-uniform — spatially-graded refinement); it is renormalised to the actual total cell volume so
+ * the residual has zero mean and E → 0 is achievable. `pos` (3N) and `weight` (N; used only when
+ * Weighted) are updated in place.
  *
- * @param prec     Jacobi or ColoredGS CG preconditioner.
+ * NOTE: with an SDF the per-cell volume gradient still uses only the published seed-seed facetConnect
+ * (it omits the SDF wall-facet term), so pore-space meshing does not yet fully equalise — the wall
+ * gradient needs to be produced inside the tessellator (see the study in tests/kokkos/bench_mesh_optimizer).
+ *
+ * @param prec     Jacobi / ColoredGS / GraphAMG CG preconditioner.
  * @param cgIters  inner CG iterations per Newton step; @param tol on the gradient ∞-norm.
  */
 template <class Real, bool Weighted = false, class Sdf = NoSdf>
@@ -59,7 +66,6 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
   using peclet::core::Index;
   using MemSpace = peclet::core::MemSpace;
   const Real Larr[3] = {L[0], L[1], L[2]};
-  const double gamma = 1.0;
   const int nD = Weighted ? 4 * N : 3 * N;  // DOFs: [0,3N) positions 3i+d ; [3N,4N) weights 3N+i
   auto wdof = [N](int i) { return 3 * N + i; };
 
@@ -95,8 +101,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     G.E = G.maxErr = G.meanErr = 0;
     G.nBad = 0;
     for (int i = 0; i < N; ++i) {
-      const double e = G.vol[i] - vset[i];
-      G.E += gamma * e * e;
+      const double e = G.vol[i] / vset[i] - 1.0;  // relative residual V/V_ref − 1
+      G.E += e * e;
       G.maxErr = std::max(G.maxErr, std::fabs(e));
       G.meanErr += std::fabs(e);
       if (G.vol[i] <= 0.0) ++G.nBad;
@@ -156,8 +162,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     G.E = G.maxErr = G.meanErr = 0;
     G.nBad = 0;
     for (int i = 0; i < N; ++i) {
-      const double e = G.vol[i] - vset[i];
-      G.E += gamma * e * e;
+      const double e = G.vol[i] / vset[i] - 1.0;  // relative residual V/V_ref − 1
+      G.E += e * e;
       G.maxErr = std::max(G.maxErr, std::fabs(e));
       G.meanErr += std::fabs(e);
       if (G.vol[i] <= 0.0) ++G.nBad;
@@ -181,12 +187,17 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     std::fill(g.begin(), g.end(), 0.0);
     std::vector<std::unordered_map<int, double>> row(nD);
     for (int c = 0; c < N; ++c) {
-      const double Rc = 2.0 * gamma * (G.vol[c] - vset[c]);
+      // Relative energy E = Σ (V_c/V_ref − 1)²: residual r_c = V_c/V_ref − 1, so the objective
+      // gradient picks up ∇V_c with coefficient Rc = 2 r_c/V_ref and the Gauss-Newton rank-1 weight
+      // is Hw = 2/V_ref². (V_ref = vset, renormalised to the total cell volume above; per-cell so a
+      // graded V_ref is a drop-in.)
+      const double Rc = 2.0 * (G.vol[c] / vset[c] - 1.0) / vset[c];
+      const double Hw = 2.0 / (vset[c] * vset[c]);
       stencil(G, c, st);
       for (auto& [a, va] : st) {
         g[a] += Rc * va;
         auto& ra = row[a];
-        for (auto& [b, vb] : st) ra[b] += 2.0 * gamma * va * vb;
+        for (auto& [b, vb] : st) ra[b] += Hw * va * vb;
       }
     }
     double gnorm = 0;
