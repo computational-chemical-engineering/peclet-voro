@@ -20,9 +20,12 @@
 #ifndef PECLET_VORO_MESH_OPTIMIZER_HPP
 #define PECLET_VORO_MESH_OPTIMIZER_HPP
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
+#include <numeric>
 #include <unordered_map>
 #include <vector>
 
@@ -304,6 +307,176 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
                   prec == Precond::Jacobi ? "jac" : "cgs", rz0, rz, alpha);
     if (!accepted) break;
   }
+  return R;
+}
+
+// ================================================================================================
+// Interfacial-energy optimiser (Surface-Evolver-style) — move seed positions to minimise the total
+// area of the faces between cells of DIFFERENT type: E = Σ_{f: type_i≠type_j} σ A_f. A two-phase
+// interface-tension minimiser (foam/emulsion coarsening).
+//
+// The face-area gradient ∂A_f/∂x is not published, so each cell is RECONSTRUCTED as a ConvexCell
+// from its facet neighbours and the validated per-triangle area-Jacobian geomVolumeAreaGrad is
+// gathered into ∂A_k/∂n_l, then routed to positions by chainToDofs<Voronoi>. Steepest descent with
+// an Armijo line search on E. Host (the oracle per docs/DEVICE_RESIDENCY_PLAN.md); the device port
+// mirrors the volume path (assemble on device, reuse the same reconstruction kernel per cell).
+// ================================================================================================
+template <class Real, class Sdf = NoSdf>
+OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type, double sigma,
+                           const Real L[3], int N, int sw, const Sdf& sdf, int maxIter, Real tol,
+                           bool verbose = false) {
+  using MemSpace = peclet::core::MemSpace;
+  using RCell = ConvexCell<Real, 128, 256>;
+  const Real Larr[3] = {L[0], L[1], L[2]}, Lh[3] = {L[0] / 2, L[1] / 2, L[2] / 2};
+  Kokkos::View<Real*, MemSpace> dw;
+  Kokkos::View<long*, MemSpace> gd;
+
+  // Build the tessellation at `x`, download the neighbour CSR, then per cell reconstruct the
+  // ConvexCell and gather the interfacial-area energy E and its position gradient g (3N).
+  auto energyGrad = [&](const std::vector<Real>& x, std::vector<double>& g, double& E) {
+    Kokkos::View<Real*, MemSpace> dpos("if.pos", 3 * N);
+    Kokkos::deep_copy(dpos, Kokkos::View<const Real*, Kokkos::HostSpace>(x.data(), 3 * N));
+    auto res = buildTessellation<Real, false, Sdf>(dpos, dw, N, Larr, sw, N, gd, sdf, true);
+    auto off = detail::toHostVecT<int>(res.view.cellFacetOffset);
+    auto cnt = detail::toHostVecT<int>(res.view.cellFacetCount);
+    auto nbr = detail::toHostVecT<peclet::voro::gid_t>(res.view.facetNeighbor);
+    const int nF = (int)nbr.size();
+    g.assign(3 * N, 0.0);
+    E = 0;
+    for (int c = 0; c < N; ++c) {
+      // gather + sort real neighbours by distance (min-image) → reconstruct the cell.
+      std::vector<std::array<Real, 4>> nb;  // dist², rx, ry, rz
+      std::vector<int> ids;
+      for (int f = off[c]; f < off[c] + cnt[c] && f < nF; ++f) {
+        const long j = (long)nbr[f];
+        if (j < 0 || j >= N) continue;
+        Real r[3];
+        for (int d = 0; d < 3; ++d) {
+          Real rr = x[3 * j + d] - x[3 * c + d];
+          rr = rr > Lh[d] ? rr - L[d] : (rr < -Lh[d] ? rr + L[d] : rr);
+          r[d] = rr;
+        }
+        nb.push_back({r[0] * r[0] + r[1] * r[1] + r[2] * r[2], r[0], r[1], r[2]});
+        ids.push_back((int)j);
+      }
+      const int M = (int)ids.size();
+      std::vector<int> ord(M);
+      for (int i = 0; i < M; ++i) ord[i] = i;
+      std::sort(ord.begin(), ord.end(), [&](int a, int b) { return nb[a][0] < nb[b][0]; });
+      std::vector<Real> rx(M), ry(M), rz(M);
+      std::vector<int> id2(M);
+      for (int i = 0; i < M; ++i) {
+        rx[i] = nb[ord[i]][1];
+        ry[i] = nb[ord[i]][2];
+        rz[i] = nb[ord[i]][3];
+        id2[i] = ids[ord[i]];
+      }
+      RCell cell;
+      buildConvexCell(cell, Larr, rx.data(), ry.data(), rz.data(), id2.data(), M);
+      if (cell.empty() || cell.overflow) continue;
+
+      // gather per-face area magnitudes Ag[k] and the area Jacobian dA[k][l][cc] = ∂A_k/∂n_l.
+      const int np = cell.np;
+      std::vector<double> Ag(np, 0.0), dA((size_t)np * np * 3, 0.0);
+      for (int t = 0; t < cell.nt; ++t) {
+        if (!cell.alive[t]) continue;
+        int pl[3];
+        double cb[3], gr[3][3][3];
+        cell.geomVolumeAreaGrad(t, pl, cb, gr);
+        for (int ii = 0; ii < 3; ++ii) {
+          Ag[pl[ii]] += cb[ii];
+          for (int jj = 0; jj < 3; ++jj)
+            for (int cc = 0; cc < 3; ++cc)
+              dA[((size_t)pl[ii] * np + pl[jj]) * 3 + cc] += gr[ii][jj][cc];
+        }
+      }
+      // interfacial energy of this cell (½ per face — each interface face is shared by two cells),
+      // and dGeom/dn_l accumulated over the cell's interface faces.
+      std::vector<double> gn(3 * np, 0.0);
+      for (int k = 0; k < np; ++k) {
+        const int j = cell.pnbr[k];
+        if (j < 0 || j >= N || type[j] == type[c]) continue;  // only different-type faces
+        E += 0.5 * sigma * Ag[k];
+        for (int l = 0; l < np; ++l)
+          for (int cc = 0; cc < 3; ++cc)
+            gn[3 * l + cc] += 0.5 * sigma * dA[((size_t)k * np + l) * 3 + cc];
+      }
+      // route ∂E_c/∂n_l → positions (self + neighbours) and scatter into g.
+      double gx[128], gy[128], gz[128];
+      for (int l = 0; l < np; ++l) {
+        gx[l] = gn[3 * l];
+        gy[l] = gn[3 * l + 1];
+        gz[l] = gn[3 * l + 2];
+      }
+      const double seed3[3] = {(double)x[3 * c], (double)x[3 * c + 1], (double)x[3 * c + 2]};
+      double fSelf[3], fwSelf, fnx[128], fny[128], fnz[128], fwn[128];
+      chainToDofs<Voronoi>(cell, seed3, (const double*)nullptr, 0.0, (const double*)nullptr,
+                           (double)L[0], gx, gy, gz, fSelf, fwSelf, fnx, fny, fnz, fwn);
+      g[3 * c] += fSelf[0];
+      g[3 * c + 1] += fSelf[1];
+      g[3 * c + 2] += fSelf[2];
+      for (int l = 0; l < np; ++l) {
+        const int j = cell.pnbr[l];
+        if (j < 0 || j >= N) continue;
+        g[3 * j] += fnx[l];
+        g[3 * j + 1] += fny[l];
+        g[3 * j + 2] += fnz[l];
+      }
+    }
+  };
+
+  OtResult R;
+  std::vector<double> g;
+  double E;
+  energyGrad(pos, g, E);
+  const double E0 = E;
+  if (verbose) {  // FD-validate the interfacial-area gradient (one DOF)
+    const int d = 3 * (N / 2);
+    const double h = 1e-7;
+    std::vector<Real> xp = pos;
+    std::vector<double> gp, gm;
+    double Ep, Em;
+    xp[d] += (Real)h;
+    energyGrad(xp, gp, Ep);
+    xp[d] -= (Real)(2 * h);
+    energyGrad(xp, gm, Em);
+    std::printf("      FD dE/dx_%d: analytic=%.4e fd=%.4e\n", d, g[d], (Ep - Em) / (2 * h));
+  }
+  for (int it = 0; it < maxIter; ++it) {
+    double gnorm = 0;
+    for (double v : g) gnorm = std::max(gnorm, std::fabs(v));
+    R.iters = it;
+    R.maxVolErr = E;  // report energy in maxVolErr slot
+    if (verbose) std::printf("  [iface] iter %2d  E=%.6e gnorm=%.3e\n", it, E, gnorm);
+    if (gnorm < tol) {
+      R.converged = true;
+      break;
+    }
+    // steepest descent with Armijo line search on E (dq = −g, g·dq = −|g|² < 0). Bound the initial
+    // step to a trust region (≈2% of the spacing) so it does not overshoot across the non-smooth
+    // topology-change kinks of the interfacial energy.
+    const double gdq = -std::inner_product(g.begin(), g.end(), g.begin(), 0.0);
+    const double spacing = std::cbrt((double)L[0] * L[1] * L[2] / N);
+    double alpha = std::min(1.0, 0.02 * spacing / std::max(gnorm, 1e-30));
+    bool accepted = false;
+    std::vector<Real> xtry(3 * N);
+    std::vector<double> gt;
+    double Et;
+    for (int bt = 0; bt < 30; ++bt) {
+      for (int i = 0; i < 3 * N; ++i) xtry[i] = pos[i] - (Real)(alpha * g[i]);
+      energyGrad(xtry, gt, Et);
+      if (Et <= E + 1e-4 * alpha * gdq) {
+        pos = xtry;
+        g = gt;
+        E = Et;
+        accepted = true;
+        break;
+      }
+      alpha *= 0.5;
+    }
+    if (!accepted) break;
+  }
+  R.meanVolErr = E / std::max(E0, 1e-30);  // final/initial energy ratio
   return R;
 }
 

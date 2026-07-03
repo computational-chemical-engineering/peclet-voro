@@ -455,6 +455,32 @@ NB_MODULE(_voro, m) {
       "Pure Voronoi (use_weights=False) reaches equal/graded volumes well; weights add fuller volume\n"
       "control but are limited by the periodic tessellation's ~1% min-image floor.");
 
+  m.def(
+      "minimize_interface",
+      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<int, nb::c_contig> type_in,
+         real_t sigma, real_t L, int sw, int max_iter, real_t tol) {
+        auto pos = flatten3(pos_in);
+        const int N = (int)type_in.shape(0);
+        std::vector<int> type(type_in.data(), type_in.data() + N);
+        const real_t Larr[3] = {L, L, L};
+        auto R = peclet::voro::interfaceMinimize<real_t>(pos, type, sigma, Larr, N, sw,
+                                                         peclet::voro::NoSdf{}, max_iter, tol, false);
+        nb::dict d;
+        d["positions"] = peclet::core::python::vector_to_ndarray(
+            std::move(pos), {static_cast<std::size_t>(N), 3}, {3, 1});
+        d["energy"] = R.maxVolErr;         // final interfacial energy
+        d["energy_ratio"] = R.meanVolErr;  // E_final / E_initial
+        d["iters"] = R.iters;
+        d["converged"] = R.converged;
+        return d;
+      },
+      nb::arg("positions"), nb::arg("types"), nb::arg("sigma") = 1.0, nb::arg("L") = 1.0,
+      nb::arg("sw") = 5, nb::arg("max_iter") = 60, nb::arg("tol") = 1e-9,
+      "Surface-Evolver-style interfacial-tension minimiser: move seeds (N,3) to minimise the total\n"
+      "area of faces between cells of different integer type (N,), E = Σ σ A_ij. Steepest descent\n"
+      "with a trust-region line search on the (non-smooth) interfacial energy. Returns a dict with\n"
+      "the updated 'positions', final 'energy', 'energy_ratio' (final/initial), and iters.");
+
   // ---- Tessellation -----------------------------------------------------------------------------
   nb::class_<Tess>(
       m, "Tessellation",

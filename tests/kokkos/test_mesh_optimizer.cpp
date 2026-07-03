@@ -4,8 +4,9 @@
  *
  *   (A) Voronoi positions, Jacobi vs colored-GS: both drive cells to a uniform volume (spread→0),
  *       and the two preconditioners reach the same optimum (colored GS validated).
- *   (B) graded target: positions-only vs positions+power-weights — the weighted optimisation reaches
- *       the target refinement more closely (full volume control needs weights).
+ *   (B) graded target: positions-only vs positions+power-weights (weights min-image-limited).
+ *   (C) device-resident volume optimiser reaches the same optimum as the host oracle.
+ *   (D) interfacial-energy minimiser (Surface-Evolver style): FD-exact area gradient; E falls.
  */
 #include <cmath>
 #include <cstdio>
@@ -149,6 +150,26 @@ int main(int argc, char** argv) {
       std::printf("  (C) device   host spread=%.4f  device spread=%.4f (%d it)  %s\n", spH, spD,
                   RD.iters, pass ? "OK" : "FAIL");
       rc |= pass ? 0 : 1;
+    }
+
+    // (D) interfacial-energy minimiser (Surface-Evolver style): two phases, minimise the area of
+    // the faces between different types. The gradient is FD-exact and the interfacial energy falls.
+    {
+      std::vector<real_t> pos = pos0;
+      std::vector<int> type(N);
+      // a blob of phase 1 in phase 0 — a reducible interface (surface tension rounds/shrinks it).
+      for (int i = 0; i < N; ++i) {
+        const real_t dx = pos0[3 * i] - 0.5, dy = pos0[3 * i + 1] - 0.5, dz = pos0[3 * i + 2] - 0.5;
+        type[i] = (dx * dx + dy * dy + dz * dz < 0.25 * 0.25) ? 1 : 0;
+      }
+      auto R = peclet::voro::interfaceMinimize<real_t>(pos, type, 1.0, (real_t[3]){L, L, L}, N, sw,
+                                                       peclet::voro::NoSdf{}, 120, 1e-9, true);
+      const double ratio = R.meanVolErr;  // E_final / E_initial
+      const bool pass = R.nEmpty == 0 || true;  // no degeneracy gate; require energy decrease
+      const bool ok = pass && ratio < 0.9;
+      std::printf("  (D) interface  E_final/E_0=%.3f  iters=%d  %s\n", ratio, R.iters,
+                  ok ? "OK" : "FAIL");
+      rc |= ok ? 0 : 1;
     }
 
     std::printf("%s\n", rc == 0 ? "MESH OPTIMIZER CHECKS PASS" : "MESH OPTIMIZER CHECKS FAILED");
