@@ -64,7 +64,7 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
                             const std::vector<Real>& vsetIn, const Real L[3], int N, int sw,
                             const Sdf& sdf, int maxNewton, Real tol, int cgIters = 300,
                             Precond prec = Precond::Jacobi, bool verbose = false,
-                            Real muBarrier = 0, Real muDecay = (Real)0.7) {
+                            Real muBarrier = 0, Real muDecay = (Real)0.7, bool freeEnergy = false) {
   using peclet::core::Index;
   using MemSpace = peclet::core::MemSpace;
   const Real Larr[3] = {L[0], L[1], L[2]};
@@ -78,6 +78,45 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
   for (int i = 0; i < N; ++i) sumVset += vsetIn[i];
   std::vector<double> vset(N);
   for (int i = 0; i < N; ++i) vset[i] = vsetIn[i] * (boxVol / sumVset);
+
+  // Per-cell objective pieces {energy, dE/dV, d²E/dV²}. Two modes (chosen by `freeEnergy`):
+  //  • default: relative energy (V/V_ref−1)² (barCell = the collapse barrier, added with weight μ).
+  //  • free-energy: e = −V_ref·log(V) (freeCell), pressure V_ref/V equalises to V∝V_ref and −log V
+  //    resists collapse on its own. Both relax below a small V (matching quadratic) so a slightly
+  //    infeasible start (V≤0 from tessellation flicker) stays finite and is driven feasible.
+  const double barEps = 0.1;
+  auto barCell = [&](double V, double vref, double mu) {
+    struct { double e, d1, d2; } r{0.0, 0.0, 0.0};
+    if (mu <= 0.0) return r;
+    const double t = V / vref;
+    if (t > barEps) {
+      r.e = -mu * std::log(t);
+      r.d1 = -mu / V;
+      r.d2 = mu / (V * V);
+    } else {
+      const double dt = t - barEps, ie = 1.0 / barEps;
+      r.e = mu * (-std::log(barEps) - dt * ie + 0.5 * dt * dt * ie * ie);
+      r.d1 = mu * (-ie + dt * ie * ie) / vref;
+      r.d2 = mu * ie * ie / (vref * vref);
+    }
+    return r;
+  };
+  const double feMin = 0.1;
+  auto freeCell = [&](double V, double vref) {
+    struct { double e, d1, d2; } r{0.0, 0.0, 0.0};
+    const double Vmin = feMin * vref, iv = 1.0 / Vmin;
+    if (V > Vmin) {
+      r.e = -vref * std::log(V);
+      r.d1 = -vref / V;
+      r.d2 = vref / (V * V);
+    } else {
+      const double dV = V - Vmin;
+      r.e = -vref * (std::log(Vmin) + dV * iv - 0.5 * dV * dV * iv * iv);
+      r.d1 = -vref * (iv - dV * iv * iv);
+      r.d2 = vref * iv * iv;
+    }
+    return r;
+  };
 
   struct Geo {
     std::vector<double> vol, dvr, area, conn;
@@ -104,8 +143,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     G.E = G.maxErr = G.meanErr = 0;
     G.nBad = 0;
     for (int i = 0; i < N; ++i) {
-      const double e = G.vol[i] / vset[i] - 1.0;  // relative residual V/V_ref − 1
-      G.E += e * e;
+      const double e = G.vol[i] / vset[i] - 1.0;  // relative deviation from target (diagnostic)
+      G.E += freeEnergy ? freeCell(G.vol[i], vset[i]).e : e * e;
       G.maxErr = std::max(G.maxErr, std::fabs(e));
       G.meanErr += std::fabs(e);
       if (G.vol[i] <= 0.0) ++G.nBad;
@@ -205,8 +244,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     G.E = G.maxErr = G.meanErr = 0;
     G.nBad = 0;
     for (int i = 0; i < N; ++i) {
-      const double e = G.vol[i] / vset[i] - 1.0;  // relative residual V/V_ref − 1
-      G.E += e * e;
+      const double e = G.vol[i] / vset[i] - 1.0;  // relative deviation from target (diagnostic)
+      G.E += freeEnergy ? freeCell(G.vol[i], vset[i]).e : e * e;
       G.maxErr = std::max(G.maxErr, std::fabs(e));
       G.meanErr += std::fabs(e);
       if (G.vol[i] <= 0.0) ++G.nBad;
@@ -222,31 +261,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     if constexpr (Weighted) w.assign(q.begin() + 3 * N, q.end());
   };
 
-  // RELAXED log-barrier against cell collapse: −μ log(V_i/V_ref,i) for t=V/V_ref > ε, continued by the
-  // quadratic that matches its value/1st/2nd derivative at t=ε for t ≤ ε. It → large (not ∞) as V→0,
-  // so it strongly discourages collapse yet tolerates a slightly-infeasible start (the parallel
-  // tessellation flickers a few borderline cells to V≤0) and drives it feasible; with μ→0 continuation
-  // the minimiser approaches the true equal-volume mesh. Off (μ=0) ⇒ the plain relative energy.
-  // barCell returns {energy, dE/dV, d²E/dV²} for one cell.
-  const double barEps = 0.1;
-  auto barCell = [&](double V, double vref, double mu) {
-    struct { double e, d1, d2; } r{0.0, 0.0, 0.0};
-    if (mu <= 0.0) return r;
-    const double t = V / vref;
-    if (t > barEps) {
-      r.e = -mu * std::log(t);
-      r.d1 = -mu / V;
-      r.d2 = mu / (V * V);
-    } else {
-      const double dt = t - barEps, ie = 1.0 / barEps;
-      r.e = mu * (-std::log(barEps) - dt * ie + 0.5 * dt * dt * ie * ie);
-      r.d1 = mu * (-ie + dt * ie * ie) / vref;
-      r.d2 = mu * ie * ie / (vref * vref);
-    }
-    return r;
-  };
   auto barrierE = [&](const Geo& G, double mu) -> double {
-    if (mu <= 0.0) return 0.0;
+    if (freeEnergy || mu <= 0.0) return 0.0;  // free-energy mode carries its own collapse resistance
     double b = 0.0;
     for (int i = 0; i < N; ++i) b += barCell(G.vol[i], vset[i], mu).e;
     return b;
@@ -257,8 +273,9 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
   std::vector<std::pair<int, double>> st;
   const bool useHessian = (prec != Precond::SteepestDescent);
   for (int it = 0; it < maxNewton; ++it) {
-    // Barrier-continuation weight for this Newton step: μ_it = μ0·decay^it → 0.
-    const double muCur = (double)muBarrier * std::pow((double)muDecay, it);
+    // Barrier-continuation weight for this Newton step: μ_it = μ0·decay^it → 0 (free-energy mode
+    // carries its own collapse resistance, so no separate barrier).
+    const double muCur = freeEnergy ? 0.0 : (double)muBarrier * std::pow((double)muDecay, it);
     // gradient + assembled Gauss-Newton Hessian (rows as maps → CSR).
     std::fill(g.begin(), g.end(), 0.0);
     std::vector<std::unordered_map<int, double>> row(nD);
@@ -268,12 +285,19 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       // is Hw = 2/V_ref². (V_ref = vset, renormalised to the total cell volume above; per-cell so a
       // graded V_ref is a drop-in.) The log-barrier adds ∂(−μ log V_c)/∂V_c = −μ/V_c to Rc and the
       // GN term +μ/V_c² to Hw (both ∝ ∇V_c, so they ride the same stencil).
-      double Rc = 2.0 * (G.vol[c] / vset[c] - 1.0) / vset[c];
-      double Hw = 2.0 / (vset[c] * vset[c]);
-      if (muCur > 0.0) {
-        const auto bc = barCell(G.vol[c], vset[c], muCur);
-        Rc += bc.d1;  // add the (relaxed) barrier's dE/dV and GN Hessian weight d²E/dV²
-        Hw += bc.d2;
+      double Rc, Hw;
+      if (freeEnergy) {  // e=−V_ref log V ⇒ dE/dV=−V_ref/V (the pressure), GN weight V_ref/V²
+        const auto fc = freeCell(G.vol[c], vset[c]);
+        Rc = fc.d1;
+        Hw = fc.d2;
+      } else {
+        Rc = 2.0 * (G.vol[c] / vset[c] - 1.0) / vset[c];
+        Hw = 2.0 / (vset[c] * vset[c]);
+        if (muCur > 0.0) {
+          const auto bc = barCell(G.vol[c], vset[c], muCur);
+          Rc += bc.d1;  // add the (relaxed) barrier's dE/dV and GN Hessian weight d²E/dV²
+          Hw += bc.d2;
+        }
       }
       stencil(G, c, st);
       for (auto& [a, va] : st) {

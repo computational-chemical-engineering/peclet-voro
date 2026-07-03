@@ -190,7 +190,7 @@ std::vector<Real> seedClean(const Packing& pk, int Nreq, Real margin, int sw, co
         sV += T.vol[c];
         ++m;
       }
-    const double thr = 0.35 * (m > 0 ? sV / m : 0.0);  // drop cells below 15% of the mean volume
+    const double thr = 0.25 * (m > 0 ? sV / m : 0.0);  // drop cells below 15% of the mean volume
     std::vector<Real> keep;
     keep.reserve(pos.size());
     for (int c = 0; c < n; ++c)
@@ -409,7 +409,7 @@ int main(int argc, char** argv) {
       std::vector<Real> p1 = seeds;
       peclet::voro::meshVolumeOptimize<Real, false, peclet::voro::NoSdf>(
           p1, noW, vset, (Real[3]){L, L, L}, Nc, sw, peclet::voro::NoSdf{}, 40, 1e-9, 400,
-          peclet::voro::Precond::GraphAMG, true);
+          peclet::voro::Precond::GraphAMG, true, 0.0, 0.7, /*freeEnergy=*/true);
       {
         Tess T = buildTess(p1, Nc, L, sw, peclet::voro::NoSdf{}, gd);
         std::printf("   NoSdf final variance = %.3e\n", volumeSpread(T, Nc));
@@ -424,11 +424,11 @@ int main(int argc, char** argv) {
         vsetG[i] = (Real)(phi * phi * phi);
       }
       (void)vsetG;
-      std::printf("\n---- SDF (pore walls), STEEPEST DESCENT + log-barrier, uniform V_ref, verbose ----\n");
+      std::printf("\n---- SDF (pore walls), FREE ENERGY −V_ref·log(V), steepest descent, verbose ----\n");
       std::vector<Real> p2 = seeds;
       peclet::voro::meshVolumeOptimize<Real, false, SdfSpheres>(
           p2, noW, vset, (Real[3]){L, L, L}, Nc, sw, sdf, 200, 1e-9, 400,
-          peclet::voro::Precond::SteepestDescent, true, 0.4, 0.995);
+          peclet::voro::Precond::SteepestDescent, true, 0.0, 0.7, /*freeEnergy=*/true);
       {
         Tess T = buildTess(p2, Nc, L, sw, sdf, gd);
         std::printf("   SDF final variance = %.3e\n", volumeSpread(T, Nc));
