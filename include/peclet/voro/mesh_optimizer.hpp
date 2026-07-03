@@ -307,6 +307,229 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
   return R;
 }
 
+// ================================================================================================
+// Device-resident volume optimiser (pure Voronoi positions) — every per-Newton computation runs on
+// the Kokkos device: gradient assembly, matrix-free Gauss-Newton matvec, Jacobi-preconditioned CG,
+// line search, and the DOF update. Only convergence scalars (energy, dot products) cross to host.
+// This is the device path per docs/DEVICE_RESIDENCY_PLAN.md; the host meshVolumeOptimize is its
+// oracle. (Weight DOFs, colored-GS-on-device, and MPI halo exchange are the recorded next
+// increments.)
+// ================================================================================================
+template <class Real, class Sdf = NoSdf>
+OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<Real>& vsetIn,
+                                  const Real L[3], int N, int sw, const Sdf& sdf, int maxNewton,
+                                  Real tol, int cgIters = 300, bool verbose = false) {
+  using MemSpace = peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
+  using DV = Kokkos::View<double*, MemSpace>;
+  const Real Larr[3] = {L[0], L[1], L[2]};
+  const double gamma = 1.0, boxVol = (double)L[0] * L[1] * L[2];
+  const int nD = 3 * N;
+
+  double sumVset = 0;
+  for (int i = 0; i < N; ++i) sumVset += vsetIn[i];
+  DV vset("mo.vset", N);
+  {
+    auto h = Kokkos::create_mirror_view(vset);
+    for (int i = 0; i < N; ++i) h(i) = vsetIn[i] * (boxVol / sumVset);
+    Kokkos::deep_copy(vset, h);
+  }
+  Kokkos::View<Real*, MemSpace> dpos("mo.pos", 3 * N), dw;
+  Kokkos::deep_copy(dpos, Kokkos::View<const Real*, Kokkos::HostSpace>(posHost.data(), 3 * N));
+  Kokkos::View<long*, MemSpace> gd;
+
+  DV g("mo.g", nD), dq("mo.dq", nD), diag("mo.diag", nD);
+  DV rr("mo.r", nD), z("mo.z", nD), pp("mo.p", nD), Ap("mo.Ap", nD), yy("mo.y", N);
+
+  // Build the tessellation at `x` and return E + max/mean vol error + empty count (device reduce).
+  auto evaluate = [&](const Kokkos::View<Real*, MemSpace>& x, TessellatorResult<Real>& res,
+                      double& E, double& maxErr, double& meanErr, long& nBad) {
+    res = buildTessellation<Real, false, Sdf>(x, dw, N, Larr, sw, N, gd, sdf, true);
+    auto vol = res.view.cellVolume;
+    auto vs = vset;
+    double e = 0, mx = 0, mn = 0;
+    long nb = 0;
+    Kokkos::parallel_reduce(
+        "mo.E", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(int i, double& le, double& lmx, double& lmn, long& lnb) {
+          const double d = vol(i) - vs(i);
+          le += gamma * d * d;
+          lmx = Kokkos::max(lmx, Kokkos::fabs(d));
+          lmn += Kokkos::fabs(d);
+          if (vol(i) <= 0.0) ++lnb;
+        },
+        e, Kokkos::Max<double>(mx), mn, nb);
+    E = e;
+    maxErr = mx;
+    meanErr = mn / N;
+    nBad = nb;
+  };
+
+  TessellatorResult<Real> res;
+  double E, maxErr, meanErr;
+  long nBad;
+  evaluate(dpos, res, E, maxErr, meanErr, nBad);
+
+  OtResult R;
+  for (int it = 0; it < maxNewton; ++it) {
+    auto off = res.view.cellFacetOffset;
+    auto cnt = res.view.cellFacetCount;
+    auto nbr = res.view.facetNeighbor;
+    auto dvr = res.view.facetConnect;  // ∂V_c/∂r per facet
+    auto vol = res.view.cellVolume;
+    auto vs = vset;
+
+    // gradient g and Gauss-Newton diagonal (device, atomic scatter).
+    Kokkos::deep_copy(g, 0.0);
+    Kokkos::deep_copy(diag, 0.0);
+    Kokkos::parallel_for(
+        "mo.grad", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int c) {
+          const double Rc = 2.0 * gamma * (vol(c) - vs(c));
+          double sx = 0, sy = 0, sz = 0;
+          for (int f = off(c); f < off(c) + cnt(c); ++f) {
+            const int j = (int)nbr(f);
+            if (j < 0 || j >= N) continue;
+            const double dx = dvr(3 * f), dy = dvr(3 * f + 1), dz = dvr(3 * f + 2);
+            Kokkos::atomic_add(&g(3 * j), Rc * dx);
+            Kokkos::atomic_add(&g(3 * j + 1), Rc * dy);
+            Kokkos::atomic_add(&g(3 * j + 2), Rc * dz);
+            Kokkos::atomic_add(&diag(3 * j), 2.0 * gamma * dx * dx);
+            Kokkos::atomic_add(&diag(3 * j + 1), 2.0 * gamma * dy * dy);
+            Kokkos::atomic_add(&diag(3 * j + 2), 2.0 * gamma * dz * dz);
+            sx -= dx;
+            sy -= dy;
+            sz -= dz;
+          }
+          Kokkos::atomic_add(&g(3 * c), Rc * sx);
+          Kokkos::atomic_add(&g(3 * c + 1), Rc * sy);
+          Kokkos::atomic_add(&g(3 * c + 2), Rc * sz);
+          Kokkos::atomic_add(&diag(3 * c), 2.0 * gamma * sx * sx);
+          Kokkos::atomic_add(&diag(3 * c + 1), 2.0 * gamma * sy * sy);
+          Kokkos::atomic_add(&diag(3 * c + 2), 2.0 * gamma * sz * sz);
+        });
+    double gnorm = 0;
+    Kokkos::parallel_reduce(
+        "mo.gnorm", Kokkos::RangePolicy<Exec>(0, nD),
+        KOKKOS_LAMBDA(int i, double& m) { m = Kokkos::max(m, Kokkos::fabs(g(i))); },
+        Kokkos::Max<double>(gnorm));
+
+    R.iters = it;
+    R.maxVolErr = maxErr;
+    R.meanVolErr = meanErr;
+    R.nEmpty = nBad;
+    if (verbose)
+      std::printf("  [dvmesh] iter %2d  E=%.4e maxVolErr=%.3e gnorm=%.3e nBad=%ld\n", it, E, maxErr,
+                  gnorm, nBad);
+    if (gnorm < tol) {
+      R.converged = true;
+      break;
+    }
+
+    // matrix-free Gauss-Newton apply H v = 2γ Jᵀ(J v) (two device passes: J into yy, Jᵀ scatter).
+    auto Hmul = [&](const DV& v, DV& out) {
+      auto y = yy;
+      Kokkos::parallel_for(
+          "mo.Jv", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int c) {
+            double yc = 0;
+            for (int f = off(c); f < off(c) + cnt(c); ++f) {
+              const int j = (int)nbr(f);
+              if (j < 0 || j >= N) continue;
+              for (int d = 0; d < 3; ++d) yc += dvr(3 * f + d) * (v(3 * j + d) - v(3 * c + d));
+            }
+            y(c) = yc;
+          });
+      Kokkos::deep_copy(out, 0.0);
+      Kokkos::parallel_for(
+          "mo.JTy", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int c) {
+            const double s = 2.0 * gamma * y(c);
+            for (int f = off(c); f < off(c) + cnt(c); ++f) {
+              const int j = (int)nbr(f);
+              if (j < 0 || j >= N) continue;
+              for (int d = 0; d < 3; ++d) {
+                Kokkos::atomic_add(&out(3 * j + d), s * dvr(3 * f + d));
+                Kokkos::atomic_add(&out(3 * c + d), -s * dvr(3 * f + d));
+              }
+            }
+          });
+    };
+    auto dot = [&](const DV& a, const DV& b) {
+      double s = 0;
+      Kokkos::parallel_reduce(
+          "mo.dot", Kokkos::RangePolicy<Exec>(0, nD),
+          KOKKOS_LAMBDA(int i, double& l) { l += a(i) * b(i); }, s);
+      return s;
+    };
+
+    // Jacobi-preconditioned CG for H dq = −g (device).
+    Kokkos::deep_copy(dq, 0.0);
+    {
+      auto G = g, D = diag;
+      Kokkos::parallel_for(
+          "mo.r0", Kokkos::RangePolicy<Exec>(0, nD), KOKKOS_LAMBDA(int i) {
+            rr(i) = -G(i);
+            z(i) = Kokkos::fabs(D(i)) > 1e-30 ? rr(i) / D(i) : rr(i);
+            pp(i) = z(i);
+          });
+    }
+    double rz = dot(rr, z), rz0 = rz;
+    for (int k = 0; k < cgIters && rz > 1e-18 * rz0; ++k) {
+      Hmul(pp, Ap);
+      const double pAp = dot(pp, Ap);
+      if (pAp <= 0) break;
+      const double a = rz / pAp;
+      {
+        auto D = diag;
+        Kokkos::parallel_for(
+            "mo.cgupd", Kokkos::RangePolicy<Exec>(0, nD), KOKKOS_LAMBDA(int i) {
+              dq(i) += a * pp(i);
+              rr(i) -= a * Ap(i);
+              z(i) = Kokkos::fabs(D(i)) > 1e-30 ? rr(i) / D(i) : rr(i);
+            });
+      }
+      const double rzn = dot(rr, z);
+      const double beta = rzn / rz;
+      Kokkos::parallel_for(
+          "mo.pupd", Kokkos::RangePolicy<Exec>(0, nD),
+          KOKKOS_LAMBDA(int i) { pp(i) = z(i) + beta * pp(i); });
+      rz = rzn;
+    }
+    const double gdq = dot(g, dq);
+
+    // Armijo line search on E: x_try = x + α dq (device), rebuild + reduce E; backtrack.
+    double alpha = 1.0;
+    bool accepted = false;
+    Kokkos::View<Real*, MemSpace> xtry("mo.xtry", 3 * N);
+    for (int bt = 0; bt < 24; ++bt) {
+      const double al = alpha;
+      auto X = dpos, DQ = dq, XT = xtry;
+      Kokkos::parallel_for(
+          "mo.trial", Kokkos::RangePolicy<Exec>(0, nD),
+          KOKKOS_LAMBDA(int i) { XT(i) = X(i) + (Real)(al * DQ(i)); });
+      TessellatorResult<Real> resT;
+      double Et, mxT, mnT;
+      long nbT;
+      evaluate(xtry, resT, Et, mxT, mnT, nbT);
+      if (nbT == 0 && Et <= E + 1e-4 * alpha * gdq) {
+        Kokkos::deep_copy(dpos, xtry);
+        res = resT;
+        E = Et;
+        maxErr = mxT;
+        meanErr = mnT;
+        nBad = nbT;
+        accepted = true;
+        break;
+      }
+      alpha *= 0.5;
+    }
+    if (!accepted) break;
+  }
+  // download the optimised positions.
+  auto h = Kokkos::create_mirror_view(dpos);
+  Kokkos::deep_copy(h, dpos);
+  for (int i = 0; i < 3 * N; ++i) posHost[i] = h(i);
+  return R;
+}
+
 }  // namespace peclet::voro
 
 #endif  // PECLET_VORO_MESH_OPTIMIZER_HPP

@@ -132,6 +132,25 @@ int main(int argc, char** argv) {
                   ratioPos, ratioPw, nBadPw, pass ? "OK" : "FAIL");
       rc |= pass ? 0 : 1;
     }
+    // (C) device-resident optimiser (all assembly/matvec/CG/precond/line-search/update on device):
+    // must reach the same uniform-volume optimum as the host path (its oracle).
+    {
+      std::vector<real_t> posH = pos0, posD = pos0, volH, volD;
+      std::vector<real_t> vsetU(N, boxVol / N);
+      peclet::voro::meshVolumeOptimize<real_t, false>(posH, noW, vsetU, (real_t[3]){L, L, L}, N, sw,
+                                                      peclet::voro::NoSdf{}, 60, 1e-10, 300,
+                                                      peclet::voro::Precond::Jacobi, false);
+      auto RD = peclet::voro::meshVolumeOptimizeDevice<real_t>(
+          posD, vsetU, (real_t[3]){L, L, L}, N, sw, peclet::voro::NoSdf{}, 60, 1e-10, 300, true);
+      volumes<false>(posH, noW, N, L, sw, volH);
+      volumes<false>(posD, noW, N, L, sw, volD);
+      const double spH = spread(volH), spD = spread(volD);
+      const bool pass = RD.nEmpty == 0 && spD < 0.02 && std::fabs(spD - spH) < 0.01;
+      std::printf("  (C) device   host spread=%.4f  device spread=%.4f (%d it)  %s\n", spH, spD,
+                  RD.iters, pass ? "OK" : "FAIL");
+      rc |= pass ? 0 : 1;
+    }
+
     std::printf("%s\n", rc == 0 ? "MESH OPTIMIZER CHECKS PASS" : "MESH OPTIMIZER CHECKS FAILED");
   }
   Kokkos::finalize();
