@@ -892,6 +892,90 @@ struct ConvexCell {
     A[2] = Real(0.5) * az;
   }
 
+  static constexpr int MAXSV = 2 * MAXFV;  ///< max vertices on a cross-section polygon
+
+  /// Cross-section of the cell by the plane {x : (x - p0)·u = 0}: the convex polygon the plane cuts
+  /// out. Enumerates the cell's primal EDGES straight from the dual triangles — an edge is a pair of
+  /// alive triangles sharing exactly two planes (each edge is then their two endpoints, found exactly
+  /// once) — and collects the point where each edge crosses the plane, then orders the crossings CCW
+  /// in the plane (same in-plane basis + diamond pseudo-angle as faceOrdered). This never relies on
+  /// face watertightness, so it tiles a cross-section exactly where a face-by-face slice drops facets.
+  /// Coordinates are in the cell's own frame (dual-vertex frame, i.e. seed-relative). Returns the
+  /// vertex count m (0 or <3 if the plane misses/grazes the cell; -1 on MAXSV overflow — caller skips).
+  KOKKOS_INLINE_FUNCTION int sectionPolygon(const Real p0[3], const Real u[3], Real px[MAXSV],
+                                            Real py[MAXSV], Real pz[MAXSV]) const {
+    int m = 0;
+    for (int i = 0; i < nt; ++i) {
+      if (!alive[i])
+        continue;
+      const Real di = (vx[i] - p0[0]) * u[0] + (vy[i] - p0[1]) * u[1] + (vz[i] - p0[2]) * u[2];
+      const unsigned char a0 = t0[i], a1 = t1[i], a2 = t2[i];
+      for (int j = i + 1; j < nt; ++j) {
+        if (!alive[j])
+          continue;
+        const unsigned char b0 = t0[j], b1 = t1[j], b2 = t2[j];
+        const int common = (a0 == b0) + (a0 == b1) + (a0 == b2) + (a1 == b0) + (a1 == b1) +
+                           (a1 == b2) + (a2 == b0) + (a2 == b1) + (a2 == b2);
+        if (common != 2)
+          continue;  // not an edge (a primal edge = two triangles sharing exactly two planes)
+        const Real dj = (vx[j] - p0[0]) * u[0] + (vy[j] - p0[1]) * u[1] + (vz[j] - p0[2]) * u[2];
+        if ((di > Real(0)) == (dj > Real(0)))
+          continue;  // both endpoints on the same side -> edge doesn't cross the plane
+        const Real denom = di - dj;
+        if (denom == Real(0))
+          continue;
+        const Real tt = di / denom;
+        if (m >= MAXSV)
+          return -1;
+        px[m] = vx[i] + tt * (vx[j] - vx[i]);
+        py[m] = vy[i] + tt * (vy[j] - vy[i]);
+        pz[m] = vz[i] + tt * (vz[j] - vz[i]);
+        ++m;
+      }
+    }
+    if (m < 3)
+      return m;
+    const Real ulen = Kokkos::sqrt(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]);
+    if (ulen == Real(0))
+      return 0;
+    const Real un[3] = {u[0] / ulen, u[1] / ulen, u[2] / ulen};
+    Real e1[3];
+    if (Kokkos::fabs(un[0]) <= Kokkos::fabs(un[1]) && Kokkos::fabs(un[0]) <= Kokkos::fabs(un[2])) {
+      e1[0] = 0; e1[1] = -un[2]; e1[2] = un[1];
+    } else if (Kokkos::fabs(un[1]) <= Kokkos::fabs(un[2])) {
+      e1[0] = -un[2]; e1[1] = 0; e1[2] = un[0];
+    } else {
+      e1[0] = -un[1]; e1[1] = un[0]; e1[2] = 0;
+    }
+    const Real e1l = Kokkos::sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
+    e1[0] /= e1l; e1[1] /= e1l; e1[2] /= e1l;
+    const Real e2[3] = {un[1] * e1[2] - un[2] * e1[1], un[2] * e1[0] - un[0] * e1[2],
+                        un[0] * e1[1] - un[1] * e1[0]};
+    Real cx = 0, cy = 0, cz = 0;
+    for (int i = 0; i < m; ++i) { cx += px[i]; cy += py[i]; cz += pz[i]; }
+    cx /= m; cy /= m; cz /= m;
+    Real ang[MAXSV];
+    for (int i = 0; i < m; ++i) {
+      const Real dx = px[i] - cx, dy = py[i] - cy, dz = pz[i] - cz;
+      const Real qx = dx * e1[0] + dy * e1[1] + dz * e1[2];
+      const Real qy = dx * e2[0] + dy * e2[1] + dz * e2[2];
+      const Real s = Kokkos::fabs(qx) + Kokkos::fabs(qy);
+      const Real tt = (s > Real(0)) ? qy / s : Real(0);
+      ang[i] = (qx < Real(0)) ? (Real(2) - tt) : (qy < Real(0) ? Real(4) + tt : tt);
+    }
+    for (int i = 1; i < m; ++i) {
+      Real ka = ang[i], kx = px[i], ky = py[i], kz = pz[i];
+      int j = i - 1;
+      while (j >= 0 && ang[j] > ka) {
+        ang[j + 1] = ang[j];
+        px[j + 1] = px[j]; py[j + 1] = py[j]; pz[j + 1] = pz[j];
+        --j;
+      }
+      ang[j + 1] = ka; px[j + 1] = kx; py[j + 1] = ky; pz[j + 1] = kz;
+    }
+    return m;
+  }
+
   /// Cell volume (G1): V = (1/3) Σ_faces support_k · area_k. Seed (origin) is interior so
   /// every support distance is positive.
   KOKKOS_INLINE_FUNCTION Real volume() const {

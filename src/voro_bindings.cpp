@@ -153,6 +153,89 @@ int faceOrderedIdx(const PoreCell& c, int k, int out[PoreCell::MAXFV]) {
   return m;
 }
 
+// Reconstructs the SDF-clipped interstitial Voronoi cell of any seed. Builds a periodic counting-sort
+// grid once; each build() gathers the ~80 nearest seeds via an O(1) Chebyshev shell walk (stop once the
+// 80th nearest is provably found), builds the ConvexCell against a far box, and clips it to the SDF.
+// Shared by sdf_voronoi_cells (polyhedra) and sdf_voronoi_section (plane cross-section).
+struct PoreReconstructor {
+  const real_t* seed;
+  int N;
+  real_t L, Lh, big, hbin;
+  int nb;
+  peclet::voro::SdfSpheres<real_t> sdf;
+  std::vector<int> binStart, binItem;
+  mutable std::vector<std::pair<real_t, int>> ord;
+
+  int binOf(real_t x) const {
+    int b = (int)std::floor(x / hbin) % nb;
+    return b < 0 ? b + nb : b;
+  }
+  int cellOf(int i) const {
+    return binOf(seed[3 * i]) + nb * (binOf(seed[3 * i + 1]) + nb * binOf(seed[3 * i + 2]));
+  }
+  PoreReconstructor(const std::vector<real_t>& s, real_t L_, peclet::voro::SdfSpheres<real_t> sdf_)
+      : seed(s.data()), N((int)(s.size() / 3)), L(L_), Lh(0.5 * L_), big(4 * L_), sdf(sdf_) {
+    nb = std::max(1, std::min((int)std::cbrt((double)N / 2.0 + 1.0), 96));
+    hbin = L / nb;
+    const int nbin = nb * nb * nb;
+    binStart.assign(nbin + 1, 0);
+    for (int i = 0; i < N; ++i) ++binStart[cellOf(i) + 1];
+    for (int b = 0; b < nbin; ++b) binStart[b + 1] += binStart[b];
+    binItem.resize(N);
+    std::vector<int> cur(binStart.begin(), binStart.end());
+    for (int i = 0; i < N; ++i) binItem[cur[cellOf(i)]++] = i;
+  }
+  bool build(int i, PoreCell& c) const {
+    const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
+    ord.clear();
+    const int Kwant = 80, bx = binOf(sx), by = binOf(sy), bz = binOf(sz);
+    for (int R = 0; R <= nb; ++R) {
+      for (int dz2 = -R; dz2 <= R; ++dz2)
+        for (int dy2 = -R; dy2 <= R; ++dy2)
+          for (int dx2 = -R; dx2 <= R; ++dx2) {
+            int cheb = std::abs(dx2);
+            cheb = std::max(cheb, std::abs(dy2));
+            cheb = std::max(cheb, std::abs(dz2));
+            if (cheb != R) continue;
+            const int gx = ((bx + dx2) % nb + nb) % nb, gy = ((by + dy2) % nb + nb) % nb,
+                      gz = ((bz + dz2) % nb + nb) % nb;
+            const int b = gx + nb * (gy + nb * gz);
+            for (int t = binStart[b]; t < binStart[b + 1]; ++t) {
+              const int j = binItem[t];
+              if (j == i) continue;
+              real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
+              dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
+              dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
+              dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
+              ord.emplace_back(dx * dx + dy * dy + dz * dz, j);
+            }
+          }
+      if ((int)ord.size() >= Kwant) {
+        std::nth_element(ord.begin(), ord.begin() + (Kwant - 1), ord.end());
+        const real_t rh = (real_t)R * hbin;
+        if (rh * rh >= ord[Kwant - 1].first) break;
+      }
+    }
+    std::sort(ord.begin(), ord.end());
+    const int M = std::min((int)ord.size(), 80);
+    real_t rx[80], ry[80], rz[80];
+    int ids[80];
+    for (int k = 0; k < M; ++k) {
+      const int j = ord[k].second;
+      real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
+      dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
+      dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
+      dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
+      rx[k] = dx; ry[k] = dy; rz[k] = dz; ids[k] = j;
+    }
+    const real_t Lbig[3] = {big, big, big};
+    peclet::voro::buildConvexCell(c, Lbig, rx, ry, rz, ids, M);
+    const real_t seedW[3] = {sx, sy, sz};
+    peclet::voro::clipCellAgainstSdf<real_t, 128, 256, false>(c, seedW, sdf);
+    return !(c.empty() || c.overflow);
+  }
+};
+
 // --------------------------------------------------------------------------------------------------
 // Tessellation: the bare moving-particle Voronoi tessellator (cold build + incremental repair).
 // --------------------------------------------------------------------------------------------------
@@ -580,80 +663,11 @@ NB_MODULE(_voro, m) {
         std::vector<real_t> px, py, pz, vol;
         std::vector<int64_t> faces, faceOff(1, 0);
         std::vector<int32_t> boundary, cellSeed;
-        const real_t Lh = real_t(0.5) * L, big = 4 * L;
-        // periodic uniform grid (counting sort) for an O(N) neighbour gather — replaces the O(N^2)
-        // brute force so dense (inflation-layer) seedings stay fast.
-        const int nb = std::max(1, std::min((int)std::cbrt((double)N / 2.0 + 1.0), 96));
-        const real_t hbin = L / nb;
-        auto binOf = [&](real_t x) {
-          int b = (int)std::floor(x / hbin) % nb;
-          return b < 0 ? b + nb : b;
-        };
-        const int nbin = nb * nb * nb;
-        std::vector<int> binStart(nbin + 1, 0);
-        auto cellOf = [&](int i) {
-          return binOf(seed[3 * i]) + nb * (binOf(seed[3 * i + 1]) + nb * binOf(seed[3 * i + 2]));
-        };
-        for (int i = 0; i < N; ++i) ++binStart[cellOf(i) + 1];
-        for (int b = 0; b < nbin; ++b) binStart[b + 1] += binStart[b];
-        std::vector<int> binItem(N);
-        {
-          std::vector<int> cur(binStart.begin(), binStart.end());
-          for (int i = 0; i < N; ++i) binItem[cur[cellOf(i)]++] = i;
-        }
-        std::vector<std::pair<real_t, int>> ord;
+        PoreReconstructor rec(seed, L, sdf);
         for (int i = 0; i < N; ++i) {
           const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
-          ord.clear();
-          // walk Chebyshev shells of the grid outward; stop once the 80 nearest are provably found
-          // (all unscanned bins lie at L-inf distance >= R*hbin from the seed).
-          const int Kwant = 80;
-          const int bx = binOf(sx), by = binOf(sy), bz = binOf(sz);
-          for (int R = 0; R <= nb; ++R) {
-            for (int dz2 = -R; dz2 <= R; ++dz2)
-              for (int dy2 = -R; dy2 <= R; ++dy2)
-                for (int dx2 = -R; dx2 <= R; ++dx2) {
-                  int cheb = std::abs(dx2);
-                  cheb = std::max(cheb, std::abs(dy2));
-                  cheb = std::max(cheb, std::abs(dz2));
-                  if (cheb != R) continue;  // shell only (interior already scanned)
-                  const int gx = ((bx + dx2) % nb + nb) % nb, gy = ((by + dy2) % nb + nb) % nb,
-                            gz = ((bz + dz2) % nb + nb) % nb;
-                  const int b = gx + nb * (gy + nb * gz);
-                  for (int t = binStart[b]; t < binStart[b + 1]; ++t) {
-                    const int j = binItem[t];
-                    if (j == i) continue;
-                    real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
-                    dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
-                    dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
-                    dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
-                    ord.emplace_back(dx * dx + dy * dy + dz * dz, j);
-                  }
-                }
-            if ((int)ord.size() >= Kwant) {
-              std::nth_element(ord.begin(), ord.begin() + (Kwant - 1), ord.end());
-              const real_t rh = (real_t)R * hbin;
-              if (rh * rh >= ord[Kwant - 1].first) break;  // no closer seed can remain unscanned
-            }
-          }
-          std::sort(ord.begin(), ord.end());
-          const int M = std::min((int)ord.size(), 80);
-          std::vector<real_t> rx(M), ry(M), rz(M);
-          std::vector<int> ids(M);
-          for (int k = 0; k < M; ++k) {
-            const int j = ord[k].second;
-            real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
-            dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
-            dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
-            dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
-            rx[k] = dx; ry[k] = dy; rz[k] = dz; ids[k] = j;
-          }
           PoreCell c;
-          const real_t Lbig[3] = {big, big, big};
-          peclet::voro::buildConvexCell(c, Lbig, rx.data(), ry.data(), rz.data(), ids.data(), M);
-          const real_t seedW[3] = {sx, sy, sz};
-          peclet::voro::clipCellAgainstSdf<real_t, 128, 256, false>(c, seedW, sdf);
-          if (c.empty() || c.overflow) continue;
+          if (!rec.build(i, c)) continue;
           const int64_t base = (int64_t)px.size();
           std::vector<int> triToPt(c.nt, -1);
           int np = 0;
@@ -705,6 +719,56 @@ NB_MODULE(_voro, m) {
       "Reconstruct the SDF-clipped interstitial Voronoi cells and return their polyhedra as flat\n"
       "arrays (VTK_POLYHEDRON layout): 'points' (Np,3), 'faces' + 'face_offsets' (per-cell face lists,\n"
       "global point ids), 'volume' (Nc,), 'boundary' (Nc, 1 where the cell touches a sphere wall).");
+
+  m.def(
+      "sdf_voronoi_section",
+      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
+         nb::ndarray<real_t, nb::c_contig> sph_r, real_t L,
+         std::array<real_t, 3> origin, std::array<real_t, 3> normal) {
+        auto seed = flatten3(pos_in);
+        DView cenH, radH;
+        auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
+        PoreReconstructor rec(seed, L, sdf);
+        // Cut every reconstructed cell by the plane {x : (x-origin)·normal = 0} and collect the
+        // convex section polygons (robust: ConvexCell::sectionPolygon works from the dual edges, so it
+        // tiles the cross-section exactly). Vertices returned in WORLD 3-D (all on the plane).
+        std::vector<real_t> verts, vol;
+        std::vector<int64_t> off(1, 0);
+        std::vector<int32_t> cellSeed;
+        real_t spx[PoreCell::MAXSV], spy[PoreCell::MAXSV], spz[PoreCell::MAXSV];
+        for (int i = 0; i < rec.N; ++i) {
+          const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
+          PoreCell c;
+          if (!rec.build(i, c)) continue;
+          const real_t p0[3] = {origin[0] - sx, origin[1] - sy, origin[2] - sz};  // plane in cell frame
+          const real_t u3[3] = {normal[0], normal[1], normal[2]};
+          const int mm = c.sectionPolygon(p0, u3, spx, spy, spz);
+          if (mm < 3) continue;
+          for (int k = 0; k < mm; ++k) {
+            verts.push_back(sx + spx[k]);
+            verts.push_back(sy + spy[k]);
+            verts.push_back(sz + spz[k]);
+          }
+          off.push_back((int64_t)(verts.size() / 3));
+          vol.push_back(c.volumePerVertex());
+          cellSeed.push_back(i);
+        }
+        const std::size_t nV = verts.size() / 3, nP = vol.size();
+        nb::dict d;
+        d["verts"] = peclet::core::python::vector_to_ndarray(std::move(verts), {nV, 3}, {3, 1});
+        d["offsets"] = peclet::core::python::vector_to_ndarray(std::move(off), {off.size()}, {1});
+        d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nP}, {1});
+        d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nP}, {1});
+        return d;
+      },
+      nb::arg("positions"), nb::arg("sphere_centres"), nb::arg("sphere_radii"), nb::arg("L"),
+      nb::arg("origin"), nb::arg("normal"),
+      "Cross-section of the SDF-clipped interstitial Voronoi mesh by the plane through `origin` with\n"
+      "`normal`: cut every cell directly (ConvexCell::sectionPolygon, robust — works from the dual\n"
+      "edges, so it tiles the plane exactly where a face-by-face slice drops facets). Returns 'verts'\n"
+      "(Nv,3, world coords, all on the plane) + 'offsets' (Npoly+1, per-polygon vertex ranges) +\n"
+      "'volume' (Npoly, the 3-D cell volume) + 'seed' (Npoly, the seed index). For a z=z0 slice pass\n"
+      "origin=(0,0,z0), normal=(0,0,1) and plot verts[:, :2].");
 
   m.def(
       "minimize_interface",
