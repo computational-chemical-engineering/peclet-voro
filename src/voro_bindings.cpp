@@ -581,17 +581,60 @@ NB_MODULE(_voro, m) {
         std::vector<int64_t> faces, faceOff(1, 0);
         std::vector<int32_t> boundary, cellSeed;
         const real_t Lh = real_t(0.5) * L, big = 4 * L;
+        // periodic uniform grid (counting sort) for an O(N) neighbour gather — replaces the O(N^2)
+        // brute force so dense (inflation-layer) seedings stay fast.
+        const int nb = std::max(1, std::min((int)std::cbrt((double)N / 2.0 + 1.0), 96));
+        const real_t hbin = L / nb;
+        auto binOf = [&](real_t x) {
+          int b = (int)std::floor(x / hbin) % nb;
+          return b < 0 ? b + nb : b;
+        };
+        const int nbin = nb * nb * nb;
+        std::vector<int> binStart(nbin + 1, 0);
+        auto cellOf = [&](int i) {
+          return binOf(seed[3 * i]) + nb * (binOf(seed[3 * i + 1]) + nb * binOf(seed[3 * i + 2]));
+        };
+        for (int i = 0; i < N; ++i) ++binStart[cellOf(i) + 1];
+        for (int b = 0; b < nbin; ++b) binStart[b + 1] += binStart[b];
+        std::vector<int> binItem(N);
+        {
+          std::vector<int> cur(binStart.begin(), binStart.end());
+          for (int i = 0; i < N; ++i) binItem[cur[cellOf(i)]++] = i;
+        }
         std::vector<std::pair<real_t, int>> ord;
         for (int i = 0; i < N; ++i) {
           const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
           ord.clear();
-          for (int j = 0; j < N; ++j) {
-            if (j == i) continue;
-            real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
-            dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
-            dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
-            dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
-            ord.emplace_back(dx * dx + dy * dy + dz * dz, j);
+          // walk Chebyshev shells of the grid outward; stop once the 80 nearest are provably found
+          // (all unscanned bins lie at L-inf distance >= R*hbin from the seed).
+          const int Kwant = 80;
+          const int bx = binOf(sx), by = binOf(sy), bz = binOf(sz);
+          for (int R = 0; R <= nb; ++R) {
+            for (int dz2 = -R; dz2 <= R; ++dz2)
+              for (int dy2 = -R; dy2 <= R; ++dy2)
+                for (int dx2 = -R; dx2 <= R; ++dx2) {
+                  int cheb = std::abs(dx2);
+                  cheb = std::max(cheb, std::abs(dy2));
+                  cheb = std::max(cheb, std::abs(dz2));
+                  if (cheb != R) continue;  // shell only (interior already scanned)
+                  const int gx = ((bx + dx2) % nb + nb) % nb, gy = ((by + dy2) % nb + nb) % nb,
+                            gz = ((bz + dz2) % nb + nb) % nb;
+                  const int b = gx + nb * (gy + nb * gz);
+                  for (int t = binStart[b]; t < binStart[b + 1]; ++t) {
+                    const int j = binItem[t];
+                    if (j == i) continue;
+                    real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
+                    dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
+                    dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
+                    dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
+                    ord.emplace_back(dx * dx + dy * dy + dz * dz, j);
+                  }
+                }
+            if ((int)ord.size() >= Kwant) {
+              std::nth_element(ord.begin(), ord.begin() + (Kwant - 1), ord.end());
+              const real_t rh = (real_t)R * hbin;
+              if (rh * rh >= ord[Kwant - 1].first) break;  // no closer seed can remain unscanned
+            }
           }
           std::sort(ord.begin(), ord.end());
           const int M = std::min((int)ord.size(), 80);
