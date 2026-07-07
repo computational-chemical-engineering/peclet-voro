@@ -70,6 +70,7 @@ int main(int argc, char** argv) {
     std::printf("energy-minimisation mesh optimiser:\n");
     const int N = 1500, sw = 5;
     const real_t L = 1.0;
+    const real_t boxL[3] = {L, L, L};
     const double boxVol = L * L * L;
     std::mt19937 rng(3);
     std::uniform_real_distribution<real_t> U(0.0, 1.0);
@@ -87,7 +88,7 @@ int main(int argc, char** argv) {
       std::vector<real_t> pos = pos0, vol1;
       std::vector<real_t> vset(N, boxVol / N);
       auto R = peclet::voro::meshVolumeOptimize<real_t, false>(
-          pos, noW, vset, (real_t[3]){L, L, L}, N, sw, peclet::voro::NoSdf{}, 60, 1e-10, 300,
+          pos, noW, vset, boxL, N, sw, peclet::voro::NoSdf{}, 60, 1e-10, 300,
           precs[mode], mode == 0);
       volumes<false>(pos, noW, N, L, sw, vol1);
       sp[mode] = spread(vol1);
@@ -110,7 +111,7 @@ int main(int argc, char** argv) {
     long nBadPw = 0;
     {
       std::vector<real_t> pos = pos0, vol1;
-      peclet::voro::meshVolumeOptimize<real_t, false>(pos, noW, vset, (real_t[3]){L, L, L}, N, sw,
+      peclet::voro::meshVolumeOptimize<real_t, false>(pos, noW, vset, boxL, N, sw,
                                                       peclet::voro::NoSdf{}, 80, 1e-10, 300,
                                                       peclet::voro::Precond::Jacobi, false);
       volumes<false>(pos, noW, N, L, sw, vol1);
@@ -121,10 +122,9 @@ int main(int argc, char** argv) {
        // an exact partition (Effort-1 min-image floor ~1%), so its volume energy is inconsistent —
        // weights help only on a non-periodic/exact-partition domain (deferred).
       std::vector<real_t> pos = pos0, w(N, 0.0), vol1;
-      auto R = peclet::voro::meshVolumeOptimize<real_t, true>(pos, w, vset, (real_t[3]){L, L, L}, N,
-                                                             sw, peclet::voro::NoSdf{}, 40, 1e-10,
-                                                             300, peclet::voro::Precond::Jacobi,
-                                                             true);
+      auto R = peclet::voro::meshVolumeOptimize<real_t, true>(
+          pos, w, vset, boxL, N, sw, peclet::voro::NoSdf{}, 40, 1e-10, 300,
+          peclet::voro::Precond::Jacobi, true);
       volumes<true>(pos, w, N, L, sw, vol1);
       ratioPw = slabRatio(pos, vol1, N);
       nBadPw = R.nEmpty;
@@ -142,11 +142,11 @@ int main(int argc, char** argv) {
     {
       std::vector<real_t> posH = pos0, posD = pos0, volH, volD;
       std::vector<real_t> vsetU(N, boxVol / N);
-      peclet::voro::meshVolumeOptimize<real_t, false>(posH, noW, vsetU, (real_t[3]){L, L, L}, N, sw,
+      peclet::voro::meshVolumeOptimize<real_t, false>(posH, noW, vsetU, boxL, N, sw,
                                                       peclet::voro::NoSdf{}, 60, 1e-10, 300,
                                                       peclet::voro::Precond::Jacobi, false);
       auto RD = peclet::voro::meshVolumeOptimizeDevice<real_t>(
-          posD, vsetU, (real_t[3]){L, L, L}, N, sw, peclet::voro::NoSdf{}, 60, 1e-10, 300, true);
+          posD, vsetU, boxL, N, sw, peclet::voro::NoSdf{}, 60, 1e-10, 300, true);
       volumes<false>(posH, noW, N, L, sw, volH);
       volumes<false>(posD, noW, N, L, sw, volD);
       const double spH = spread(volH), spD = spread(volD);
@@ -166,7 +166,7 @@ int main(int argc, char** argv) {
         const real_t dx = pos0[3 * i] - 0.5, dy = pos0[3 * i + 1] - 0.5, dz = pos0[3 * i + 2] - 0.5;
         type[i] = (dx * dx + dy * dy + dz * dz < 0.25 * 0.25) ? 1 : 0;
       }
-      auto R = peclet::voro::interfaceMinimize<real_t>(pos, type, 1.0, (real_t[3]){L, L, L}, N, sw,
+      auto R = peclet::voro::interfaceMinimize<real_t>(pos, type, 1.0, boxL, N, sw,
                                                        peclet::voro::NoSdf{}, 120, 1e-9, true);
       const double ratio = R.meanVolErr;  // E_final / E_initial
       const bool pass = R.nEmpty == 0 || true;  // no degeneracy gate; require energy decrease

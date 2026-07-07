@@ -387,6 +387,7 @@ int main(int argc, char** argv) {
   {
     Packing pk = readPacking(pack);
     const Real L = pk.L, boxVol = L * L * L;
+    const Real boxL[3] = {L, L, L};
     std::printf("packing: M=%d spheres  side=%.3f  meanR=%.4f\n", pk.M, L,
                 std::accumulate(pk.r.begin(), pk.r.end(), 0.0) / pk.M);
     // device-visible sphere arrays for the SDF provider (host pointers ok under the OpenMP backend)
@@ -408,7 +409,7 @@ int main(int argc, char** argv) {
       std::printf("\n---- NoSdf (no walls, pure Voronoi of the same seeds), Newton+AMG, verbose ----\n");
       std::vector<Real> p1 = seeds;
       peclet::voro::meshVolumeOptimize<Real, false, peclet::voro::NoSdf>(
-          p1, noW, vset, (Real[3]){L, L, L}, Nc, sw, peclet::voro::NoSdf{}, 40, 1e-9, 400,
+          p1, noW, vset, boxL, Nc, sw, peclet::voro::NoSdf{}, 40, 1e-9, 400,
           peclet::voro::Precond::GraphAMG, true, 0.0, 0.7, /*freeEnergy=*/true);
       {
         Tess T = buildTess(p1, Nc, L, sw, peclet::voro::NoSdf{}, gd);
@@ -427,7 +428,7 @@ int main(int argc, char** argv) {
       std::printf("\n---- SDF (pore walls), FREE ENERGY −V_ref·log(V), steepest descent, verbose ----\n");
       std::vector<Real> p2 = seeds;
       peclet::voro::meshVolumeOptimize<Real, false, SdfSpheres>(
-          p2, noW, vset, (Real[3]){L, L, L}, Nc, sw, sdf, 200, 1e-9, 400,
+          p2, noW, vset, boxL, Nc, sw, sdf, 200, 1e-9, 400,
           peclet::voro::Precond::SteepestDescent, true, 0.0, 0.7, /*freeEnergy=*/true);
       {
         Tess T = buildTess(p2, Nc, L, sw, sdf, gd);
@@ -552,7 +553,7 @@ int main(int argc, char** argv) {
       std::vector<Real> pos = pos0, noW;
       auto t0 = clk::now();
       auto R = peclet::voro::meshVolumeOptimize<Real, false, SdfSpheres>(
-          pos, noW, vset, (Real[3]){L, L, L}, Nend, sw, sdf, 60, 1e-9, 400, pc.second, false);
+          pos, noW, vset, boxL, Nend, sw, sdf, 60, 1e-9, 400, pc.second, false);
       const double t = secs(t0, clk::now());
       Tess Tf = buildTess(pos, Nend, L, sw, sdf, gd);
       std::printf("%-26s | %6d | %10.2f | %12.3e\n", pc.first, R.iters, t, volumeSpread(Tf, Nend));
