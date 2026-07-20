@@ -50,6 +50,7 @@ static real_t wrap1(real_t x, real_t L) {
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   Kokkos::initialize(argc, argv);
+  int rc = 0;  // nonzero when a completeness invariant fails (so ctest can gate on this bench)
   {
     int rank = 0, nproc = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -180,9 +181,16 @@ int main(int argc, char** argv) {
           "max gather = %.2f ms  build = %.2f ms  | totOwned=%d badOwned=%ld Σvol=%.6f\n",
           nproc, N, rcutMult, aggMps, aggMps * 1e3 / nproc, sumGather * 1e3, maxBuild * 1e3,
           totOwned, totBad, totVol);
+      // Completeness invariants: every seed owned exactly once, no incomplete/overflowed owned
+      // cell, and the owned cells tile the periodic box (Σvol == |box|).
+      const double boxVol = (double)L[0] * L[1] * L[2];
+      if (totOwned != N || totBad != 0 || std::abs(totVol - boxVol) > 1e-9 * boxVol)
+        rc = 1;
+      std::printf("VORONOI(MPI) completeness: %s\n", rc == 0 ? "PASS" : "FAIL");
     }
+    MPI_Bcast(&rc, 1, MPI_INT, 0, MPI_COMM_WORLD);
   }
   Kokkos::finalize();
   MPI_Finalize();
-  return 0;
+  return rc;
 }

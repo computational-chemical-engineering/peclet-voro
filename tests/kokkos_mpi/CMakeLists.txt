@@ -35,11 +35,23 @@ endif()
 
 enable_testing()
 
-# Distributed benchmarks (run manually under mpirun -np <R> [N ...]).
+# Distributed benchmarks (run manually under mpirun -np <R> [N ...] for at-scale numbers).
 foreach(b bench_voronoi_mpi bench_repair_mpi)
   add_executable(${b} ${b}.cpp)
   target_include_directories(${b} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include ${MORTON_INCLUDE})
   target_compile_definitions(${b} PRIVATE PECLET_VORO_MPI MORTON_ENABLE_KOKKOS=1)
   target_link_libraries(${b} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
+endforeach()
+
+# Both benches self-check (voronoi: completeness invariants — owned count, no bad cells,
+# Σvol == |box|; repair: MPI repair-vs-cold-rebuild exactness) and exit nonzero on failure,
+# so register test-sized runs as ctests at np=1,2,4.
+foreach(np 1 2 4)
+  add_test(NAME voronoi_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:bench_voronoi_mpi> 20000 1)
+  add_test(NAME repair_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:bench_repair_mpi> 20000 4)
+  set_tests_properties(voronoi_mpi_np${np} repair_mpi_np${np} PROPERTIES
+    ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false" PROCESSORS ${np})
 endforeach()
