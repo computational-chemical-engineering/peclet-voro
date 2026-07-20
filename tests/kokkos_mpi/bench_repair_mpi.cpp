@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "peclet/core/common/view.hpp"
+#include "peclet/voro/mpi/distributed_moving.hpp"
 #include "peclet/voro/mpi/voronoi_halo.hpp"
 #include "peclet/voro/repair.hpp"
 #include "peclet/voro/tessellator.hpp"
@@ -122,19 +123,6 @@ int main(int argc, char** argv) {
         for (int d = 0; d < 3; ++d)
           out[i][d] = wrap1(ownedP0[i][d] + ownedVel[i][d] * s, L[d]);
     };
-    auto maxOwnedDispFrom = [&](const std::vector<Vec3>& a, const std::vector<Vec3>& b) {
-      real_t m2 = 0;
-      for (int i = 0; i < nOwned; ++i) {
-        real_t d2 = 0;
-        for (int d = 0; d < 3; ++d) {
-          real_t q = a[i][d] - b[i][d];
-          q -= std::round(q / L[d]) * L[d];
-          d2 += q * q;
-        }
-        m2 = std::max(m2, d2);
-      }
-      return std::sqrt(m2);
-    };
 
     std::vector<real_t> disps = {real_t(1e-4), real_t(2e-4), real_t(5e-4), real_t(1e-3),
                                  real_t(2e-3), real_t(5e-3), real_t(1e-2)};
@@ -151,7 +139,7 @@ int main(int argc, char** argv) {
 
     for (real_t disp : disps) {
       const real_t scale = disp * spacing;
-      std::vector<Vec3> owned, refPos;
+      std::vector<Vec3> owned;
 
       // ---------- distributed COLD build timing (gather + buildTessellation(owned) every step)
       // ----------
@@ -176,51 +164,28 @@ int main(int argc, char** argv) {
       // ----------
       double tRep = 0;
       long regath = 0, p1 = 0, p2 = 0;
-      // establish at t0
+      // establish at t0 — the library-level distributed driver (VoronoiHalo + MovingTessellation
+      // + the distributed Verlet-skin invariant now live in DistributedMovingTessellation; this
+      // bench validates it via the exactness gate below).
       advanceOwned(scale, 0, owned);
-      auto g = halo.gather(owned, ownedGid, ownedW, rcut);
-      int nComb = (int)g.pos.size();
-      auto dPos = uploadCombined(g.pos, L);
-      peclet::voro::MovingTessellation<real_t, CMAXP, CMAXT> mt;
-      mt.alloc(nComb, L.data(), tol, skin, 4, N, g.nOwned);
-      mt.rebuild(dPos);
-      refPos = owned;  // Verlet reference (owned positions at last (re)gather)
-      Kokkos::View<real_t*, Mem> lastDPos = dPos;
+      peclet::voro::mpi::DistributedMovingTessellation<real_t, CMAXP, CMAXT> dmt;
+      dmt.init({0, 0, 0}, {L[0], L[1], L[2]}, {16, 16, 16}, {true, true, true}, (real_t)rcut, skin,
+               tol, MPI_COMM_WORLD, 4, N);
+      dmt.establish(owned, ownedGid, ownedW);
 
       for (int s = 1; s <= nSteps; ++s) {
         advanceOwned(scale, s, owned);
         MPI_Barrier(MPI_COMM_WORLD);
         double t0 = MPI_Wtime();
-        // The re-gather vs refresh paths are BOTH collective (gather rebuilds the halo topology via
-        // NBX; refreshPositions forwards on the established topology) — every rank must take the
-        // SAME one or the two patterns mismatch and deadlock. The skin trip is a LOCAL test, so
-        // reduce it to a GLOBAL decision: if ANY rank tripped, ALL ranks re-gather. (This is the
-        // distributed-Verlet invariant; without it the run deadlocks at np>=4 once ranks diverge on
-        // the trip at larger displacement.)
-        int localTrip = (maxOwnedDispFrom(owned, refPos) > real_t(0.5) * skin) ? 1 : 0;
-        int anyTrip = 0;
-        MPI_Allreduce(&localTrip, &anyTrip, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
-        if (anyTrip) {
-          // skin trip: re-gather (re-establish topology) + cold rebuild — the distributed fallback.
-          g = halo.gather(owned, ownedGid, ownedW, rcut);
-          nComb = (int)g.pos.size();
-          dPos = uploadCombined(g.pos, L);
-          mt.alloc(nComb, L.data(), tol, skin, 4, N, g.nOwned);
-          mt.rebuild(dPos);
-          refPos = owned;
-          ++regath;
-        } else {
-          // fast path: refresh ghost positions on the established topology, repair locally.
-          std::vector<Vec3> comb;
-          halo.refreshPositions(owned, comb);
-          dPos = uploadCombined(comb, L);
-          auto st = mt.step(dPos);
-          p1 += st.pass1;
-          p2 += st.pass2;
-        }
+        auto st = dmt.step(owned);
         Kokkos::fence();
         tRep += MPI_Wtime() - t0;
-        lastDPos = dPos;
+        if (st.regathered) {
+          ++regath;
+        } else {
+          p1 += st.repair.pass1;
+          p2 += st.repair.pass2;
+        }
       }
 
       // ---------- exactness: cold-build the SAME final combined positions, compare owned volumes
@@ -229,8 +194,9 @@ int main(int argc, char** argv) {
       {
         Kokkos::View<real_t*, Mem> wd;
         Kokkos::View<long*, Mem> gd;
+        auto& mt = dmt.tess();
         auto rr = peclet::voro::buildTessellation<real_t, false>(
-            lastDPos, wd, mt.N, L.data(), 4, N, gd, peclet::voro::NoSdf{}, false, mt.nProc);
+            dmt.positions(), wd, mt.N, L.data(), 4, N, gd, peclet::voro::NoSdf{}, false, mt.nProc);
         auto ov = Kokkos::create_mirror_view(rr.view.cellVolume);
         auto rv = Kokkos::create_mirror_view(mt.vol);
         Kokkos::deep_copy(ov, rr.view.cellVolume);
