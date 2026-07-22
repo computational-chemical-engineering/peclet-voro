@@ -705,13 +705,14 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
   Kokkos::deep_copy(dpos, Kokkos::View<const Real*, Kokkos::HostSpace>(posHost.data(), 3 * N));
   Kokkos::View<long*, MemSpace> gd;
 
+  constexpr bool kHasSdfD = !std::is_same_v<Sdf, peclet::voro::NoSdf>;
   DV g("mo.g", nD), dq("mo.dq", nD), diag("mo.diag", nD);
   DV rr("mo.r", nD), z("mo.z", nD), pp("mo.p", nD), Ap("mo.Ap", nD), yy("mo.y", N);
+  DV wallG("mo.wallG", nD);  // per-cell SDF wall-facet own-seed term (zero without an SDF)
 
-  // Build the tessellation at `x` and return E + max/mean vol error + empty count (device reduce).
-  auto evaluate = [&](const Kokkos::View<Real*, MemSpace>& x, TessellatorResult<Real>& res,
-                      double& E, double& maxErr, double& meanErr, long& nBad) {
-    res = buildTessellation<Real, false, Sdf>(x, dw, N, Larr, sw, N, gd, sdf, true);
+  // Score a built tessellation: E + max/mean vol error + empty count (device reduce).
+  auto score = [&](TessellatorResult<Real>& res, double& E, double& maxErr, double& meanErr,
+                   long& nBad) {
     auto vol = res.view.cellVolume;
     auto vs = vset;
     double e = 0, mx = 0, mn = 0;
@@ -731,11 +732,32 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
     meanErr = mn / N;
     nBad = nb;
   };
+  // Build the tessellation at `x` and score it.
+  auto evaluate = [&](const Kokkos::View<Real*, MemSpace>& x, TessellatorResult<Real>& res,
+                      double& E, double& maxErr, double& meanErr, long& nBad) {
+    res = buildTessellation<Real, false, Sdf>(x, dw, N, Larr, sw, N, gd, sdf, true);
+    score(res, E, maxErr, meanErr, nBad);
+  };
 
   TessellatorResult<Real> res;
   double E, maxErr, meanErr;
   long nBad;
   evaluate(dpos, res, E, maxErr, meanErr, nBad);
+  if constexpr (kHasSdfD) {
+    // Renormalize the targets to the ACTUAL tessellated volume (the pore volume under the SDF
+    // clip; == boxVol unclipped) — the host oracle rescales per build; the clip volume is fixed,
+    // so once suffices. Then re-score with the renormalized targets (no rebuild).
+    double totVol = 0;
+    auto vol0 = res.view.cellVolume;
+    Kokkos::parallel_reduce(
+        "mo.totvol", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(int i, double& l) { l += vol0(i); }, totVol);
+    const double sc = (totVol > 0) ? totVol / boxVol : 1.0;
+    auto vsc = vset;
+    Kokkos::parallel_for(
+        "mo.vscale", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int i) { vsc(i) *= sc; });
+    score(res, E, maxErr, meanErr, nBad);
+  }
 
   OtResult R;
   for (int it = 0; it < maxNewton; ++it) {
@@ -746,13 +768,60 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
     auto vol = res.view.cellVolume;
     auto vs = vset;
 
+    // SDF wall-facet own-seed term (device mirror of the host stencil's wall block): sum the
+    // published wall-facet outward area vectors gw = Σ_wall A_k, then chain through the seed-foot
+    // wall model n(x) = −φ ∇φ/|∇φ|²: leading term −(û·gw)û (|∇φ|-independent) + the φ/|∇φ|
+    // curvature term ∝ ∇²φ. Recomputed each Newton iteration from the CURRENT tessellation.
+    if constexpr (kHasSdfD) {
+      auto area = res.view.facetArea;
+      auto wG = wallG;
+      auto X = dpos;
+      auto sdfD = sdf;
+      Kokkos::parallel_for(
+          "mo.wall", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int c) {
+            double gw0 = 0, gw1 = 0, gw2 = 0;
+            for (int f = off(c); f < off(c) + cnt(c); ++f)
+              if ((int)nbr(f) == kBoundaryFacet) {
+                gw0 += area(3 * f);
+                gw1 += area(3 * f + 1);
+                gw2 += area(3 * f + 2);
+              }
+            double wx = 0, wy = 0, wz = 0;
+            if (gw0 != 0.0 || gw1 != 0.0 || gw2 != 0.0) {
+              Real gg[3];
+              sdfGradient<Real>(sdfD, X(3 * c), X(3 * c + 1), X(3 * c + 2), gg);
+              const double gn = Kokkos::sqrt((double)gg[0] * gg[0] + (double)gg[1] * gg[1] +
+                                             (double)gg[2] * gg[2]);
+              if (gn > 1e-12) {
+                const double u0 = gg[0] / gn, u1 = gg[1] / gn, u2 = gg[2] / gn;
+                const double ug = u0 * gw0 + u1 * gw1 + u2 * gw2;
+                const double p0 = gw0 - ug * u0, p1 = gw1 - ug * u1, p2 = gw2 - ug * u2;
+                Real Hm[3][3];
+                sdfHessian<Real>(sdfD, X(3 * c), X(3 * c + 1), X(3 * c + 2), Hm);
+                const double Hp0 = Hm[0][0] * p0 + Hm[0][1] * p1 + Hm[0][2] * p2;
+                const double Hp1 = Hm[1][0] * p0 + Hm[1][1] * p1 + Hm[1][2] * p2;
+                const double Hp2 = Hm[2][0] * p0 + Hm[2][1] * p1 + Hm[2][2] * p2;
+                const double cH =
+                    (double)sdfD.eval(X(3 * c), X(3 * c + 1), X(3 * c + 2)) / gn;
+                wx = -ug * u0 - cH * Hp0;
+                wy = -ug * u1 - cH * Hp1;
+                wz = -ug * u2 - cH * Hp2;
+              }
+            }
+            wG(3 * c) = wx;
+            wG(3 * c + 1) = wy;
+            wG(3 * c + 2) = wz;
+          });
+    }
+
     // gradient g and Gauss-Newton diagonal (device, atomic scatter).
     Kokkos::deep_copy(g, 0.0);
     Kokkos::deep_copy(diag, 0.0);
+    auto wGc = wallG;
     Kokkos::parallel_for(
         "mo.grad", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int c) {
           const double Rc = 2.0 * gamma * (vol(c) - vs(c));
-          double sx = 0, sy = 0, sz = 0;
+          double sx = wGc(3 * c), sy = wGc(3 * c + 1), sz = wGc(3 * c + 2);
           for (int f = off(c); f < off(c) + cnt(c); ++f) {
             const int j = (int)nbr(f);
             if (j < 0 || j >= N) continue;
@@ -795,6 +864,7 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
     // matrix-free Gauss-Newton apply H v = 2γ Jᵀ(J v) (two device passes: J into yy, Jᵀ scatter).
     auto Hmul = [&](const DV& v, DV& out) {
       auto y = yy;
+      auto wGv = wallG;
       Kokkos::parallel_for(
           "mo.Jv", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(int c) {
             double yc = 0;
@@ -803,6 +873,7 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
               if (j < 0 || j >= N) continue;
               for (int d = 0; d < 3; ++d) yc += dvr(3 * f + d) * (v(3 * j + d) - v(3 * c + d));
             }
+            for (int d = 0; d < 3; ++d) yc += wGv(3 * c + d) * v(3 * c + d);  // wall own-seed term
             y(c) = yc;
           });
       Kokkos::deep_copy(out, 0.0);
@@ -817,6 +888,8 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
                 Kokkos::atomic_add(&out(3 * c + d), -s * dvr(3 * f + d));
               }
             }
+            for (int d = 0; d < 3; ++d)  // wall own-seed term
+              Kokkos::atomic_add(&out(3 * c + d), s * wGv(3 * c + d));
           });
     };
     auto dot = [&](const DV& a, const DV& b) {
@@ -862,31 +935,43 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
     }
     const double gdq = dot(g, dq);
 
-    // Armijo line search on E: x_try = x + α dq (device), rebuild + reduce E; backtrack.
-    double alpha = 1.0;
-    bool accepted = false;
+    // Armijo line search on E: x_try = x + α dir (device), rebuild + reduce E; backtrack. If the
+    // Gauss-Newton step is rejected (its quadratic model degrades near dead/clipped cells), retry
+    // along steepest descent −g before giving up — same globalization the host oracle uses.
     Kokkos::View<Real*, MemSpace> xtry("mo.xtry", 3 * N);
-    for (int bt = 0; bt < 24; ++bt) {
-      const double al = alpha;
-      auto X = dpos, DQ = dq, XT = xtry;
-      Kokkos::parallel_for(
-          "mo.trial", Kokkos::RangePolicy<Exec>(0, nD),
-          KOKKOS_LAMBDA(int i) { XT(i) = X(i) + (Real)(al * DQ(i)); });
-      TessellatorResult<Real> resT;
-      double Et, mxT, mnT;
-      long nbT;
-      evaluate(xtry, resT, Et, mxT, mnT, nbT);
-      if (nbT == 0 && Et <= E + 1e-4 * alpha * gdq) {
-        Kokkos::deep_copy(dpos, xtry);
-        res = resT;
-        E = Et;
-        maxErr = mxT;
-        meanErr = mnT;
-        nBad = nbT;
-        accepted = true;
-        break;
+    auto lineSearch = [&](const DV& dir, double gdir) {
+      double alpha = 1.0;
+      for (int bt = 0; bt < 24; ++bt) {
+        const double al = alpha;
+        auto X = dpos, DQ = dir, XT = xtry;
+        Kokkos::parallel_for(
+            "mo.trial", Kokkos::RangePolicy<Exec>(0, nD),
+            KOKKOS_LAMBDA(int i) { XT(i) = X(i) + (Real)(al * DQ(i)); });
+        TessellatorResult<Real> resT;
+        double Et, mxT, mnT;
+        long nbT;
+        evaluate(xtry, resT, Et, mxT, mnT, nbT);
+        const bool feasible = kHasSdfD ? std::isfinite(Et) : (nbT == 0);
+        if (feasible && Et <= E + 1e-4 * alpha * gdir) {
+          Kokkos::deep_copy(dpos, xtry);
+          res = resT;
+          E = Et;
+          maxErr = mxT;
+          meanErr = mnT;
+          nBad = nbT;
+          return true;
+        }
+        alpha *= 0.5;
       }
-      alpha *= 0.5;
+      return false;
+    };
+    bool accepted = lineSearch(dq, gdq);
+    if (!accepted) {
+      // steepest-descent fallback: dq := −g (reuse dq as scratch), unit natural scale.
+      auto G = g, DQ = dq;
+      Kokkos::parallel_for(
+          "mo.sd", Kokkos::RangePolicy<Exec>(0, nD), KOKKOS_LAMBDA(int i) { DQ(i) = -G(i); });
+      accepted = lineSearch(dq, -dot(g, g));
     }
     if (!accepted) break;
   }

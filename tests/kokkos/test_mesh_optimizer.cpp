@@ -37,6 +37,18 @@ void volumes(const std::vector<real_t>& x, const std::vector<real_t>& w, int N, 
   vol.assign(m.data(), m.data() + N);
 }
 
+template <class Sdf>
+void volumesSdf(const std::vector<real_t>& x, int N, real_t L, int sw, const Sdf& sdf,
+                std::vector<real_t>& vol) {
+  Kokkos::View<real_t*, peclet::core::MemSpace> dpos("p", 3 * N), dw;
+  Kokkos::deep_copy(dpos, Kokkos::View<const real_t*, Kokkos::HostSpace>(x.data(), 3 * N));
+  Kokkos::View<long*, peclet::core::MemSpace> gd;
+  const real_t Larr[3] = {L, L, L};
+  auto res = peclet::voro::buildTessellation<real_t, false>(dpos, dw, N, Larr, sw, N, gd, sdf, true);
+  auto m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), res.view.cellVolume);
+  vol.assign(m.data(), m.data() + N);
+}
+
 double spread(const std::vector<real_t>& v) {
   double mean = 0;
   for (double x : v) mean += x;
@@ -174,6 +186,52 @@ int main(int argc, char** argv) {
       std::printf("  (D) interface  E_final/E_0=%.3f  iters=%d  %s\n", ratio, R.iters,
                   ok ? "OK" : "FAIL");
       rc |= ok ? 0 : 1;
+    }
+
+    // (E) SDF WALL case, host vs device: seeds inside a sphere, cells clipped at the wall. The
+    // device optimiser now carries the wall-facet own-seed term (gradient + Gauss-Newton) and the
+    // pore-volume target renormalization — without them pore meshing "half-equalises" (stalls well
+    // above the host optimum).
+    {
+      // SDF convention: NEGATIVE inside the SOLID; seeds live in the pore (sdf > 0). A solid
+      // ball at the box centre — cells around it get wall facets, the pore stays near-uniform.
+      peclet::voro::SdfSphere<real_t> ball{(real_t)0.5, (real_t)0.5, (real_t)0.5, (real_t)0.3};
+      std::mt19937 rng(99);
+      std::uniform_real_distribution<real_t> U(0, 1);
+      std::vector<real_t> posS;
+      while ((int)posS.size() < 3 * N) {
+        const real_t x = U(rng), y = U(rng), z = U(rng);
+        if (ball.eval(x, y, z) > (real_t)0.08) {  // healthy wall margin: keeps the problem
+                                                  // well-posed (seeds hugging the wall get their
+                                                  // cells pinched and the equalisation traps them)
+          posS.push_back(x);
+          posS.push_back(y);
+          posS.push_back(z);
+        }
+      }
+      std::vector<real_t> volS0;
+      volumesSdf(posS, N, L, sw, ball, volS0);
+      const double s0 = spread(volS0);
+      std::vector<real_t> posH = posS, posD = posS, volH, volD;
+      std::vector<real_t> vsetU(N, boxVol / N), noW2;
+      peclet::voro::meshVolumeOptimize<real_t, false>(posH, noW2, vsetU, (real_t[3]){L, L, L}, N,
+                                                      sw, ball, 60, 1e-10, 300,
+                                                      peclet::voro::Precond::Jacobi, false);
+      auto RD = peclet::voro::meshVolumeOptimizeDevice<real_t>(
+          posD, vsetU, (real_t[3]){L, L, L}, N, sw, ball, 60, 1e-10, 300, true);
+      volumesSdf(posH, N, L, sw, ball, volH);
+      volumesSdf(posD, N, L, sw, ball, volD);
+      const double sH = spread(volH), sD = spread(volD);
+      // Gate: the device wall term FUNCTIONS — percent spread driven from O(10^3)% to below 10%
+      // (without the wall term pore meshing half-equalises and stalls far above). The device
+      // trajectory is atomic-scatter nondeterministic (observed 1.7-5.4% across runs), so the
+      // gate is a stable order-of-magnitude bound; full host parity (host ~0.6%, deterministic)
+      // needs the wall Jacobian computed inside the tessellator build kernel + a dead-cell
+      // rescue — the recorded follow-ups.
+      const bool pass = sD < 10.0 && sH < 10.0;
+      std::printf("  (E) sdf-wall  spread init=%.4f host=%.4f device=%.4f (%d it)  %s\n", s0, sH,
+                  sD, RD.iters, pass ? "OK" : "FAIL");
+      rc |= pass ? 0 : 1;
     }
 
     std::printf("%s\n", rc == 0 ? "MESH OPTIMIZER CHECKS PASS" : "MESH OPTIMIZER CHECKS FAILED");
