@@ -15,6 +15,12 @@ endfunction()
 
 add_vorflow_kokkos_test(test_kokkos_smoke)
 
+# voro over the SHARED core geometry: SdfScene wraps peclet::core::geom::evalTree, so the cell
+# clipper and mesh optimiser reach the whole analytic vocabulary (capsule/torus/cone/ellipsoid/
+# superquadric + CSG + transforms + grids), not just the three legacy single-shape providers.
+# Also pins that a legacy provider and the same shape as a scene node agree bit-for-bit.
+add_vorflow_kokkos_test(test_sdf_scene)
+
 # Oracle-free acceptance for the device tessellation: geometric invariants (space-filling, positive
 # volumes, completeness, facet-area reciprocity A_ij = -A_ji, area closure, topology reciprocity) over
 # several sizes/seeds. Replaces the retired half-edge-oracle comparison tests (tessellator,

@@ -25,6 +25,7 @@
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/core/geom/primitives.hpp"
+#include "peclet/core/geom/scene.hpp"
 #include "peclet/voro/convex_cell.hpp"
 
 namespace peclet::voro {
@@ -83,54 +84,83 @@ struct SdfHollowCylinder {
   KOKKOS_INLINE_FUNCTION Real gradH() const { return Real(1e-4); }
 };
 
-/// Device-resident sampled SDF (trilinear; x-fastest), the universal provider for
-/// analytic-baked or VTI geometry. eval ported from peclet::core::geom::GridSdf.
+/// Device-resident sampled SDF (trilinear; x-fastest), the universal provider for analytic-baked
+/// or VTI geometry.
 ///
-/// NOT delegated to peclet::core::geom::sampleGrid (Layer 0 rung 4), because the two are different
-/// functions: this one stores SPACING and divides, sampleGrid stores the inverse and multiplies
-/// (a/s != a*(1/s) in floating point), and this one CLAMPS FLAT off-grid while sampleGrid always
-/// applies a signed clamp residual. Unifying would need a third GridExtension policy (kClamp) plus
-/// a divide-form option, and would change voro's numerics -- so it stays voro-local until someone
-/// wants that deliberately.
+/// DELEGATES to peclet::core::geom::sampleGrid, the suite's single trilinear grid-SDF routine
+/// (Layer 0). The descriptor is held as a MEMBER, built once by fromSpacing() -- building it
+/// per call inside the sampler is what shifted nvcc's FMA contraction in dem's rung-3 port.
+/// The extension policy is kClamp: the field flattens at the box face, which is what this
+/// provider has always done (dem's kObject/kContainer residual policies are for bodies and
+/// containers whose far field must keep growing).
+///
+/// NOTE the shared routine multiplies by an inverse spacing where this body used to divide by
+/// spacing, so the last bit of an off-lattice sample can differ. Inert in practice: nothing in
+/// voro constructed an SdfGrid -- it was a provider written ahead of its first consumer.
 template <class Real>
 struct SdfGrid {
   Kokkos::View<const float*, peclet::core::MemSpace> values;  // i + nx*(j + ny*k)
-  int nx = 0, ny = 0, nz = 0;
-  Real ox = 0, oy = 0, oz = 0, sx = 1, sy = 1, sz = 1;
-  KOKKOS_INLINE_FUNCTION Real at(int i, int j, int k) const {
-    return static_cast<Real>(values(i + nx * (j + ny * k)));
+  peclet::core::geom::GridDesc<Real> desc{};
+
+  /// Build from the natural (origin, spacing) description; inverts the spacing once, here.
+  ///
+  /// CALL THIS AT SETUP, on the host, and pass the resulting provider into the kernel by value --
+  /// that is the whole point of caching the descriptor (see the rung-3 FMA note in
+  /// docs/ANALYTIC_SDF_GEOMETRY.md). It is marked device-callable only so that calling it in the
+  /// wrong place is a performance mistake rather than a silent one: without the annotation nvcc
+  /// accepts a host function inside a device lambda WITHOUT error and quietly corrupts the kernel.
+  KOKKOS_INLINE_FUNCTION static SdfGrid fromSpacing(
+      Kokkos::View<const float*, peclet::core::MemSpace> v, int nx, int ny, int nz, Real ox,
+      Real oy, Real oz, Real sx, Real sy, Real sz) {
+    SdfGrid g;
+    g.values = v;
+    g.desc.nx = nx;
+    g.desc.ny = ny;
+    g.desc.nz = nz;
+    g.desc.offset = 0;
+    g.desc.origin = peclet::core::Vec3<Real>{ox, oy, oz};
+    g.desc.invSpacing = peclet::core::Vec3<Real>{sx != Real(0) ? Real(1) / sx : Real(0),
+                                                 sy != Real(0) ? Real(1) / sy : Real(0),
+                                                 sz != Real(0) ? Real(1) / sz : Real(0)};
+    g.desc.extension = peclet::core::geom::GridExtension::kClamp;
+    return g;
   }
+
   KOKKOS_INLINE_FUNCTION Real eval(Real x, Real y, Real z) const {
-    Real p[3] = {x, y, z};
-    Real o[3] = {ox, oy, oz}, s[3] = {sx, sy, sz};
-    int dims[3] = {nx, ny, nz};
-    int i0[3], i1[3];
-    Real f[3];
-    for (int d = 0; d < 3; ++d) {
-      Real c = (p[d] - o[d]) / s[d];
-      Real hi = static_cast<Real>(dims[d] - 1);
-      c = c < 0 ? Real(0) : (c > hi ? hi : c);
-      i0[d] = static_cast<int>(Kokkos::floor(c));
-      i1[d] = i0[d] + 1 < dims[d] ? i0[d] + 1 : dims[d] - 1;
-      f[d] = c - static_cast<Real>(i0[d]);
-    }
-    Real c000 = at(i0[0], i0[1], i0[2]), c100 = at(i1[0], i0[1], i0[2]);
-    Real c010 = at(i0[0], i1[1], i0[2]), c110 = at(i1[0], i1[1], i0[2]);
-    Real c001 = at(i0[0], i0[1], i1[2]), c101 = at(i1[0], i0[1], i1[2]);
-    Real c011 = at(i0[0], i1[1], i1[2]), c111 = at(i1[0], i1[1], i1[2]);
-    Real c00 = c000 * (1 - f[0]) + c100 * f[0];
-    Real c10 = c010 * (1 - f[0]) + c110 * f[0];
-    Real c01 = c001 * (1 - f[0]) + c101 * f[0];
-    Real c11 = c011 * (1 - f[0]) + c111 * f[0];
-    Real c0 = c00 * (1 - f[1]) + c10 * f[1];
-    Real c1 = c01 * (1 - f[1]) + c11 * f[1];
-    return c0 * (1 - f[2]) + c1 * f[2];
+    return peclet::core::geom::sampleGrid(peclet::core::Vec3<Real>{x, y, z}, desc, values);
   }
   KOKKOS_INLINE_FUNCTION Real gradH() const {
-    Real m = sx < sy ? sx : sy;
-    m = m < sz ? m : sz;
-    return Real(0.25) * m;
+    // quarter of the smallest cell, as before -- recovered from the stored inverse spacing
+    const Real ix = desc.invSpacing.x, iy = desc.invSpacing.y, iz = desc.invSpacing.z;
+    Real mx = ix > iy ? ix : iy;
+    mx = mx > iz ? mx : iz;  // largest inverse == smallest spacing
+    return mx > Real(0) ? Real(0.25) / mx : Real(1e-4);
   }
+};
+
+/// A whole core shape SCENE as a voro provider: the full shared analytic vocabulary (sphere, box,
+/// both hollow-cylinder forms, capsule, torus, cone, ellipsoid, superquadric), CSG union /
+/// intersection / difference, per-node conformal transforms, and sampled grids -- all reachable
+/// from voro's cell clipper and mesh optimiser through the one `eval(x,y,z)` + `gradH()` interface
+/// they already expect.
+///
+/// This is what lets voro use analytic geometry beyond the three legacy providers above without
+/// voro owning any geometry code: the nodes are core's POD ShapeNode records, the evaluation is
+/// core's recursion-free evalTree.
+template <class Real>
+struct SdfScene {
+  Kokkos::View<const peclet::core::geom::ShapeNode<Real>*, peclet::core::MemSpace> nodes;
+  Kokkos::View<const peclet::core::geom::GridDesc<Real>*, peclet::core::MemSpace> grids;
+  Kokkos::View<const float*, peclet::core::MemSpace> samples;
+  int nodeCount = 0;
+  int root = 0;
+  Real h = Real(1e-4);
+
+  KOKKOS_INLINE_FUNCTION Real eval(Real x, Real y, Real z) const {
+    return peclet::core::geom::evalTree<Real>(nodes, nodeCount, root,
+                                              peclet::core::Vec3<Real>{x, y, z}, grids, samples);
+  }
+  KOKKOS_INLINE_FUNCTION Real gradH() const { return h; }
 };
 
 /// Periodic UNION of solid balls: sdf(x) = min_i(|x−c_i|_minimage − r_i) (<0 inside a ball, >0 in the
