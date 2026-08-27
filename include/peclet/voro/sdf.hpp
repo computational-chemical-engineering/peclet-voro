@@ -24,6 +24,7 @@
 #include <type_traits>
 
 #include "peclet/core/common/view.hpp"
+#include "peclet/core/geom/primitives.hpp"
 #include "peclet/voro/convex_cell.hpp"
 
 namespace peclet::voro {
@@ -35,36 +36,39 @@ constexpr int kBoundaryFacet = -2;
 /// Sentinel "no geometry" provider — the default; the clip stage is skipped.
 struct NoSdf {};
 
-/// Solid ball (negative inside). eval ported from peclet::core::geom::Sphere.
+/// Solid ball (negative inside). DELEGATES to peclet::core::geom::prim::Sphere -- the shared leaf
+/// is the single source of the formula (Layer 0 rung 4, suite/docs/ANALYTIC_SDF_GEOMETRY.md); this
+/// struct keeps voro's provider shape (a centre + the (x,y,z) scalar signature the clipper calls).
 template <class Real>
 struct SdfSphere {
   Real cx = 0, cy = 0, cz = 0, radius = 1;
   KOKKOS_INLINE_FUNCTION Real eval(Real x, Real y, Real z) const {
-    Real dx = x - cx, dy = y - cy, dz = z - cz;
-    return Kokkos::sqrt(dx * dx + dy * dy + dz * dz) - radius;
+    return peclet::core::geom::prim::Sphere<Real>{radius}.eval(
+        peclet::core::Vec3<Real>{x - cx, y - cy, z - cz});
   }
   KOKKOS_INLINE_FUNCTION Real gradH() const { return Real(1e-4); }
 };
 
-/// Axis-aligned solid box of half-extents (hx,hy,hz). eval ported from peclet::core::geom::Box.
+/// Axis-aligned solid box of half-extents (hx,hy,hz). DELEGATES to
+/// peclet::core::geom::prim::Box. The leaf uses fmax/fmin where this body used ternaries; those
+/// agree on every input including NaN and -0.0 (fmax(-0,0) and (-0 > 0 ? -0 : 0) both give +0),
+/// and the rung-4 bit-capture confirms the values are unchanged on host and CUDA.
 template <class Real>
 struct SdfBox {
   Real cx = 0, cy = 0, cz = 0, hx = Real(0.5), hy = Real(0.5), hz = Real(0.5);
   KOKKOS_INLINE_FUNCTION Real eval(Real x, Real y, Real z) const {
-    Real qx = Kokkos::fabs(x - cx) - hx, qy = Kokkos::fabs(y - cy) - hy,
-         qz = Kokkos::fabs(z - cz) - hz;
-    Real ox = qx > 0 ? qx : 0, oy = qy > 0 ? qy : 0, oz = qz > 0 ? qz : 0;
-    Real outside = Kokkos::sqrt(ox * ox + oy * oy + oz * oz);
-    Real mx = qx > qy ? qx : qy;
-    mx = mx > qz ? mx : qz;
-    Real inside = mx < 0 ? mx : 0;
-    return outside + inside;
+    return peclet::core::geom::prim::Box<Real>{hx, hy, hz}.eval(
+        peclet::core::Vec3<Real>{x - cx, y - cy, z - cz});
   }
   KOKKOS_INLINE_FUNCTION Real gradH() const { return Real(1e-4); }
 };
 
-/// Solid hollow cylinder (tube wall) about `axis`. eval ported from
-/// peclet::core::geom::HollowCylinder.
+/// Solid hollow cylinder (tube wall) about `axis`. DELEGATES to
+/// peclet::core::geom::prim::HollowCylinderShell -- the MAX-OF-HALFSPACES form, which is what this
+/// provider has always computed. It is deliberately NOT core's prim::HollowCylinder: that is the
+/// distance-exact tube dem uses, a genuinely different function that would shift voro's
+/// mesh-optimiser wall force (see the TRAP section of docs/ANALYTIC_SDF_GEOMETRY.md).
+/// The axis permutation stays here; the leaf's evalRZ takes the cross-section (r, z) directly.
 template <class Real>
 struct SdfHollowCylinder {
   Real cx = 0, cy = 0, cz = 0, rOuter = 1, rInner = Real(0.5), height = 1;
@@ -73,21 +77,21 @@ struct SdfHollowCylinder {
     Real d[3] = {x - cx, y - cy, z - cz};
     int a0 = (axis + 1) % 3, a1 = (axis + 2) % 3;
     Real r = Kokkos::sqrt(d[a0] * d[a0] + d[a1] * d[a1]);
-    Real zz = d[axis];
-    Real m = r - rOuter;
-    Real b = rInner - r;
-    if (b > m)
-      m = b;
-    Real c = Kokkos::fabs(zz) - height * Real(0.5);
-    if (c > m)
-      m = c;
-    return m;
+    return peclet::core::geom::prim::HollowCylinderShell<Real>{rOuter, rInner, height}.evalRZ(
+        r, d[axis]);
   }
   KOKKOS_INLINE_FUNCTION Real gradH() const { return Real(1e-4); }
 };
 
 /// Device-resident sampled SDF (trilinear; x-fastest), the universal provider for
 /// analytic-baked or VTI geometry. eval ported from peclet::core::geom::GridSdf.
+///
+/// NOT delegated to peclet::core::geom::sampleGrid (Layer 0 rung 4), because the two are different
+/// functions: this one stores SPACING and divides, sampleGrid stores the inverse and multiplies
+/// (a/s != a*(1/s) in floating point), and this one CLAMPS FLAT off-grid while sampleGrid always
+/// applies a signed clamp residual. Unifying would need a third GridExtension policy (kClamp) plus
+/// a divide-form option, and would change voro's numerics -- so it stays voro-local until someone
+/// wants that deliberately.
 template <class Real>
 struct SdfGrid {
   Kokkos::View<const float*, peclet::core::MemSpace> values;  // i + nx*(j + ny*k)
