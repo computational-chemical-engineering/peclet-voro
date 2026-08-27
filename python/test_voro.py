@@ -38,7 +38,12 @@ def test_tessellation():
     for _ in range(20):
         pos = (pos + 2e-5 * rng.standard_normal((N, 3))) % L  # ~5e-4 of the spacing per step
         last = t.step(pos)
-    assert set(last) == {"flagged", "pass1", "pass2", "rebuilt", "fell_back"}
+    # step() must keep reporting the repair-stats fields this test (and callers) rely on. A
+    # SUPERSET check, not equality: the dict legitimately grows as the repair path gains
+    # instrumentation -- it picked up extra/surgical/verify_passes, which broke a strict
+    # `set(last) == {...}` here even though nothing had regressed. A removed or renamed key is
+    # the real regression, and this still catches that.
+    assert set(last) >= {"flagged", "pass1", "pass2", "rebuilt", "fell_back"}, sorted(last)
     assert abs(t.volumes().sum() / L**3 - 1.0) < 1e-9
     assert last["flagged"] < N // 2  # small per-step displacement -> not a full rebuild
     print(f"  Tessellation: N={N}  vol_err={abs(t.volumes().sum()/L**3-1):.1e}  "
@@ -53,7 +58,7 @@ def test_simulation():
     mass = np.ones(N)
 
     s = voro.Simulation()
-    s.set_l((L, L, L))
+    s.set_box((L, L, L))
     s.set_positions(pos)
     s.set_velocities(vel)
     s.set_masses(mass)
