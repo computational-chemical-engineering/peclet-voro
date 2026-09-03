@@ -657,6 +657,12 @@ class Flow {
       co_->skewCorrected = on;
   }
   void set_pressure_tolerance(real_t tol) { (co_ ? co_->poisson : cv_->poisson).tol = tol; }
+  void set_wall_gradient_quadratic(bool on) {
+    if (co_)
+      co_->wallQuadratic = on;
+    else
+      cv_->wallQuadratic = on;
+  }
   void set_wall_velocity(nb::ndarray<real_t, nb::c_contig> Uw) {
     const int nB = m_.nFaces - m_.nInterior;
     if (Uw.ndim() != 2 || (int)Uw.shape(0) != nB || Uw.shape(1) != 3)
@@ -1367,6 +1373,9 @@ NB_MODULE(_voro, m) {
       .def("set_skew_corrected", &Flow::set_skew_corrected, nb::arg("on"),
            "Collocated only: the centroid-consistent constraint pair (default on).")
       .def("set_pressure_tolerance", &Flow::set_pressure_tolerance, nb::arg("tol"))
+      .def("set_wall_gradient_quadratic", &Flow::set_wall_gradient_quadratic, nb::arg("on"),
+           "Wall viscous flux from the wall-anchored least-squares quadratic (default on; exact "
+           "for Poiseuille) instead of the two-point (U_i - U_wall)/h_A.")
       .def("set_wall_velocity", &Flow::set_wall_velocity, nb::arg("U"),
            "Prescribed velocity on the wall faces, (num_wall_faces, 3).")
       .def("set_velocity", &Flow::set_velocity, nb::arg("U"),

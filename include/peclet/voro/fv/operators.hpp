@@ -343,6 +343,80 @@ void faceInterpTranspose(const FaceMesh<Real>& m, const DV<Real>& g, const DV<Re
       });
 }
 
+/// Second-order wall gradient (3 × nBoundary): for each boundary face f of cell i, the normal
+/// derivative AT THE WALL of the wall-anchored quadratic u(s) = U_wall + a s + b s² (s = distance
+/// from the wall plane) least-squares fitted to the cell value and its interior neighbours, each
+/// sample corrected for the tangential variation with the cell gradient gradU (9N; may be empty).
+/// The two-point flux (U_i − U_wall)/h_A is the derivative at s = h_A/2 (the half-cell O(h) wall
+/// shear that limits the sphere drag, C4); this is flow's wall-anchored quadratic
+/// (centerToFaceWallAware) on the unstructured mesh. On a lattice wall cell the fit passes through
+/// (wall, U_i, U_above) exactly, so Poiseuille is reproduced to round-off.
+template <class Real>
+void wallGradientLS(const FaceMesh<Real>& m, const DV<Real>& U, const DV<Real>& gradU,
+                    const DV<Real>& Uwall, const DV<Real>& out) {
+  using Exec = peclet::core::ExecSpace;
+  const int nI = m.nInterior, nB = m.nFaces - nI;
+  const bool hasG = gradU.extent(0) > 0, hasW = Uwall.extent(0) > 0;
+  Kokkos::parallel_for(
+      "fv.wallLS", Kokkos::RangePolicy<Exec>(0, nB), KOKKOS_LAMBDA(const int b) {
+        const int f = nI + b, i = m.faceCellA(f);
+        const Real ha = m.faceHa(f);
+        Real n[3], Uw[3];
+        for (int c = 0; c < 3; ++c) {
+          n[c] = m.normal(f, c);
+          Uw[c] = hasW ? Uwall(3 * b + c) : Real(0);
+        }
+        // normal equations of u − U_wall = a s + b s²: [S2 S3; S3 S4] [a; b] = [R1; R2]
+        Real S2 = 0, S3 = 0, S4 = 0, R1[3] = {0, 0, 0}, R2[3] = {0, 0, 0};
+        auto add = [&](Real s, const Real du[3]) {
+          const Real s2 = s * s;
+          S2 += s2;
+          S3 += s2 * s;
+          S4 += s2 * s2;
+          for (int c = 0; c < 3; ++c) {
+            R1[c] += s * du[c];
+            R2[c] += s2 * du[c];
+          }
+        };
+        Real du[3];
+        for (int c = 0; c < 3; ++c)
+          du[c] = U(3 * i + c) - Uw[c];
+        add(ha, du);
+        for (int q = m.cellFacesBegin(i); q < m.cellFacesEnd(i); ++q) {
+          const int g = m.cellFace(q);
+          if (g >= nI)
+            continue;
+          const Real sg = m.cellFaceSign(q);
+          const int j = sg > 0 ? m.faceCellB(g) : m.faceCellA(g);
+          Real d[3], dn = 0;
+          for (int c = 0; c < 3; ++c) {
+            d[c] = sg * m.conn(g, c);  // x_j − x_i
+            dn += d[c] * n[c];
+          }
+          const Real s = ha - dn;  // n points toward the wall: away from it is −n
+          if (!(s > Real(0.05) * ha))
+            continue;
+          for (int c = 0; c < 3; ++c) {
+            Real tang = 0;
+            if (hasG)
+              for (int k = 0; k < 3; ++k)
+                tang += gradU(9 * i + 3 * c + k) * (d[k] - dn * n[k]);
+            du[c] = U(3 * j + c) - tang - Uw[c];
+          }
+          add(s, du);
+        }
+        const Real det = S2 * S4 - S3 * S3;
+        for (int c = 0; c < 3; ++c) {
+          Real a;
+          if (det > Real(1e-30) * S2 * S4)
+            a = (S4 * R1[c] - S3 * R2[c]) / det;
+          else
+            a = (U(3 * i + c) - Uw[c]) / ha;  // no second abscissa: the two-point gradient
+          out(3 * b + c) = a;
+        }
+      });
+}
+
 /// Conjugate gradients on −L p = f (matrix-free, Neumann/periodic: the mean of f is removed and
 /// the mean of p pinned to zero — L is symmetric negative semi-definite with the constant null
 /// space). Returns the iteration count; `resOut` the final relative residual. Unpreconditioned:

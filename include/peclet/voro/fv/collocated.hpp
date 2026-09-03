@@ -47,6 +47,8 @@ struct CollocatedNS {
                               // TGV order 2.10 / 2.08 on jittered / CVT meshes vs 1.72 / 1.17 plain
   DV<Real> U, uf, p, force;   // 3N, nFaces, N, 3N (optional)
   DV<Real> Uwall, ub;         // 3 × nBoundary wall velocity, nBoundary wall flux (C3)
+  bool wallQuadratic = true;  // second-order wall gradient (wallGradientLS) vs two-point
+  DV<Real> wg;                // 3 × nBoundary wall gradient
   DV<Real> a, U1, U2, uf1, uf2, div, gphi, gp, phi, g9;  // workspace
 
   void setup(const FaceMesh<Real>& mesh, Real viscosity, bool amg = false) {
@@ -113,7 +115,15 @@ struct CollocatedNS {
   }
   /// a = tendency of Uin transported by ufin, minus the current pressure gradient (incremental).
   void tendency(const DV<Real>& Uin, const DV<Real>& ufin, const DV<Real>& out) {
-    cellTendency(m, ufin, Uin, nu, out, force, convScale, Uwall);
+    if (wallQuadratic && m.nFaces > m.nInterior) {
+      if (wg.extent(0) == 0)
+        wg = DV<Real>("co.wg", 3 * (m.nFaces - m.nInterior));
+      vectorGreenGauss(m, Uin, g9, Uwall);
+      wallGradientLS(m, Uin, g9, Uwall, wg);
+      cellTendency(m, ufin, Uin, nu, out, force, convScale, Uwall, wg);
+    } else {
+      cellTendency(m, ufin, Uin, nu, out, force, convScale, Uwall);
+    }
     if (!incremental)
       return;
     const DV<Real> gc = gp;

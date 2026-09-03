@@ -99,12 +99,26 @@ int main(int argc, char** argv) {
       DV U = up(Uh, "U"), force = up(fh, "f"), a("a", 3 * N), zero("zero", m.nFaces);
       fv::cellTendency(m, zero, U, nu, a, force, Real(0));
       auto ah = down(a);
-      double rin = 0, rwall = 0;
+      double rin = 0, rwall = 0, rwallQ = 0;
       for (int i = 0; i < N; ++i) {
         const double r = std::sqrt(ah[3 * i] * ah[3 * i] + ah[3 * i + 1] * ah[3 * i + 1] +
                                    ah[3 * i + 2] * ah[3 * i + 2]) /
                          fx;
         (wc[i] ? rwall : rin) = std::max(wc[i] ? rwall : rin, r);
+      }
+      {  // the quadratic (wall-anchored least-squares) wall gradient: exact for the parabola
+        const int nB = m.nFaces - m.nInterior;
+        DV g9("g9", 9 * N), wg("wg", 3 * nB), Uw("Uw", 3 * nB);
+        fv::vectorGreenGauss(m, U, g9, Uw);
+        fv::wallGradientLS(m, U, g9, Uw, wg);
+        fv::cellTendency(m, zero, U, nu, a, force, Real(0), Uw, wg);
+        auto aq = down(a);
+        for (int i = 0; i < N; ++i)
+          if (wc[i])
+            rwallQ =
+                std::max(rwallQ, std::sqrt(aq[3 * i] * aq[3 * i] + aq[3 * i + 1] * aq[3 * i + 1] +
+                                           aq[3 * i + 2] * aq[3 * i + 2]) /
+                                     fx);
       }
       // covolume: exact flux at the face centroids, the face tendency
       std::vector<Real> ufh(m.nFaces, 0.0);
@@ -162,12 +176,13 @@ int main(int argc, char** argv) {
           "      wall-aware constraint pair adjointness (skew-corrected, U_wall prescribed): "
           "%.1e\n",
           adjW);
-      const bool aOk = rin < 1e-10 && fin < 1e-10 && adjW < 1e-12;  // round-off of O(1/h²) sums
+      const bool aOk = rin < 1e-10 && fin < 1e-10 && adjW < 1e-12 && rwallQ < 1e-10;
       std::printf(
           "  (A) exact parabola, n=%d (%d cells, %d wall faces): Stokes residual/f — "
-          "interior cells %.1e, wall-row cells %.3f (two-point wall flux: f/4 expected); "
-          "covolume face tendency interior %.1e, wall-adjacent %.3f  %s\n",
-          n, N, m.nFaces - m.nInterior, rin, rwall, fin, fwall, aOk ? "OK" : "FAIL");
+          "interior cells %.1e, wall-row cells %.3f with the two-point wall flux (f/4 "
+          "expected), %.1e with the quadratic wall gradient; covolume face tendency "
+          "(two-point) interior %.1e, wall-adjacent %.3f  %s\n",
+          n, N, m.nFaces - m.nInterior, rin, rwall, rwallQ, fin, fwall, aOk ? "OK" : "FAIL");
       if (!aOk)
         bad = 1;
     }
@@ -175,68 +190,66 @@ int main(int argc, char** argv) {
     // ---- (B) steady state -----------------------------------------------------------------------
     {
       const int ns_[3] = {4, 8, 16};
-      Real eCo[3], eCv[3], eCoF[3], eCvF[3];
-      for (int r = 0; r < 3; ++r) {
-        const int n = ns_[r];
-        std::vector<Real> pos;
-        Real L[3];
-        const int N = seeds(n, pos, L);
-        auto m = slabMesh(pos, N, L, sdf);
-        const Real h = H / n, dt = 0.2 * h * h / nu, T = 0.3;
-        const int steps = (int)std::ceil(T / dt);
-        std::vector<Real> fh(3 * N, 0.0), exC(3 * N, 0.0), exF(m.nFaces, 0.0);
-        for (int i = 0; i < N; ++i) {
-          fh[3 * i] = fx;
-          exC[3 * i] = uex(pos[3 * i + 1]);
+      Real eCo[2][3], eCv[2][3];
+      for (int wq = 0; wq < 2; ++wq)
+        for (int r = 0; r < 3; ++r) {
+          const int n = ns_[r];
+          std::vector<Real> pos;
+          Real L[3];
+          const int N = seeds(n, pos, L);
+          auto m = slabMesh(pos, N, L, sdf);
+          const Real h = H / n, dt = 0.2 * h * h / nu, T = 0.3;
+          const int steps = (int)std::ceil(T / dt);
+          std::vector<Real> fh(3 * N, 0.0), exC(3 * N, 0.0), exF(m.nFaces, 0.0);
+          for (int i = 0; i < N; ++i) {
+            fh[3 * i] = fx;
+            exC[3 * i] = uex(pos[3 * i + 1]);
+          }
+          {
+            auto A = down(m.faceCellA);
+            auto C = down(m.faceCentroid), Nn = down(m.faceNormal);
+            for (int f = 0; f < m.nFaces; ++f)
+              exF[f] = uex(pos[3 * A[f] + 1] + C[3 * f + 1]) * Nn[3 * f];
+          }
+          DV force = up(fh, "f");
+          fv::CollocatedNS<Real> co;
+          co.setup(m, nu, true);
+          co.force = force;
+          co.wallQuadratic = wq == 1;
+          co.poisson.tol = 1e-12;
+          DV U0("U0", 3 * N);
+          co.initialize(U0);
+          for (int s = 0; s < steps; ++s)
+            co.step(T / steps);
+          eCo[wq][r] = relErrV(m, co.U, exC);
+          fv::CovolumeNS<Real> cv;
+          cv.setup(m, nu, true);
+          cv.force = force;
+          cv.wallQuadratic = wq == 1;
+          cv.poisson.tol = 1e-12;
+          Kokkos::deep_copy(cv.u, Real(0));
+          for (int s = 0; s < steps; ++s)
+            cv.step(T / steps);
+          eCv[wq][r] = relErrF(m, cv.u, exF);
+          auto ufh = down(co.uf), cvh = down(cv.u);
+          double wmax = 0;
+          for (int f = m.nInterior; f < m.nFaces; ++f)
+            wmax = std::max({wmax, std::fabs(ufh[f]), std::fabs(cvh[f])});
+          std::printf(
+              "      %-9s n=%2d (%5d cells, %4d steps): collocated err %.3e | covolume "
+              "err %.3e | max wall flux %.1e, face div %.1e / %.1e\n",
+              wq ? "quadratic" : "two-point", n, N, steps, eCo[wq][r], eCv[wq][r], wmax,
+              co.maxFaceDivergence(), cv.maxDivergence());
         }
-        {
-          auto A = down(m.faceCellA);
-          auto C = down(m.faceCentroid), Nn = down(m.faceNormal);
-          for (int f = 0; f < m.nFaces; ++f)
-            exF[f] = uex(pos[3 * A[f] + 1] + C[3 * f + 1]) * Nn[3 * f];
-        }
-        DV force = up(fh, "f");
-        // collocated (default: skew-corrected adjoint pair)
-        fv::CollocatedNS<Real> co;
-        co.setup(m, nu, true);
-        co.force = force;
-        co.poisson.tol = 1e-11;
-        DV U0("U0", 3 * N);
-        co.initialize(U0);
-        for (int s = 0; s < steps; ++s)
-          co.step(T / steps);
-        eCo[r] = relErrV(m, co.U, exC);
-        eCoF[r] = relErrF(m, co.uf, exF);
-        // covolume
-        fv::CovolumeNS<Real> cv;
-        cv.setup(m, nu, true);
-        cv.force = force;
-        cv.poisson.tol = 1e-11;
-        Kokkos::deep_copy(cv.u, Real(0));
-        for (int s = 0; s < steps; ++s)
-          cv.step(T / steps);
-        eCvF[r] = relErrF(m, cv.u, exF);
-        DV Uc("Uc", 3 * N);
-        fv::perotVelocity(m, cv.u, Uc);
-        eCv[r] = relErrV(m, Uc, exC);
-        // wall flux + divergence
-        auto ufh = down(co.uf), cvh = down(cv.u);
-        double wmax = 0;
-        for (int f = m.nInterior; f < m.nFaces; ++f)
-          wmax = std::max({wmax, std::fabs(ufh[f]), std::fabs(cvh[f])});
-        std::printf(
-            "      n=%2d (%5d cells, %4d steps): collocated cell err %.3e face %.3e | "
-            "covolume face err %.3e Perot cell %.3e | max wall flux %.1e, face div %.1e / "
-            "%.1e\n",
-            n, N, steps, eCo[r], eCoF[r], eCvF[r], eCv[r], wmax, co.maxFaceDivergence(),
-            cv.maxDivergence());
-      }
-      const Real oCo = std::log2(eCo[1] / eCo[2]), oCv = std::log2(eCvF[1] / eCvF[2]);
-      const bool bOk = oCo >= 1.9 && oCv >= 1.9;
+      const Real oCo = std::log2(eCo[0][1] / eCo[0][2]), oCv = std::log2(eCv[0][1] / eCv[0][2]);
+      // two-point: second order; quadratic wall gradient: the parabola is the exact discrete
+      // steady state — the remaining error is the march's convergence level (gate 1e-4)
+      const bool bOk = oCo >= 1.9 && oCv >= 1.9 && eCo[1][2] < 1e-4 && eCv[1][2] < 1e-4;
       std::printf(
-          "  (B) Poiseuille order 8->16: collocated cell %.2f (face %.2f), covolume face "
-          "%.2f (Perot cell %.2f)  (gated >= 1.9)  %s\n",
-          oCo, std::log2(eCoF[1] / eCoF[2]), oCv, std::log2(eCv[1] / eCv[2]), bOk ? "OK" : "FAIL");
+          "  (B) Poiseuille: two-point wall flux order 8->16 collocated %.2f, covolume %.2f "
+          "(gated >= 1.9); quadratic wall gradient error at n=16 %.1e / %.1e (gated < 1e-4: "
+          "the parabola is exact, the residual is the march)  %s\n",
+          oCo, oCv, eCo[1][2], eCv[1][2], bOk ? "OK" : "FAIL");
       if (!bOk)
         bad = 1;
     }

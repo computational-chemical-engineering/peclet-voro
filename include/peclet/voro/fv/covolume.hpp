@@ -65,10 +65,10 @@ void perotTranspose(const FaceMesh<Real>& m, const DV<Real>& acell, const DV<Rea
 template <class Real>
 void cellTendency(const FaceMesh<Real>& m, const DV<Real>& u, const DV<Real>& U, Real nu,
                   const DV<Real>& out, const DV<Real>& force = DV<Real>{}, Real convScale = Real(1),
-                  const DV<Real>& Uwall = DV<Real>{}) {
+                  const DV<Real>& Uwall = DV<Real>{}, const DV<Real>& wallGrad = DV<Real>{}) {
   using Exec = peclet::core::ExecSpace;
   const int nI = m.nInterior;
-  const bool hasF = force.extent(0) > 0, hasW = Uwall.extent(0) > 0;
+  const bool hasF = force.extent(0) > 0, hasW = Uwall.extent(0) > 0, hasWG = wallGrad.extent(0) > 0;
   Kokkos::parallel_for(
       "fv.tendency", Kokkos::RangePolicy<Exec>(0, m.nCells), KOKKOS_LAMBDA(const int i) {
         Real acc[3] = {0, 0, 0};
@@ -88,7 +88,10 @@ void cellTendency(const FaceMesh<Real>& m, const DV<Real>& u, const DV<Real>& U,
             const Real w = nu * m.faceArea(f) / m.faceHa(f);
             for (int c = 0; c < 3; ++c) {
               const Real Uw = hasW ? Uwall(3 * (f - nI) + c) : Real(0);
-              acc[c] += -F * Uw + w * (Uw - Ui[c]);
+              // viscous wall flux: −ν A ∂u/∂n at the wall (n outward), two-point or quadratic
+              const Real visc =
+                  hasWG ? -nu * m.faceArea(f) * wallGrad(3 * (f - nI) + c) : w * (Uw - Ui[c]);
+              acc[c] += -F * Uw + visc;
             }
           }
         }
@@ -275,6 +278,8 @@ struct CovolumeNS {
   Real convScale = 1;                   // 0 = Stokes (diagnostic)
   DV<Real> u, p, force;                 // nFaces, nCells, 3N (optional)
   DV<Real> Uwall, ub;                   // 3 × nBoundary wall velocity, nBoundary wall flux (C3)
+  bool wallQuadratic = true;            // second-order wall gradient (wallGradientLS) vs two-point
+  DV<Real> wg, g9w;                     // 3 × nBoundary wall gradient, 9N gradient scratch
   DV<Real> U, a, k, u1, u2, div, gphi;  // workspace
   PressureSolver<Real> poisson;
   Real lastDiv = 0;
@@ -324,7 +329,17 @@ struct CovolumeNS {
   /// k = Rᵀ a(u): the face-normal tendency (no pressure).
   void rhs(const DV<Real>& uf, const DV<Real>& out) {
     perotVelocity(m, uf, U);
-    cellTendency(m, uf, U, nu, a, force, convScale, Uwall);
+    if (wallQuadratic && m.nFaces > m.nInterior) {
+      if (wg.extent(0) == 0) {
+        wg = DV<Real>("ns.wg", 3 * (m.nFaces - m.nInterior));
+        g9w = DV<Real>("ns.g9w", 9 * m.nCells);
+      }
+      vectorGreenGauss(m, U, g9w, Uwall);
+      wallGradientLS(m, U, g9w, Uwall, wg);
+      cellTendency(m, uf, U, nu, a, force, convScale, Uwall, wg);
+    } else {
+      cellTendency(m, uf, U, nu, a, force, convScale, Uwall);
+    }
     perotTranspose(m, a, out);
   }
   /// Make uf divergence-free: L φ = div uf / dt, uf −= dt grad φ; p = φ.

@@ -296,19 +296,22 @@ a 0.2h-jittered lattice / a Lloyd CVT (plain pair 1.97 / 1.72 / 1.17; covolume f
 **Body-fitted walls (rung C3).** Both solvers take a prescribed wall velocity
 (`setWallVelocity`, empty = no-slip) on the wall faces of the SDF-clipped cells: the constraint
 returns `U_wall·n`, the viscous wall flux is the two-point `ν A (U_wall − U_i)/h_A`, the pressure
-is Neumann. Measured (`tests/kokkos/test_body_fitted`, Poiseuille between SDF slabs): the interior
-residual of the exact parabola is round-off, the wall row's is f/4 (the two-point wall flux is the
-derivative at h_A/2), and the steady state converges at order 2.00 for both solvers. The face
+is Neumann. The viscous wall flux is the wall-anchored least-squares quadratic gradient (`wallGradientLS`,
+flow's wall-anchored reconstruction on the unstructured mesh; `wallQuadratic`, default on) or the
+two-point `(U_wall − U_i)/h_A`. Measured (`tests/kokkos/test_body_fitted`, Poiseuille between SDF
+slabs): the parabola is the exact discrete steady state with the quadratic gradient (wall residual
+5e-11, march error 7e-6); the two-point flux leaves a wall-row residual of f/4 and converges at
+order 2.00. The face
 mesh drops zero-area non-reciprocal facets of degenerate lattices (`nDropped`); the tessellator
 needs every periodic box extent above twice its coverage radius.
 
-**Sphere-array permeability (rung C4, measured, target open).** `tests/kokkos/test_permeability`
-marches Stokes flow through a simple-cubic sphere array (φ = 0.216) on jittered-lattice seeds
-clipped by the sphere: the fluid volume is exact but the drag is −13 % / −7.5 % of Zick & Homsy
-at 12 / 18 cells per diameter (order ≈ 1.4) because the fat wall cells' two-point wall flux is a
-first-order wall shear. Wall-adapted seeding (a seed shell at h/2) overflows the 64-plane cell
-cap; a second-order one-sided wall gradient is the other remedy. A cubic (unjittered) lattice
-around a sphere is degenerate and overflows the clipper — jitter the seeds.
+**Sphere-array permeability (rung C4).** `tests/kokkos/test_permeability` marches Stokes flow
+through a simple-cubic sphere array (φ = 0.216) on jittered-lattice seeds clipped by the sphere:
+drag −2.4 % / −0.96 % / −0.37 % of Zick & Homsy at 16 / 24 / 32 cells per box edge (second
+order; flow's cut-cell IBM −0.49 % at 32) with the quadratic wall gradient — the two-point wall
+flux gave −13 % / −7.5 % on the same meshes (fat wall cells). A cubic (unjittered) lattice around
+a sphere is degenerate and overflows the clipper — jitter the seeds; a seed shell at h/2 overflows
+the 64-plane cell cap.
 
 **Python `FlowSolver` (rung C5, Python half).** `peclet.voro.FlowSolver(tess, viscosity,
 layout='collocated'|'covolume')` runs either static solver on the face mesh of a resident

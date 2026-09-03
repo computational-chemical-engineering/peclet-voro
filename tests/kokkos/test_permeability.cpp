@@ -12,14 +12,17 @@
  * 1e-7 over 100 steps — the loose-tolerance trap of the flow sphere study).
  *
  * MEASURED (2026-09-03), φ = 0.216 (Z&H K = 7.442), 0.15h-jittered lattice seeds clipped by the
- * sphere: K −13.4 % at n = 16 (12 cells per diameter), −7.5 % at n = 24 (18) — order ≈ 1.4; flow's
- * cut-cell IBM is at −0.5 % by N = 32. Cause: the wall cells are fat and irregular (seeds within
- * 0.4 h of the wall dropped; h_A up to ~1.4 h) and the two-point wall flux (U_i − U_w)/h_A is a
- * first-order wall shear. Remedies (OPEN): (i) wall-adapted seeding — a shell of seeds at h/2
- * from the surface — which today overflows the 64-plane cell cap (kMaxP; measured: 131–298
- * overflowed cells), (ii) a second-order one-sided wall gradient (flow's gpCenterGrad /
- * wall-anchored quadratic idea) on the wall faces. Gate as measured: valid meshes (exact fluid
- * volume), |err| decreasing with n, |err| ≤ 10 % at n = 24; the 3 % target stays open.
+ * sphere, collocated solver with the wall-anchored QUADRATIC wall gradient (wallGradientLS): K
+ * −2.43 % at n = 16 (12 cells per diameter), −0.96 % at n = 24, −0.37 % at n = 32 — second order,
+ * on par with flow's cut-cell IBM (−0.49 % at N = 32). With the two-point wall flux the same meshes
+ * give −13.4 / −7.5 % (order 1.4): the fat wall cells (seeds within 0.4 h of the wall dropped, h_A
+ * up to ~1.4 h) make the two-point wall shear first order; the quadratic fit through the wall, the
+ * cell and its neighbours is the remedy (a seed shell at h/2 would be the other, but overflows the
+ * 64-plane cell cap). The cubic lattice must be jittered (a lattice around a sphere is degenerate
+ * and overflows the clipper); kIncomplete fires on every wall cell facing the sphere (unclipped
+ * extent beyond the gather coverage) and is harmless when the fluid volume is exact. φ = 0.45 at
+ * n = 32 overflows 2 cells in the thin gaps (invalid, informational).
+ * Gate: valid meshes, |err| decreasing, |err| ≤ 3 % at n = 24 (and ≤ 1 % at n = 32 when run).
  * `argv[1]` = max n (default 24; 32 for the study), `argv[2]` = mesh validity only.
  */
 #include <cmath>
@@ -228,21 +231,22 @@ int main(int argc, char** argv) {
                     sh ? "lattice + wall shell" : "lattice only");
       }
     }
-    bool cOk = nr >= 2 && std::isfinite(errs[nr - 1]) && std::fabs(errs[nr - 1]) <= 0.10;
+    const double lim = nMax >= 32 ? 0.01 : 0.03;
+    bool cOk = nr >= 2 && std::isfinite(errs[nr - 1]) && std::fabs(errs[nr - 1]) <= lim;
     for (int r = 1; r < nr; ++r)
       cOk = cOk && std::fabs(errs[r]) < std::fabs(errs[r - 1]);
-    std::printf(
-        "  (A) phi=0.216: |err| %.2f %% at the finest rung, decreasing (gated <= 10 %% at "
-        "n=24; the 3 %% cross-code target is OPEN — fat wall cells, see the header)  %s\n",
-        100 * std::fabs(errs[nr - 1]), cOk ? "OK" : "FAIL");
+    std::printf("  (A) phi=0.216: |err| %.2f %% at the finest rung (n=%d), decreasing (gated <= "
+                "%.0f %%; flow's cut-cell IBM: 0.49 %% at N=32)  %s\n",
+                100 * std::fabs(errs[nr - 1]), nMax >= 32 ? 32 : 24, 100 * lim,
+                cOk ? "OK" : "FAIL");
     if (!cOk)
       bad = 1;
     if (nMax >= 32) {
       auto r = dragK(32, 0.45, nu, f, false, false);
       const double kzh = zhRef(0.45);
       std::printf(
-          "  (B) phi=0.45 n=32 (dense, informational): K %.3f vs Z&H %.1f (%+.2f %%; flow "
-          "cut-cell IBM: -0.49 %% at N=32), phi_mesh %.5f, %d cells, %d steps\n",
+          "  (B) phi=0.45 n=32 (dense, informational; nan = invalid mesh): K %.3f vs Z&H "
+          "%.1f (%+.2f %%), phi_mesh %.5f, %d cells, %d steps\n",
           r.K, kzh, 100 * (r.K - kzh) / kzh, r.phiMesh, r.cells, r.steps);
     }
   }
