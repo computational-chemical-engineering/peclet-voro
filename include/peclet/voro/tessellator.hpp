@@ -74,6 +74,126 @@ struct TessellatorResult {
  * ScratchCell published, now from the leaner cell whose geometry is a cheap separate pass
  * (so re-eval over a fixed topology is possible: ConvexCell::reevalGeometry).
  */
+/// Rung A3 — the facet-edge AREA-JACOBIAN CSR of one finalised cell (shared by the cold build's
+/// CellBuilder::publishAreaGrad and reevalPublish). Per triangle, ConvexCell::geomVolumeAreaGrad
+/// gives the 3x3 blocks ∂contrib_i/∂n_{pl[j]}; summed over the cell's triangles they are exactly
+/// ∂A_{pl[i]}/∂n_{pl[j]}, and (i, j) with i != j is always an edge pair (the two planes meet at
+/// that vertex), so the CSR is the union of {self} ∪ {edge partners} per face — enumerated from
+/// the triangle list (dedup by a short scan; `part`/`pcnt` are the caller's MAXF*kMaxFV /
+/// MAXF scratch), then filled by one scatter pass. Planes that publish no face (< 3 live
+/// triangles) are skipped as partners: no area, and their sliver dependence is below the
+/// published-face contract. `faces[0..nf)` = the cell's face planes in CSR order.
+template <class Cell, int MAXF>
+KOKKOS_INLINE_FUNCTION int areaGradEnumerate(const Cell& c, const int* faces, int nf,
+                                             unsigned char* part, unsigned char* pcnt, bool& full) {
+  constexpr int kMaxFV = Cell::MAXFV;
+  signed char faceOf[256];
+  for (int k = 0; k < c.np; ++k)
+    faceOf[k] = -1;
+  for (int idx = 0; idx < nf; ++idx)
+    faceOf[faces[idx]] = (signed char)idx;
+  for (int idx = 0; idx < nf; ++idx)
+    pcnt[idx] = 0;
+  full = false;
+  for (int t = 0; t < c.nt; ++t) {
+    if (!c.alive[t])
+      continue;
+    const int tp[3] = {c.t0[t], c.t1[t], c.t2[t]};
+    for (int a = 0; a < 3; ++a) {
+      const int fa = faceOf[tp[a]];
+      if (fa < 0)
+        continue;
+      for (int b = 0; b < 3; ++b) {
+        if (b == a)
+          continue;
+        const int fb = faceOf[tp[b]];
+        if (fb < 0)
+          continue;
+        bool seen = false;
+        for (int q = 0; q < pcnt[fa]; ++q)
+          if (part[fa * kMaxFV + q] == (unsigned char)fb) {
+            seen = true;
+            break;
+          }
+        if (seen)
+          continue;
+        if (pcnt[fa] >= kMaxFV) {
+          full = true;
+          continue;
+        }
+        part[fa * kMaxFV + pcnt[fa]] = (unsigned char)fb;
+        ++pcnt[fa];
+      }
+    }
+  }
+  int total = 0;
+  for (int idx = 0; idx < nf; ++idx)
+    total += 1 + pcnt[idx];
+  return total;
+}
+
+/// Fill the CSR entries reserved at `ebase` (see areaGradEnumerate): offsets/counts per facet
+/// (facet g = base + idx), partner facet indices (slot 0 = self), and the accumulated blocks.
+template <class Cell, int MAXF, class IView, class RView>
+KOKKOS_INLINE_FUNCTION void areaGradFill(const Cell& c, const int* faces, int nf,
+                                         const unsigned char* part, const unsigned char* pcnt,
+                                         int base, int ebase, const IView& oEdgeOff,
+                                         const IView& oEdgeCnt, const IView& oEdgeFacet,
+                                         const RView& oEdgeGrad) {
+  using Real = typename RView::non_const_value_type;
+  constexpr int kMaxFV = Cell::MAXFV;
+  signed char faceOf[256];
+  for (int k = 0; k < c.np; ++k)
+    faceOf[k] = -1;
+  for (int idx = 0; idx < nf; ++idx)
+    faceOf[faces[idx]] = (signed char)idx;
+  int run = ebase;
+  for (int idx = 0; idx < nf; ++idx) {
+    oEdgeOff(base + idx) = run;
+    oEdgeCnt(base + idx) = 1 + pcnt[idx];
+    oEdgeFacet(run) = base + idx;
+    for (int q = 0; q < pcnt[idx]; ++q)
+      oEdgeFacet(run + 1 + q) = base + part[idx * kMaxFV + q];
+    for (int e = 0; e < 1 + pcnt[idx]; ++e)
+      for (int cc = 0; cc < 3; ++cc)
+        oEdgeGrad((size_t)(run + e) * 3 + cc) = Real(0);
+    run += 1 + pcnt[idx];
+  }
+  for (int t = 0; t < c.nt; ++t) {
+    if (!c.alive[t])
+      continue;
+    int pl[3];
+    Real contrib[3], grad[3][3][3];
+    c.geomVolumeAreaGrad(t, pl, contrib, grad);
+    for (int a = 0; a < 3; ++a) {
+      const int fa = faceOf[pl[a]];
+      if (fa < 0)
+        continue;
+      const int eoff = oEdgeOff(base + fa);
+      for (int b = 0; b < 3; ++b) {
+        const int fb = faceOf[pl[b]];
+        if (fb < 0)
+          continue;
+        int slot = 0;
+        if (b != a) {
+          slot = -1;
+          for (int q = 0; q < pcnt[fa]; ++q)
+            if (part[fa * kMaxFV + q] == (unsigned char)fb) {
+              slot = 1 + q;
+              break;
+            }
+          if (slot < 0)
+            continue;
+        }
+        const size_t o = (size_t)(eoff + slot) * 3;
+        oEdgeGrad(o + 0) += grad[a][b][0];
+        oEdgeGrad(o + 1) += grad[a][b][1];
+        oEdgeGrad(o + 2) += grad[a][b][2];
+      }
+    }
+  }
+}
+
 template <class Real, bool Weighted, class Sdf, bool TrackAdj = false>
 struct CellBuilder {
   using MemSpace = peclet::core::MemSpace;
@@ -140,59 +260,15 @@ struct CellBuilder {
   bool withAreaGrad = false;
 
   /// Rung A3: publish the per-facet area Jacobians of finalised cell `c` (facets `faces[0..nf)`
-  /// at CSR base `base`) into the facet-edge CSR. Per triangle, geomVolumeAreaGrad gives the
-  /// 3x3 blocks ∂contrib_i/∂n_{pl[j]}; summed over the cell's triangles they are exactly
-  /// ∂A_{pl[i]}/∂n_{pl[j]}, and (i, j) with i != j is always an edge pair (the two planes meet at
-  /// that vertex), so the CSR is the union of {self} ∪ {edge partners} per face — built first
-  /// from the triangle list (dedup by a short scan), then filled by a single scatter pass.
-  /// Planes that publish no face (< 3 live triangles) are skipped as partners: they carry no
-  /// area and their sliver dependence is below the published-face contract.
+  /// at CSR base `base`) into the facet-edge CSR: one atomic reservation on `edgeCursor`, then
+  /// the shared areaGradEnumerate / areaGradFill (also used by reevalPublish on the resident
+  /// store, where the reservation is a prefix sum instead).
   KOKKOS_INLINE_FUNCTION void publishAreaGrad(const Cell& c, int i, int base, const int* faces,
                                               int nf) const {
-    signed char faceOf[kMaxP];
-    for (int k = 0; k < c.np; ++k)
-      faceOf[k] = -1;
-    for (int idx = 0; idx < nf; ++idx)
-      faceOf[faces[idx]] = (signed char)idx;
     unsigned char part[MAXF_TMP * kMaxFV];
     unsigned char pcnt[MAXF_TMP];
-    for (int idx = 0; idx < nf; ++idx)
-      pcnt[idx] = 0;
     bool full = false;
-    for (int t = 0; t < c.nt; ++t) {
-      if (!c.alive[t])
-        continue;
-      const int tp[3] = {c.t0[t], c.t1[t], c.t2[t]};
-      for (int a = 0; a < 3; ++a) {
-        const int fa = faceOf[tp[a]];
-        if (fa < 0)
-          continue;
-        for (int b = 0; b < 3; ++b) {
-          if (b == a)
-            continue;
-          const int fb = faceOf[tp[b]];
-          if (fb < 0)
-            continue;
-          bool seen = false;
-          for (int s = 0; s < pcnt[fa]; ++s)
-            if (part[fa * kMaxFV + s] == (unsigned char)fb) {
-              seen = true;
-              break;
-            }
-          if (seen)
-            continue;
-          if (pcnt[fa] >= kMaxFV) {
-            full = true;
-            continue;
-          }
-          part[fa * kMaxFV + pcnt[fa]] = (unsigned char)fb;
-          ++pcnt[fa];
-        }
-      }
-    }
-    int total = 0;
-    for (int idx = 0; idx < nf; ++idx)
-      total += 1 + pcnt[idx];
+    const int total = areaGradEnumerate<Cell, MAXF_TMP>(c, faces, nf, part, pcnt, full);
     const int ebase = Kokkos::atomic_fetch_add(&edgeCursor(0), total);
     if (full || (size_t)ebase + (size_t)total > edgeCap) {
       status(i) |= kOverflow;
@@ -202,51 +278,8 @@ struct CellBuilder {
       }
       return;
     }
-    int run = ebase;
-    for (int idx = 0; idx < nf; ++idx) {
-      oEdgeOff(base + idx) = run;
-      oEdgeCnt(base + idx) = 1 + pcnt[idx];
-      oEdgeFacet(run) = base + idx;
-      for (int s = 0; s < pcnt[idx]; ++s)
-        oEdgeFacet(run + 1 + s) = base + part[idx * kMaxFV + s];
-      for (int e = 0; e < 1 + pcnt[idx]; ++e)
-        for (int cc = 0; cc < 3; ++cc)
-          oEdgeGrad((size_t)(run + e) * 3 + cc) = Real(0);
-      run += 1 + pcnt[idx];
-    }
-    for (int t = 0; t < c.nt; ++t) {
-      if (!c.alive[t])
-        continue;
-      int pl[3];
-      Real contrib[3], grad[3][3][3];
-      c.geomVolumeAreaGrad(t, pl, contrib, grad);
-      for (int a = 0; a < 3; ++a) {
-        const int fa = faceOf[pl[a]];
-        if (fa < 0)
-          continue;
-        const int eoff = oEdgeOff(base + fa);
-        for (int b = 0; b < 3; ++b) {
-          const int fb = faceOf[pl[b]];
-          if (fb < 0)
-            continue;
-          int slot = 0;
-          if (b != a) {
-            slot = -1;
-            for (int s = 0; s < pcnt[fa]; ++s)
-              if (part[fa * kMaxFV + s] == (unsigned char)fb) {
-                slot = 1 + s;
-                break;
-              }
-            if (slot < 0)
-              continue;  // cannot happen (pair enumerated above)
-          }
-          const size_t o = (size_t)(eoff + slot) * 3;
-          oEdgeGrad(o + 0) += grad[a][b][0];
-          oEdgeGrad(o + 1) += grad[a][b][1];
-          oEdgeGrad(o + 2) += grad[a][b][2];
-        }
-      }
-    }
+    areaGradFill<Cell, MAXF_TMP>(c, faces, nf, part, pcnt, base, ebase, oEdgeOff, oEdgeCnt,
+                                 oEdgeFacet, oEdgeGrad);
   }
 
   /// Minimal-image relative vector from the seed at (pix,piy,piz) to sorted seed q.

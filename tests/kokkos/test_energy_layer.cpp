@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
+#include <map>
 #include <random>
 #include <vector>
 
@@ -29,6 +30,8 @@
 #include "peclet/voro/energy/wall.hpp"
 #include "peclet/voro/mesh_optimizer.hpp"
 #include "peclet/voro/plane_policy.hpp"
+#include "peclet/voro/reeval_tessellation.hpp"
+#include "peclet/voro/repair.hpp"
 #include "peclet/voro/sdf.hpp"
 #include "peclet/voro/tessellator.hpp"
 
@@ -387,6 +390,91 @@ int main(int argc, char** argv) {
                             rng, 12, 1e-5))
         bad = 1;
     }
+  }
+  // ---- (F) the incremental path: reevalPublish(withAreaGrad) == cold build, cell by cell -------
+  {
+    const int N = 3000;
+    const Real L[3] = {1, 1, 1};
+    std::mt19937 rng(21);
+    std::uniform_real_distribution<Real> U(0, 1);
+    std::vector<Real> pos(3 * N);
+    for (auto& v : pos)
+      v = U(rng);
+    DV dpos = up(pos, "pos"), dw;
+    Kokkos::View<long*, Mem> gd;
+    auto cold = peclet::voro::buildTessellation<Real, false, NoSdf>(
+        dpos, dw, N, L, 4, N, gd, NoSdf{}, true, -1, {}, {}, {}, {}, {}, {}, 0, nullptr, {}, true);
+    peclet::voro::MovingTessellation<Real, 64, 112, false, NoSdf> mt;
+    const Real spacing = std::cbrt(1.0 / N);
+    mt.alloc(N, L, Real(1e-4) * spacing, Real(0.25) * spacing, 4, N);
+    mt.rebuild(dpos);
+    auto rp =
+        peclet::voro::reevalPublish<Real, 64, 112>(mt.store, dpos, mt.vol, N, L, {}, {}, true);
+    auto cOff = down(cold.view.cellFacetOffset), cCnt = down(cold.view.cellFacetCount);
+    auto cNbr = down(cold.view.facetNeighbor);
+    auto cEOff = down(cold.view.facetEdgeOffset), cECnt = down(cold.view.facetEdgeCount);
+    auto cEF = down(cold.view.edgeFacet);
+    auto cEG = down(cold.view.edgeAreaGrad);
+    auto rOff = down(rp.cellFacetOffset), rCnt = down(rp.cellFacetCount);
+    auto rNbr = down(rp.facetNeighbor);
+    auto rEOff = down(rp.facetEdgeOffset), rECnt = down(rp.facetEdgeCount);
+    auto rEF = down(rp.edgeFacet);
+    auto rEG = down(rp.edgeAreaGrad);
+    // Facets are matched by NEIGHBOUR id (the counting-sort grid can order a cell's planes
+    // differently between two builds, which permutes the facet CSR within the cell without
+    // changing it); edge partners likewise.
+    long mism = 0, blocks = 0, mCnt = 0, mNbr = 0, mECnt = 0, mPart = 0;
+    double worst = 0, scale = 0;
+    for (int i = 0; i < N; ++i) {
+      if (cCnt[i] != rCnt[i]) {
+        ++mism;
+        ++mCnt;
+        continue;
+      }
+      std::map<int, int> rOf;  // nbr -> reeval facet index
+      for (int k = 0; k < rCnt[i]; ++k)
+        rOf[rNbr[rOff[i] + k]] = rOff[i] + k;
+      for (int k = 0; k < cCnt[i]; ++k) {
+        const int fc = cOff[i] + k;
+        auto it = rOf.find(cNbr[fc]);
+        if (it == rOf.end()) {
+          ++mism;
+          ++mNbr;
+          continue;
+        }
+        const int fr = it->second;
+        if (cECnt[fc] != rECnt[fr]) {
+          ++mism;
+          ++mECnt;
+          continue;
+        }
+        std::map<int, int> rSlot;  // partner nbr -> reeval edge index
+        for (int e = 0; e < rECnt[fr]; ++e)
+          rSlot[rNbr[rEF[rEOff[fr] + e]]] = rEOff[fr] + e;
+        for (int e = 0; e < cECnt[fc]; ++e) {
+          const int ec = cEOff[fc] + e;
+          auto jt = rSlot.find(cNbr[cEF[ec]]);
+          if (jt == rSlot.end()) {
+            ++mism;
+            ++mPart;
+            continue;
+          }
+          const int er = jt->second;
+          for (int cc = 0; cc < 3; ++cc) {
+            worst = std::max(worst, std::fabs(cEG[3 * ec + cc] - rEG[3 * er + cc]));
+            scale = std::max(scale, std::fabs(cEG[3 * ec + cc]));
+          }
+          ++blocks;
+        }
+      }
+    }
+    const bool ok = mism == 0 && blocks > 0 && worst < 1e-10 * scale;
+    std::printf(
+        "  (F) reevalPublish area-Jacobian CSR == cold build: blocks=%ld mismatches=%ld "
+        "(facetCount %ld, nbr %ld, edgeCount %ld, partner %ld) worstAbs=%.2e (scale %.2e)  %s\n",
+        blocks, mism, mCnt, mNbr, mECnt, mPart, worst, scale, ok ? "OK" : "FAIL");
+    if (!ok)
+      bad = 1;
   }
   Kokkos::finalize();
   std::printf(bad ? "VORO-ENERGY FAIL\n" : "VORO-ENERGY OK\n");

@@ -242,7 +242,8 @@ areaGrad`). The `energy/` headers evaluate interfacial, wetting and volume energ
 gradients on that view — one kernel over the cells, no per-cell reconstruction — and route them to
 the seed positions (and power weights) through the plane-policy chain; SDF wall planes go through
 the one seed-foot wall chain `sdfWallChain`. `interfaceMinimize` runs on this path (gated against
-the old reconstruction to round-off, `tests/kokkos/test_energy_layer`).
+the old reconstruction to round-off, `tests/kokkos/test_energy_layer`); the incremental path
+publishes the same CSR (`reevalPublish(..., withAreaGrad=true)`).
 
 Per-cell **geometry** (volume, per-facet area and first moment, volume gradients) is computed
 by a **sort-free, adjacency-free per-vertex scatter** (`volumePerVertex` /
