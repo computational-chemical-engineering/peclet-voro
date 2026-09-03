@@ -54,6 +54,16 @@ struct CollocatedNS {
   // global sum / max. Unset = single rank.
   std::function<void(const DV<Real>&, int)> exchange;
   std::function<Real(Real)> sum, max;
+  // Implicit diffusion (flow's step structure): explicit convection, backward-Euler viscous solve
+  // per component with the two-point Laplacian and the two-point wall term implicit and the
+  // quadratic wall-gradient correction lagged (deferred correction keeps the matrix SPD), then the
+  // approximate projection. First order in time, no diffusive Δt limit (Stokes: Δt free).
+  bool implicitDiffusion = false;
+  bool rotational =
+      true;  // P += φ − ν div u* (Timmermans; flow's rotationalP_) with the implicit step
+  PressureSolver<Real> visc;
+  Real viscDt = -1;
+  DV<Real> rhs3, uc, wcorr, aT, divStar;
   DV<Real> a, U1, U2, uf1, uf2, div, gphi, gp, phi, g9;  // workspace
 
   void setup(const FaceMesh<Real>& mesh, Real viscosity, bool amg = false) {
@@ -149,12 +159,15 @@ struct CollocatedNS {
   }
   /// Approximate projection of the predictor Ustar (in place): T Ustar → exact face projection →
   /// cell correction with the transpose gradient; ufOut = the divergence-free face flux; P += φ.
-  void project(const DV<Real>& Ustar, const DV<Real>& ufOut, Real dt) {
+  void project(const DV<Real>& Ustar, const DV<Real>& ufOut, Real dt,
+               const DV<Real>& divOut = DV<Real>{}) {
     const DV<Real> dv = div, g = gphi, gc = gp, ph = phi, pp = p;
     if (exchange)
       exchange(Ustar, 3);  // the predictor's ghosts (interface faces read both cells)
     toFaces(Ustar, ufOut);
     divergence(m, ufOut, dv);
+    if (divOut.extent(0) > 0)
+      Kokkos::deep_copy(divOut, dv);  // div u* for the rotational pressure update
     const Real s = -Real(1) / dt;
     Kokkos::parallel_for(
         "co.rhsP", Kokkos::RangePolicy<Exec>(0, m.nCells),
@@ -186,8 +199,102 @@ struct CollocatedNS {
     project(U, uf, Real(1));
     Kokkos::deep_copy(p, Real(0));
   }
-  /// One SSP-RK3 step, flow's predictor/projection structure at every stage.
   void step(Real dt) {
+    if (implicitDiffusion)
+      stepImplicit(dt);
+    else
+      stepRK3(dt);
+  }
+  /// flow's semi-implicit step: U* from (V/Δt − ν V L + wall) U* = V[U/Δt + conv + F − G Pⁿ +
+  /// lagged wall correction] + ν Σ_wall (A/h_A) U_wall, then the approximate projection; P += φ [−
+  /// ν div u*].
+  void stepImplicit(Real dt) {
+    const int N = m.nCells, NC = m.nCombined > 0 ? m.nCombined : N;
+    if (viscDt != dt) {
+      visc.setupVelocity(m, nu, dt, poisson.useAmg);
+      visc.tol = poisson.tol;
+      if (exchange)
+        visc.setHooks(exchange, sum);
+      viscDt = dt;
+      if (rhs3.extent(0) == 0) {
+        rhs3 = DV<Real>("co.rhs3", 3 * N);
+        uc = DV<Real>("co.uc", NC);
+        wcorr = DV<Real>("co.wcorr", 3 * N);
+        aT = DV<Real>("co.aT", 3 * N);
+        divStar = DV<Real>("co.divStar", N);
+      }
+    }
+    const DV<Real> UU = U, aa = a, R3 = rhs3, WC = wcorr, AT = aT, UC = uc, gc = gp;
+    const FaceMesh<Real> mm = m;
+    const Real nuL = nu;
+    const bool hasWall = m.nFaces > m.nInterior;
+    // explicit part: convection + force (nu = 0) − G Pⁿ
+    cellTendency(m, uf, UU, Real(0), aa, force, convScale, Uwall);
+    if (incremental) {
+      cellGrad(p, gc);
+      Kokkos::parallel_for(
+          "co.igradp", Kokkos::RangePolicy<Exec>(0, 3 * N),
+          KOKKOS_LAMBDA(const int i) { aa(i) -= gc(i); });
+    }
+    // lagged wall correction: quadratic − two-point viscous wall term at Uⁿ (interior cancels)
+    if (hasWall && wallQuadratic) {
+      if (wg.extent(0) == 0)
+        wg = DV<Real>("co.wg", 3 * (m.nFaces - m.nInterior));
+      vectorGreenGauss(m, UU, g9, Uwall);
+      wallGradientLS(m, UU, g9, Uwall, wg);
+      const DV<Real> zero("co.zero", m.nFaces);
+      cellTendency(m, zero, UU, nuL, WC, DV<Real>{}, Real(0), Uwall, wg);
+      cellTendency(m, zero, UU, nuL, AT, DV<Real>{}, Real(0), Uwall);
+      Kokkos::parallel_for(
+          "co.wcorr", Kokkos::RangePolicy<Exec>(0, 3 * N),
+          KOKKOS_LAMBDA(const int i) { aa(i) += WC(i) - AT(i); });
+    }
+    // right-hand side: V(U/Δt + a) + ν Σ_wall (A/h_A) U_wall
+    const DV<Real> Uw = Uwall;
+    const bool hasW = Uw.extent(0) > 0;
+    const int nI = m.nInterior;
+    Kokkos::parallel_for(
+        "co.rhs", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          const Real V = mm.cellVolume(i);
+          Real wall[3] = {0, 0, 0};
+          if (hasW)
+            for (int t = mm.cellFacesBegin(i); t < mm.cellFacesEnd(i); ++t) {
+              const int f = mm.cellFace(t);
+              if (f >= nI) {
+                const Real w = nuL * mm.faceArea(f) / mm.faceHa(f);
+                for (int c = 0; c < 3; ++c)
+                  wall[c] += w * Uw(3 * (f - nI) + c);
+              }
+            }
+          for (int c = 0; c < 3; ++c)
+            R3(3 * i + c) = V * (UU(3 * i + c) / dt + aa(3 * i + c)) + wall[c];
+        });
+    // three scalar solves; the previous velocity component is the initial guess's replacement
+    // (PressureSolver starts from zero — fine for CG)
+    for (int c = 0; c < 3; ++c) {
+      const DV<Real> rc("co.rc", N);
+      Kokkos::parallel_for(
+          "co.gather", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i) { rc(i) = R3(3 * i + c); });
+      visc.solve(rc, UC);
+      Kokkos::parallel_for(
+          "co.scatter", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i) { UU(3 * i + c) = UC(i); });
+    }
+    // approximate projection (exchanges the predictor's ghosts itself)
+    const DV<Real> dS = divStar;
+    project(UU, uf, dt, rotational ? dS : DV<Real>{});
+    if (rotational && incremental) {
+      const DV<Real> pp = p;
+      Kokkos::parallel_for(
+          "co.rot", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i) { pp(i) -= nuL * dS(i); });
+      if (exchange)
+        exchange(pp, 1);
+    }
+  }
+  /// One SSP-RK3 step, flow's predictor/projection structure at every stage.
+  void stepRK3(Real dt) {
     const int N3 = 3 * m.nCells;
     const DV<Real> UU = U, aa = a, V1 = U1, V2 = U2;
     tendency(UU, uf, aa);

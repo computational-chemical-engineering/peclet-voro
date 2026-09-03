@@ -657,6 +657,12 @@ class Flow {
       co_->skewCorrected = on;
   }
   void set_pressure_tolerance(real_t tol) { (co_ ? co_->poisson : cv_->poisson).tol = tol; }
+  void set_implicit_diffusion(bool on) {
+    if (co_)
+      co_->implicitDiffusion = on;
+    else
+      throw std::runtime_error("set_implicit_diffusion(): collocated layout only");
+  }
   void set_wall_gradient_quadratic(bool on) {
     if (co_)
       co_->wallQuadratic = on;
@@ -1373,6 +1379,9 @@ NB_MODULE(_voro, m) {
       .def("set_skew_corrected", &Flow::set_skew_corrected, nb::arg("on"),
            "Collocated only: the centroid-consistent constraint pair (default on).")
       .def("set_pressure_tolerance", &Flow::set_pressure_tolerance, nb::arg("tol"))
+      .def("set_implicit_diffusion", &Flow::set_implicit_diffusion, nb::arg("on"),
+           "Collocated: flow's semi-implicit step (explicit convection, backward-Euler viscous "
+           "solve, approximate projection) — no diffusive dt limit, first order in time.")
       .def("set_wall_gradient_quadratic", &Flow::set_wall_gradient_quadratic, nb::arg("on"),
            "Wall viscous flux from the wall-anchored least-squares quadratic (default on; exact "
            "for Poiseuille) instead of the two-point (U_i - U_wall)/h_A.")

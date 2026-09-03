@@ -101,6 +101,7 @@ int main(int argc, char** argv) {
       if (std::getenv("FLOW_MPI_SKEW") && std::atoi(std::getenv("FLOW_MPI_SKEW")) == 0)
         co.skewCorrected = false;
       co.poisson.tol = 1e-12;
+      co.implicitDiffusion = std::getenv("FLOW_MPI_IMPLICIT") != nullptr;
       co.initialize(up(U0g, "U0"));
       for (int s = 0; s < steps; ++s)
         co.step(dt);
@@ -153,6 +154,7 @@ int main(int argc, char** argv) {
     if (std::getenv("FLOW_MPI_SKEW") && std::atoi(std::getenv("FLOW_MPI_SKEW")) == 0)
       co.skewCorrected = false;
     co.poisson.tol = 1e-12;
+    co.implicitDiffusion = std::getenv("FLOW_MPI_IMPLICIT") != nullptr;
     bool solveOk = true;
     {  // (A) the distributed pressure solve in isolation: random right-hand side — the recursive
        // residual must equal the TRUE residual (b − K p with the ghosts of p refreshed), K·1 = 0,
@@ -399,15 +401,20 @@ int main(int argc, char** argv) {
     const double rel = dmaxG / umaxG, eRel = std::fabs(E / Eref - 1);
     // MEASURED (2026-09-03): np=2/4 agree with the single-rank reference to 3e-15 (velocity) and
     // 2e-16 (energy) — the block-Jacobi AMG only changes the PCG iterates (28/36 vs 11 iterations)
-    const double tolU = np == 1 ? 0.0 : 1e-12, tolE = np == 1 ? 0.0 : 1e-13;
+    // implicit variant (FLOW_MPI_IMPLICIT): three velocity PCG solves per step at 1e-12 with the
+    // block-Jacobi preconditioner — measured 2e-11 / 2e-14 at np = 2/4
+    const bool impl = std::getenv("FLOW_MPI_IMPLICIT") != nullptr;
+    const double tolU = np == 1 ? 0.0 : (impl ? 1e-9 : 1e-12),
+                 tolE = np == 1 ? 0.0 : (impl ? 1e-12 : 1e-13);
     const bool ok = solveOk && rel <= tolU && eRel <= tolE && divMax < 1e-11 && flaggedG == 0;
     if (rank == 0)
       std::printf(
-          "  (B) C5 distributed collocated TGV: np=%d n=%d steps=%d ghosts=%d | max |U - U_ref| / "
+          "  (B) C5 distributed collocated TGV (%s): np=%d n=%d steps=%d ghosts=%d | max |U - "
+          "U_ref| / "
           "max|U| = %.3e (gate %.0e), E/E_ref - 1 = %.3e (gate %.0e), max face div %.1e, flagged "
           "cells %d, PCG iters %d  %s\n",
-          np, n, steps, ghostsG, rel, tolU, eRel, tolE, divMax, flaggedG, co.poisson.lastIters,
-          ok ? "OK" : "FAIL");
+          impl ? "implicit diffusion" : "RK3", np, n, steps, ghostsG, rel, tolU, eRel, tolE, divMax,
+          flaggedG, co.poisson.lastIters, ok ? "OK" : "FAIL");
     if (rank == 0)
       std::printf("    (last pressure solve: %d iterations, relative residual %.2e, amg %d)\n",
                   co.poisson.lastIters, co.poisson.lastRes, (int)useAmg);

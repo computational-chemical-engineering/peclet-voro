@@ -146,9 +146,13 @@ KOKKOS_INLINE_FUNCTION void areaGradFill(const Cell& c, const int* faces, int nf
                                          const unsigned char* part, const unsigned char* pcnt,
                                          int base, int ebase, const IView& oEdgeOff,
                                          const IView& oEdgeCnt, const IView& oEdgeFacet,
-                                         const RView& oEdgeGrad) {
+                                         const RView& oEdgeGrad, const RView& oEdgeLen) {
   using Real = typename RView::non_const_value_type;
   constexpr int kMaxFV = Cell::MAXFV;
+  // Edge lengths (track C2a′, opt-in when oEdgeLen is sized): each facet-edge slot is visited by
+  // exactly the two dual triangles (cell vertices) it joins; accumulate S = v1 + v2 and
+  // Q = |v1|² + |v2|² in a 4-stride scratch, then |v1 − v2|² = 2Q − |S|² (no per-edge state).
+  const bool wl = oEdgeLen.extent(0) > 0;
   signed char faceOf[256];
   for (int k = 0; k < c.np; ++k)
     faceOf[k] = -1;
@@ -161,9 +165,13 @@ KOKKOS_INLINE_FUNCTION void areaGradFill(const Cell& c, const int* faces, int nf
     oEdgeFacet(run) = base + idx;
     for (int q = 0; q < pcnt[idx]; ++q)
       oEdgeFacet(run + 1 + q) = base + part[idx * kMaxFV + q];
-    for (int e = 0; e < 1 + pcnt[idx]; ++e)
+    for (int e = 0; e < 1 + pcnt[idx]; ++e) {
       for (int cc = 0; cc < 3; ++cc)
         oEdgeGrad((size_t)(run + e) * 3 + cc) = Real(0);
+      if (wl)
+        for (int cc = 0; cc < 4; ++cc)
+          oEdgeLen((size_t)(run + e) * 4 + cc) = Real(0);
+    }
     run += 1 + pcnt[idx];
   }
   for (int t = 0; t < c.nt; ++t) {
@@ -196,7 +204,23 @@ KOKKOS_INLINE_FUNCTION void areaGradFill(const Cell& c, const int* faces, int nf
         oEdgeGrad(o + 0) += grad[a][b][0];
         oEdgeGrad(o + 1) += grad[a][b][1];
         oEdgeGrad(o + 2) += grad[a][b][2];
+        if (wl && slot > 0) {
+          const size_t l = (size_t)(eoff + slot) * 4;
+          oEdgeLen(l + 0) += c.vx[t];
+          oEdgeLen(l + 1) += c.vy[t];
+          oEdgeLen(l + 2) += c.vz[t];
+          oEdgeLen(l + 3) += c.vx[t] * c.vx[t] + c.vy[t] * c.vy[t] + c.vz[t] * c.vz[t];
+        }
       }
+    }
+  }
+  if (wl) {  // finalize: slot 0 (the facet itself) = 0, partners = |v1 − v2|
+    for (int e = ebase; e < run; ++e) {
+      const size_t l = (size_t)e * 4;
+      const Real S2 = oEdgeLen(l) * oEdgeLen(l) + oEdgeLen(l + 1) * oEdgeLen(l + 1) +
+                      oEdgeLen(l + 2) * oEdgeLen(l + 2);
+      const Real d2 = Real(2) * oEdgeLen(l + 3) - S2;
+      oEdgeLen(l) = d2 > Real(0) ? Kokkos::sqrt(d2) : Real(0);
     }
   }
 }
@@ -262,6 +286,7 @@ struct CellBuilder {
   static constexpr int kMaxFV = Cell::MAXFV;  // edge partners one face may have
   Kokkos::View<int*, MemSpace> oEdgeOff, oEdgeCnt, oEdgeFacet;
   Kokkos::View<Real*, MemSpace> oEdgeGrad;
+  Kokkos::View<Real*, MemSpace> oEdgeLen;  // 4-stride scratch → edge lengths (C2a′)
   Kokkos::View<int*, MemSpace> edgeCursor;
   size_t edgeCap = 0;
   bool withAreaGrad = false;
@@ -301,7 +326,7 @@ struct CellBuilder {
       return;
     }
     areaGradFill<Cell, MAXF_TMP>(c, faces, nf, part, pcnt, base, ebase, oEdgeOff, oEdgeCnt,
-                                 oEdgeFacet, oEdgeGrad);
+                                 oEdgeFacet, oEdgeGrad, oEdgeLen);
   }
 
   /// Minimal-image relative vector from the seed at (pix,piy,piz) to sorted seed q.
@@ -733,7 +758,7 @@ TessellatorResult<Real> buildTessellation(
   // (Poisson–Voronoi), so ~6.2 entries per facet incl. the self slot; cap at 8 per facet.
   const size_t edgeCap = withAreaGrad ? facetCap * 8 : 0;
   Kokkos::View<int*, MemSpace> oEdgeOff, oEdgeCnt, oEdgeFacet, edgeCursor;
-  Kokkos::View<Real*, MemSpace> oEdgeGrad;
+  Kokkos::View<Real*, MemSpace> oEdgeGrad, oEdgeLen;
   if (withAreaGrad) {
     oEdgeOff = Kokkos::View<int*, MemSpace>(
         view_alloc(std::string("oEdgeOff"), WithoutInitializing), facetCap);
@@ -743,6 +768,8 @@ TessellatorResult<Real> buildTessellation(
         view_alloc(std::string("oEdgeFacet"), WithoutInitializing), edgeCap);
     oEdgeGrad = Kokkos::View<Real*, MemSpace>(
         view_alloc(std::string("oEdgeGrad"), WithoutInitializing), edgeCap * 3);
+    oEdgeLen = Kokkos::View<Real*, MemSpace>(
+        view_alloc(std::string("oEdgeLen"), WithoutInitializing), edgeCap * 4);
     edgeCursor = Kokkos::View<int*, MemSpace>("edgeCursor", 1);
   }
   // Track B (B1): per-facet second moments (opt-in), over-buffered like the facet arrays.
@@ -826,6 +853,7 @@ TessellatorResult<Real> buildTessellation(
                                       oEdgeCnt,
                                       oEdgeFacet,
                                       oEdgeGrad,
+                                      oEdgeLen,
                                       edgeCursor,
                                       edgeCap,
                                       withAreaGrad,
@@ -961,6 +989,15 @@ TessellatorResult<Real> buildTessellation(
     Kokkos::deep_copy(view.edgeFacet, Kokkos::subview(oEdgeFacet, std::make_pair(0, nEdges)));
     Kokkos::deep_copy(view.edgeAreaGrad,
                       Kokkos::subview(oEdgeGrad, std::make_pair((size_t)0, (size_t)nEdges * 3)));
+    view.edgeLength = Kokkos::View<Real*, MemSpace>(
+        view_alloc(std::string("edgeLength"), WithoutInitializing), nEdges);
+    {
+      auto el = view.edgeLength;
+      auto src = oEdgeLen;
+      Kokkos::parallel_for(
+          "edgeLength", Kokkos::RangePolicy<Exec>(0, nEdges),
+          KOKKOS_LAMBDA(const int e) { el(e) = src((size_t)e * 4); });
+    }
   }
   Kokkos::fence();
   oConn = Kokkos::View<Real*, MemSpace>();

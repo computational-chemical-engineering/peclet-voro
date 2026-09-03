@@ -292,6 +292,43 @@ int main(int argc, char** argv) {
           bad = 1;
       }
     }
+    // ---- (D) implicit diffusion on the viscous TGV: first order in dt (informational) ----------
+    {
+      const int n = 16, N = n * n * n;
+      auto pos = lattice(n, 0.2, rng);
+      auto m = meshOf(pos, N, L);
+      const Real nu = 0.01, T = 0.25, h = Real(1) / n;
+      auto exC = tgvCell(pos, N, T, nu);
+      Real e[3], eRK3;
+      int st[3] = {(int)std::ceil(T / (0.2 * h)), (int)std::ceil(T / (0.1 * h)),
+                   (int)std::ceil(T / (0.05 * h))};
+      {
+        fv::CollocatedNS<Real> ns;
+        ns.setup(m, nu, true);
+        ns.poisson.tol = 1e-11;
+        ns.initialize(up(tgvCell(pos, N, 0, nu), "U0"));
+        for (int s = 0; s < st[0]; ++s)
+          ns.step(T / st[0]);
+        eRK3 = relErrV(m, ns.U, exC);
+      }
+      for (int r = 0; r < 3; ++r) {
+        fv::CollocatedNS<Real> ns;
+        ns.setup(m, nu, true);
+        ns.implicitDiffusion = true;
+        ns.poisson.tol = 1e-11;
+        ns.initialize(up(tgvCell(pos, N, 0, nu), "U0"));
+        for (int s = 0; s < st[r]; ++s)
+          ns.step(T / st[r]);
+        e[r] = relErrV(m, ns.U, exC);
+      }
+      // MEASURED (2026-09-03): 2.97e-2 / 2.95e-2 / 2.94e-2 vs RK3 at CFL 0.2 — the spatial error
+      // dominates at these steps, the first-order time error is below it (informational).
+      std::printf(
+          "  (D) implicit-diffusion TGV 16^3 jittered: error %.3e / %.3e / %.3e at CFL 0.2 / "
+          "0.1 / 0.05 -> dt-order %.2f, %.2f (backward Euler + explicit convection; the "
+          "RK3 scheme at CFL 0.2 gives %.3e — the spatial error dominates)  informational\n",
+          e[0], e[1], e[2], std::log2(e[0] / e[1]), std::log2(e[1] / e[2]), eRK3);
+    }
   }
   std::printf("VORO-COLLOCATED %s\n", bad ? "FAIL" : "OK");
   Kokkos::finalize();

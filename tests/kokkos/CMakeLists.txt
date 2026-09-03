@@ -54,6 +54,7 @@ add_vorflow_kokkos_test(test_grid_quality)
 add_vorflow_kokkos_test(test_covolume_ns)
 add_vorflow_kokkos_test(test_collocated_ns)
 add_vorflow_kokkos_test(test_body_fitted)
+add_vorflow_kokkos_test(test_covolume_dec)
 add_vorflow_kokkos_test(test_permeability)
 
 # Oracle-free acceptance for the device tessellation: geometric invariants (space-filling, positive

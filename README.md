@@ -280,6 +280,14 @@ Voronoi meshes (0.2h-jittered 0.96/0.82, Lloyd CVT 1.43/1.28) — the Perot reco
 first-order consistent on non-symmetric cells and the viscous term inherits it; the DEC
 (Nicolaides) curl-curl viscous term on the Voronoi edges is the planned remedy.
 
+**DEC viscous term (rung C2a′, measured, shelved).** `fv/dec.hpp` builds the Nicolaides
+covolume Laplacian grad div − curl curl on the Voronoi–Delaunay pair (the view publishes the
+Voronoi edge lengths, `edgeLength`, with the facet-edge CSR). It is symmetric and dissipative to
+round-off (`tests/kokkos/test_covolume_dec`), but no accuracy remedy: first-order consistent on
+skewed meshes like the Perot term (face-average flux vs connector-midpoint 1-form), inconsistent on
+the degenerate cubic lattice, and ~8× stiffer explicitly. The covolume scheme's second order needs
+centroidal meshes or the collocated scheme.
+
 **Collocated Navier–Stokes (rung C2b).** `fv/collocated.hpp` is `peclet.flow`'s SolverColocated
 structure on the Voronoi face mesh: incremental predictor whose cell pressure gradient is the
 exact transpose of the centre→face constraint (flow's gauge-exact gradient), the constraint
@@ -292,6 +300,14 @@ centroid to 5e-16 on a random mesh of skewness 0.24). Measured
 a 0.2h-jittered lattice / a Lloyd CVT (plain pair 1.97 / 1.72 / 1.17; covolume flux 1.98 / 0.82
 / 1.29), energy drift O(dt·h²), face divergence 3e-14. The comparison page is
 `suite/docs/studies/voro_covolume_vs_collocated.md`.
+
+**Semi-implicit step (rung C2c).** `CollocatedNS::implicitDiffusion` is flow's step: explicit
+convection, a backward-Euler viscous solve per component (two-point Laplacian and two-point wall
+term implicit, the quadratic wall correction lagged; `PressureSolver::setupVelocity`, GraphAMG-PCG),
+the approximate projection, and the optional rotational pressure update `P += φ − ν div u*`.
+Stokes marches take Δt = 10–20 h²/ν (the sphere-array ladder: 260 steps at n = 32 instead of
+3700, same K to four digits; Poiseuille exact to 4e-13 in 154 steps). Works under MPI through the
+same hooks. Python: `FlowSolver.set_implicit_diffusion(True)`.
 
 **Body-fitted walls (rung C3).** Both solvers take a prescribed wall velocity
 (`setWallVelocity`, empty = no-slip) on the wall faces of the SDF-clipped cells: the constraint

@@ -57,6 +57,10 @@ foreach(np 1 2 4)
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:bench_repair_mpi> 20000 4 --sdf)
   add_test(NAME flow_mpi_np${np}
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_flow_mpi> 12 20)
+  add_test(NAME flow_mpi_implicit_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} -x FLOW_MPI_IMPLICIT $<TARGET_FILE:test_flow_mpi> 12 20)
   set_tests_properties(voronoi_mpi_np${np} repair_mpi_np${np} repair_sdf_mpi_np${np} flow_mpi_np${np} PROPERTIES
     ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false" PROCESSORS ${np})
+  set_tests_properties(flow_mpi_implicit_np${np} PROPERTIES
+    ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false;FLOW_MPI_IMPLICIT=1" PROCESSORS ${np})
 endforeach()

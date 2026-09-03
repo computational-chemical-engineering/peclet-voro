@@ -160,6 +160,7 @@ SubsetGatherResult<Real> subsetGather(
              /*oEdgeCnt=*/{},
              /*oEdgeFacet=*/{},
              /*oEdgeGrad=*/{},
+             /*oEdgeLen=*/{},
              /*edgeCursor=*/{},
              /*edgeCap=*/0,
              /*withAreaGrad=*/false,

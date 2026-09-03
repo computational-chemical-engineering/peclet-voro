@@ -138,6 +138,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
                                  withAreaGrad ? nE : 0);
   Kokkos::View<Real*, Mem> eGrad(view_alloc(std::string("rp.eGrad"), WithoutInitializing),
                                  withAreaGrad ? nE * 3 : 0);
+  Kokkos::View<Real*, Mem> eLen(view_alloc(std::string("rp.eLen"), WithoutInitializing),
+                                withAreaGrad ? nE * 4 : 0);
   Kokkos::View<Real*, Mem> fM2(view_alloc(std::string("rp.fM2"), WithoutInitializing),
                                withMoments ? nF : 0);
   const bool wm = withMoments;
@@ -192,7 +194,7 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
             bool full = false;
             areaGradEnumerate<Cell, kMaxF>(c, faces, idx, part, pcnt, full);
             areaGradFill<Cell, kMaxF>(c, faces, idx, part, pcnt, b, eb(i), eOff, eCnt, eFacet,
-                                      eGrad);
+                                      eGrad, eLen);
           }
         });
   }
@@ -221,6 +223,14 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
     view.facetEdgeCount = eCnt;
     view.edgeFacet = eFacet;
     view.edgeAreaGrad = eGrad;
+    view.edgeLength = Kokkos::View<Real*, Mem>(
+        view_alloc(std::string("rp.edgeLength"), WithoutInitializing), nE);
+    {
+      auto el = view.edgeLength;
+      Kokkos::parallel_for(
+          "reevalPublish.edgeLength", Kokkos::RangePolicy<Exec>(0, nE),
+          KOKKOS_LAMBDA(const int e) { el(e) = eLen((size_t)e * 4); });
+    }
   }
   return view;
 }

@@ -139,6 +139,10 @@ struct TessellationView {
   Kokkos::View<int*, peclet::core::MemSpace> facetEdgeCount;   // nFacets
   Kokkos::View<int*, peclet::core::MemSpace> edgeFacet;        // nEdges
   Kokkos::View<Real*, peclet::core::MemSpace> edgeAreaGrad;    // 3*nEdges
+  // Track C2a′: the Voronoi EDGE length of each facet-edge slot (0 for the self slot): the edge
+  // where the facet's plane meets the partner facet's plane — the dual of the Delaunay triangle
+  // (seed, facet neighbour, partner neighbour); the DEC curl-curl viscous term's Hodge star.
+  Kokkos::View<Real*, peclet::core::MemSpace> edgeLength;  // nEdges
 
   // Rung A1 (force half; opt-in `withWallFD`): per cell, the WALL part of dV/dx and dA_wall/dx
   // by in-kernel central differences of the SDF clip (sdfWallFD) — exact for the clip actually
@@ -163,6 +167,8 @@ struct TessellationView {
   KOKKOS_INLINE_FUNCTION int edgeEnd(int f) const { return facetEdgeOffset(f) + facetEdgeCount(f); }
   KOKKOS_INLINE_FUNCTION int edgePartner(int e) const { return edgeFacet(e); }
   KOKKOS_INLINE_FUNCTION Real areaGrad(int e, int c) const { return edgeAreaGrad(3 * e + c); }
+  KOKKOS_INLINE_FUNCTION Real edgeLen(int e) const { return edgeLength(e); }
+  KOKKOS_INLINE_FUNCTION bool hasEdgeLength() const { return edgeLength.extent(0) > 0; }
 
   KOKKOS_INLINE_FUNCTION int numCells() const { return static_cast<int>(cellSeedId.extent(0)); }
   KOKKOS_INLINE_FUNCTION bool hasVertices() const { return cellVertexOffset.extent(0) > 0; }

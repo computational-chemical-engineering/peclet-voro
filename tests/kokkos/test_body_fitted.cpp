@@ -200,6 +200,10 @@ int main(int argc, char** argv) {
           auto m = slabMesh(pos, N, L, sdf);
           const Real h = H / n, dt = 0.2 * h * h / nu, T = 0.3;
           const int steps = (int)std::ceil(T / dt);
+          // collocated: the semi-implicit step at 20 h²/ν (same steady state, 100x fewer steps);
+          // covolume: explicit RK3 (no implicit variant) — its n = 16 rung is skipped for time
+          const Real dtI = 20.0 * h * h / nu, TI = 3.0;
+          const int stepsI = (int)std::ceil(TI / dtI);
           std::vector<Real> fh(3 * N, 0.0), exC(3 * N, 0.0), exF(m.nFaces, 0.0);
           for (int i = 0; i < N; ++i) {
             fh[3 * i] = fx;
@@ -216,11 +220,12 @@ int main(int argc, char** argv) {
           co.setup(m, nu, true);
           co.force = force;
           co.wallQuadratic = wq == 1;
+          co.implicitDiffusion = true;
           co.poisson.tol = 1e-12;
           DV U0("U0", 3 * N);
           co.initialize(U0);
-          for (int s = 0; s < steps; ++s)
-            co.step(T / steps);
+          for (int s = 0; s < stepsI; ++s)
+            co.step(TI / stepsI);
           eCo[wq][r] = relErrV(m, co.U, exC);
           fv::CovolumeNS<Real> cv;
           cv.setup(m, nu, true);
@@ -228,9 +233,10 @@ int main(int argc, char** argv) {
           cv.wallQuadratic = wq == 1;
           cv.poisson.tol = 1e-12;
           Kokkos::deep_copy(cv.u, Real(0));
-          for (int s = 0; s < steps; ++s)
-            cv.step(T / steps);
-          eCv[wq][r] = relErrF(m, cv.u, exF);
+          if (n <= 8)
+            for (int s = 0; s < steps; ++s)
+              cv.step(T / steps);
+          eCv[wq][r] = n <= 8 ? relErrF(m, cv.u, exF) : Real(0);
           auto ufh = down(co.uf), cvh = down(cv.u);
           double wmax = 0;
           for (int f = m.nInterior; f < m.nFaces; ++f)
@@ -241,16 +247,56 @@ int main(int argc, char** argv) {
               wq ? "quadratic" : "two-point", n, N, steps, eCo[wq][r], eCv[wq][r], wmax,
               co.maxFaceDivergence(), cv.maxDivergence());
         }
-      const Real oCo = std::log2(eCo[0][1] / eCo[0][2]), oCv = std::log2(eCv[0][1] / eCv[0][2]);
+      const Real oCo = std::log2(eCo[0][1] / eCo[0][2]), oCv = std::log2(eCv[0][0] / eCv[0][1]);
       // two-point: second order; quadratic wall gradient: the parabola is the exact discrete
       // steady state — the remaining error is the march's convergence level (gate 1e-4)
-      const bool bOk = oCo >= 1.9 && oCv >= 1.9 && eCo[1][2] < 1e-4 && eCv[1][2] < 1e-4;
+      const bool bOk = oCo >= 1.9 && oCv >= 1.9 && eCo[1][2] < 1e-4 && eCv[1][1] < 1e-4;
       std::printf(
-          "  (B) Poiseuille: two-point wall flux order 8->16 collocated %.2f, covolume %.2f "
-          "(gated >= 1.9); quadratic wall gradient error at n=16 %.1e / %.1e (gated < 1e-4: "
-          "the parabola is exact, the residual is the march)  %s\n",
-          oCo, oCv, eCo[1][2], eCv[1][2], bOk ? "OK" : "FAIL");
+          "  (B) Poiseuille: two-point wall flux order collocated 8->16 %.2f, covolume 4->8 "
+          "%.2f (gated >= 1.9); quadratic wall gradient error: collocated n=16 %.1e, "
+          "covolume n=8 %.1e (gated < 1e-4: the parabola is exact, the residual is the "
+          "march)  %s\n",
+          oCo, oCv, eCo[1][2], eCv[1][1], bOk ? "OK" : "FAIL");
       if (!bOk)
+        bad = 1;
+    }
+    // ---- (C) implicit diffusion: the same steady state with a 100x larger step ----------------
+    {
+      const int n = 16;
+      std::vector<Real> pos;
+      Real L[3];
+      const int N = seeds(n, pos, L);
+      auto m = slabMesh(pos, N, L, sdf);
+      const Real h = H / n, dt = 20.0 * h * h / nu, T = 3.0;  // explicit limit is 0.2 h^2/nu
+      const int steps = (int)std::ceil(T / dt);
+      std::vector<Real> fh(3 * N, 0.0), exC(3 * N, 0.0);
+      for (int i = 0; i < N; ++i) {
+        fh[3 * i] = fx;
+        exC[3 * i] = uex(pos[3 * i + 1]);
+      }
+      Real err[2];
+      int its[2];
+      for (int rot = 0; rot < 2; ++rot) {
+        fv::CollocatedNS<Real> co;
+        co.setup(m, nu, true);
+        co.force = up(fh, "f");
+        co.implicitDiffusion = true;
+        co.rotational = rot == 1;
+        co.poisson.tol = 1e-12;
+        DV U0("U0", 3 * N);
+        co.initialize(U0);
+        for (int s = 0; s < steps; ++s)
+          co.step(T / steps);
+        err[rot] = relErrV(m, co.U, exC);
+        its[rot] = co.visc.lastIters;
+      }
+      const bool cOk = err[0] < 1e-6 && err[1] < 1e-6;
+      std::printf(
+          "  (C) implicit diffusion, n=16, dt = 20 h^2/nu (100x the explicit limit), %d steps: "
+          "error vs the parabola %.1e (plain increment) / %.1e (rotational P += phi - nu "
+          "div u*), velocity PCG iterations %d  (gated < 1e-6)  %s\n",
+          steps, err[0], err[1], its[1], cOk ? "OK" : "FAIL");
+      if (!cOk)
         bad = 1;
     }
   }

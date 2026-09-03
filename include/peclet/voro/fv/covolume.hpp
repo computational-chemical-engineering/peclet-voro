@@ -32,7 +32,9 @@
 #include <type_traits>
 #include <vector>
 
+#include "peclet/core/common/view.hpp"
 #include "peclet/core/solver/graph_amg_device.hpp"
+#include "peclet/voro/fv/dec.hpp"
 #include "peclet/voro/fv/mesh.hpp"
 #include "peclet/voro/fv/operators.hpp"
 
@@ -112,6 +114,12 @@ struct PressureSolver {
   bool useAmg = false;
   Real tol = 1e-12;
   int maxIter = 5000;
+  // Generalization (implicit diffusion, C2): K = extraDiag + lapScale·(−V L). Pressure: lapScale 1,
+  // no extraDiag, `deflate` (mean removal + pin, singular Neumann). Velocity: extraDiag_i = V_i/Δt
+  // + ν Σ_wall A_f/h_A (the two-point wall term), lapScale = ν, no deflation (SPD).
+  Real lapScale = 1;
+  bool deflate = true;
+  DV<Real> extraDiag;
   int lastIters = 0;
   Real lastRes = 0;
   peclet::core::solver::GraphAMGDevice amg;
@@ -134,6 +142,27 @@ struct PressureSolver {
   Kokkos::View<double*, peclet::core::MemSpace> rd, zd;  // AMG works in double
   Real Vtot = 0;
 
+  /// Velocity-solve configuration: (V/Δt + ν Σ_wall A/h_A) u − ν V L u; `Uwall`-independent (the
+  /// Dirichlet wall value enters the right-hand side). Rebuild when Δt or ν change.
+  void setupVelocity(const FaceMesh<Real>& mesh, Real nu, Real dt, bool withAmg) {
+    lapScale = nu;
+    deflate = false;
+    const FaceMesh<Real> mm = mesh;
+    extraDiag = DV<Real>("ps.extraDiag", mesh.nCells);
+    const DV<Real> ed = extraDiag;
+    const int nI = mesh.nInterior;
+    Kokkos::parallel_for(
+        "ps.ediag", Kokkos::RangePolicy<Exec>(0, mesh.nCells), KOKKOS_LAMBDA(const int i) {
+          Real d = mm.cellVolume(i) / dt;
+          for (int t = mm.cellFacesBegin(i); t < mm.cellFacesEnd(i); ++t) {
+            const int f = mm.cellFace(t);
+            if (f >= nI)
+              d += nu * mm.faceArea(f) / mm.faceHa(f);
+          }
+          ed(i) = d;
+        });
+    setup(mesh, withAmg);
+  }
   void setup(const FaceMesh<Real>& mesh, bool withAmg) {
     m = mesh;
     useAmg = withAmg;
@@ -169,13 +198,18 @@ struct PressureSolver {
     K.n = N;
     K.diag.assign(N, 0.0);
     K.start.assign(N + 1, 0);
+    std::vector<Real> edh;
+    if (extraDiag.extent(0) > 0)
+      edh = peclet::core::toVector(extraDiag);
     for (int i = 0; i < N; ++i) {
+      if (!edh.empty())
+        K.diag[i] += edh[i];
       for (int qq = off(i); qq < off(i + 1); ++qq) {
         const int f = cf(qq);
         if (f >= m.nInterior)
           continue;
         const int j = cs(qq) > 0 ? B(f) : A(f);
-        const double w = Af(f) / df(f);
+        const double w = lapScale * Af(f) / df(f);
         K.diag[i] += w;
         if (j >= N)
           continue;  // ghost neighbour: off-block
@@ -189,7 +223,7 @@ struct PressureSolver {
     // K is singular (constant null space): smoother sweeps on the coarsest level instead of the
     // near-exact coarse CG, which divides by zero once the coarse residual lies in the null
     // space (seen on a 512-cell mesh, NaN).
-    prm.coarseSweeps = 8;
+    prm.coarseSweeps = deflate ? 8 : 0;  // the velocity matrix is SPD: exact coarse solve is fine
     amg.build(K, prm);
   }
 
@@ -197,6 +231,9 @@ struct PressureSolver {
   void applyK(const DV<Real>& zz, const DV<Real>& qq) const {
     const FaceMesh<Real> mm = m;
     const int nI = mm.nInterior;
+    const Real ls = lapScale;
+    const DV<Real> ed = extraDiag;
+    const bool hasEd = ed.extent(0) > 0;
     Kokkos::parallel_for(
         "ps.K", Kokkos::RangePolicy<Exec>(0, mm.nCells), KOKKOS_LAMBDA(const int i) {
           Real acc = 0;
@@ -206,9 +243,9 @@ struct PressureSolver {
             if (f >= nI)
               continue;
             const int j = mm.cellFaceSign(t) > 0 ? mm.faceCellB(f) : mm.faceCellA(f);
-            acc += mm.faceArea(f) / mm.faceDist(f) * (zi - zz(j));
+            acc += ls * mm.faceArea(f) / mm.faceDist(f) * (zi - zz(j));
           }
-          qq(i) = acc;
+          qq(i) = acc + (hasEd ? ed(i) * zi : Real(0));
         });
   }
   // dot over the OWNED cells (fields may be sized nCombined), globally reduced
@@ -238,22 +275,26 @@ struct PressureSolver {
   /// Solve −L p = f (mean of f removed, mean of p pinned to zero). Returns iterations.
   int solve(const DV<Real>& f, const DV<Real>& p) {
     const int N = m.nCells;
-    if (!useAmg && !exchange)
+    if (!useAmg && !exchange && deflate)
       return lastIters = poissonCG(m, f, p, tol, maxIter, lastRes);
     const FaceMesh<Real> mm = m;
     const DV<Real> rr = r, zz = z, qq = q;
     const Real vt = Vtot;
     Real fMean = 0;
-    Kokkos::parallel_reduce(
-        "ps.fmean", Kokkos::RangePolicy<Exec>(0, N),
-        KOKKOS_LAMBDA(const int i, Real& acc) { acc += mm.cellVolume(i) * f(i); }, fMean);
-    if (sum)
-      fMean = sum(fMean);
-    fMean /= vt;
+    if (deflate) {
+      Kokkos::parallel_reduce(
+          "ps.fmean", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i, Real& acc) { acc += mm.cellVolume(i) * f(i); }, fMean);
+      if (sum)
+        fMean = sum(fMean);
+      fMean /= vt;
+    }
     Kokkos::deep_copy(p, Real(0));
+    const bool defl = deflate;
     Kokkos::parallel_for(
-        "ps.b", Kokkos::RangePolicy<Exec>(0, N),
-        KOKKOS_LAMBDA(const int i) { rr(i) = mm.cellVolume(i) * (f(i) - fMean); });
+        "ps.b", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          rr(i) = defl ? mm.cellVolume(i) * (f(i) - fMean) : f(i);  // velocity: f is the full RHS
+        });
     const Real r0 = Kokkos::sqrt(dot(rr, rr));
     if (!(r0 > Real(0))) {  // zero right-hand side: p = 0
       lastRes = 0;
@@ -290,15 +331,17 @@ struct PressureSolver {
           "ps.d", Kokkos::RangePolicy<Exec>(0, N),
           KOKKOS_LAMBDA(const int i) { d(i) = zz(i) + beta * d(i); });
     }
-    Real pMean = 0;
-    Kokkos::parallel_reduce(
-        "ps.pmean", Kokkos::RangePolicy<Exec>(0, N),
-        KOKKOS_LAMBDA(const int i, Real& acc) { acc += mm.cellVolume(i) * p(i); }, pMean);
-    if (sum)
-      pMean = sum(pMean);
-    pMean /= vt;
-    Kokkos::parallel_for(
-        "ps.pin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) { p(i) -= pMean; });
+    if (deflate) {
+      Real pMean = 0;
+      Kokkos::parallel_reduce(
+          "ps.pmean", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i, Real& acc) { acc += mm.cellVolume(i) * p(i); }, pMean);
+      if (sum)
+        pMean = sum(pMean);
+      pMean /= vt;
+      Kokkos::parallel_for(
+          "ps.pin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) { p(i) -= pMean; });
+    }
     if (exchange)
       exchange(p, 1);
     return lastIters = it;
@@ -311,11 +354,17 @@ struct CovolumeNS {
   using Exec = peclet::core::ExecSpace;
   FaceMesh<Real> m;
   Real nu = 0;
-  Real convScale = 1;                   // 0 = Stokes (diagnostic)
-  DV<Real> u, p, force;                 // nFaces, nCells, 3N (optional)
-  DV<Real> Uwall, ub;                   // 3 × nBoundary wall velocity, nBoundary wall flux (C3)
-  bool wallQuadratic = true;            // second-order wall gradient (wallGradientLS) vs two-point
-  DV<Real> wg, g9w;                     // 3 × nBoundary wall gradient, 9N gradient scratch
+  Real convScale = 1;         // 0 = Stokes (diagnostic)
+  DV<Real> u, p, force;       // nFaces, nCells, 3N (optional)
+  DV<Real> Uwall, ub;         // 3 × nBoundary wall velocity, nBoundary wall flux (C3)
+  bool wallQuadratic = true;  // second-order wall gradient (wallGradientLS) vs two-point
+  DV<Real> wg, g9w;           // 3 × nBoundary wall gradient, 9N gradient scratch
+  // C2a′: the DEC (Nicolaides) viscous term ν(grad div − curl curl) on the faces instead of the
+  // Perot-reconstructed Rᵀ Δ₂ R. Enable with setDec(view) (needs the view's edge lengths,
+  // `withAreaGrad`); periodic (wall-free) meshes only for now.
+  bool viscousDEC = false;
+  DecEdges<Real> dec;
+  DV<Real> decOut, decDiv;
   DV<Real> U, a, k, u1, u2, div, gphi;  // workspace
   PressureSolver<Real> poisson;
   Real lastDiv = 0;
@@ -362,8 +411,27 @@ struct CovolumeNS {
         "fv.wall", Kokkos::RangePolicy<Exec>(0, nB),
         KOKKOS_LAMBDA(const int b) { uf(nI + b) = bb(b); });
   }
+  /// Install the DEC viscous term from the published view (facet-edge CSR with edge lengths).
+  void setDec(const TessellationView<Real>& view) {
+    dec = buildDecEdges<Real>(view, m);
+    decOut = DV<Real>("ns.decOut", m.nFaces);
+    decDiv = DV<Real>("ns.decDiv", m.nCells);
+    viscousDEC = true;
+  }
   /// k = Rᵀ a(u): the face-normal tendency (no pressure).
   void rhs(const DV<Real>& uf, const DV<Real>& out) {
+    if (viscousDEC) {  // convection (+ force) through Rᵀ, viscous term directly on the faces
+      perotVelocity(m, uf, U);
+      cellTendency(m, uf, U, Real(0), a, force, convScale, Uwall);
+      perotTranspose(m, a, out);
+      decLaplacian(m, dec, uf, decDiv, decOut);
+      const DV<Real> dO = decOut;
+      const Real nuL = nu;
+      Kokkos::parallel_for(
+          "ns.decvisc", Kokkos::RangePolicy<Exec>(0, m.nInterior),
+          KOKKOS_LAMBDA(const int f) { out(f) += nuL * dO(f); });
+      return;
+    }
     perotVelocity(m, uf, U);
     if (wallQuadratic && m.nFaces > m.nInterior) {
       if (wg.extent(0) == 0) {

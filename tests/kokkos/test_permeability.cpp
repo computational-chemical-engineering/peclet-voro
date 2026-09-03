@@ -163,13 +163,17 @@ static KResult dragK(int n, double phi, double nu, double f, bool verbose, bool 
   co.setup(m, nu, true);
   co.convScale = 0;
   co.poisson.tol = 1e-10;
+  // Stokes: no CFL — the implicit step takes dt = 10 h^2/nu (67x the explicit limit); the
+  // explicit RK3 march remains available (PERMEABILITY_EXPLICIT=1) and gives the same K.
+  const bool implicit = std::getenv("PERMEABILITY_EXPLICIT") == nullptr;
+  co.implicitDiffusion = implicit;
   std::vector<Real> fh(3 * N, 0.0);
   for (int i = 0; i < N; ++i)
     fh[3 * i] = f;
   co.force = up(fh, "f");
   DV U0("U0", 3 * N);
   co.initialize(U0);
-  const Real dt = 0.15 * h * h / nu;
+  const Real dt = (implicit ? 10.0 : 0.15) * h * h / nu;
   auto usup = [&]() {
     auto Uh = down(co.U);
     double s = 0;
@@ -180,10 +184,11 @@ static KResult dragK(int n, double phi, double nu, double f, bool verbose, bool 
   double prev = 0, cur = 0;
   int steps = 0;
   const int maxSteps = 200000;
+  const int chunk = implicit ? 10 : 100;
   while (steps < maxSteps) {
-    for (int s = 0; s < 100; ++s)
+    for (int s = 0; s < chunk; ++s)
       co.step(dt);
-    steps += 100;
+    steps += chunk;
     cur = usup();
     if (!std::isfinite(cur))
       break;
@@ -209,7 +214,7 @@ int main(int argc, char** argv) {
   setvbuf(stdout, nullptr, _IOLBF, 0);
   int bad = 0;
   {
-    const int nMax = argc > 1 ? std::atoi(argv[1]) : 24;
+    const int nMax = argc > 1 ? std::atoi(argv[1]) : 32;  // implicit march: n=32 in ~3 min
     gCheckOnly = argc > 2;
     const double nu = 1.0, f = 1.0;
     std::printf(
@@ -235,10 +240,10 @@ int main(int argc, char** argv) {
     bool cOk = nr >= 2 && std::isfinite(errs[nr - 1]) && std::fabs(errs[nr - 1]) <= lim;
     for (int r = 1; r < nr; ++r)
       cOk = cOk && std::fabs(errs[r]) < std::fabs(errs[r - 1]);
-    std::printf("  (A) phi=0.216: |err| %.2f %% at the finest rung (n=%d), decreasing (gated <= "
-                "%.0f %%; flow's cut-cell IBM: 0.49 %% at N=32)  %s\n",
-                100 * std::fabs(errs[nr - 1]), nMax >= 32 ? 32 : 24, 100 * lim,
-                cOk ? "OK" : "FAIL");
+    std::printf(
+        "  (A) phi=0.216: |err| %.2f %% at the finest rung (n=%d), decreasing (gated <= "
+        "%.0f %%; flow's cut-cell IBM: 0.49 %% at N=32)  %s\n",
+        100 * std::fabs(errs[nr - 1]), nMax >= 32 ? 32 : 24, 100 * lim, cOk ? "OK" : "FAIL");
     if (!cOk)
       bad = 1;
     if (nMax >= 32) {
