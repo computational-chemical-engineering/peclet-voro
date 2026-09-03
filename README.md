@@ -268,6 +268,18 @@ lattice while the cellwise residual of the two-point flux is skewness-limited; t
 (Lloyd) energy `energy/lloyd.hpp` removes that skewness (random grid: skewness 0.23 → 0.04, volume
 CV 0.42 → 0.06, residual consistency 0.17 → 0.04 in 40 steps; `tests/kokkos/test_grid_relax`).
 
+**Covolume Navier–Stokes (rung C2a).** `fv/covolume.hpp` is the staggered solver on the face
+mesh: face fluxes and cell pressures, face momentum as the exact transpose of the Perot
+reconstruction (adjoint to round-off), cell-centred convection with the arithmetic face mean
+(skew-symmetric for divergence-free fluxes), the two-point viscous term on the reconstructed
+field, SSP-RK3 with a projection per stage, and pressure PCG with core's `GraphAMGDevice` on the
+symmetric `−V L` (12 vs 76 CG iterations). Measured (`tests/kokkos/test_covolume_ns`): the inviscid
+Taylor–Green energy drift is the RK3 time error only (dt-order 2.96), divergence 6e-14; the
+viscous decay is second order on the cubic lattice (1.93/1.98) but first order on unstructured
+Voronoi meshes (0.2h-jittered 0.96/0.82, Lloyd CVT 1.43/1.28) — the Perot reconstruction is only
+first-order consistent on non-symmetric cells and the viscous term inherits it; the DEC
+(Nicolaides) curl-curl viscous term on the Voronoi edges is the planned remedy.
+
 **PolyMesh (rung B3).** `fv/polymesh.hpp` assembles the internal polyhedral mesh of a resident
 tessellation — shared vertices (periodic-aware), CCW face polygons, owner/neighbour, wall patches,
 cell→faces CSR — and writes VTU polyhedra (`writeVtu`). Watertight and Euler-exact off walls;

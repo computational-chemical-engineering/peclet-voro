@@ -1,0 +1,348 @@
+/**
+ * @file fv/covolume.hpp
+ * \brief Track C, rung C2a (Voronoi methods plan, verdict V4): the staggered COVOLUME
+ * Navier–Stokes solver on the Voronoi face mesh — face-normal fluxes u_f as the velocity unknown,
+ * cell pressures, exact projection with the two-point Laplacian L of C1.
+ *
+ * Momentum on the faces is the TRANSPOSE of the Perot reconstruction R (fluxes → cell vectors):
+ *   R:   V_i U_i = Σ_{f∈i} s_if u_f A_f (c_f − x_i)
+ *   Rᵀ:  d_f a_f = (c_f − x_A)·a_A − (c_f − x_B)·a_B             (interior faces)
+ * so that ⟨R u, a⟩_V = ⟨u, Rᵀ a⟩_F to round-off (⟨a,b⟩_F = Σ A_f d_f a_f b_f). The cell-centred
+ * tendency a_i is the finite-volume convection of the reconstructed field with the ARITHMETIC face
+ * mean (on a Voronoi mesh the face is the bisector, h_A = h_B, so this is also the
+ * distance-weighted mean) — skew-symmetric in ⟨·,·⟩_V for a divergence-free flux — plus the
+ * two-point viscous term, which is symmetric negative. Hence, semi-discretely, d/dt ½⟨u,u⟩_F = −ν
+ * Σ_f A_f/d_f |U_B − U_A|² ≤ 0, exactly zero in the inviscid limit, on ANY Voronoi mesh (skewness
+ * included: the centroid offsets are carried by R and Rᵀ). The projection u ← u − Δt grad φ, L φ =
+ * div u/Δt, is exact to the Poisson tolerance and is orthogonal to the divergence-free fluxes in
+ * ⟨·,·⟩_F (adjointness of div and grad, C1), so it does not touch the energy either.
+ *
+ * Time integration: SSP-RK3, projection after every stage (the skew-symmetry needs div-free stage
+ * fluxes). Pressure Poisson: unpreconditioned CG (C1) or PCG with core's smoothed-aggregation
+ * GraphAMGDevice on the symmetric form −V L (the OT optimiser's graph Laplacian).
+ *
+ * Boundary faces (walls; C3): no-slip — zero flux, U = 0 at distance h_A for the viscous term.
+ */
+#ifndef PECLET_VORO_FV_COVOLUME_HPP
+#define PECLET_VORO_FV_COVOLUME_HPP
+
+#include <Kokkos_Core.hpp>
+#include <type_traits>
+#include <vector>
+
+#include "peclet/core/solver/graph_amg_device.hpp"
+#include "peclet/voro/fv/mesh.hpp"
+#include "peclet/voro/fv/operators.hpp"
+
+namespace peclet::voro::fv {
+
+/// Transpose of the Perot reconstruction: face-normal tendency from cell tendencies (3N).
+template <class Real>
+void perotTranspose(const FaceMesh<Real>& m, const DV<Real>& acell, const DV<Real>& out) {
+  using Exec = peclet::core::ExecSpace;
+  const int nI = m.nInterior;
+  Kokkos::parallel_for(
+      "fv.perotT", Kokkos::RangePolicy<Exec>(0, m.nFaces), KOKKOS_LAMBDA(const int f) {
+        if (f >= nI) {
+          out(f) = Real(0);
+          return;
+        }
+        const int a = m.faceCellA(f), b = m.faceCellB(f);
+        Real s = 0;
+        for (int c = 0; c < 3; ++c) {
+          const Real cf = m.centroid(f, c);
+          s += cf * acell(3 * a + c) - (cf - m.conn(f, c)) * acell(3 * b + c);
+        }
+        out(f) = s / m.faceDist(f);
+      });
+}
+
+/// Cell-centred tendency of the reconstructed velocity U (3N) under the face flux u:
+///   a_i = −(1/V_i) Σ_f s_if u_f A_f ½(U_i + U_j) + (ν/V_i) Σ_f A_f/d_f (U_j − U_i) + F_i
+/// (boundary faces: U_j = 0 at distance h_A, no-slip). `force` (3N) optional.
+template <class Real>
+void cellTendency(const FaceMesh<Real>& m, const DV<Real>& u, const DV<Real>& U, Real nu,
+                  const DV<Real>& out, const DV<Real>& force = DV<Real>{},
+                  Real convScale = Real(1)) {
+  using Exec = peclet::core::ExecSpace;
+  const int nI = m.nInterior;
+  const bool hasF = force.extent(0) > 0;
+  Kokkos::parallel_for(
+      "fv.tendency", Kokkos::RangePolicy<Exec>(0, m.nCells), KOKKOS_LAMBDA(const int i) {
+        Real acc[3] = {0, 0, 0};
+        const Real Ui[3] = {U(3 * i), U(3 * i + 1), U(3 * i + 2)};
+        for (int q = m.cellFacesBegin(i); q < m.cellFacesEnd(i); ++q) {
+          const int f = m.cellFace(q);
+          const Real s = m.cellFaceSign(q);
+          const Real F = convScale * s * u(f) * m.faceArea(f);  // outward volume flux
+          if (f < nI) {
+            const int j = (s > 0) ? m.faceCellB(f) : m.faceCellA(f);
+            const Real w = nu * m.faceArea(f) / m.faceDist(f);
+            for (int c = 0; c < 3; ++c) {
+              const Real Uj = U(3 * j + c);
+              acc[c] += -F * Real(0.5) * (Ui[c] + Uj) + w * (Uj - Ui[c]);
+            }
+          } else {  // no-slip wall at distance h_A
+            const Real w = nu * m.faceArea(f) / m.faceHa(f);
+            for (int c = 0; c < 3; ++c)
+              acc[c] += -F * Real(0.5) * Ui[c] - w * Ui[c];
+          }
+        }
+        const Real iv = Real(1) / m.cellVolume(i);
+        for (int c = 0; c < 3; ++c)
+          out(3 * i + c) = acc[c] * iv + (hasF ? force(3 * i + c) : Real(0));
+      });
+}
+
+/// Pressure Poisson solver: −L φ = f, unpreconditioned CG (C1) or GraphAMGDevice-PCG on the
+/// symmetric form K = −V L (K_ii = Σ A_f/d_f, K_ij = −A_f/d_f), b = V (f − mean f).
+template <class Real>
+struct PressureSolver {
+  using Exec = peclet::core::ExecSpace;
+  FaceMesh<Real> m;
+  bool useAmg = false;
+  Real tol = 1e-12;
+  int maxIter = 5000;
+  int lastIters = 0;
+  Real lastRes = 0;
+  peclet::core::solver::GraphAMGDevice amg;
+  DV<Real> r, z, q, b, Kd;
+  Kokkos::View<double*, peclet::core::MemSpace> rd, zd;  // AMG works in double
+  Real Vtot = 0;
+
+  void setup(const FaceMesh<Real>& mesh, bool withAmg) {
+    m = mesh;
+    useAmg = withAmg;
+    const int N = m.nCells;
+    r = DV<Real>("ps.r", N);
+    z = DV<Real>("ps.z", N);
+    q = DV<Real>("ps.q", N);
+    b = DV<Real>("ps.b", N);
+    {
+      const FaceMesh<Real> mm = m;  // no `this` capture on the device
+      Kokkos::parallel_reduce(
+          "ps.vtot", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i, Real& acc) { acc += mm.cellVolume(i); }, Vtot);
+    }
+    if (!useAmg)
+      return;
+    rd = Kokkos::View<double*, peclet::core::MemSpace>("ps.rd", N);
+    zd = Kokkos::View<double*, peclet::core::MemSpace>("ps.zd", N);
+    // host CSR of K = −V L (interior faces only: Neumann walls contribute nothing)
+    auto A = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, m.faceCellA);
+    auto B = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, m.faceCellB);
+    auto Af = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, m.faceArea);
+    auto df = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, m.faceDist);
+    auto off = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, m.cellFaceOffset);
+    auto cf = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, m.cellFace);
+    auto cs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, m.cellFaceSign);
+    peclet::core::solver::HostCsrOp K;
+    K.n = N;
+    K.diag.assign(N, 0.0);
+    K.start.assign(N + 1, 0);
+    for (int i = 0; i < N; ++i) {
+      for (int qq = off(i); qq < off(i + 1); ++qq) {
+        const int f = cf(qq);
+        if (f >= m.nInterior)
+          continue;
+        const int j = cs(qq) > 0 ? B(f) : A(f);
+        const double w = Af(f) / df(f);
+        K.diag[i] += w;
+        K.nbr.push_back(j);
+        K.coef.push_back(-w);
+      }
+      K.start[i + 1] = (peclet::core::Index)K.nbr.size();
+    }
+    peclet::core::solver::AmgParams prm;
+    prm.ndofPerNode = 1;
+    // K is singular (constant null space): smoother sweeps on the coarsest level instead of the
+    // near-exact coarse CG, which divides by zero once the coarse residual lies in the null
+    // space (seen on a 512-cell mesh, NaN).
+    prm.coarseSweeps = 8;
+    amg.build(K, prm);
+  }
+
+  // q = K z
+  void applyK(const DV<Real>& zz, const DV<Real>& qq) const {
+    const FaceMesh<Real> mm = m;
+    const int nI = mm.nInterior;
+    Kokkos::parallel_for(
+        "ps.K", Kokkos::RangePolicy<Exec>(0, mm.nCells), KOKKOS_LAMBDA(const int i) {
+          Real acc = 0;
+          const Real zi = zz(i);
+          for (int t = mm.cellFacesBegin(i); t < mm.cellFacesEnd(i); ++t) {
+            const int f = mm.cellFace(t);
+            if (f >= nI)
+              continue;
+            const int j = mm.cellFaceSign(t) > 0 ? mm.faceCellB(f) : mm.faceCellA(f);
+            acc += mm.faceArea(f) / mm.faceDist(f) * (zi - zz(j));
+          }
+          qq(i) = acc;
+        });
+  }
+  static Real dot(const DV<Real>& a, const DV<Real>& bb) {
+    Real s = 0;
+    Kokkos::parallel_reduce(
+        "ps.dot", Kokkos::RangePolicy<Exec>(0, a.extent(0)),
+        KOKKOS_LAMBDA(const int i, Real& acc) { acc += a(i) * bb(i); }, s);
+    return s;
+  }
+  void precond(const DV<Real>& rr, const DV<Real>& zz) const {
+    if (!useAmg) {
+      Kokkos::deep_copy(zz, rr);
+      return;
+    }
+    if constexpr (std::is_same_v<Real, double>) {
+      amg.apply(rr, zz);
+    } else {
+      Kokkos::deep_copy(rd, rr);
+      amg.apply(rd, zd);
+      Kokkos::deep_copy(zz, zd);
+    }
+  }
+  /// Solve −L p = f (mean of f removed, mean of p pinned to zero). Returns iterations.
+  int solve(const DV<Real>& f, const DV<Real>& p) {
+    const int N = m.nCells;
+    if (!useAmg)
+      return lastIters = poissonCG(m, f, p, tol, maxIter, lastRes);
+    const FaceMesh<Real> mm = m;
+    const DV<Real> rr = r, zz = z, qq = q;
+    const Real vt = Vtot;
+    Real fMean = 0;
+    Kokkos::parallel_reduce(
+        "ps.fmean", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(const int i, Real& acc) { acc += mm.cellVolume(i) * f(i); }, fMean);
+    fMean /= vt;
+    Kokkos::deep_copy(p, Real(0));
+    Kokkos::parallel_for(
+        "ps.b", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(const int i) { rr(i) = mm.cellVolume(i) * (f(i) - fMean); });
+    const Real r0 = Kokkos::sqrt(dot(rr, rr));
+    precond(rr, zz);
+    DV<Real> d("ps.d", N);
+    Kokkos::deep_copy(d, zz);
+    Real rz = dot(rr, zz);
+    int it = 0;
+    for (; it < maxIter; ++it) {
+      applyK(d, qq);
+      const Real dq = dot(d, qq);
+      const Real alpha = rz / dq;
+      Kokkos::parallel_for(
+          "ps.upd", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+            p(i) += alpha * d(i);
+            rr(i) -= alpha * qq(i);
+          });
+      lastRes = Kokkos::sqrt(dot(rr, rr)) / (r0 > Real(0) ? r0 : Real(1));
+      if (lastRes < tol) {
+        ++it;
+        break;
+      }
+      precond(rr, zz);
+      const Real rzn = dot(rr, zz);
+      const Real beta = rzn / rz;
+      rz = rzn;
+      Kokkos::parallel_for(
+          "ps.d", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i) { d(i) = zz(i) + beta * d(i); });
+    }
+    Real pMean = 0;
+    Kokkos::parallel_reduce(
+        "ps.pmean", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(const int i, Real& acc) { acc += mm.cellVolume(i) * p(i); }, pMean);
+    pMean /= vt;
+    Kokkos::parallel_for(
+        "ps.pin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) { p(i) -= pMean; });
+    return lastIters = it;
+  }
+};
+
+/// The covolume NS solver state: face fluxes u, cell pressure p (from the last projection).
+template <class Real>
+struct CovolumeNS {
+  using Exec = peclet::core::ExecSpace;
+  FaceMesh<Real> m;
+  Real nu = 0;
+  Real convScale = 1;                   // 0 = Stokes (diagnostic)
+  DV<Real> u, p, force;                 // nFaces, nCells, 3N (optional)
+  DV<Real> U, a, k, u1, u2, div, gphi;  // workspace
+  PressureSolver<Real> poisson;
+  Real lastDiv = 0;
+
+  void setup(const FaceMesh<Real>& mesh, Real viscosity, bool amg = false) {
+    m = mesh;
+    nu = viscosity;
+    const int N = m.nCells, F = m.nFaces;
+    u = DV<Real>("ns.u", F);
+    p = DV<Real>("ns.p", N);
+    U = DV<Real>("ns.U", 3 * N);
+    a = DV<Real>("ns.a", 3 * N);
+    k = DV<Real>("ns.k", F);
+    u1 = DV<Real>("ns.u1", F);
+    u2 = DV<Real>("ns.u2", F);
+    div = DV<Real>("ns.div", N);
+    gphi = DV<Real>("ns.gphi", F);
+    poisson.setup(m, amg);
+  }
+  /// k = Rᵀ a(u): the face-normal tendency (no pressure).
+  void rhs(const DV<Real>& uf, const DV<Real>& out) {
+    perotVelocity(m, uf, U);
+    cellTendency(m, uf, U, nu, a, force, convScale);
+    perotTranspose(m, a, out);
+  }
+  /// Make uf divergence-free: L φ = div uf / dt, uf −= dt grad φ; p = φ.
+  void project(const DV<Real>& uf, Real dt) {
+    const DV<Real> dv = div, g = gphi;
+    divergence(m, uf, dv);
+    const Real s = -Real(1) / dt;
+    Kokkos::parallel_for(
+        "ns.rhsP", Kokkos::RangePolicy<Exec>(0, m.nCells),
+        KOKKOS_LAMBDA(const int i) { dv(i) *= s; });
+    poisson.solve(dv, p);
+    faceGradient(m, p, g);
+    Kokkos::parallel_for(
+        "ns.corr", Kokkos::RangePolicy<Exec>(0, m.nFaces),
+        KOKKOS_LAMBDA(const int f) { uf(f) -= dt * g(f); });
+  }
+  /// One SSP-RK3 step with a projection after every stage.
+  void step(Real dt) {
+    const int F = m.nFaces;
+    const DV<Real> uu = u, kk = k, v1 = u1, v2 = u2;
+    rhs(uu, kk);
+    Kokkos::parallel_for(
+        "ns.s1", Kokkos::RangePolicy<Exec>(0, F),
+        KOKKOS_LAMBDA(const int f) { v1(f) = uu(f) + dt * kk(f); });
+    project(v1, dt);
+    rhs(v1, kk);
+    Kokkos::parallel_for(
+        "ns.s2", Kokkos::RangePolicy<Exec>(0, F), KOKKOS_LAMBDA(const int f) {
+          v2(f) = Real(0.75) * uu(f) + Real(0.25) * (v1(f) + dt * kk(f));
+        });
+    project(v2, Real(0.25) * dt);
+    rhs(v2, kk);
+    Kokkos::parallel_for(
+        "ns.s3", Kokkos::RangePolicy<Exec>(0, F),
+        KOKKOS_LAMBDA(const int f) { uu(f) = (uu(f) + Real(2) * (v2(f) + dt * kk(f))) / Real(3); });
+    project(uu, Real(2) / Real(3) * dt);
+  }
+  /// ½⟨u,u⟩_F — the energy the scheme conserves.
+  Real kineticEnergy() const { return Real(0.5) * dotFaces(m, u, u); }
+  /// max_i |div u|_i
+  Real maxDivergence() {
+    const DV<Real> dv = div;
+    divergence(m, u, dv);
+    Real mx = 0;
+    Kokkos::parallel_reduce(
+        "ns.maxdiv", Kokkos::RangePolicy<Exec>(0, m.nCells),
+        KOKKOS_LAMBDA(const int i, Real& acc) {
+          const Real v = Kokkos::fabs(dv(i));
+          if (v > acc)
+            acc = v;
+        },
+        Kokkos::Max<Real>(mx));
+    return mx;
+  }
+};
+
+}  // namespace peclet::voro::fv
+
+#endif  // PECLET_VORO_FV_COVOLUME_HPP

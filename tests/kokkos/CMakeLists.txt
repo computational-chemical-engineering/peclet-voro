@@ -51,6 +51,7 @@ add_vorflow_kokkos_test(test_polymesh)
 # Track B, rung B4: grid quality IS solver quality — Poisson residual/solution error vs skewness at
 # fixed h (Lloyd-relaxed jittered lattices) and the solution's convergence order on relaxed grids.
 add_vorflow_kokkos_test(test_grid_quality)
+add_vorflow_kokkos_test(test_covolume_ns)
 
 # Oracle-free acceptance for the device tessellation: geometric invariants (space-filling, positive
 # volumes, completeness, facet-area reciprocity A_ij = -A_ji, area closure, topology reciprocity) over
