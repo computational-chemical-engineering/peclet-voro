@@ -15,6 +15,7 @@
 #ifndef PECLET_VORO_FV_OPERATORS_HPP
 #define PECLET_VORO_FV_OPERATORS_HPP
 
+#include <functional>
 #include <Kokkos_Core.hpp>
 
 #include "peclet/voro/fv/mesh.hpp"
@@ -270,7 +271,8 @@ Real dotFaces(const FaceMesh<Real>& m, const DV<Real>& a, const DV<Real>& b) {
 template <class Real>
 void faceInterpTranspose(const FaceMesh<Real>& m, const DV<Real>& g, const DV<Real>& out,
                          bool skew = false, const DV<Real>& scratch9 = DV<Real>{},
-                         bool wallPrescribed = false) {
+                         bool wallPrescribed = false,
+                         const std::function<void(const DV<Real>&, int)>& exchange = {}) {
   using Exec = peclet::core::ExecSpace;
   const int nI = m.nInterior;
   Kokkos::parallel_for(
@@ -311,6 +313,8 @@ void faceInterpTranspose(const FaceMesh<Real>& m, const DV<Real>& g, const DV<Re
       });
   if (!skew)
     return;
+  if (exchange)
+    exchange(scratch9, 9);  // distributed: the neighbours' M/V (rung C5)
   // GGᵀ: coefficient of U_c(i) = Σ_{f∈i} w_if q_fc, q_fc = Σ_k A_f n_fk (M_A/V_A − M_B/V_B)_ck
   Kokkos::parallel_for(
       "fv.T1t", Kokkos::RangePolicy<Exec>(0, m.nCells), KOKKOS_LAMBDA(const int i) {

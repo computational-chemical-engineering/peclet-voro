@@ -316,8 +316,15 @@ the 64-plane cell cap.
 **Python `FlowSolver` (rung C5, Python half).** `peclet.voro.FlowSolver(tess, viscosity,
 layout='collocated'|'covolume')` runs either static solver on the face mesh of a resident
 `Tessellation` (walls from its SDF geometry): body force, Stokes switch, wall velocities, initial
-velocity, `step`, cell velocity / pressure / volumes, kinetic energy, divergence. The MPI half
-(2-ring halo, distributed pressure solve) is open.
+velocity, `step`, cell velocity / pressure / volumes, kinetic energy, divergence. **Distributed (MPI).** `fv/distributed.hpp` runs the collocated solver over `VoronoiHalo`'s
+decomposition: `buildFaceMesh(view, aux, nOwned)` keeps facets toward ghost seeds as interface
+faces owned locally, cell fields are sized owned+ghost and refreshed through the halo's `forward`
+at every stage, the pressure PCG exchanges its search direction, all-reduces its dot products and
+preconditions with the per-rank block of the GraphAMG. `tests/kokkos_mpi/test_flow_mpi`
+(`flow_mpi_np{1,2,4}`): np = 1 bit-exact to single rank, np = 2/4 within 3e-15 (velocity) and
+2e-16 (energy) of it, divergence 2e-14. The isolated pressure-solve gate (true residual ==
+recursive residual, K·1 = 0, symmetry) is what caught the rank-local total volume in the mean
+deflation. Covolume hooks and a device-resident halo are follow-ups.
 
 **PolyMesh (rung B3).** `fv/polymesh.hpp` assembles the internal polyhedral mesh of a resident
 tessellation — shared vertices (periodic-aware), CCW face polygons, owner/neighbour, wall patches,

@@ -124,6 +124,13 @@ class VoronoiHalo {
 
   /// Number of ghosts in the last gather() (the established topology).
   int numGhost() const { return nGhost_; }
+  /// Forward any per-owned array onto the ghost copies (translation-invariant fields), over the
+  /// topology of the last gather(): the field exchange of the distributed solvers (rung C5).
+  template <class T>
+  void forward(const T* owned, T* ghost) {
+    halo_.forward(owned, ghost);
+  }
+  MPI_Comm comm() const { return comm_; }
 
   /// Position-only halo refresh: re-forward the CURRENT owned positions onto the EXISTING ghost
   /// topology (the one built by the last gather()), WITHOUT re-decomposing or re-selecting ghosts.

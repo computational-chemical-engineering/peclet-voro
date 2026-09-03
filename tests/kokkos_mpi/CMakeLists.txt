@@ -36,7 +36,7 @@ endif()
 enable_testing()
 
 # Distributed benchmarks (run manually under mpirun -np <R> [N ...] for at-scale numbers).
-foreach(b bench_voronoi_mpi bench_repair_mpi)
+foreach(b bench_voronoi_mpi bench_repair_mpi test_flow_mpi)
   add_executable(${b} ${b}.cpp)
   target_include_directories(${b} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include ${MORTON_INCLUDE})
@@ -55,6 +55,8 @@ foreach(np 1 2 4)
   # Rung A0: the same through a replicated SDF scene — repair == distributed cold == single-rank cold.
   add_test(NAME repair_sdf_mpi_np${np}
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:bench_repair_mpi> 20000 4 --sdf)
-  set_tests_properties(voronoi_mpi_np${np} repair_mpi_np${np} repair_sdf_mpi_np${np} PROPERTIES
+  add_test(NAME flow_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:test_flow_mpi> 12 20)
+  set_tests_properties(voronoi_mpi_np${np} repair_mpi_np${np} repair_sdf_mpi_np${np} flow_mpi_np${np} PROPERTIES
     ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false" PROCESSORS ${np})
 endforeach()

@@ -28,6 +28,7 @@
 #ifndef PECLET_VORO_FV_COLLOCATED_HPP
 #define PECLET_VORO_FV_COLLOCATED_HPP
 
+#include <functional>
 #include <Kokkos_Core.hpp>
 
 #include "peclet/voro/fv/covolume.hpp"
@@ -49,27 +50,39 @@ struct CollocatedNS {
   DV<Real> Uwall, ub;         // 3 × nBoundary wall velocity, nBoundary wall flux (C3)
   bool wallQuadratic = true;  // second-order wall gradient (wallGradientLS) vs two-point
   DV<Real> wg;                // 3 × nBoundary wall gradient
+  // Distributed hooks (rung C5, see fv/distributed.hpp): ghost refresh of a cell field and the
+  // global sum / max. Unset = single rank.
+  std::function<void(const DV<Real>&, int)> exchange;
+  std::function<Real(Real)> sum, max;
   DV<Real> a, U1, U2, uf1, uf2, div, gphi, gp, phi, g9;  // workspace
 
   void setup(const FaceMesh<Real>& mesh, Real viscosity, bool amg = false) {
     m = mesh;
     nu = viscosity;
-    const int N = m.nCells, F = m.nFaces;
-    U = DV<Real>("co.U", 3 * N);
+    const int N = m.nCells, F = m.nFaces, NC = m.nCombined > 0 ? m.nCombined : N;
+    U = DV<Real>("co.U", 3 * NC);
     uf = DV<Real>("co.uf", F);
-    p = DV<Real>("co.p", N);
+    p = DV<Real>("co.p", NC);
     a = DV<Real>("co.a", 3 * N);
-    U1 = DV<Real>("co.U1", 3 * N);
-    U2 = DV<Real>("co.U2", 3 * N);
+    U1 = DV<Real>("co.U1", 3 * NC);
+    U2 = DV<Real>("co.U2", 3 * NC);
     uf1 = DV<Real>("co.uf1", F);
     uf2 = DV<Real>("co.uf2", F);
     div = DV<Real>("co.div", N);
     gphi = DV<Real>("co.gphi", F);
     gp = DV<Real>("co.gp", 3 * N);
-    phi = DV<Real>("co.phi", N);
-    g9 = DV<Real>("co.g9", 9 * N);
+    phi = DV<Real>("co.phi", NC);
+    g9 = DV<Real>("co.g9", 9 * NC);
     setWallVelocity(DV<Real>{});
     poisson.setup(m, amg);
+  }
+  /// Install the distributed hooks on the solver and its pressure solver.
+  template <class Ex>
+  void setExchange(Ex& ex) {
+    exchange = [&ex](const DV<Real>& f, int nc) { ex.exchange(f, nc); };
+    sum = [&ex](Real v) { return ex.sum(v); };
+    max = [&ex](Real v) { return ex.max(v); };
+    poisson.setHooks(exchange, sum);
   }
   /// Prescribe the boundary-face velocity (3 × nBoundary; empty = no-slip): boundary fluxes
   /// u_f = U_wall·n; the viscous wall flux and the convective wall value read U_wall.
@@ -103,6 +116,8 @@ struct CollocatedNS {
   void toFaces(const DV<Real>& Uc, const DV<Real>& out) {
     if (skewCorrected) {
       vectorGreenGauss(m, Uc, g9, Uwall);
+      if (exchange)
+        exchange(g9, 9);
       projectToFaces(m, Uc, out, g9, ub);
     } else {
       projectToFaces(m, Uc, out, DV<Real>{}, ub);
@@ -111,7 +126,7 @@ struct CollocatedNS {
   /// The cell gradient of a scalar q = the transpose of the constraint applied to grad_f q.
   void cellGrad(const DV<Real>& q, const DV<Real>& out) {
     faceGradient(m, q, gphi);
-    faceInterpTranspose(m, gphi, out, skewCorrected, g9, Uwall.extent(0) > 0);
+    faceInterpTranspose(m, gphi, out, skewCorrected, g9, Uwall.extent(0) > 0, exchange);
   }
   /// a = tendency of Uin transported by ufin, minus the current pressure gradient (incremental).
   void tendency(const DV<Real>& Uin, const DV<Real>& ufin, const DV<Real>& out) {
@@ -136,6 +151,8 @@ struct CollocatedNS {
   /// cell correction with the transpose gradient; ufOut = the divergence-free face flux; P += φ.
   void project(const DV<Real>& Ustar, const DV<Real>& ufOut, Real dt) {
     const DV<Real> dv = div, g = gphi, gc = gp, ph = phi, pp = p;
+    if (exchange)
+      exchange(Ustar, 3);  // the predictor's ghosts (interface faces read both cells)
     toFaces(Ustar, ufOut);
     divergence(m, ufOut, dv);
     const Real s = -Real(1) / dt;
@@ -157,6 +174,10 @@ struct CollocatedNS {
           KOKKOS_LAMBDA(const int i) { pp(i) += ph(i); });
     else
       Kokkos::deep_copy(pp, ph);
+    if (exchange) {
+      exchange(Ustar, 3);  // corrected cells (the next tendency's neighbours)
+      exchange(pp, 1);     // the incremental predictor's −∇P
+    }
   }
   /// Initialise from a cell field: U = Uin projected once (dt = 1, no pressure kept).
   void initialize(const DV<Real>& Uin) {
@@ -198,6 +219,8 @@ struct CollocatedNS {
                                      UU(3 * i + 2) * UU(3 * i + 2));
         },
         e);
+    if (sum)
+      e = sum(e);
     return Real(0.5) * e;
   }
   /// max_i |div u_f|_i of the transporting face flux (exactly projected)
@@ -219,7 +242,7 @@ struct CollocatedNS {
             acc = v;
         },
         Kokkos::Max<Real>(mx));
-    return mx;
+    return max ? max(mx) : mx;
   }
 };
 

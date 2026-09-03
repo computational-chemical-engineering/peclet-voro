@@ -33,7 +33,9 @@ template <class Real>
 struct FaceMesh {
   using Mem = peclet::core::MemSpace;
   int nCells = 0, nFaces = 0, nInterior = 0;
-  int nDropped = 0;  // non-reciprocal fluid facets dropped (degenerate edge/vertex contacts)
+  int nCombined = 0;  // owned + ghost cells (distributed; == nCells on one rank): cell fields are
+                      // sized nCombined, cell loops run over the nCells owned cells
+  int nDropped = 0;   // non-reciprocal fluid facets dropped (degenerate edge/vertex contacts)
   // faces [0, nInterior) are interior (two cells), [nInterior, nFaces) boundary (wall / box).
   Kokkos::View<int*, Mem> faceCellA, faceCellB;  // nFaces; B = -1 on a boundary face
   Kokkos::View<int*, Mem> faceFacet;             // nFaces: owner (A-side) facet index in the view
@@ -57,16 +59,23 @@ struct FaceMesh {
 
 /// Build the face mesh. `aux` = buildAuxMaps(view). Interior faces are owned by the facet with the
 /// lower index of the reciprocal pair; wall facets (facetNbr == kBoundaryFacet) and box facets
-/// (−1) become boundary faces.
+/// (−1) become boundary faces. Distributed (rung C5): `nOwned` ≥ 0 marks cells [0, nOwned) as this
+/// rank's owned cells (the tessellation was built for them only, ghosts [nOwned, N) are
+/// candidates without facets); a facet toward a ghost is an INTERFACE face owned here (B = the
+/// ghost's combined index; the other rank owns its own copy of the same face and computes the
+/// same flux from the exchanged fields).
 template <class Real>
-FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<Real>& aux) {
+FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<Real>& aux,
+                             int nOwned = -1) {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Kokkos::view_alloc;
   using Kokkos::WithoutInitializing;
   FaceMesh<Real> m;
   const int N = view.numCells(), nF = view.numFacets();
-  m.nCells = N;
+  const int nOwn = (nOwned >= 0 && nOwned < N) ? nOwned : N;
+  m.nCells = nOwn;
+  m.nCombined = N;
   auto recip = aux.recip;
   auto cellOf = aux.cellOfFacet;
   // classify facets: 1 = interior owner, 2 = boundary, 0 = twin (not owned)
@@ -76,6 +85,8 @@ FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<R
         const int j = view.facetNbr(f);
         if (j < 0)
           kind(f) = 2;
+        else if (j >= nOwn)
+          kind(f) = 1;  // interface face toward a ghost cell: owned here
         else if (recip(f) >= 0)
           kind(f) = (f < recip(f)) ? 1 : 0;
         else
@@ -151,7 +162,8 @@ FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<R
           const int g = (k == 1) ? idxI(f) : nI + idxB(f);
           const int i = cellOf(f);
           A(g) = i;
-          B(g) = (k == 1) ? cellOf(recip(f)) : -1;
+          // interior: the reciprocal facet's cell; interface (no reciprocal): the ghost index
+          B(g) = (k == 1) ? (recip(f) >= 0 ? cellOf(recip(f)) : view.facetNbr(f)) : -1;
           FF(g) = f;
           const Real ax = view.area(f, 0), ay = view.area(f, 1), az = view.area(f, 2);
           const Real ar = Kokkos::sqrt(ax * ax + ay * ay + az * az);
@@ -193,7 +205,7 @@ FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<R
     Kokkos::parallel_for(
         "fv.count", Kokkos::RangePolicy<Exec>(0, nFaces), KOKKOS_LAMBDA(const int g) {
           Kokkos::atomic_inc(&cnt(A(g)));
-          if (B(g) >= 0)
+          if (B(g) >= 0 && B(g) < nOwn)
             Kokkos::atomic_inc(&cnt(B(g)));
         });
   }
@@ -226,7 +238,7 @@ FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<R
           CF(pa) = g;
           CS(pa) = Real(1);
           const int b = B(g);
-          if (b >= 0) {
+          if (b >= 0 && b < nOwn) {
             const int pb = off(b) + Kokkos::atomic_fetch_add(&cursor(b), 1);
             CF(pb) = g;
             CS(pb) = Real(-1);

@@ -26,6 +26,8 @@
 #ifndef PECLET_VORO_FV_COVOLUME_HPP
 #define PECLET_VORO_FV_COVOLUME_HPP
 
+#include <cstdio>
+#include <functional>
 #include <Kokkos_Core.hpp>
 #include <type_traits>
 #include <vector>
@@ -113,6 +115,21 @@ struct PressureSolver {
   int lastIters = 0;
   Real lastRes = 0;
   peclet::core::solver::GraphAMGDevice amg;
+  // Distributed hooks (rung C5): `exchange(field, ncomp)` refreshes the ghost entries of a
+  // cell field (sized m.nCombined) from their owners, `sum` is the global reduction. Unset =
+  // single rank. With `exchange` set the PCG path is used (block-Jacobi AMG per rank when
+  // useAmg, plain CG otherwise) — poissonCG has no hooks.
+  std::function<void(const DV<Real>&, int)> exchange;
+  std::function<Real(Real)> sum;
+  Real localVtot_ = 0;
+  /// Install the distributed hooks (after setup): the total volume of the mean deflation becomes
+  /// the GLOBAL volume — with the rank-local one the deflated right-hand side is not mean-free
+  /// and CG on the singular Neumann system drifts (the C5 bug found by the isolated-solve gate).
+  void setHooks(std::function<void(const DV<Real>&, int)> ex, std::function<Real(Real)> s) {
+    exchange = std::move(ex);
+    sum = std::move(s);
+    Vtot = sum ? sum(localVtot_) : localVtot_;
+  }
   DV<Real> r, z, q, b, Kd;
   Kokkos::View<double*, peclet::core::MemSpace> rd, zd;  // AMG works in double
   Real Vtot = 0;
@@ -121,8 +138,9 @@ struct PressureSolver {
     m = mesh;
     useAmg = withAmg;
     const int N = m.nCells;
+    const int NC = m.nCombined > 0 ? m.nCombined : N;
     r = DV<Real>("ps.r", N);
-    z = DV<Real>("ps.z", N);
+    z = DV<Real>("ps.z", NC);  // read at ghosts by applyK (distributed)
     q = DV<Real>("ps.q", N);
     b = DV<Real>("ps.b", N);
     {
@@ -131,11 +149,15 @@ struct PressureSolver {
           "ps.vtot", Kokkos::RangePolicy<Exec>(0, N),
           KOKKOS_LAMBDA(const int i, Real& acc) { acc += mm.cellVolume(i); }, Vtot);
     }
+    if (sum)
+      Vtot = sum(Vtot);
+    localVtot_ = Vtot;
     if (!useAmg)
       return;
     rd = Kokkos::View<double*, peclet::core::MemSpace>("ps.rd", N);
     zd = Kokkos::View<double*, peclet::core::MemSpace>("ps.zd", N);
-    // host CSR of K = −V L (interior faces only: Neumann walls contribute nothing)
+    // host CSR of K = −V L (interior faces only: Neumann walls contribute nothing). Distributed:
+    // the owned block only (couplings to ghosts stay in the diagonal — block-Jacobi AMG).
     auto A = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, m.faceCellA);
     auto B = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, m.faceCellB);
     auto Af = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, m.faceArea);
@@ -155,6 +177,8 @@ struct PressureSolver {
         const int j = cs(qq) > 0 ? B(f) : A(f);
         const double w = Af(f) / df(f);
         K.diag[i] += w;
+        if (j >= N)
+          continue;  // ghost neighbour: off-block
         K.nbr.push_back(j);
         K.coef.push_back(-w);
       }
@@ -187,20 +211,24 @@ struct PressureSolver {
           qq(i) = acc;
         });
   }
-  static Real dot(const DV<Real>& a, const DV<Real>& bb) {
+  // dot over the OWNED cells (fields may be sized nCombined), globally reduced
+  Real dot(const DV<Real>& a, const DV<Real>& bb) const {
     Real s = 0;
     Kokkos::parallel_reduce(
-        "ps.dot", Kokkos::RangePolicy<Exec>(0, a.extent(0)),
+        "ps.dot", Kokkos::RangePolicy<Exec>(0, m.nCells),
         KOKKOS_LAMBDA(const int i, Real& acc) { acc += a(i) * bb(i); }, s);
-    return s;
+    return sum ? sum(s) : s;
   }
   void precond(const DV<Real>& rr, const DV<Real>& zz) const {
-    if (!useAmg) {
-      Kokkos::deep_copy(zz, rr);
+    if (!useAmg) {  // zz may be longer than rr (ghost slots): copy the owned part
+      Kokkos::deep_copy(Kokkos::subview(zz, std::make_pair(0, (int)rr.extent(0))), rr);
       return;
     }
     if constexpr (std::is_same_v<Real, double>) {
-      amg.apply(rr, zz);
+      if (zz.extent(0) == rr.extent(0))
+        amg.apply(rr, zz);
+      else
+        amg.apply(rr, Kokkos::subview(zz, std::make_pair(0, (int)rr.extent(0))));
     } else {
       Kokkos::deep_copy(rd, rr);
       amg.apply(rd, zd);
@@ -210,7 +238,7 @@ struct PressureSolver {
   /// Solve −L p = f (mean of f removed, mean of p pinned to zero). Returns iterations.
   int solve(const DV<Real>& f, const DV<Real>& p) {
     const int N = m.nCells;
-    if (!useAmg)
+    if (!useAmg && !exchange)
       return lastIters = poissonCG(m, f, p, tol, maxIter, lastRes);
     const FaceMesh<Real> mm = m;
     const DV<Real> rr = r, zz = z, qq = q;
@@ -219,6 +247,8 @@ struct PressureSolver {
     Kokkos::parallel_reduce(
         "ps.fmean", Kokkos::RangePolicy<Exec>(0, N),
         KOKKOS_LAMBDA(const int i, Real& acc) { acc += mm.cellVolume(i) * f(i); }, fMean);
+    if (sum)
+      fMean = sum(fMean);
     fMean /= vt;
     Kokkos::deep_copy(p, Real(0));
     Kokkos::parallel_for(
@@ -230,11 +260,13 @@ struct PressureSolver {
       return lastIters = 0;
     }
     precond(rr, zz);
-    DV<Real> d("ps.d", N);
+    DV<Real> d("ps.d", zz.extent(0));
     Kokkos::deep_copy(d, zz);
     Real rz = dot(rr, zz);
     int it = 0;
     for (; it < maxIter; ++it) {
+      if (exchange)
+        exchange(d, 1);
       applyK(d, qq);
       const Real dq = dot(d, qq);
       if (!(dq > Real(0)))
@@ -262,9 +294,13 @@ struct PressureSolver {
     Kokkos::parallel_reduce(
         "ps.pmean", Kokkos::RangePolicy<Exec>(0, N),
         KOKKOS_LAMBDA(const int i, Real& acc) { acc += mm.cellVolume(i) * p(i); }, pMean);
+    if (sum)
+      pMean = sum(pMean);
     pMean /= vt;
     Kokkos::parallel_for(
         "ps.pin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) { p(i) -= pMean; });
+    if (exchange)
+      exchange(p, 1);
     return lastIters = it;
   }
 };
