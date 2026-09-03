@@ -280,6 +280,42 @@ Voronoi meshes (0.2h-jittered 0.96/0.82, Lloyd CVT 1.43/1.28) — the Perot reco
 first-order consistent on non-symmetric cells and the viscous term inherits it; the DEC
 (Nicolaides) curl-curl viscous term on the Voronoi edges is the planned remedy.
 
+**Collocated Navier–Stokes (rung C2b).** `fv/collocated.hpp` is `peclet.flow`'s SolverColocated
+structure on the Voronoi face mesh: incremental predictor whose cell pressure gradient is the
+exact transpose of the centre→face constraint (flow's gauge-exact gradient), the constraint
+interpolation `T`, an exact face projection with the same `L`, the transpose cell correction and
+`P += φ`. The unstructured extension makes `T` second order on skewed faces (each cell is
+extrapolated to the face centroid with the Green–Gauss gradient times the Gauss-exact factor
+`(I − S)⁻¹`, `faceInterpTranspose` is its exact adjoint — linear fields are reproduced at the
+centroid to 5e-16 on a random mesh of skewness 0.24). Measured
+(`tests/kokkos/test_collocated_ns`): Taylor–Green order 1.97 / 2.11 / 2.08 on the cubic lattice /
+a 0.2h-jittered lattice / a Lloyd CVT (plain pair 1.97 / 1.72 / 1.17; covolume flux 1.98 / 0.82
+/ 1.29), energy drift O(dt·h²), face divergence 3e-14. The comparison page is
+`suite/docs/studies/voro_covolume_vs_collocated.md`.
+
+**Body-fitted walls (rung C3).** Both solvers take a prescribed wall velocity
+(`setWallVelocity`, empty = no-slip) on the wall faces of the SDF-clipped cells: the constraint
+returns `U_wall·n`, the viscous wall flux is the two-point `ν A (U_wall − U_i)/h_A`, the pressure
+is Neumann. Measured (`tests/kokkos/test_body_fitted`, Poiseuille between SDF slabs): the interior
+residual of the exact parabola is round-off, the wall row's is f/4 (the two-point wall flux is the
+derivative at h_A/2), and the steady state converges at order 2.00 for both solvers. The face
+mesh drops zero-area non-reciprocal facets of degenerate lattices (`nDropped`); the tessellator
+needs every periodic box extent above twice its coverage radius.
+
+**Sphere-array permeability (rung C4, measured, target open).** `tests/kokkos/test_permeability`
+marches Stokes flow through a simple-cubic sphere array (φ = 0.216) on jittered-lattice seeds
+clipped by the sphere: the fluid volume is exact but the drag is −13 % / −7.5 % of Zick & Homsy
+at 12 / 18 cells per diameter (order ≈ 1.4) because the fat wall cells' two-point wall flux is a
+first-order wall shear. Wall-adapted seeding (a seed shell at h/2) overflows the 64-plane cell
+cap; a second-order one-sided wall gradient is the other remedy. A cubic (unjittered) lattice
+around a sphere is degenerate and overflows the clipper — jitter the seeds.
+
+**Python `FlowSolver` (rung C5, Python half).** `peclet.voro.FlowSolver(tess, viscosity,
+layout='collocated'|'covolume')` runs either static solver on the face mesh of a resident
+`Tessellation` (walls from its SDF geometry): body force, Stokes switch, wall velocities, initial
+velocity, `step`, cell velocity / pressure / volumes, kinetic energy, divergence. The MPI half
+(2-ring halo, distributed pressure solve) is open.
+
 **PolyMesh (rung B3).** `fv/polymesh.hpp` assembles the internal polyhedral mesh of a resident
 tessellation — shared vertices (periodic-aware), CCW face polygons, owner/neighbour, wall patches,
 cell→faces CSR — and writes VTU polyhedra (`writeVtu`). Watertight and Euler-exact off walls;

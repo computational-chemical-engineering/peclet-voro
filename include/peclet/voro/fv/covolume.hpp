@@ -59,14 +59,16 @@ void perotTranspose(const FaceMesh<Real>& m, const DV<Real>& acell, const DV<Rea
 
 /// Cell-centred tendency of the reconstructed velocity U (3N) under the face flux u:
 ///   a_i = −(1/V_i) Σ_f s_if u_f A_f ½(U_i + U_j) + (ν/V_i) Σ_f A_f/d_f (U_j − U_i) + F_i
-/// (boundary faces: U_j = 0 at distance h_A, no-slip). `force` (3N) optional.
+/// Boundary faces (walls, C3): the face velocity is the prescribed `Uwall` (3 × nBoundary; zero =
+/// no-slip when not given) at distance h_A — two-point wall flux ν A_f (U_wall − U_i)/h_A, and the
+/// convective flux F_f carries U_wall (F_f = 0 on an impermeable wall). `force` (3N) optional.
 template <class Real>
 void cellTendency(const FaceMesh<Real>& m, const DV<Real>& u, const DV<Real>& U, Real nu,
-                  const DV<Real>& out, const DV<Real>& force = DV<Real>{},
-                  Real convScale = Real(1)) {
+                  const DV<Real>& out, const DV<Real>& force = DV<Real>{}, Real convScale = Real(1),
+                  const DV<Real>& Uwall = DV<Real>{}) {
   using Exec = peclet::core::ExecSpace;
   const int nI = m.nInterior;
-  const bool hasF = force.extent(0) > 0;
+  const bool hasF = force.extent(0) > 0, hasW = Uwall.extent(0) > 0;
   Kokkos::parallel_for(
       "fv.tendency", Kokkos::RangePolicy<Exec>(0, m.nCells), KOKKOS_LAMBDA(const int i) {
         Real acc[3] = {0, 0, 0};
@@ -82,10 +84,12 @@ void cellTendency(const FaceMesh<Real>& m, const DV<Real>& u, const DV<Real>& U,
               const Real Uj = U(3 * j + c);
               acc[c] += -F * Real(0.5) * (Ui[c] + Uj) + w * (Uj - Ui[c]);
             }
-          } else {  // no-slip wall at distance h_A
+          } else {  // wall at distance h_A with the prescribed velocity
             const Real w = nu * m.faceArea(f) / m.faceHa(f);
-            for (int c = 0; c < 3; ++c)
-              acc[c] += -F * Real(0.5) * Ui[c] - w * Ui[c];
+            for (int c = 0; c < 3; ++c) {
+              const Real Uw = hasW ? Uwall(3 * (f - nI) + c) : Real(0);
+              acc[c] += -F * Uw + w * (Uw - Ui[c]);
+            }
           }
         }
         const Real iv = Real(1) / m.cellVolume(i);
@@ -218,6 +222,10 @@ struct PressureSolver {
         "ps.b", Kokkos::RangePolicy<Exec>(0, N),
         KOKKOS_LAMBDA(const int i) { rr(i) = mm.cellVolume(i) * (f(i) - fMean); });
     const Real r0 = Kokkos::sqrt(dot(rr, rr));
+    if (!(r0 > Real(0))) {  // zero right-hand side: p = 0
+      lastRes = 0;
+      return lastIters = 0;
+    }
     precond(rr, zz);
     DV<Real> d("ps.d", N);
     Kokkos::deep_copy(d, zz);
@@ -226,6 +234,8 @@ struct PressureSolver {
     for (; it < maxIter; ++it) {
       applyK(d, qq);
       const Real dq = dot(d, qq);
+      if (!(dq > Real(0)))
+        break;
       const Real alpha = rz / dq;
       Kokkos::parallel_for(
           "ps.upd", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
@@ -264,6 +274,7 @@ struct CovolumeNS {
   Real nu = 0;
   Real convScale = 1;                   // 0 = Stokes (diagnostic)
   DV<Real> u, p, force;                 // nFaces, nCells, 3N (optional)
+  DV<Real> Uwall, ub;                   // 3 × nBoundary wall velocity, nBoundary wall flux (C3)
   DV<Real> U, a, k, u1, u2, div, gphi;  // workspace
   PressureSolver<Real> poisson;
   Real lastDiv = 0;
@@ -281,12 +292,39 @@ struct CovolumeNS {
     u2 = DV<Real>("ns.u2", F);
     div = DV<Real>("ns.div", N);
     gphi = DV<Real>("ns.gphi", F);
+    setWallVelocity(DV<Real>{});
     poisson.setup(m, amg);
+  }
+  /// Prescribe the boundary-face velocity (3 × nBoundary; empty = no-slip): boundary fluxes
+  /// u_f = U_wall·n; the viscous wall flux and the convective wall value read U_wall.
+  void setWallVelocity(const DV<Real>& Uw) {
+    const int nB = m.nFaces - m.nInterior, nI = m.nInterior;
+    Uwall = Uw;
+    ub = DV<Real>("fv.ub", nB);
+    if (Uw.extent(0) == 0)
+      return;
+    const FaceMesh<Real> mm = m;
+    const DV<Real> bb = ub;
+    Kokkos::parallel_for(
+        "fv.ub", Kokkos::RangePolicy<Exec>(0, nB), KOKKOS_LAMBDA(const int b) {
+          Real un = 0;
+          for (int c = 0; c < 3; ++c)
+            un += Uw(3 * b + c) * mm.normal(nI + b, c);
+          bb(b) = un;
+        });
+  }
+  /// Impose the boundary fluxes on a face field.
+  void applyWallFlux(const DV<Real>& uf) const {
+    const int nB = m.nFaces - m.nInterior, nI = m.nInterior;
+    const DV<Real> bb = ub;
+    Kokkos::parallel_for(
+        "fv.wall", Kokkos::RangePolicy<Exec>(0, nB),
+        KOKKOS_LAMBDA(const int b) { uf(nI + b) = bb(b); });
   }
   /// k = Rᵀ a(u): the face-normal tendency (no pressure).
   void rhs(const DV<Real>& uf, const DV<Real>& out) {
     perotVelocity(m, uf, U);
-    cellTendency(m, uf, U, nu, a, force, convScale);
+    cellTendency(m, uf, U, nu, a, force, convScale, Uwall);
     perotTranspose(m, a, out);
   }
   /// Make uf divergence-free: L φ = div uf / dt, uf −= dt grad φ; p = φ.

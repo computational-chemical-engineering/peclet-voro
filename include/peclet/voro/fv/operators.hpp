@@ -121,20 +121,114 @@ void perotVelocity(const FaceMesh<Real>& m, const DV<Real>& u, const DV<Real>& o
       });
 }
 
-/// Face-normal flux of a uniform (or cell-wise given) velocity field: u_f = U(A-side)·n_f.
+/// Skewness correction of the Green–Gauss gradient. For a LINEAR field the plain Green–Gauss
+/// gradient (face values at the connector foot) is (I − S) ∇p with the geometric tensor
+/// S = (1/V) Σ_f s_f A_f t_f ⊗ n_f (t_f = the face centroid's tangential offset from the
+/// connector; Gauss: Σ_f A_f c_f ⊗ n_f = V I). R = (I − S)⁻¹ makes it exact for linear fields on
+/// any polyhedral cell; zero on a lattice / centroidal-symmetric cell.
 template <class Real>
-void projectToFaces(const FaceMesh<Real>& m, const DV<Real>& ucell, const DV<Real>& out) {
+KOKKOS_INLINE_FUNCTION void cellSkewInverse(const FaceMesh<Real>& m, int i, Real R[9]) {
+  Real A[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};  // I − S
+  const Real iv = Real(1) / m.cellVolume(i);
+  for (int q = m.cellFacesBegin(i); q < m.cellFacesEnd(i); ++q) {
+    const int f = m.cellFace(q);  // all faces: the identity holds for the full polytope
+    const Real w = m.cellFaceSign(q) * m.faceArea(f) * iv, ha = m.faceHa(f);
+    for (int r = 0; r < 3; ++r) {
+      const Real t = m.centroid(f, r) - ha * m.normal(f, r);
+      for (int k = 0; k < 3; ++k)
+        A[3 * r + k] -= w * t * m.normal(f, k);
+    }
+  }
+  const Real det = A[0] * (A[4] * A[8] - A[5] * A[7]) - A[1] * (A[3] * A[8] - A[5] * A[6]) +
+                   A[2] * (A[3] * A[7] - A[4] * A[6]);
+  const Real id = Real(1) / det;
+  R[0] = (A[4] * A[8] - A[5] * A[7]) * id;
+  R[1] = (A[2] * A[7] - A[1] * A[8]) * id;
+  R[2] = (A[1] * A[5] - A[2] * A[4]) * id;
+  R[3] = (A[5] * A[6] - A[3] * A[8]) * id;
+  R[4] = (A[0] * A[8] - A[2] * A[6]) * id;
+  R[5] = (A[2] * A[3] - A[0] * A[5]) * id;
+  R[6] = (A[3] * A[7] - A[4] * A[6]) * id;
+  R[7] = (A[1] * A[6] - A[0] * A[7]) * id;
+  R[8] = (A[0] * A[4] - A[1] * A[3]) * id;
+}
+
+/// Skew-corrected Green–Gauss gradient of a cell VECTOR field (3N → 9N, (∂_k U_c)_i at
+/// 9i + 3c + k): the plain distance-weighted Green–Gauss gradient times R = (I − S)⁻¹
+/// (cellSkewInverse) — exact for linear fields on every cell; boundary faces use the cell value.
+template <class Real>
+void vectorGreenGauss(const FaceMesh<Real>& m, const DV<Real>& U, const DV<Real>& out,
+                      const DV<Real>& Uwall = DV<Real>{}) {
   using Exec = peclet::core::ExecSpace;
   const int nI = m.nInterior;
+  const bool hasW = Uwall.extent(0) > 0;
+  Kokkos::parallel_for(
+      "fv.vgg", Kokkos::RangePolicy<Exec>(0, m.nCells), KOKKOS_LAMBDA(const int i) {
+        Real g[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+        for (int q = m.cellFacesBegin(i); q < m.cellFacesEnd(i); ++q) {
+          const int f = m.cellFace(q);
+          const Real s = m.cellFaceSign(q);
+          const int a = m.faceCellA(f), b = m.faceCellB(f);
+          Real Uf[3];
+          if (f < nI) {
+            const Real ha = m.faceHa(f), hb = m.faceHb(f);
+            for (int c = 0; c < 3; ++c)
+              Uf[c] = (hb * U(3 * a + c) + ha * U(3 * b + c)) / (ha + hb);
+          } else {
+            for (int c = 0; c < 3; ++c)
+              Uf[c] = hasW ? Uwall(3 * (f - nI) + c) : U(3 * i + c);
+          }
+          const Real w = s * m.faceArea(f);
+          for (int c = 0; c < 3; ++c)
+            for (int k = 0; k < 3; ++k)
+              g[3 * c + k] += w * Uf[c] * m.normal(f, k);
+        }
+        Real R[9];
+        cellSkewInverse(m, i, R);
+        const Real iv = Real(1) / m.cellVolume(i);
+        for (int c = 0; c < 3; ++c)
+          for (int k = 0; k < 3; ++k) {
+            Real v = 0;
+            for (int kk = 0; kk < 3; ++kk)
+              v += R[3 * k + kk] * g[3 * c + kk];
+            out(9 * i + 3 * c + k) = v * iv;
+          }
+      });
+}
+
+/// The centre→face CONSTRAINT interpolation T: u_f = U_f·n_f with U_f the distance-weighted
+/// average of the two cell velocities (exact at the connector foot for linear fields). With
+/// `gradU` (9N, vectorGreenGauss) the SKEW correction adds each cell's gradient times the
+/// tangential offset t_f = c_f − h_A n_f of the face centroid from the connector, so U_f is the
+/// value AT THE FACE CENTROID (second order on skewed faces). Boundary faces: U(A)·n.
+template <class Real>
+void projectToFaces(const FaceMesh<Real>& m, const DV<Real>& ucell, const DV<Real>& out,
+                    const DV<Real>& gradU = DV<Real>{}, const DV<Real>& ub = DV<Real>{}) {
+  using Exec = peclet::core::ExecSpace;
+  const int nI = m.nInterior;
+  const bool skew = gradU.extent(0) > 0, hasB = ub.extent(0) > 0;
   Kokkos::parallel_for(
       "fv.project", Kokkos::RangePolicy<Exec>(0, m.nFaces), KOKKOS_LAMBDA(const int f) {
         const int a = m.faceCellA(f);
         Real un = 0;
-        if (f < nI) {  // distance-weighted average of the two cell velocities
+        if (f < nI) {
           const int b = m.faceCellB(f);
-          const Real ha = m.faceHa(f), hb = m.faceHb(f);
+          const Real ha = m.faceHa(f), hb = m.faceHb(f), wa = hb / (ha + hb), wb = ha / (ha + hb);
           for (int c = 0; c < 3; ++c)
-            un += ((hb * ucell(3 * a + c) + ha * ucell(3 * b + c)) / (ha + hb)) * m.normal(f, c);
+            un += (wa * ucell(3 * a + c) + wb * ucell(3 * b + c)) * m.normal(f, c);
+          if (skew) {
+            Real t[3];
+            for (int k = 0; k < 3; ++k)
+              t[k] = m.centroid(f, k) - ha * m.normal(f, k);
+            for (int c = 0; c < 3; ++c) {
+              Real dc = 0;
+              for (int k = 0; k < 3; ++k)
+                dc += (wa * gradU(9 * a + 3 * c + k) + wb * gradU(9 * b + 3 * c + k)) * t[k];
+              un += dc * m.normal(f, c);
+            }
+          }
+        } else if (hasB) {  // wall / inflow: the prescribed boundary flux
+          un = ub(f - nI);
         } else {
           for (int c = 0; c < 3; ++c)
             un += ucell(3 * a + c) * m.normal(f, c);
@@ -163,6 +257,92 @@ Real dotFaces(const FaceMesh<Real>& m, const DV<Real>& a, const DV<Real>& b) {
   return s;
 }
 
+/// Transpose of the constraint interpolation T (projectToFaces) in the inner products ⟨·,·⟩_V /
+/// ⟨·,·⟩_F: ⟨T U, g⟩_F = ⟨U, Tᵀ g⟩_V for every cell field U and face field g. Plain part:
+/// (T₀ᵀ g)_i = (1/V_i) Σ_{f∈i} A_f d_f w_if g_f n_f (w_if = the interpolation weight of cell i on
+/// f; on a cubic lattice this IS the central difference = Green–Gauss). With `skew` the transpose
+/// of the centroid correction T₁ ∘ GG is added (two passes: the per-cell moment
+/// M_i,ck = Σ_f A_f d_f w_if g_f n_fc t_fk, then the Green–Gauss transpose through the faces).
+/// Applied to g = the two-point face gradient of φ this is the cell pressure gradient that makes
+/// the ABC cell correction the exact adjoint of the face constraint — flow's gauge-exact
+/// gradient (`gpCenterGrad`, the transpose of centerToFace) on the Voronoi mesh: the pressure
+/// does no work on the constraint manifold. `scratch9` (9N) is needed for the skew part.
+template <class Real>
+void faceInterpTranspose(const FaceMesh<Real>& m, const DV<Real>& g, const DV<Real>& out,
+                         bool skew = false, const DV<Real>& scratch9 = DV<Real>{},
+                         bool wallPrescribed = false) {
+  using Exec = peclet::core::ExecSpace;
+  const int nI = m.nInterior;
+  Kokkos::parallel_for(
+      "fv.T0t", Kokkos::RangePolicy<Exec>(0, m.nCells), KOKKOS_LAMBDA(const int i) {
+        Real v[3] = {0, 0, 0}, M[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+        for (int q = m.cellFacesBegin(i); q < m.cellFacesEnd(i); ++q) {
+          const int f = m.cellFace(q);
+          if (f >= nI)
+            continue;
+          const Real ha = m.faceHa(f), hb = m.faceHb(f);
+          const Real wi = (m.cellFaceSign(q) > 0 ? hb : ha) / (ha + hb);
+          const Real w = m.faceArea(f) * (ha + hb) * wi * g(f);
+          for (int c = 0; c < 3; ++c)
+            v[c] += w * m.normal(f, c);
+          if (skew) {
+            Real t[3];
+            for (int k = 0; k < 3; ++k)
+              t[k] = m.centroid(f, k) - ha * m.normal(f, k);
+            for (int c = 0; c < 3; ++c)
+              for (int k = 0; k < 3; ++k)
+                M[3 * c + k] += w * m.normal(f, c) * t[k];
+          }
+        }
+        const Real iv = Real(1) / m.cellVolume(i);
+        for (int c = 0; c < 3; ++c)
+          out(3 * i + c) = v[c] * iv;
+        if (skew) {  // (M_i R_i) / V_i — the transpose of the skew correction R (row index k)
+          Real R[9];
+          cellSkewInverse(m, i, R);
+          for (int c = 0; c < 3; ++c)
+            for (int k = 0; k < 3; ++k) {
+              Real v2 = 0;
+              for (int kk = 0; kk < 3; ++kk)
+                v2 += M[3 * c + kk] * R[3 * kk + k];
+              scratch9(9 * i + 3 * c + k) = v2 * iv;
+            }
+        }
+      });
+  if (!skew)
+    return;
+  // GGᵀ: coefficient of U_c(i) = Σ_{f∈i} w_if q_fc, q_fc = Σ_k A_f n_fk (M_A/V_A − M_B/V_B)_ck
+  Kokkos::parallel_for(
+      "fv.T1t", Kokkos::RangePolicy<Exec>(0, m.nCells), KOKKOS_LAMBDA(const int i) {
+        Real v[3] = {0, 0, 0};
+        for (int q = m.cellFacesBegin(i); q < m.cellFacesEnd(i); ++q) {
+          const int f = m.cellFace(q);
+          if (f >= nI) {  // vectorGreenGauss used the cell value on a boundary face (unless
+                          // a wall velocity was prescribed: then the face value is a constant)
+            if (wallPrescribed)
+              continue;
+            for (int c = 0; c < 3; ++c)
+              for (int k = 0; k < 3; ++k)
+                v[c] += m.faceArea(f) * m.normal(f, k) * scratch9(9 * i + 3 * c + k);
+            continue;
+          }
+          const int a = m.faceCellA(f), b = m.faceCellB(f);
+          const Real ha = m.faceHa(f), hb = m.faceHb(f);
+          const Real wi = (m.cellFaceSign(q) > 0 ? hb : ha) / (ha + hb);
+          for (int c = 0; c < 3; ++c) {
+            Real qf = 0;
+            for (int k = 0; k < 3; ++k)
+              qf += m.faceArea(f) * m.normal(f, k) *
+                    (scratch9(9 * a + 3 * c + k) - scratch9(9 * b + 3 * c + k));
+            v[c] += wi * qf;
+          }
+        }
+        const Real iv = Real(1) / m.cellVolume(i);
+        for (int c = 0; c < 3; ++c)
+          out(3 * i + c) += v[c] * iv;
+      });
+}
+
 /// Conjugate gradients on −L p = f (matrix-free, Neumann/periodic: the mean of f is removed and
 /// the mean of p pinned to zero — L is symmetric negative semi-definite with the constant null
 /// space). Returns the iteration count; `resOut` the final relative residual. Unpreconditioned:
@@ -189,12 +369,18 @@ int poissonCG(const FaceMesh<Real>& m, const DV<Real>& f, const DV<Real>& p, Rea
   Kokkos::deep_copy(z, r);
   Real rr = dotCells(m, r, r);
   const Real r0 = Kokkos::sqrt(rr);
+  if (!(r0 > Real(0))) {  // zero (or NaN) right-hand side: p = 0 is the solution
+    resOut = 0;
+    return 0;
+  }
   int it = 0;
   for (; it < maxIter; ++it) {
     laplacian(m, z, q, sf);
     Kokkos::parallel_for(
         "cg.negq", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) { q(i) = -q(i); });
     const Real zq = dotCells(m, z, q);
+    if (!(zq > Real(0)))  // z in the null space (converged to round-off)
+      break;
     const Real alpha = rr / zq;
     Kokkos::parallel_for(
         "cg.upd", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {

@@ -52,6 +52,9 @@ add_vorflow_kokkos_test(test_polymesh)
 # fixed h (Lloyd-relaxed jittered lattices) and the solution's convergence order on relaxed grids.
 add_vorflow_kokkos_test(test_grid_quality)
 add_vorflow_kokkos_test(test_covolume_ns)
+add_vorflow_kokkos_test(test_collocated_ns)
+add_vorflow_kokkos_test(test_body_fitted)
+add_vorflow_kokkos_test(test_permeability)
 
 # Oracle-free acceptance for the device tessellation: geometric invariants (space-filling, positive
 # volumes, completeness, facet-area reciprocity A_ij = -A_ji, area closure, topology reciprocity) over

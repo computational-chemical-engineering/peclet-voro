@@ -63,6 +63,9 @@
 #include "peclet/voro/mesh_optimizer.hpp"
 #include "peclet/voro/physics/simulation.hpp"
 #include "peclet/voro/reeval_tessellation.hpp"
+#include "peclet/voro/fv/collocated.hpp"
+#include "peclet/voro/fv/covolume.hpp"
+#include "peclet/voro/fv/mesh.hpp"
 #include "peclet/voro/repair.hpp"
 #include "peclet/voro/topology_store.hpp"
 
@@ -545,6 +548,21 @@ class Tess {
     return d;
   }
 
+  // The face mesh of the resident tessellation (track C): reevalPublish over the store, then the
+  // reciprocal map and the owner/neighbour face records (fv/mesh.hpp). Used by FlowSolver.
+  peclet::voro::fv::FaceMesh<real_t> face_mesh() {
+    const int N = N_;
+    const real_t Larr[3] = {L_[0], L_[1], L_[2]};
+    return std::visit(
+        [&](auto& mt) {
+          auto view = peclet::voro::reevalPublish<real_t, 64, 112>(mt.store, pos_, mt.vol, N, Larr,
+                                                                   mt.wall, mt.xRef);
+          auto aux = peclet::voro::buildAuxMaps(view);
+          return peclet::voro::fv::buildFaceMesh(view, aux);
+        },
+        mt_);
+  }
+
   // Per-cell number of resident SDF wall planes (0 everywhere without geometry).
   nb::ndarray<nb::numpy, int> wall_counts() {
     const std::size_t N = static_cast<std::size_t>(N_);
@@ -590,6 +608,120 @@ class Tess {
   DView pos_, weight_;
   SceneHolder scene_;
   MtVariant mt_;
+};
+
+// Track C (rungs C2/C3/C5): the static Navier–Stokes solvers on the face mesh of a resident
+// Tessellation — the collocated solver (peclet.flow's approximate projection with the
+// skew-corrected adjoint constraint pair, the default) or the staggered covolume solver. The
+// mesh is frozen at construction (rebuild the FlowSolver after moving seeds).
+class Flow {
+ public:
+  Flow(Tess& t, real_t nu, const std::string& layout, bool amg) : layout_(layout) {
+    m_ = t.face_mesh();
+    if (layout == "collocated") {
+      co_ = std::make_unique<peclet::voro::fv::CollocatedNS<real_t>>();
+      co_->setup(m_, nu, amg);
+    } else if (layout == "covolume") {
+      cv_ = std::make_unique<peclet::voro::fv::CovolumeNS<real_t>>();
+      cv_->setup(m_, nu, amg);
+    } else {
+      throw std::runtime_error("FlowSolver: layout must be 'collocated' or 'covolume'");
+    }
+  }
+  int num_cells() const { return m_.nCells; }
+  int num_faces() const { return m_.nFaces; }
+  int num_wall_faces() const { return m_.nFaces - m_.nInterior; }
+  void set_body_force(real_t fx, real_t fy, real_t fz) {
+    const int N = m_.nCells;
+    DView f("flow.force", 3 * (size_t)N);
+    auto h = Kokkos::create_mirror_view(f);
+    for (int i = 0; i < N; ++i) {
+      h(3 * i) = fx;
+      h(3 * i + 1) = fy;
+      h(3 * i + 2) = fz;
+    }
+    Kokkos::deep_copy(f, h);
+    if (co_)
+      co_->force = f;
+    else
+      cv_->force = f;
+  }
+  void set_stokes(bool on) {
+    if (co_)
+      co_->convScale = on ? 0 : 1;
+    else
+      cv_->convScale = on ? 0 : 1;
+  }
+  void set_skew_corrected(bool on) {
+    if (co_)
+      co_->skewCorrected = on;
+  }
+  void set_pressure_tolerance(real_t tol) { (co_ ? co_->poisson : cv_->poisson).tol = tol; }
+  void set_wall_velocity(nb::ndarray<real_t, nb::c_contig> Uw) {
+    const int nB = m_.nFaces - m_.nInterior;
+    if (Uw.ndim() != 2 || (int)Uw.shape(0) != nB || Uw.shape(1) != 3)
+      throw std::runtime_error("set_wall_velocity(): expected (num_wall_faces, 3)");
+    DView d("flow.Uwall", 3 * (size_t)nB);
+    Kokkos::deep_copy(d, Kokkos::View<const real_t*, Kokkos::HostSpace>(Uw.data(), 3 * (size_t)nB));
+    if (co_)
+      co_->setWallVelocity(d);
+    else
+      cv_->setWallVelocity(d);
+  }
+  // Set the cell velocity (N,3); the collocated solver projects it once, the covolume solver
+  // takes the face-normal components of the distance-weighted face average.
+  void set_velocity(nb::ndarray<real_t, nb::c_contig> U) {
+    const int N = m_.nCells;
+    if (U.ndim() != 2 || (int)U.shape(0) != N || U.shape(1) != 3)
+      throw std::runtime_error("set_velocity(): expected (num_cells, 3)");
+    DView d("flow.U0", 3 * (size_t)N);
+    Kokkos::deep_copy(d, Kokkos::View<const real_t*, Kokkos::HostSpace>(U.data(), 3 * (size_t)N));
+    if (co_) {
+      co_->initialize(d);
+    } else {
+      peclet::voro::fv::projectToFaces(m_, d, cv_->u, DView{}, cv_->ub);
+      cv_->project(cv_->u, real_t(1));
+    }
+  }
+  void step(int n, real_t dt) {
+    for (int i = 0; i < n; ++i) {
+      if (co_)
+        co_->step(dt);
+      else
+        cv_->step(dt);
+    }
+  }
+  nb::ndarray<nb::numpy, real_t> get_velocity() {
+    const std::size_t N = m_.nCells;
+    std::vector<real_t> v;
+    if (co_) {
+      v = peclet::core::toVector(co_->U);
+    } else {
+      DView Uc("flow.Uc", 3 * N);
+      peclet::voro::fv::perotVelocity(m_, cv_->u, Uc);
+      v = peclet::core::toVector(Uc);
+    }
+    return peclet::core::python::vector_to_ndarray(std::move(v), {N, std::size_t(3)}, {3, 1});
+  }
+  nb::ndarray<nb::numpy, real_t> get_pressure() {
+    const std::size_t N = m_.nCells;
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(co_ ? co_->p : cv_->p),
+                                                   {N}, {1});
+  }
+  nb::ndarray<nb::numpy, real_t> get_cell_volume() {
+    const std::size_t N = m_.nCells;
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(m_.cellVolume), {N}, {1});
+  }
+  real_t kinetic_energy() { return co_ ? co_->kineticEnergy() : cv_->kineticEnergy(); }
+  real_t max_divergence() { return co_ ? co_->maxFaceDivergence() : cv_->maxDivergence(); }
+  int pressure_iterations() const { return (co_ ? co_->poisson : cv_->poisson).lastIters; }
+  std::string layout() const { return layout_; }
+
+ private:
+  std::string layout_;
+  peclet::voro::fv::FaceMesh<real_t> m_;
+  std::unique_ptr<peclet::voro::fv::CollocatedNS<real_t>> co_;
+  std::unique_ptr<peclet::voro::fv::CovolumeNS<real_t>> cv_;
 };
 
 // --------------------------------------------------------------------------------------------------
@@ -1215,6 +1347,38 @@ NB_MODULE(_voro, m) {
                    "Particle count N set by the last `build`.");
 
   // ---- Simulation -------------------------------------------------------------------------------
+  nb::class_<Flow>(
+      m, "FlowSolver",
+      "Static Navier–Stokes solver on the face mesh of a resident Tessellation (Voronoi methods "
+      "plan, track C). layout='collocated' (default): peclet.flow's approximate projection with "
+      "the skew-corrected adjoint constraint pair — second order on unstructured Voronoi meshes; "
+      "layout='covolume': the staggered covolume scheme (exact energy conservation, first order "
+      "on unstructured meshes). Walls come from the tessellation's SDF geometry (no-slip unless "
+      "set_wall_velocity). SSP-RK3 with a projection per stage; GraphAMG-PCG pressure solve.")
+      .def(nb::init<Tess&, real_t, const std::string&, bool>(), nb::arg("tessellation"),
+           nb::arg("viscosity"), nb::arg("layout") = "collocated", nb::arg("amg") = true)
+      .def("num_cells", &Flow::num_cells)
+      .def("num_faces", &Flow::num_faces)
+      .def("num_wall_faces", &Flow::num_wall_faces)
+      .def("layout", &Flow::layout)
+      .def("set_body_force", &Flow::set_body_force, nb::arg("fx"), nb::arg("fy"), nb::arg("fz"))
+      .def("set_stokes", &Flow::set_stokes, nb::arg("on"),
+           "Drop the convective term (creeping flow).")
+      .def("set_skew_corrected", &Flow::set_skew_corrected, nb::arg("on"),
+           "Collocated only: the centroid-consistent constraint pair (default on).")
+      .def("set_pressure_tolerance", &Flow::set_pressure_tolerance, nb::arg("tol"))
+      .def("set_wall_velocity", &Flow::set_wall_velocity, nb::arg("U"),
+           "Prescribed velocity on the wall faces, (num_wall_faces, 3).")
+      .def("set_velocity", &Flow::set_velocity, nb::arg("U"),
+           "Initial cell velocity (num_cells, 3); projected once.")
+      .def("step", &Flow::step, nb::arg("num_steps"), nb::arg("dt"))
+      .def("get_velocity", &Flow::get_velocity, "Cell velocity (num_cells, 3).")
+      .def("get_pressure", &Flow::get_pressure)
+      .def("get_cell_volume", &Flow::get_cell_volume)
+      .def("kinetic_energy", &Flow::kinetic_energy)
+      .def("max_divergence", &Flow::max_divergence)
+      .def("pressure_iterations", &Flow::pressure_iterations);
+
   nb::class_<Sim>(
       m, "Simulation",
       "Device-native compressible-Euler / Navier-Stokes Voronoi fluid simulation.\n\n"

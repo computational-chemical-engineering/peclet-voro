@@ -247,6 +247,46 @@ def test_energy_forces():
           f"  wetting E={rw['wall_energy']:.4f};  Lloyd E {e_l0:.3e} -> {rl['lloyd_energy']:.3e} in 10 steps")
 
 
+def test_flow_solver():
+    """Track C (C5): FlowSolver on a resident tessellation — a decaying Taylor–Green vortex on a
+    jittered 16^3 lattice for both layouts; the energy must track exp(-4 nu k^2 t) (collocated
+    within 3 %, covolume within 5 % at 0.2h jitter — the measured accuracies of the C2 tests at
+    this resolution) and the transporting face flux must be divergence-free to round-off."""
+    rng = np.random.default_rng(5)
+    n, L, nu = 16, 1.0, 0.01
+    h = L / n
+    g = (np.arange(n) + 0.5) * h
+    X, Y, Z = np.meshgrid(g, g, g, indexing="ij")
+    pos = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=1)
+    pos = (pos + rng.uniform(-0.2 * h, 0.2 * h, pos.shape)) % L
+    k = 2 * np.pi
+    U0 = np.zeros_like(pos)
+    U0[:, 0] = np.sin(k * pos[:, 0]) * np.cos(k * pos[:, 1])
+    U0[:, 1] = -np.cos(k * pos[:, 0]) * np.sin(k * pos[:, 1])
+    t = voro.Tessellation()
+    t.set_box((L, L, L))
+    t.build(pos)
+    T, dt = 0.25, 0.2 * h
+    steps = int(np.ceil(T / dt))
+    exact = np.exp(-4 * nu * k * k * T)
+    for layout, tol in (("collocated", 0.03), ("covolume", 0.05)):
+        f = voro.FlowSolver(t, nu, layout=layout)
+        assert f.num_cells() == n**3 and f.num_wall_faces() == 0 and f.layout() == layout
+        f.set_velocity(U0)
+        E0 = f.kinetic_energy()
+        f.step(steps, T / steps)
+        ratio = f.kinetic_energy() / E0
+        div = f.max_divergence()
+        assert abs(ratio / exact - 1) < tol, (layout, ratio, exact)
+        assert div < 1e-9, (layout, div)
+        vel = f.get_velocity()
+        assert vel.shape == (n**3, 3) and np.isfinite(vel).all()
+        assert f.get_pressure().shape == (n**3,)
+        assert abs(f.get_cell_volume().sum() - L**3) < 1e-9
+        print(f"  FlowSolver[{layout}]: E/E0 {ratio:.5f} (exact {exact:.5f}), face div {div:.1e}, "
+              f"PCG iters {f.pressure_iterations()}")
+
+
 if __name__ == "__main__":
     print(f"peclet.voro execution_space = {voro.execution_space}")
     test_tessellation()
@@ -254,4 +294,5 @@ if __name__ == "__main__":
     test_geometry()
     test_weights()
     test_energy_forces()
+    test_flow_solver()
     print("peclet.voro python smoke test: PASS")

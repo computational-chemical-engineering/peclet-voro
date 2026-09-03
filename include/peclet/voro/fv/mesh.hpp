@@ -33,6 +33,7 @@ template <class Real>
 struct FaceMesh {
   using Mem = peclet::core::MemSpace;
   int nCells = 0, nFaces = 0, nInterior = 0;
+  int nDropped = 0;  // non-reciprocal fluid facets dropped (degenerate edge/vertex contacts)
   // faces [0, nInterior) are interior (two cells), [nInterior, nFaces) boundary (wall / box).
   Kokkos::View<int*, Mem> faceCellA, faceCellB;  // nFaces; B = -1 on a boundary face
   Kokkos::View<int*, Mem> faceFacet;             // nFaces: owner (A-side) facet index in the view
@@ -78,8 +79,16 @@ FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<R
         else if (recip(f) >= 0)
           kind(f) = (f < recip(f)) ? 1 : 0;
         else
-          kind(f) = 2;  // no reciprocal (should not happen in a dense periodic build)
+          kind(f) = 3;  // no reciprocal: a degenerate (zero-area) edge/vertex contact of a
+                        // symmetric lattice, seen from one side only — not a face, dropped
       });
+  {
+    int nd = 0;
+    Kokkos::parallel_reduce(
+        "fv.dropped", Kokkos::RangePolicy<Exec>(0, nF),
+        KOKKOS_LAMBDA(const int f, int& acc) { acc += kind(f) == 3 ? 1 : 0; }, nd);
+    m.nDropped = nd;
+  }
   // enumerate: interior first, then boundary (two scans)
   Kokkos::View<int*, Mem> idxI(view_alloc(std::string("fv.idxI"), WithoutInitializing), nF);
   Kokkos::View<int*, Mem> idxB(view_alloc(std::string("fv.idxB"), WithoutInitializing), nF);
@@ -137,7 +146,7 @@ FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<R
     Kokkos::parallel_for(
         "fv.fill", Kokkos::RangePolicy<Exec>(0, nF), KOKKOS_LAMBDA(const int f) {
           const int k = kind(f);
-          if (k == 0)
+          if (k == 0 || k == 3)
             return;
           const int g = (k == 1) ? idxI(f) : nI + idxB(f);
           const int i = cellOf(f);
