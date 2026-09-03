@@ -222,6 +222,45 @@ KOKKOS_INLINE_FUNCTION void sdfHessian(const Sdf& s, Real x, Real y, Real z, Rea
     }
 }
 
+/// The seed-foot SDF wall chain (rung A3 — the single source; see energy/wall.hpp): f_self +=
+/// J_wallᵀ g_w with J_wall = dn/dx of the foot vector n = −φ∇φ/|∇φ|². Coordinates in Real,
+/// accumulation in double — the exact arithmetic of the optimiser's device kernel it replaces.
+/// No-op for NoSdf.
+template <class Real, class Sdf>
+KOKKOS_INLINE_FUNCTION void sdfWallChain(const Sdf& sdf, Real x, Real y, Real z, const double gw[3],
+                                         double fSelf[3]) {
+  if constexpr (std::is_same_v<Sdf, NoSdf>) {
+    (void)sdf;
+    (void)x;
+    (void)y;
+    (void)z;
+    (void)gw;
+    (void)fSelf;
+    return;
+  } else {
+    if (gw[0] == 0.0 && gw[1] == 0.0 && gw[2] == 0.0)
+      return;
+    Real gg[3];
+    sdfGradient<Real>(sdf, x, y, z, gg);
+    const double gn =
+        Kokkos::sqrt((double)gg[0] * gg[0] + (double)gg[1] * gg[1] + (double)gg[2] * gg[2]);
+    if (gn <= 1e-12)
+      return;  // degenerate gradient (crease / corner): no wall force (guard)
+    const double u0 = gg[0] / gn, u1 = gg[1] / gn, u2 = gg[2] / gn;
+    const double ug = u0 * gw[0] + u1 * gw[1] + u2 * gw[2];
+    const double p0 = gw[0] - ug * u0, p1 = gw[1] - ug * u1, p2 = gw[2] - ug * u2;
+    Real Hm[3][3];
+    sdfHessian<Real>(sdf, x, y, z, Hm);
+    const double Hp0 = Hm[0][0] * p0 + Hm[0][1] * p1 + Hm[0][2] * p2;
+    const double Hp1 = Hm[1][0] * p0 + Hm[1][1] * p1 + Hm[1][2] * p2;
+    const double Hp2 = Hm[2][0] * p0 + Hm[2][1] * p1 + Hm[2][2] * p2;
+    const double cH = (double)sdf.eval(x, y, z) / gn;
+    fSelf[0] += -ug * u0 - cH * Hp0;
+    fSelf[1] += -ug * u1 - cH * Hp1;
+    fSelf[2] += -ug * u2 - cH * Hp2;
+  }
+}
+
 /// Differentiable SDF wall force (Effort 2, Option A — the seed-foot model). A wall facet
 /// (pnbr == kBoundaryFacet) is modelled as the tangent plane at the seed's foot point on sdf=0, so
 /// its seed-relative foot-point normal is n_wall(s) = −φ(s) û(s), û = ∇φ/|∇φ|. Its Jacobian is
@@ -256,21 +295,14 @@ KOKKOS_INLINE_FUNCTION void addSdfWallForce(const ConvexCell<Real, MAXP, MAXT, T
         any = true;
       }
     if (!any) return;
-    const Real phi = sdf.eval(seed[0], seed[1], seed[2]);
-    Real g[3];
-    sdfGradient<Real>(sdf, seed[0], seed[1], seed[2], g);
-    const Real gn = Kokkos::sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
-    if (gn <= Real(1e-12)) return;  // degenerate gradient (box crease/corner) — no wall force (guard)
-    const Real u[3] = {g[0] / gn, g[1] / gn, g[2] / gn};
-    Real H[3][3];
-    sdfHessian<Real>(sdf, seed[0], seed[1], seed[2], H);
-    const Real ug = u[0] * gw[0] + u[1] * gw[1] + u[2] * gw[2];
-    const Real perp[3] = {gw[0] - ug * u[0], gw[1] - ug * u[1], gw[2] - ug * u[2]};
-    const Real Hp[3] = {H[0][0] * perp[0] + H[0][1] * perp[1] + H[0][2] * perp[2],
-                        H[1][0] * perp[0] + H[1][1] * perp[1] + H[1][2] * perp[2],
-                        H[2][0] * perp[0] + H[2][1] * perp[1] + H[2][2] * perp[2]};
-    const Real cH = phi / gn;
-    for (int d = 0; d < 3; ++d) fSelf[d] += -gn * ug * u[d] - cH * Hp[d];
+    // Rung A3: the shared |∇φ|-independent seed-foot chain (foot vector n = −φ∇φ/|∇φ|²). The
+    // earlier body carried an extra |∇φ| factor from the n = −φû shortcut (identical for a true
+    // SDF, |∇φ| = 1; wrong for a general level set).
+    const double gwd[3] = {(double)gw[0], (double)gw[1], (double)gw[2]};
+    double fw[3] = {0.0, 0.0, 0.0};
+    sdfWallChain<Real>(sdf, seed[0], seed[1], seed[2], gwd, fw);
+    for (int d = 0; d < 3; ++d)
+      fSelf[d] += (Real)fw[d];
   }
 }
 

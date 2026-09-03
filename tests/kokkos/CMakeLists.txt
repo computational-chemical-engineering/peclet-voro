@@ -26,6 +26,11 @@ add_vorflow_kokkos_test(test_sdf_scene)
 # leaving the solid, exact wall mode gated at 1e-9, skin mode reported.
 add_vorflow_kokkos_test(test_sdf_dynamic)
 
+# Rung A3: the facet-edge area-Jacobian CSR the build publishes + the energy layer on it
+# (interface / wall / volume terms, Voronoi + Power chains, the shared seed-foot wall chain):
+# published == reconstruction to round-off, FD-exact gradients incl. weights and a flat wall.
+add_vorflow_kokkos_test(test_energy_layer)
+
 # Oracle-free acceptance for the device tessellation: geometric invariants (space-filling, positive
 # volumes, completeness, facet-area reciprocity A_ij = -A_ji, area closure, topology reciprocity) over
 # several sizes/seeds. Replaces the retired half-edge-oracle comparison tests (tessellator,

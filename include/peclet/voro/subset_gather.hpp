@@ -152,7 +152,14 @@ SubsetGatherResult<Real> subsetGather(
              /*emitTopo=*/true,
              /*emitCand=*/false,
              /*candCap=*/0,
-             outWall};
+             outWall,
+             /*oEdgeOff=*/{},
+             /*oEdgeCnt=*/{},
+             /*oEdgeFacet=*/{},
+             /*oEdgeGrad=*/{},
+             /*edgeCursor=*/{},
+             /*edgeCap=*/0,
+             /*withAreaGrad=*/false};
 
   auto slotOf = grid.slotOf;
   auto idx = indices;

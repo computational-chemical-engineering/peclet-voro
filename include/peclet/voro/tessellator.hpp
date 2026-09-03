@@ -130,6 +130,124 @@ struct CellBuilder {
   // the topology so the moving-point path can re-evaluate a wall-clipped cell (a wall plane has no
   // partner seed to rebuild it from). No-op when the store is unallocated.
   WallStore<Real> oWall;
+  // Optional (rung A3): the facet-edge AREA-JACOBIAN CSR (TessellationView::edge*). Written only
+  // when `withAreaGrad` (the views are sized); one atomic reservation per cell on `edgeCursor`.
+  static constexpr int kMaxFV = Cell::MAXFV;  // edge partners one face may have
+  Kokkos::View<int*, MemSpace> oEdgeOff, oEdgeCnt, oEdgeFacet;
+  Kokkos::View<Real*, MemSpace> oEdgeGrad;
+  Kokkos::View<int*, MemSpace> edgeCursor;
+  size_t edgeCap = 0;
+  bool withAreaGrad = false;
+
+  /// Rung A3: publish the per-facet area Jacobians of finalised cell `c` (facets `faces[0..nf)`
+  /// at CSR base `base`) into the facet-edge CSR. Per triangle, geomVolumeAreaGrad gives the
+  /// 3x3 blocks ∂contrib_i/∂n_{pl[j]}; summed over the cell's triangles they are exactly
+  /// ∂A_{pl[i]}/∂n_{pl[j]}, and (i, j) with i != j is always an edge pair (the two planes meet at
+  /// that vertex), so the CSR is the union of {self} ∪ {edge partners} per face — built first
+  /// from the triangle list (dedup by a short scan), then filled by a single scatter pass.
+  /// Planes that publish no face (< 3 live triangles) are skipped as partners: they carry no
+  /// area and their sliver dependence is below the published-face contract.
+  KOKKOS_INLINE_FUNCTION void publishAreaGrad(const Cell& c, int i, int base, const int* faces,
+                                              int nf) const {
+    signed char faceOf[kMaxP];
+    for (int k = 0; k < c.np; ++k)
+      faceOf[k] = -1;
+    for (int idx = 0; idx < nf; ++idx)
+      faceOf[faces[idx]] = (signed char)idx;
+    unsigned char part[MAXF_TMP * kMaxFV];
+    unsigned char pcnt[MAXF_TMP];
+    for (int idx = 0; idx < nf; ++idx)
+      pcnt[idx] = 0;
+    bool full = false;
+    for (int t = 0; t < c.nt; ++t) {
+      if (!c.alive[t])
+        continue;
+      const int tp[3] = {c.t0[t], c.t1[t], c.t2[t]};
+      for (int a = 0; a < 3; ++a) {
+        const int fa = faceOf[tp[a]];
+        if (fa < 0)
+          continue;
+        for (int b = 0; b < 3; ++b) {
+          if (b == a)
+            continue;
+          const int fb = faceOf[tp[b]];
+          if (fb < 0)
+            continue;
+          bool seen = false;
+          for (int s = 0; s < pcnt[fa]; ++s)
+            if (part[fa * kMaxFV + s] == (unsigned char)fb) {
+              seen = true;
+              break;
+            }
+          if (seen)
+            continue;
+          if (pcnt[fa] >= kMaxFV) {
+            full = true;
+            continue;
+          }
+          part[fa * kMaxFV + pcnt[fa]] = (unsigned char)fb;
+          ++pcnt[fa];
+        }
+      }
+    }
+    int total = 0;
+    for (int idx = 0; idx < nf; ++idx)
+      total += 1 + pcnt[idx];
+    const int ebase = Kokkos::atomic_fetch_add(&edgeCursor(0), total);
+    if (full || (size_t)ebase + (size_t)total > edgeCap) {
+      status(i) |= kOverflow;
+      for (int idx = 0; idx < nf; ++idx) {
+        oEdgeOff(base + idx) = 0;
+        oEdgeCnt(base + idx) = 0;
+      }
+      return;
+    }
+    int run = ebase;
+    for (int idx = 0; idx < nf; ++idx) {
+      oEdgeOff(base + idx) = run;
+      oEdgeCnt(base + idx) = 1 + pcnt[idx];
+      oEdgeFacet(run) = base + idx;
+      for (int s = 0; s < pcnt[idx]; ++s)
+        oEdgeFacet(run + 1 + s) = base + part[idx * kMaxFV + s];
+      for (int e = 0; e < 1 + pcnt[idx]; ++e)
+        for (int cc = 0; cc < 3; ++cc)
+          oEdgeGrad((size_t)(run + e) * 3 + cc) = Real(0);
+      run += 1 + pcnt[idx];
+    }
+    for (int t = 0; t < c.nt; ++t) {
+      if (!c.alive[t])
+        continue;
+      int pl[3];
+      Real contrib[3], grad[3][3][3];
+      c.geomVolumeAreaGrad(t, pl, contrib, grad);
+      for (int a = 0; a < 3; ++a) {
+        const int fa = faceOf[pl[a]];
+        if (fa < 0)
+          continue;
+        const int eoff = oEdgeOff(base + fa);
+        for (int b = 0; b < 3; ++b) {
+          const int fb = faceOf[pl[b]];
+          if (fb < 0)
+            continue;
+          int slot = 0;
+          if (b != a) {
+            slot = -1;
+            for (int s = 0; s < pcnt[fa]; ++s)
+              if (part[fa * kMaxFV + s] == (unsigned char)fb) {
+                slot = 1 + s;
+                break;
+              }
+            if (slot < 0)
+              continue;  // cannot happen (pair enumerated above)
+          }
+          const size_t o = (size_t)(eoff + slot) * 3;
+          oEdgeGrad(o + 0) += grad[a][b][0];
+          oEdgeGrad(o + 1) += grad[a][b][1];
+          oEdgeGrad(o + 2) += grad[a][b][2];
+        }
+      }
+    }
+  }
 
   /// Minimal-image relative vector from the seed at (pix,piy,piz) to sorted seed q.
   KOKKOS_INLINE_FUNCTION void relVec(int q, Real pix, Real piy, Real piz, Real pv[3]) const {
@@ -269,6 +387,8 @@ struct CellBuilder {
     }
     facetCount(i) = nf;
     cellFacetBase(i) = base;
+    if (withAreaGrad && nf > 0)
+      publishAreaGrad(c, i, base, faces, nf);
     for (int idx = 0; idx < nf; ++idx) {
       const int k = faces[idx];
       Real area[3] = {0, 0, 0}, dv[3] = {0, 0, 0}, conn[3];
@@ -410,7 +530,7 @@ TessellatorResult<Real> buildTessellation(
     Kokkos::View<unsigned*, peclet::core::MemSpace> outTri = {},
     Kokkos::View<int*, peclet::core::MemSpace> outCand = {},
     Kokkos::View<int*, peclet::core::MemSpace> outCandCnt = {}, int candCap = 0,
-    WorklistCache<Real>* wlc = nullptr, WallStore<Real> outWall = {}) {
+    WorklistCache<Real>* wlc = nullptr, WallStore<Real> outWall = {}, bool withAreaGrad = false) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin
@@ -479,6 +599,22 @@ TessellatorResult<Real> buildTessellation(
   Kokkos::View<Real*, MemSpace> oConn(view_alloc(std::string("oConn"), WithoutInitializing),
                                       facetCap * 3);
   Kokkos::View<int*, MemSpace> facetCursor("facetCursor", 1);  // zero-initialised
+  // Rung A3: facet-edge area-Jacobian over-buffer (opt-in). A face has ~5.2 edges on average
+  // (Poisson–Voronoi), so ~6.2 entries per facet incl. the self slot; cap at 8 per facet.
+  const size_t edgeCap = withAreaGrad ? facetCap * 8 : 0;
+  Kokkos::View<int*, MemSpace> oEdgeOff, oEdgeCnt, oEdgeFacet, edgeCursor;
+  Kokkos::View<Real*, MemSpace> oEdgeGrad;
+  if (withAreaGrad) {
+    oEdgeOff = Kokkos::View<int*, MemSpace>(
+        view_alloc(std::string("oEdgeOff"), WithoutInitializing), facetCap);
+    oEdgeCnt = Kokkos::View<int*, MemSpace>(
+        view_alloc(std::string("oEdgeCnt"), WithoutInitializing), facetCap);
+    oEdgeFacet = Kokkos::View<int*, MemSpace>(
+        view_alloc(std::string("oEdgeFacet"), WithoutInitializing), edgeCap);
+    oEdgeGrad = Kokkos::View<Real*, MemSpace>(
+        view_alloc(std::string("oEdgeGrad"), WithoutInitializing), edgeCap * 3);
+    edgeCursor = Kokkos::View<int*, MemSpace>("edgeCursor", 1);
+  }
   if (prof)
     std::fprintf(stderr, "[worklist] sw=%d nOff=%d\n", sw, nOff);
 
@@ -544,7 +680,14 @@ TessellatorResult<Real> buildTessellation(
                                       emitTopo,
                                       emitCand,
                                       candCap,
-                                      outWall};
+                                      outWall,
+                                      oEdgeOff,
+                                      oEdgeCnt,
+                                      oEdgeFacet,
+                                      oEdgeGrad,
+                                      edgeCursor,
+                                      edgeCap,
+                                      withAreaGrad};
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
   Kokkos::parallel_for(
@@ -640,6 +783,27 @@ TessellatorResult<Real> buildTessellation(
           for (int cc = 0; cc < 3; ++cc)
             v(3 * g + cc) = src(3 * (size_t)g + cc);
         });
+  }
+  // Rung A3: pack the facet-edge area-Jacobian CSR (prefix [0,nEdges) of the over-buffer). The
+  // per-facet offsets are already global into the over-buffer and the pack keeps indices, so
+  // they carry over unchanged; the facet permutation of the pack (facet g -> g) is the identity.
+  if (withAreaGrad) {
+    int nEdgesRaw = 0;
+    Kokkos::deep_copy(nEdgesRaw, Kokkos::subview(edgeCursor, 0));
+    const int nEdges = (size_t)nEdgesRaw > edgeCap ? (int)edgeCap : nEdgesRaw;
+    view.facetEdgeOffset = Kokkos::View<int*, MemSpace>(
+        view_alloc(std::string("facetEdgeOffset"), WithoutInitializing), nFacets);
+    view.facetEdgeCount = Kokkos::View<int*, MemSpace>(
+        view_alloc(std::string("facetEdgeCount"), WithoutInitializing), nFacets);
+    Kokkos::deep_copy(view.facetEdgeOffset, Kokkos::subview(oEdgeOff, std::make_pair(0, nFacets)));
+    Kokkos::deep_copy(view.facetEdgeCount, Kokkos::subview(oEdgeCnt, std::make_pair(0, nFacets)));
+    view.edgeFacet = Kokkos::View<int*, MemSpace>(
+        view_alloc(std::string("edgeFacet"), WithoutInitializing), nEdges);
+    view.edgeAreaGrad = Kokkos::View<Real*, MemSpace>(
+        view_alloc(std::string("edgeAreaGrad"), WithoutInitializing), (size_t)nEdges * 3);
+    Kokkos::deep_copy(view.edgeFacet, Kokkos::subview(oEdgeFacet, std::make_pair(0, nEdges)));
+    Kokkos::deep_copy(view.edgeAreaGrad,
+                      Kokkos::subview(oEdgeGrad, std::make_pair((size_t)0, (size_t)nEdges * 3)));
   }
   Kokkos::fence();
   oConn = Kokkos::View<Real*, MemSpace>();

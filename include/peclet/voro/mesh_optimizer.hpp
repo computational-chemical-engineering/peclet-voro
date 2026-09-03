@@ -33,6 +33,7 @@
 
 #include "peclet/core/amr/momentum.hpp"     // greedyColoring
 #include "peclet/core/solver/graph_amg.hpp"  // smoothed-aggregation AMG (O(N) CG preconditioner)
+#include "peclet/voro/energy/interface.hpp"  // rung A3: interfacial energy on the published view
 #include "peclet/voro/ot_optimizer.hpp"      // OtResult + detail::toHostVec/toHostVecT
 #include "peclet/voro/sdf.hpp"
 #include "peclet/voro/tessellator.hpp"
@@ -196,28 +197,14 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
           gw[1] += G.area[3 * f + 1];
           gw[2] += G.area[3 * f + 2];
         }
-      if (gw[0] != 0.0 || gw[1] != 0.0 || gw[2] != 0.0) {
-        Real gg[3];
-        sdfGradient<Real>(sdf, pos[3 * c], pos[3 * c + 1], pos[3 * c + 2], gg);
-        const double gn = std::sqrt((double)gg[0] * gg[0] + (double)gg[1] * gg[1] + (double)gg[2] * gg[2]);
-        if (gn > 1e-12) {
-          const double u[3] = {gg[0] / gn, gg[1] / gn, gg[2] / gn};
-          const double ug = u[0] * gw[0] + u[1] * gw[1] + u[2] * gw[2];
-          const double perp[3] = {gw[0] - ug * u[0], gw[1] - ug * u[1], gw[2] - ug * u[2]};
-          Real Hm[3][3];
-          sdfHessian<Real>(sdf, pos[3 * c], pos[3 * c + 1], pos[3 * c + 2], Hm);
-          const double Hp[3] = {Hm[0][0] * perp[0] + Hm[0][1] * perp[1] + Hm[0][2] * perp[2],
-                                Hm[1][0] * perp[0] + Hm[1][1] * perp[1] + Hm[1][2] * perp[2],
-                                Hm[2][0] * perp[0] + Hm[2][1] * perp[1] + Hm[2][2] * perp[2]};
-          // Foot vector n = −φ ∇φ/|∇φ|² (Newton step to sdf(x+n)=0), valid for a general level-set
-          // function — NOT the |∇φ|=1 shortcut n=−φû. Its leading Jacobian dn/dx = −û ûᵀ is
-          // |∇φ|-INDEPENDENT (the |∇φ|² cancels), so the leading wall force is −(û·gw)û with no gn
-          // factor; the φ/|∇φ| curvature term (∝ ∇²φ) handles a curved wall to first order.
-          const double cH = (double)sdf.eval(pos[3 * c], pos[3 * c + 1], pos[3 * c + 2]) / gn;
-          sx += -ug * u[0] - cH * Hp[0];
-          sy += -ug * u[1] - cH * Hp[1];
-          sz += -ug * u[2] - cH * Hp[2];
-        }
+      // Rung A3: the shared seed-foot chain (sdf.hpp::sdfWallChain — foot vector n = −φ∇φ/|∇φ|²,
+      // |∇φ|-independent leading term + the φ/|∇φ| curvature term); same arithmetic as before.
+      {
+        double fw[3] = {0.0, 0.0, 0.0};
+        sdfWallChain<Real>(sdf, pos[3 * c], pos[3 * c + 1], pos[3 * c + 2], gw, fw);
+        sx += fw[0];
+        sy += fw[1];
+        sz += fw[2];
       }
     }
     st.emplace_back(3 * c, sx);
@@ -515,19 +502,21 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
 // an Armijo line search on E. Host (the oracle per docs/DEVICE_RESIDENCY_PLAN.md); the device port
 // mirrors the volume path (assemble on device, reuse the same reconstruction kernel per cell).
 // ================================================================================================
-template <class Real, class Sdf = NoSdf>
-OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type, double sigma,
-                           const Real L[3], int N, int sw, const Sdf& sdf, int maxIter, Real tol,
-                           bool verbose = false) {
+namespace detail {
+/// The pre-A3 interfacial energy + gradient: rebuild the tessellation, then RECONSTRUCT every cell
+/// as a ConvexCell from its published neighbours and gather geomVolumeAreaGrad + chainToDofs on
+/// the host. Kept as the ORACLE for the published-Jacobian path (tests/kokkos/test_energy_layer);
+/// interfaceMinimize itself no longer uses it.
+template <class Real, class Sdf>
+void interfaceGradReconstruct(const std::vector<Real>& x, const std::vector<int>& type,
+                              double sigma, const Real L[3], int N, int sw, const Sdf& sdf,
+                              std::vector<double>& g, double& E) {
   using MemSpace = peclet::core::MemSpace;
   using RCell = ConvexCell<Real, 128, 256>;
   const Real Larr[3] = {L[0], L[1], L[2]}, Lh[3] = {L[0] / 2, L[1] / 2, L[2] / 2};
   Kokkos::View<Real*, MemSpace> dw;
   Kokkos::View<long*, MemSpace> gd;
-
-  // Build the tessellation at `x`, download the neighbour CSR, then per cell reconstruct the
-  // ConvexCell and gather the interfacial-area energy E and its position gradient g (3N).
-  auto energyGrad = [&](const std::vector<Real>& x, std::vector<double>& g, double& E) {
+  {
     Kokkos::View<Real*, MemSpace> dpos("if.pos", 3 * N);
     Kokkos::deep_copy(dpos, Kokkos::View<const Real*, Kokkos::HostSpace>(x.data(), 3 * N));
     auto res = buildTessellation<Real, false, Sdf>(dpos, dw, N, Larr, sw, N, gd, sdf, true);
@@ -617,6 +606,46 @@ OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type,
         g[3 * j + 2] += fnz[l];
       }
     }
+  }
+}
+}  // namespace detail
+
+template <class Real, class Sdf = NoSdf>
+OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type, double sigma,
+                           const Real L[3], int N, int sw, const Sdf& sdf, int maxIter, Real tol,
+                           bool verbose = false) {
+  using MemSpace = peclet::core::MemSpace;
+  const Real Larr[3] = {L[0], L[1], L[2]};
+  Kokkos::View<Real*, MemSpace> dw;
+  Kokkos::View<long*, MemSpace> gd;
+  // Rung A3: the energy + gradient come from the PUBLISHED facet-edge area Jacobians
+  // (buildTessellation with withAreaGrad) through energy::interfaceEnergyForce — one device
+  // kernel over the view, no per-cell reconstruction (the old path is detail::
+  // interfaceGradReconstruct, now the test oracle). Two-type tension table: σ off-diagonal.
+  int nTypes = 1;
+  for (int t : type)
+    nTypes = std::max(nTypes, t + 1);
+  Kokkos::View<int*, MemSpace> dtype("if.type", N);
+  Kokkos::deep_copy(dtype, Kokkos::View<const int*, Kokkos::HostSpace>(type.data(), N));
+  Kokkos::View<Real*, MemSpace> dten("if.tension", (size_t)nTypes * nTypes);
+  {
+    auto h = Kokkos::create_mirror_view(dten);
+    for (int a = 0; a < nTypes; ++a)
+      for (int b = 0; b < nTypes; ++b)
+        h(a * nTypes + b) = (a == b) ? Real(0) : (Real)sigma;
+    Kokkos::deep_copy(dten, h);
+  }
+  Kokkos::View<Real*, MemSpace> dpos("if.pos", 3 * N), dforce("if.force", 3 * N);
+  auto energyGrad = [&](const std::vector<Real>& x, std::vector<double>& g, double& E) {
+    Kokkos::deep_copy(dpos, Kokkos::View<const Real*, Kokkos::HostSpace>(x.data(), 3 * N));
+    auto res = buildTessellation<Real, false, Sdf>(dpos, dw, N, Larr, sw, N, gd, sdf, true, -1, {},
+                                                   {}, {}, {}, {}, {}, 0, nullptr, {},
+                                                   /*withAreaGrad=*/true);
+    Kokkos::deep_copy(dforce, Real(0));
+    E = (double)energy::interfaceEnergyForce<Real, Voronoi, Sdf>(res.view, dtype, dten, nTypes,
+                                                                 dpos, dw, L[0], dforce, {}, sdf);
+    auto gh = detail::toHostVec<Real>(dforce);
+    g.assign(gh.begin(), gh.end());
   };
 
   OtResult R;
@@ -786,28 +815,11 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
                 gw1 += area(3 * f + 1);
                 gw2 += area(3 * f + 2);
               }
-            double wx = 0, wy = 0, wz = 0;
-            if (gw0 != 0.0 || gw1 != 0.0 || gw2 != 0.0) {
-              Real gg[3];
-              sdfGradient<Real>(sdfD, X(3 * c), X(3 * c + 1), X(3 * c + 2), gg);
-              const double gn = Kokkos::sqrt((double)gg[0] * gg[0] + (double)gg[1] * gg[1] +
-                                             (double)gg[2] * gg[2]);
-              if (gn > 1e-12) {
-                const double u0 = gg[0] / gn, u1 = gg[1] / gn, u2 = gg[2] / gn;
-                const double ug = u0 * gw0 + u1 * gw1 + u2 * gw2;
-                const double p0 = gw0 - ug * u0, p1 = gw1 - ug * u1, p2 = gw2 - ug * u2;
-                Real Hm[3][3];
-                sdfHessian<Real>(sdfD, X(3 * c), X(3 * c + 1), X(3 * c + 2), Hm);
-                const double Hp0 = Hm[0][0] * p0 + Hm[0][1] * p1 + Hm[0][2] * p2;
-                const double Hp1 = Hm[1][0] * p0 + Hm[1][1] * p1 + Hm[1][2] * p2;
-                const double Hp2 = Hm[2][0] * p0 + Hm[2][1] * p1 + Hm[2][2] * p2;
-                const double cH =
-                    (double)sdfD.eval(X(3 * c), X(3 * c + 1), X(3 * c + 2)) / gn;
-                wx = -ug * u0 - cH * Hp0;
-                wy = -ug * u1 - cH * Hp1;
-                wz = -ug * u2 - cH * Hp2;
-              }
-            }
+            // Rung A3: the shared seed-foot chain (sdf.hpp::sdfWallChain), same arithmetic.
+            const double gwd[3] = {gw0, gw1, gw2};
+            double fw[3] = {0.0, 0.0, 0.0};
+            sdfWallChain<Real>(sdfD, X(3 * c), X(3 * c + 1), X(3 * c + 2), gwd, fw);
+            const double wx = fw[0], wy = fw[1], wz = fw[2];
             wG(3 * c) = wx;
             wG(3 * c + 1) = wy;
             wG(3 * c + 2) = wz;

@@ -40,6 +40,11 @@ voro/
 │       ├── sdf.hpp                  #   SDF half-space clipping (solid boundaries)
 │       ├── plane_policy.hpp         #   Voronoi / Power / SDF plane-definition policies
 │       ├── transpose.hpp            #   neighbour<->facet reciprocal map helpers
+│       ├── energy/                  # rung A3: energy terms on the published view (+ area Jacobians)
+│       │   ├── route.hpp            #   per-facet gradient -> seed DOFs (Voronoi/Power chain, wall chain)
+│       │   ├── interface.hpp        #   Σ σ(t_i,t_j) A_ij  (surface tension between species)
+│       │   ├── wall.hpp             #   Σ σ_s(t_i) A_wall   (wetting; Young's angle from σ_sg − σ_sl)
+│       │   └── volume.hpp           #   Σ e_i(V_i)         (target / log-barrier / free energy)
 │       ├── physics/                 # simulation + forces over the published view
 │       │   ├── simulation.hpp       #   Euler / Navier-Stokes facade (ExplicitEuler)
 │       │   ├── euler_pressure.hpp   #   EOS pressure force
@@ -221,6 +226,15 @@ whose dual vertex falls outside the plane, finds the horizon, and adds one new t
 horizon edge; there is no stored adjacency (the cell is tiny, so the triangle sharing an
 edge is found by a short scan). Cuts are applied closest-first with a security-radius
 early-out.
+
+**Energies (rung A3 of the Voronoi methods plan).** `buildTessellation(..., withAreaGrad=true)`
+additionally publishes a facet-edge CSR of area Jacobians `∂A_f/∂n_l` (a facet's area depends on
+its own plane and on its edge-neighbours' planes; `TessellationView::edgeBegin/edgeEnd/edgePartner/
+areaGrad`). The `energy/` headers evaluate interfacial, wetting and volume energies and their exact
+gradients on that view — one kernel over the cells, no per-cell reconstruction — and route them to
+the seed positions (and power weights) through the plane-policy chain; SDF wall planes go through
+the one seed-foot wall chain `sdfWallChain`. `interfaceMinimize` runs on this path (gated against
+the old reconstruction to round-off, `tests/kokkos/test_energy_layer`).
 
 Per-cell **geometry** (volume, per-facet area and first moment, volume gradients) is computed
 by a **sort-free, adjacency-free per-vertex scatter** (`volumePerVertex` /

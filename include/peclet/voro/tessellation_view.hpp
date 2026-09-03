@@ -127,6 +127,25 @@ struct TessellationView {
   // empty otherwise.
   Kokkos::View<int*, peclet::core::MemSpace> cellVertexOffset;  // nCells+1 (empty if unused)
   Kokkos::View<Real*, peclet::core::MemSpace> vertexPos;        // 3*nVerts
+  // Facet-edge AREA-JACOBIAN CSR (Voronoi methods plan, rung A3; opt-in `withAreaGrad`): for
+  // facet f, entries e in [edgeBegin(f), edgeEnd(f)) hold ∂A_f/∂n_l for every plane l the
+  // facet's area depends on — slot 0 is the facet's OWN plane (l = f, the diagonal block), the
+  // rest are the facets sharing an edge with f (each edge is where two of the cell's planes
+  // meet; a face's area depends on its own plane and on its edge-neighbours' planes only).
+  // `edgeFacet(e)` is the global facet index of plane l's facet in the SAME cell (its neighbour
+  // id / wall sentinel is facetNbr(edgeFacet(e))); `areaGrad(e, c)` the 3-vector ∂A_f/∂n_l.
+  // A_f is the facet's area MAGNITUDE (|facetArea|). Empty unless requested.
+  Kokkos::View<int*, peclet::core::MemSpace> facetEdgeOffset;  // nFacets
+  Kokkos::View<int*, peclet::core::MemSpace> facetEdgeCount;   // nFacets
+  Kokkos::View<int*, peclet::core::MemSpace> edgeFacet;        // nEdges
+  Kokkos::View<Real*, peclet::core::MemSpace> edgeAreaGrad;    // 3*nEdges
+
+  KOKKOS_INLINE_FUNCTION bool hasAreaGrad() const { return facetEdgeOffset.extent(0) > 0; }
+  KOKKOS_INLINE_FUNCTION int numEdges() const { return static_cast<int>(edgeFacet.extent(0)); }
+  KOKKOS_INLINE_FUNCTION int edgeBegin(int f) const { return facetEdgeOffset(f); }
+  KOKKOS_INLINE_FUNCTION int edgeEnd(int f) const { return facetEdgeOffset(f) + facetEdgeCount(f); }
+  KOKKOS_INLINE_FUNCTION int edgePartner(int e) const { return edgeFacet(e); }
+  KOKKOS_INLINE_FUNCTION Real areaGrad(int e, int c) const { return edgeAreaGrad(3 * e + c); }
 
   KOKKOS_INLINE_FUNCTION int numCells() const { return static_cast<int>(cellSeedId.extent(0)); }
   KOKKOS_INLINE_FUNCTION bool hasVertices() const { return cellVertexOffset.extent(0) > 0; }
