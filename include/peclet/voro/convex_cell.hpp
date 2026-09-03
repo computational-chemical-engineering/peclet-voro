@@ -648,9 +648,14 @@ struct ConvexCell {
   /// foot-point normal `nf = (d/|pdir|²)·pdir` (so `{x : nf·x <= nf·nf}` is the same
   /// half-space). Returns true if the cell was modified. The plane is only committed if
   /// it actually cuts (so redundant candidates don't grow `np`).
-  KOKKOS_INLINE_FUNCTION bool clip(const Real pdir[3], Real d, int nbr) {
+  /// `gapOut` (optional): the signed distance of the farthest live vertex beyond the plane —
+  /// the commit test's own maximum, in distance units (== planeGap(pdir, d)); negative when the
+  /// plane misses the cell. The near-miss recording reads it instead of re-scanning the vertices.
+  KOKKOS_INLINE_FUNCTION bool clip(const Real pdir[3], Real d, int nbr, Real* gapOut = nullptr) {
     if (np >= MAXP) {
       overflow = true;
+      if (gapOut)
+        *gapOut = Real(-1e30);
       return false;
     }
     const int pi = np;  // tentative index
@@ -665,15 +670,22 @@ struct ConvexCell {
     // Mark triangles whose dual vertex is outside the new half-space (nf·v > nf·nf).
     bool kill[MAXT];
     bool any = false;
+    Real smax = Real(-1e30);
     for (int t = 0; t < nt; ++t) {
       kill[t] = false;
       if (!alive[t])
         continue;
       const Real s = n[pi][0] * vx[t] + n[pi][1] * vy[t] + n[pi][2] * vz[t] - nn[pi];
+      if (s > smax)
+        smax = s;
       if (s > 0) {
         kill[t] = true;
         any = true;
       }
+    }
+    if (gapOut) {  // s = n·v − n·n is |n| times the distance beyond the plane
+      const Real nl = Kokkos::sqrt(nn[pi]);
+      *gapOut = nl > Real(0) ? smax / nl : Real(-1e30);
     }
     if (!any)
       return false;  // candidate does not cut -> no-op, plane not committed

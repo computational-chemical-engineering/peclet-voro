@@ -520,9 +520,10 @@ struct CellBuilder {
           const Real rho = pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2];
           if (!emitNear && rho * c.maxVertexRsq() <= off * off)
             continue;  // provably beyond reach
-          if (c.clip(pv, off, binned(q))) {
+          Real gap;
+          if (c.clip(pv, off, binned(q), emitNear ? &gap : nullptr)) {
             reachSq = PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll);
-          } else if (emitNear && c.planeGap(pv, off) > -nm) {
+          } else if (emitNear && gap > -nm) {
             if (nnRec < nearCap)
               oNear[(size_t)i * nearCap + nnRec] = binned(q);
             ++nnRec;
@@ -530,9 +531,10 @@ struct CellBuilder {
         } else {
           if (!emitNear && off >= secR2)
             continue;  // beyond the radius: cannot cut (bisector certificate)
-          if (c.clip(pv, off, binned(q))) {
+          Real gap;
+          if (c.clip(pv, off, binned(q), emitNear ? &gap : nullptr)) {
             secR2 = Real(2) * c.maxVertexRsq();
-          } else if (emitNear && c.planeGap(pv, off) > -nm) {
+          } else if (emitNear && gap > -nm) {
             if (nnRec < nearCap)
               oNear[(size_t)i * nearCap + nnRec] = binned(q);
             ++nnRec;
