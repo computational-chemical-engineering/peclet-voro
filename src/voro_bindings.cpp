@@ -39,11 +39,13 @@
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 #include <nanobind/stl/array.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 
 #include <array>
 #include <cmath>
 #include <Kokkos_Core.hpp>
+#include <optional>
 #include <set>
 #include <type_traits>
 #include <variant>
@@ -53,8 +55,12 @@
 #include "peclet/core/geom/scene_builder.hpp"
 #include "peclet/core/python/ndarray_interop.hpp"
 #include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/energy/interface.hpp"
+#include "peclet/voro/energy/volume.hpp"
+#include "peclet/voro/energy/wall.hpp"
 #include "peclet/voro/mesh_optimizer.hpp"
 #include "peclet/voro/physics/simulation.hpp"
+#include "peclet/voro/reeval_tessellation.hpp"
 #include "peclet/voro/repair.hpp"
 #include "peclet/voro/topology_store.hpp"
 
@@ -432,6 +438,75 @@ class Tess {
           C(i) = c.countFaces();
         });
     return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cnt), {static_cast<std::size_t>(N)}, {1});
+  }
+
+  // Rung A3: energies + forces of the RESIDENT tessellation (after build/step) on the published
+  // view — interfacial Σσ(t_i,t_j)A, wetting Σσ_s(t_i)A_wall, volume Σe_i(V_i) via a
+  // caller-supplied e'(V_i) — routed to the seed positions (and power weights). No rebuild:
+  // reevalPublish over the store with the facet-edge area-Jacobian CSR.
+  nb::dict energy_forces(nb::ndarray<int, nb::c_contig> types,
+                         nb::ndarray<real_t, nb::c_contig> tension,
+                         std::optional<nb::ndarray<real_t, nb::c_contig>> sigma_wall,
+                         std::optional<nb::ndarray<real_t, nb::c_contig>> dEdV) {
+    const int N = N_;
+    if ((int)types.shape(0) != N)
+      throw std::runtime_error("energy_forces(): types must be (N,)");
+    int nT = 0;
+    for (int i = 0; i < N; ++i)
+      nT = std::max(nT, types.data()[i] + 1);
+    if ((int)tension.size() != nT * nT)
+      throw std::runtime_error(
+          "energy_forces(): tension must be (nTypes, nTypes) with nTypes = max(types)+1");
+    Kokkos::View<int*, Mem> dtype("en.type", N);
+    Kokkos::deep_copy(dtype, Kokkos::View<const int*, Kokkos::HostSpace>(types.data(), N));
+    DView dten("en.tension", (size_t)nT * nT);
+    Kokkos::deep_copy(
+        dten, Kokkos::View<const real_t*, Kokkos::HostSpace>(tension.data(), (size_t)nT * nT));
+    DView dsw, dde;
+    if (sigma_wall) {
+      if ((int)sigma_wall->size() != nT)
+        throw std::runtime_error("energy_forces(): sigma_wall must be (nTypes,)");
+      dsw = DView("en.sw", nT);
+      Kokkos::deep_copy(dsw,
+                        Kokkos::View<const real_t*, Kokkos::HostSpace>(sigma_wall->data(), nT));
+    }
+    if (dEdV) {
+      if ((int)dEdV->size() != N)
+        throw std::runtime_error("energy_forces(): dEdV must be (N,)");
+      dde = DView("en.dEdV", N);
+      Kokkos::deep_copy(dde, Kokkos::View<const real_t*, Kokkos::HostSpace>(dEdV->data(), N));
+    }
+    DView force("en.force", 3 * (size_t)N), forceW("en.forceW", weighted_ ? N : 0);
+    Kokkos::deep_copy(force, real_t(0));
+    if (weighted_)
+      Kokkos::deep_copy(forceW, real_t(0));
+    real_t eIf = 0, eWall = 0;
+    const real_t Larr[3] = {L_[0], L_[1], L_[2]};
+    std::visit(
+        [&](auto& mt) {
+          using T = std::decay_t<decltype(mt)>;
+          using Policy = typename T::PlanePolicy;
+          auto view = peclet::voro::reevalPublish<real_t, 64, 112>(
+              mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef, /*withAreaGrad=*/true);
+          eIf = peclet::voro::energy::interfaceEnergyForce<real_t, Policy>(
+              view, dtype, dten, nT, pos_, weight_, L_[0], force, forceW, mt.sdf);
+          if (dsw.extent(0) > 0)
+            eWall = peclet::voro::energy::wallEnergyForce<real_t, Policy>(
+                view, dtype, dsw, mt.sdf, pos_, weight_, L_[0], force, forceW);
+          if (dde.extent(0) > 0)
+            peclet::voro::energy::volumeGradientForce<real_t, Policy>(view, dde, pos_, weight_,
+                                                                      L_[0], force, forceW, mt.sdf);
+        },
+        mt_);
+    nb::dict d;
+    d["interface_energy"] = eIf;
+    d["wall_energy"] = eWall;
+    d["force"] = peclet::core::python::vector_to_ndarray(
+        peclet::core::toVector(force), {static_cast<std::size_t>(N), std::size_t(3)}, {3, 1});
+    if (weighted_)
+      d["force_w"] = peclet::core::python::vector_to_ndarray(peclet::core::toVector(forceW),
+                                                             {static_cast<std::size_t>(N)}, {1});
+    return d;
   }
 
   // Per-cell number of resident SDF wall planes (0 everywhere without geometry).
@@ -1070,6 +1145,22 @@ NB_MODULE(_voro, m) {
            "(wall facets included).")
       .def("wall_counts", &Tess::wall_counts,
            "Per-particle number of resident SDF wall planes (N,) int32; all zero without geometry.")
+      .def(
+          "energy_forces", &Tess::energy_forces, nb::arg("types"), nb::arg("tension"),
+          nb::arg("sigma_wall") = nb::none(), nb::arg("dEdV") = nb::none(),
+          "Energies and their exact gradients on the RESIDENT cells (after build/step), no "
+          "rebuild:\n"
+          "  interfacial  E = Σ σ(t_i,t_j) A_ij over facets between different `types` (N,) int32,\n"
+          "               with the symmetric `tension` table (nTypes, nTypes) float64;\n"
+          "  wetting      E = Σ σ_wall(t_i) A_wall,i over SDF wall facets, if `sigma_wall` "
+          "(nTypes,)\n"
+          "               is given (a uniform wall tension is a constant — only the species\n"
+          "               difference does work, which is what sets the contact angle);\n"
+          "  volume       Σ e_i(V_i) for a caller-supplied e'(V_i) = `dEdV` (N,) (e.g. "
+          "2(V/Vref−1)/Vref).\n"
+          "Returns {'interface_energy', 'wall_energy', 'force' (N,3) = dE/dx, 'force_w' (N,) = "
+          "dE/dw\n"
+          "when weights are set}. Descend along −force to minimise.")
       .def_prop_ro("num_particles", &Tess::num_particles,
                    "Particle count N set by the last `build`.");
 

@@ -176,10 +176,49 @@ def test_weights():
     print(f"  Weights:      N={N}  power volumes sum err={err:.1e} (periodic min-image floor)")
 
 
+def test_energy_forces():
+    """Rung A3: interfacial / wetting / volume energies + gradients on the resident cells."""
+    rng = np.random.default_rng(4)
+    N, L, R = 6_000, 1.0, 0.25
+    pos = rng.random((N, 3)) * L
+    types = (np.linalg.norm(pos - 0.5, axis=1) < 0.2).astype(np.int32)   # a blob of species 1
+    tension = np.array([[0.0, 1.0], [1.0, 0.0]])
+    t = voro.Tessellation()
+    t.set_box((L, L, L))
+    t.build(pos)
+    r = t.energy_forces(types, tension)
+    assert r["force"].shape == (N, 3) and np.isfinite(r["force"]).all()
+    assert r["interface_energy"] > 0 and r["wall_energy"] == 0.0
+    # descend along -force: the interfacial area must drop (surface tension rounds the blob)
+    e0 = r["interface_energy"]
+    spacing = (L**3 / N) ** (1.0 / 3.0)
+    for _ in range(5):
+        f = r["force"]
+        step = 0.02 * spacing / max(np.abs(f).max(), 1e-30)
+        pos = (pos - step * f) % L
+        t.step(pos)
+        r = t.energy_forces(types, tension)
+    assert r["interface_energy"] < e0, (e0, r["interface_energy"])
+    # with a wall: wetting energy of species 1 on a sphere, plus a volume-target term
+    ni, nr = sphere_scene((0.5, 0.5, 0.8), 0.2)
+    tw = voro.Tessellation()
+    tw.set_box((L, L, L))
+    tw.set_geometry(ni, nr)
+    tw.build(pos)
+    vol = tw.volumes()
+    vref = vol[vol > 0].mean()
+    dEdV = np.where(vol > 0, 2.0 * (vol / vref - 1.0) / vref, 0.0)
+    rw = tw.energy_forces(types, tension, sigma_wall=np.array([0.0, 0.5]), dEdV=dEdV)
+    assert rw["wall_energy"] > 0 and np.isfinite(rw["force"]).all()
+    print(f"  Energies:     N={N}  E_if {e0:.4f} -> {r['interface_energy']:.4f} after 5 descent steps;"
+          f"  wetting E={rw['wall_energy']:.4f}")
+
+
 if __name__ == "__main__":
     print(f"peclet.voro execution_space = {voro.execution_space}")
     test_tessellation()
     test_simulation()
     test_geometry()
     test_weights()
+    test_energy_forces()
     print("peclet.voro python smoke test: PASS")
