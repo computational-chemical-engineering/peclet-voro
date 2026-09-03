@@ -38,6 +38,23 @@ constexpr int kBoundaryFacet = -2;
 /// Sentinel "no geometry" provider — the default; the clip stage is skipped.
 struct NoSdf {};
 
+/// Rung A1: wrap a provider to DISABLE the second-order (sagitta) wall placement and cut with the
+/// bare tangent plane, as the legacy clip did — the first-order baseline the curved-wall gate
+/// measures against. `TangentOnly<SdfSphere<Real>>{{...}}`.
+template <class Sdf>
+struct TangentOnly : Sdf {
+  static constexpr bool kTangentOnly = true;
+};
+namespace detail {
+template <class T, class = void>
+struct tangentOnly : std::false_type {};
+template <class T>
+struct tangentOnly<T, std::void_t<decltype(T::kTangentOnly)>>
+    : std::bool_constant<T::kTangentOnly> {};
+template <class T>
+inline constexpr bool tangentOnly_v = tangentOnly<T>::value;
+}  // namespace detail
+
 /// Solid ball (negative inside). DELEGATES to peclet::core::geom::prim::Sphere -- the shared leaf
 /// is the single source of the formula (Layer 0 rung 4, suite/docs/ANALYTIC_SDF_GEOMETRY.md); this
 /// struct keeps voro's provider shape (a centre + the (x,y,z) scalar signature the clipper calls).
@@ -395,6 +412,128 @@ struct WallStore {
 };
 
 /**
+ * Rung A1 — second-order wall placement. A tangent plane at a tangency point `surf` (unit normal
+ * into the fluid) is exact for a flat wall but INSCRIBED for a curved one: over its face the true
+ * surface deviates from the plane by h(p) = φ(surf + p)/|∇φ| ≈ ½ pᵀ H p / |∇φ| (p in-plane,
+ * H = ∇²φ), so the tangent cut removes the fluid sliver between plane and wall on a convex solid
+ * and leaves solid inside the cell on a concave one. Once the multi-plane tangent clip has
+ * settled the cell, each committed wall plane k gets the mean sliver depth over its FINAL face
+ * polygon,
+ *     δ_k = V_sag / A_k,   V_sag = ½ Σ_ab H_ab M_ab / |∇φ|,   M = ∫_face p pᵀ dA about surf,
+ * and clipCellAgainstSdf RE-CLIPS the un-cut cell with every plane translated INTO the solid by
+ * its δ_k (a re-clip, not a plane move, so the result is a valid convex clip and the resident
+ * certificate stays clean). The planar cell then has the curved cell's volume to second order.
+ * Shifts below round-off of the Hessian stencil (|δ| < 1e-8·h_k, i.e. flat walls) are zeroed so
+ * a flat wall is bit-identical to the tangent clip. Writes δ_k into `delta` (0 for planes with
+ * no face); returns the number of nonzero shifts.
+ */
+template <class Real, int MAXP, int MAXT, bool TrackAdj, class Sdf>
+KOKKOS_INLINE_FUNCTION int sdfSagittaShifts(const ConvexCell<Real, MAXP, MAXT, TrackAdj>& c,
+                                            const Real seed[3], const Sdf& sdf, const int* planes,
+                                            const Real* tangency, int nPlanes, Real* delta) {
+  using Cell = ConvexCell<Real, MAXP, MAXT, TrackAdj>;
+  int nz = 0;
+  for (int q = 0; q < nPlanes; ++q) {
+    delta[q] = Real(0);
+    const int k = planes[q];
+    if (k < 0)
+      continue;  // chord plane: no tangency
+    Real fx[Cell::MAXFV], fy[Cell::MAXFV], fz[Cell::MAXFV];
+    const int m = c.faceOrdered(k, fx, fy, fz);
+    if (m < 3)
+      continue;
+    const Real hk = Kokkos::sqrt(c.nn[k]);
+    if (!(hk > Real(0)))
+      continue;
+    const Real u[3] = {c.n[k][0] / hk, c.n[k][1] / hk, c.n[k][2] / hk};  // seed -> wall
+    const Real* surf = tangency + 3 * q;                                 // world tangency point
+    const Real p0[3] = {surf[0] - seed[0], surf[1] - seed[1], surf[2] - seed[2]};
+    Real A = 0, M[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+    for (int i = 0; i < m; ++i) {
+      const int j = (i + 1) % m;
+      const Real a[3] = {fx[i] - p0[0], fy[i] - p0[1], fz[i] - p0[2]};
+      const Real b[3] = {fx[j] - p0[0], fy[j] - p0[1], fz[j] - p0[2]};
+      const Real cr[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                          a[0] * b[1] - a[1] * b[0]};
+      const Real At = Real(0.5) * (cr[0] * u[0] + cr[1] * u[1] + cr[2] * u[2]);
+      A += At;
+      const Real sm[3] = {a[0] + b[0], a[1] + b[1], a[2] + b[2]};
+      const Real w = At / Real(12);
+      for (int r = 0; r < 3; ++r)
+        for (int qq = 0; qq < 3; ++qq)
+          M[r][qq] += w * (a[r] * a[qq] + b[r] * b[qq] + sm[r] * sm[qq]);
+    }
+    if (A < Real(0)) {
+      A = -A;
+      for (int r = 0; r < 3; ++r)
+        for (int qq = 0; qq < 3; ++qq)
+          M[r][qq] = -M[r][qq];
+    }
+    if (!(A > Real(0)))
+      continue;
+    Real g[3];
+    sdfGradient<Real>(sdf, surf[0], surf[1], surf[2], g);
+    const Real gn = Kokkos::sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+    if (!(gn > Real(0)))
+      continue;
+    Real H[3][3];
+    sdfHessian<Real>(sdf, surf[0], surf[1], surf[2], H);
+    Real tr = 0;
+    for (int r = 0; r < 3; ++r)
+      for (int qq = 0; qq < 3; ++qq)
+        tr += H[r][qq] * M[r][qq];
+    Real d = Real(0.5) * tr / gn / A;
+    if (d < Real(-0.5) * hk)  // a concave shift keeps the plane on the far side of the seed
+      d = Real(-0.5) * hk;
+    if (Kokkos::fabs(d) < Real(1e-8) * hk)
+      continue;  // Hessian-stencil round-off (flat wall): no shift
+    delta[q] = d;
+    ++nz;
+  }
+  return nz;
+}
+
+/**
+ * The wall cut plane for a probe point (the seed for the first cut, a violating vertex after):
+ * closest point on φ = 0 + outward normal (oriented into the fluid), the half-space
+ * {x : pv·x ≤ off} in seed-relative coordinates with pv = −normal, plus the tangency point
+ * `surf` (world) for the sagitta post-pass. Shared by clipCellAgainstSdf and the moving-point
+ * boundary watch (sdfWouldClip), so both make the same decision. Returns false if the gradient
+ * is degenerate (no plane).
+ */
+template <class Real, int MAXP, int MAXT, bool TrackAdj, class Sdf>
+KOKKOS_INLINE_FUNCTION bool sdfCutPlane(const ConvexCell<Real, MAXP, MAXT, TrackAdj>& c,
+                                        const Real seed[3], const Sdf& sdf, const Real probe[3],
+                                        Real radius, Real pv[3], Real& off, Real surf[3]) {
+  (void)c;
+  Real g[3];
+  sdfGradient<Real>(sdf, probe[0], probe[1], probe[2], g);
+  const Real gsq = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+  if (gsq <= Real(0))
+    return false;
+  const Real phi = sdf.eval(probe[0], probe[1], probe[2]);
+  const Real invGsq = Real(1) / gsq, gn = Kokkos::sqrt(gsq), invG = Real(1) / gn;
+  Real normal[3];
+  for (int k = 0; k < 3; ++k) {
+    surf[k] = probe[k] - phi * g[k] * invGsq;
+    normal[k] = g[k] * invG;
+  }
+  // orient the normal into the fluid (positive side)
+  Real eps = Real(1e-3) * (radius + Real(1));
+  if (eps < Real(1e-6))
+    eps = Real(1e-6);
+  if (sdf.eval(surf[0] + eps * normal[0], surf[1] + eps * normal[1], surf[2] + eps * normal[2]) <=
+      Real(0))
+    for (int k = 0; k < 3; ++k)
+      normal[k] = -normal[k];
+  pv[0] = -normal[0];
+  pv[1] = -normal[1];
+  pv[2] = -normal[2];
+  off = pv[0] * (surf[0] - seed[0]) + pv[1] * (surf[1] - seed[1]) + pv[2] * (surf[2] - seed[2]);
+  return true;
+}
+
+/**
  * Would clipCellAgainstSdf commit at least one wall plane on this (un-clipped) cell? The exact
  * decision the cold build makes, so the moving-point boundary watch flags precisely the cells whose
  * cold rebuild would differ from a wall-free re-evaluation: the seed is in the solid (the cell
@@ -413,31 +552,14 @@ KOKKOS_INLINE_FUNCTION bool sdfWouldClip(const ConvexCell<Real, MAXP, MAXT, Trac
   const Real radius = Kokkos::sqrt(maxRsq > 0 ? maxRsq : Real(0));
   if (phiCenter > radius + tol)
     return false;
-  // first cut: the tangent plane at the seed's foot point (probe = seed)
-  Real g[3];
-  sdfGradient<Real>(sdf, seed[0], seed[1], seed[2], g);
-  const Real gsq = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
-  if (gsq > Real(0)) {
-    const Real invGsq = Real(1) / gsq, invG = Real(1) / Kokkos::sqrt(gsq);
-    Real surf[3], normal[3];
-    for (int k = 0; k < 3; ++k) {
-      surf[k] = seed[k] - phiCenter * g[k] * invGsq;
-      normal[k] = g[k] * invG;
-    }
-    Real eps = Real(1e-3) * (radius + Real(1));
-    if (eps < Real(1e-6))
-      eps = Real(1e-6);
-    if (sdf.eval(surf[0] + eps * normal[0], surf[1] + eps * normal[1], surf[2] + eps * normal[2]) <=
-        Real(0))
-      for (int k = 0; k < 3; ++k)
-        normal[k] = -normal[k];
-    const Real pv[3] = {-normal[0], -normal[1], -normal[2]};
-    const Real off =
-        pv[0] * (surf[0] - seed[0]) + pv[1] * (surf[1] - seed[1]) + pv[2] * (surf[2] - seed[2]);
-    // ConvexCell::clip commits iff some live vertex satisfies nf·v > nf·nf with nf = (off/|pv|²)
-    // pv; |pv| = 1 here, so the test is pv·v > off. The clip skips a first cut whose offset is not
-    // positive (see clipCellAgainstSdf), so only a positive offset can commit here.
-    if (off > Real(0))
+  // first cut: the same plane clipCellAgainstSdf would commit for probe = seed (tangent at the
+  // seed's foot point, sagitta-shifted unless TangentOnly). ConvexCell::clip commits iff some live
+  // vertex satisfies nf·v > nf·nf with nf = (off/|pv|²) pv; |pv| = 1 here, so the test is
+  // pv·v > off. The clip skips a first cut whose offset is not positive, so only a positive
+  // offset can commit here.
+  {
+    Real pv[3], off, surf[3];
+    if (sdfCutPlane(c, seed, sdf, seed, radius, pv, off, surf) && off > Real(0))
       for (int t = 0; t < c.nt; ++t) {
         if (!c.alive[t])
           continue;
@@ -487,6 +609,17 @@ KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ConvexCell<Real, MAXP, MAXT, Trac
   if (c.np + maxCuts > MAXP)
     c.compactPlanes();
 
+  // Rung A1: the un-cut cell is kept for the second-order RE-CLIP (see sdfSagittaShifts), and
+  // every committed plane is recorded with its half-space and tangency point (chord planes get
+  // plane index -1: no tangency, no shift).
+  constexpr bool kSagitta = !detail::tangentOnly_v<Sdf>;
+  ConvexCell<Real, MAXP, MAXT, TrackAdj> saved;
+  if constexpr (kSagitta)
+    saved = c;
+  int tpPlane[kMaxWallPlanes];
+  Real tpSurf[kMaxWallPlanes * 3], tpPv[kMaxWallPlanes * 3], tpOff[kMaxWallPlanes];
+  int nTp = 0;
+
   bool seedPlaneApplied = false;
   for (int iter = 0; iter < maxCuts; ++iter) {
     Real probe[3] = {seed[0], seed[1], seed[2]};
@@ -509,32 +642,12 @@ KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ConvexCell<Real, MAXP, MAXT, Trac
       if (!found || probePhi >= -tol)
         break;
     }
-    // closest point on sdf=0 + outward normal
-    Real g[3];
-    sdfGradient<Real>(sdf, probe[0], probe[1], probe[2], g);
-    Real gsq = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
-    if (gsq <= Real(0))
+    // the cut plane: tangent at the probe's foot point, sagitta-shifted (rung A1) unless
+    // TangentOnly; in seed-relative coords dist(v) = v·pv − off, vertices in the solid (off the
+    // fluid side) get dist > 0 and are removed.
+    Real pv[3], off, surf[3];
+    if (!sdfCutPlane(c, seed, sdf, probe, radius, pv, off, surf))
       break;
-    Real phi = sdf.eval(probe[0], probe[1], probe[2]);
-    Real invGsq = Real(1) / gsq, invG = Real(1) / Kokkos::sqrt(gsq);
-    Real surf[3], normal[3];
-    for (int k = 0; k < 3; ++k) {
-      surf[k] = probe[k] - phi * g[k] * invGsq;
-      normal[k] = g[k] * invG;
-    }
-    // orient the normal into the fluid (positive side)
-    Real eps = Real(1e-3) * (radius + Real(1));
-    if (eps < Real(1e-6))
-      eps = Real(1e-6);
-    if (sdf.eval(surf[0] + eps * normal[0], surf[1] + eps * normal[1], surf[2] + eps * normal[2]) <=
-        Real(0))
-      for (int k = 0; k < 3; ++k)
-        normal[k] = -normal[k];
-    // plane in seed-relative coords: dist(v) = v·pv - off; vertices in the solid (off the fluid
-    // side) get dist > 0 and are removed.
-    Real pv[3] = {-normal[0], -normal[1], -normal[2]};
-    Real off =
-        pv[0] * (surf[0] - seed[0]) + pv[1] * (surf[1] - seed[1]) + pv[2] * (surf[2] - seed[2]);
     if (off <= Real(0)) {
       // The tangent plane at the probe's foot point puts the SEED on its solid side: the tangent
       // approximation is invalid here (surface curvature strong on the scale of the cell — e.g. a
@@ -567,15 +680,51 @@ KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ConvexCell<Real, MAXP, MAXT, Trac
       const Real t = Real(0.5) * (lo + hi);
       if (t <= Real(0))
         break;
-      c.clip(d, t, kBoundaryFacet);
+      if (c.clip(d, t, kBoundaryFacet) && nTp < kMaxWallPlanes) {
+        tpPlane[nTp] = -1;  // chord plane: re-clipped verbatim
+        for (int k = 0; k < 3; ++k) {
+          tpPv[3 * nTp + k] = d[k];
+          tpSurf[3 * nTp + k] = Real(0);
+        }
+        tpOff[nTp] = t;
+        ++nTp;
+      }
       if (c.empty())
         break;
       continue;
     }
-    c.clip(pv, off, kBoundaryFacet);
+    const bool committed = c.clip(pv, off, kBoundaryFacet);
     seedPlaneApplied = true;
     if (c.empty())
       break;
+    if (committed) {
+      if (nTp < kMaxWallPlanes) {
+        tpPlane[nTp] = c.np - 1;
+        for (int k = 0; k < 3; ++k) {
+          tpSurf[3 * nTp + k] = surf[k];
+          tpPv[3 * nTp + k] = pv[k];
+        }
+        tpOff[nTp] = off;
+        ++nTp;
+      }
+    } else if (iter > 0) {
+      break;  // the violating vertex is not cut by its own plane: no progress possible
+    }
+  }
+  if constexpr (kSagitta) {
+    if (nTp > 0 && !c.empty()) {
+      Real delta[kMaxWallPlanes];
+      if (sdfSagittaShifts(c, seed, sdf, tpPlane, tpSurf, nTp, delta) > 0) {
+        // second pass: the same planes, in the same order, translated into the solid by δ_k
+        c = saved;
+        for (int q = 0; q < nTp; ++q) {
+          const Real pv2[3] = {tpPv[3 * q], tpPv[3 * q + 1], tpPv[3 * q + 2]};
+          c.clip(pv2, tpOff[q] + delta[q], kBoundaryFacet);
+          if (c.empty())
+            break;
+        }
+      }
+    }
   }
   return false;
 }

@@ -171,17 +171,32 @@ int main(int argc, char** argv) {
                   ncomp, npass, ncomp, mr, pass ? "OK" : "FAIL");
       rc |= pass ? 0 : 1;
     }
-    // (B) sphere: first-order (curved). Report; require only "close".
+    // (B) sphere: first-order (curved). Report; require only "close". The seed-foot model IS the
+    // tangent-plane model, so it is gated against the tangent clip (TangentOnly); the default
+    // clip's second-order sagitta placement (rung A1) moves each wall plane by a polygon-dependent
+    // amount the model does not differentiate — (C) reports that inconsistency, ungated (the
+    // consistent wall Jacobian is the open A1 item).
     {
-      peclet::voro::SdfSphere<real_t> ball{0.0, 0.0, 0.0, 3.0};  // solid ball radius 3, seed outside
+      peclet::voro::TangentOnly<peclet::voro::SdfSphere<real_t>> ball{
+          {0.0, 0.0, 0.0, 3.0}};  // solid ball radius 3, seed outside
       long nc = 0, ncomp = 0, npass = 0;
       const double mr = sweep(ball, 0.5, 999u, 400, 1e-2, nc, ncomp, npass);
       // first-order surrogate on a curved wall: the great majority within 1e-2, none wildly off.
       const bool pass = nc > 20 && ncomp > 20 && (double)npass / ncomp > 0.9 && mr < 0.2;
-      std::printf("  (B) sphere      cells=%ld comps=%ld pass(<1e-2)=%ld/%ld maxRel=%.2e "
-                  "(first-order)  %s\n",
-                  nc, ncomp, npass, ncomp, mr, pass ? "OK" : "FAIL");
+      std::printf(
+          "  (B) sphere      cells=%ld comps=%ld pass(<1e-2)=%ld/%ld maxRel=%.2e "
+          "(first-order, tangent clip)  %s\n",
+          nc, ncomp, npass, ncomp, mr, pass ? "OK" : "FAIL");
       rc |= pass ? 0 : 1;
+    }
+    {
+      peclet::voro::SdfSphere<real_t> ball{0.0, 0.0, 0.0, 3.0};
+      long nc = 0, ncomp = 0, npass = 0;
+      const double mr = sweep(ball, 0.5, 999u, 400, 1e-2, nc, ncomp, npass);
+      std::printf(
+          "  (C) sphere      cells=%ld comps=%ld pass(<1e-2)=%ld/%ld maxRel=%.2e "
+          "(sagitta clip vs the tangent-plane force model; informational)\n",
+          nc, ncomp, npass, ncomp, mr);
     }
     std::printf("%s\n", rc == 0 ? "SDF WALL-FORCE CHECKS PASS" : "SDF WALL-FORCE CHECKS FAILED");
   }

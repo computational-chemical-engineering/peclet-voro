@@ -361,7 +361,11 @@ struct MovingTessellation {
             } else if (Wl.cnt(i) > 0) {
               if (wallExactC || (dx * dx + dy * dy + dz * dz) > wallSkin2C) {
                 wflag = true;  // a moved wall cell: only a fresh clip reproduces the cold build
-              } else {         // skin mode: keep the planes unless a vertex entered the solid
+              } else {         // skin mode: keep the planes unless the seed or a vertex entered the
+                        // solid (a sagitta-placed plane sits beyond the surface, so the seed can
+                        // enter the solid without crossing its own plane)
+                if (SdC.eval(seed[0], seed[1], seed[2]) <= Real(0))
+                  wflag = true;
                 for (int t = 0; t < c.nt && !wflag; ++t)
                   if (c.alive[t] && SdC.eval(seed[0] + c.vx[t], seed[1] + c.vy[t],
                                              seed[2] + c.vz[t]) < Real(-1e-8))

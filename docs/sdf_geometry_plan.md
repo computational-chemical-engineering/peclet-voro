@@ -5,7 +5,10 @@
 > gather, persist the wall planes per cell (`WallStore` in `sdf.hpp`) and add a boundary watch to
 > the certificate (`repair.hpp` header comment); Python `Tessellation.set_geometry` /
 > `set_weights` / `Simulation.set_geometry` take any analytic core scene in the flat node
-> encoding. Gates: `tests/kokkos/test_sdf_dynamic` (repair == cold SDF build to the wall-free
+> encoding. **Rung A1 (2026-09-03):** second-order wall placement — `sdfSagittaShifts` +
+> the re-clip in `clipCellAgainstSdf` (`tests/kokkos/test_sdf_curved`: sphere fluid volume
+> 1e-3 → 2e-5 at 12k fluid seeds; cavity at its ~1e-5 floor; flat walls bit-identical).
+> Gates: `tests/kokkos/test_sdf_dynamic` (repair == cold SDF build to the wall-free
 > repair's own accuracy, host + CUDA) and `tests/kokkos_mpi` `repair_sdf_mpi_np{1,2,4}`
 > (distributed cold SDF == single-rank cold SDF to 1e-9). The clip itself gained the CHORD-PLANE
 > fallback: a vertex-foot tangent plane that would exclude the seed (offset ≤ 0, common on curved

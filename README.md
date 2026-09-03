@@ -227,6 +227,14 @@ horizon edge; there is no stored adjacency (the cell is tiny, so the triangle sh
 edge is found by a short scan). Cuts are applied closest-first with a security-radius
 early-out.
 
+**Curved walls (rung A1).** `clipCellAgainstSdf` places each wall plane to SECOND order: after the
+multi-plane tangent clip it re-clips the cell with every plane translated into the solid by the
+sagitta of its final face (`½ tr(∇²φ · M)/|∇φ| / A`, M the face's second moments about the tangency
+point). Measured on a sphere: the fluid-volume error drops 17–90× (1e-3 → 2e-5 at 12k seeds, seeds
+in the fluid); flat walls are bit-identical to the tangent clip; `TangentOnly<Sdf>` restores the
+first-order cut. The seed-foot wall FORCE model (`sdfWallChain`) is still the tangent-plane model —
+consistent with `TangentOnly`, first-order against the sagitta placement (`test_sdf_policy` (C)).
+
 **Energies (rung A3 of the Voronoi methods plan).** `buildTessellation(..., withAreaGrad=true)`
 additionally publishes a facet-edge CSR of area Jacobians `∂A_f/∂n_l` (a facet's area depends on
 its own plane and on its edge-neighbours' planes; `TessellationView::edgeBegin/edgeEnd/edgePartner/

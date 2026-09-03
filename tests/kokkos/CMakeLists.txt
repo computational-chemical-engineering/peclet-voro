@@ -31,6 +31,10 @@ add_vorflow_kokkos_test(test_sdf_dynamic)
 # published == reconstruction to round-off, FD-exact gradients incl. weights and a flat wall.
 add_vorflow_kokkos_test(test_energy_layer)
 
+# Rung A1: second-order (sagitta-shifted) wall placement on curved solids — fluid-volume error
+# vs the bare tangent clip on a sphere and a cavity at three resolutions (10x + order gate).
+add_vorflow_kokkos_test(test_sdf_curved)
+
 # Oracle-free acceptance for the device tessellation: geometric invariants (space-filling, positive
 # volumes, completeness, facet-area reciprocity A_ij = -A_ji, area closure, topology reciprocity) over
 # several sizes/seeds. Replaces the retired half-edge-oracle comparison tests (tessellator,
