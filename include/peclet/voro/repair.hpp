@@ -68,6 +68,7 @@ struct RepairStats {
   int surgical = 0;  ///< Pass-1 cells repaired surgically (Phase 4, no grid gather)
   int verifyPasses = 0;  ///< number of verify iterations run
   int wallFlagged = 0;   ///< cells flagged by the SDF boundary watch (0 without an SDF)
+  int nearFlagged = 0;   ///< cells flagged by the near-miss (face-gain) check
   Route route = kTwoPass;
   bool fellBack = false;  ///< true if the cold-build fallback was triggered (repair did not close)
 };
@@ -155,6 +156,20 @@ struct MovingTessellation {
   /// Set the per-seed power weights (Weighted only). Held by reference; the caller keeps it alive.
   void setWeights(const Kokkos::View<Real*, Mem>& w) { weight = w; }
 
+  // ---- near-miss (face-gain) completeness ----
+  // The seed-local certificate cannot see a face GAINED from a seed that is not in the stored
+  // topology (its bisector drifts into the cell without either seed moving past the Verlet
+  // skin): measured ~0.1 % of neighbour relations missed per step, ~1e-3 volume error over long
+  // runs. Every (re)build records the candidates whose plane missed the cell by less than
+  // `nearMargin` (a multiple of the skin); the certificate re-tests those planes on the current
+  // positions and flags both cells when one now cuts. Set useNearMiss=false for the old (cheaper,
+  // incomplete) certificate.
+  bool useNearMiss = true;
+  int kNearCap = 32;                ///< per-cell list capacity (overflow ⇒ re-gather every step)
+  Real nearMarginFrac = Real(0.5);  ///< margin = nearMarginFrac · skin
+  Kokkos::View<int*, Mem> near, nearCnt;
+  Kokkos::View<int, Mem> nearCounter;
+
   // ---- SDF solid (rung A0) ----
   Sdf sdf;                ///< the geometry provider (replicated on every rank under MPI)
   WallStore<Real> wall;   ///< persisted wall planes (allocated by alloc() when kHasSdf)
@@ -207,6 +222,12 @@ struct MovingTessellation {
     // verify-clean) per backend.
     constexpr bool host = Kokkos::SpaceAccessibility<Kokkos::HostSpace, Mem>::accessible;
     churnThresh = host ? 0.70 : 0.50;
+    if (useNearMiss) {
+      near = Kokkos::View<int*, Mem>(view_alloc(std::string("mt.near"), WithoutInitializing),
+                                     (size_t)n * kNearCap);
+      nearCnt = Kokkos::View<int*, Mem>("mt.nearCnt", n);
+      nearCounter = Kokkos::View<int, Mem>("mt.nearCounter");
+    }
     if constexpr (kHasSdf) {
       wall.alloc(n);
       wallCounter = Kokkos::View<int, Mem>("mt.wallCounter");
@@ -243,7 +264,8 @@ struct MovingTessellation {
     auto res = buildTessellation<Real, Weighted, Sdf>(
         pos, weight, N, L, sw, densityCount, gd, sdf, /*withForceGeom=*/false, nBuild, store.np,
         store.nt, store.pnbr, store.tri, /*outCand=*/{}, /*outCandCnt=*/{}, /*candCap=*/0,
-        /*wlc=*/nullptr, wall);
+        /*wlc=*/nullptr, wall, /*withAreaGrad=*/false, near, nearCnt, useNearMiss ? kNearCap : 0,
+        nearMarginFrac * skin);
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(xRef, pos);
     adjFresh = false;  // the cold build does not emit adjacency
@@ -306,6 +328,14 @@ struct MovingTessellation {
     const bool skinOn = useSkin;
     const int nP_ = nProc;
     auto Wt = weight;  // power weights (empty for Voronoi; captured for reevalGeometry<PlanePolicy>)
+    // near-miss (face-gain) check captures
+    auto NR = near;
+    auto NC = nearCnt;
+    auto NCtr = nearCounter;
+    const int nearCapL = kNearCap;  // a local: a member read inside the lambda would capture `this`
+    const bool nearOn = useNearMiss && useSkin;  // once per step, in the Pass-1 certify
+    if (nearOn)
+      Kokkos::deep_copy(nearCounter, 0);
     // SDF boundary watch captures (force-captured outside the constexpr-if, nvcc rule)
     WallStore<Real> Wl = wall;
     Sdf Sd = sdf;
@@ -379,7 +409,38 @@ struct MovingTessellation {
             if (wflag)
               Kokkos::atomic_inc(wcPtr);
           }
-          if (!ok || mover || wflag)
+          // near-miss check: does any recorded non-neighbour plane now cut the cell?
+          bool nflag = false;
+          if (nearOn) {
+            const int nc = NC(i);
+            if (nc > nearCapL) {
+              nflag = true;  // list overflowed at build: re-gather conservatively
+            } else {
+              const Real sx = P(3 * i), sy = P(3 * i + 1), sz = P(3 * i + 2);
+              for (int q = 0; q < nc; ++q) {
+                const int j = NR((size_t)i * nearCapL + q);
+                if (j < 0)
+                  continue;
+                Real rx = P(3 * j) - sx, ry = P(3 * j + 1) - sy, rz = P(3 * j + 2) - sz;
+                rx = rx > Lxh ? rx - Lx : (rx < -Lxh ? rx + Lx : rx);
+                ry = ry > Lyh ? ry - Ly : (ry < -Lyh ? ry + Ly : ry);
+                rz = rz > Lzh ? rz - Lz : (rz < -Lzh ? rz + Lz : rz);
+                const Real pv[3] = {rx, ry, rz};
+                Real wN = Real(0);
+                if constexpr (Weighted)
+                  wN = Wt(j);
+                const Real off = PlanePolicy::template offsetFromRel<Real>(pv, wSelfI, wN);
+                if (c.planeGap(pv, off) > Real(0)) {
+                  nflag = true;
+                  if (j < nP_)
+                    Kokkos::atomic_exchange(&M(j), 1);  // the gain is mutual
+                }
+              }
+            }
+            if (nflag)
+              Kokkos::atomic_inc(&NCtr());
+          }
+          if (!ok || mover || wflag || nflag)
             M(i) = 1;
           // only mark partners we MAINTAIN (owned); a ghost partner is the owning rank's
           // responsibility.
@@ -528,7 +589,9 @@ struct MovingTessellation {
     // plane set from it (computePoke4, no findSharing) into store.poke4, so the local cert stays
     // valid for the gathered cells with no separate maintenance pass.
     subsetGather<Real, Weighted, true, Sdf>(grid, wl, n, store.np, store.nt, store.pnbr, store.tri,
-                                            vol, store.poke4, sdf, /*withForceGeom=*/false, wall);
+                                            vol, store.poke4, sdf, /*withForceGeom=*/false, wall,
+                                            near, nearCnt, useNearMiss ? kNearCap : 0,
+                                            nearMarginFrac * skin);
     auto W = wl;
     auto rb = rebuilt;
     auto P = pos;
@@ -736,6 +799,8 @@ struct MovingTessellation {
     s.pass1Raw = n1;
     if constexpr (kHasSdf)
       Kokkos::deep_copy(s.wallFlagged, wallCounter);
+    if (useNearMiss)
+      Kokkos::deep_copy(s.nearFlagged, nearCounter);
 
     // Small-displacement fast path: the certificate found every cell consistent and no skin-mover
     // (n1 counts flagged ∪ partners ∪ movers). By the §1 completeness argument a stale topology

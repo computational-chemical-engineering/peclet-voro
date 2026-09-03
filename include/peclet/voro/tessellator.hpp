@@ -258,6 +258,15 @@ struct CellBuilder {
   Kokkos::View<int*, MemSpace> edgeCursor;
   size_t edgeCap = 0;
   bool withAreaGrad = false;
+  // Optional (moving-point certificate completeness): per-cell NEAR-MISS list — the examined
+  // candidates whose plane did NOT cut but came within `nearMargin` of a vertex, plus the search
+  // reach extended by the margin so no such candidate hides just beyond the security radius. The
+  // repair's certificate re-tests these planes each step (ConvexCell::planeGap), which closes
+  // the face-gain blind spot of the seed-local certificate. A count of nearCap+1 marks overflow
+  // (the cell is then re-gathered every step). Emitted only when oNear is sized.
+  Kokkos::View<int*, MemSpace> oNear, oNearCnt;
+  int nearCap = 0;
+  Real nearMargin = Real(0);
 
   /// Rung A3: publish the per-facet area Jacobians of finalised cell `c` (facets `faces[0..nf)`
   /// at CSR base `base`) into the facet-edge CSR: one atomic reservation on `edgeCursor`, then
@@ -467,11 +476,22 @@ struct CellBuilder {
     Real secR2 = Real(2) * c.maxVertexRsq();                                              // Voronoi
     Real reachSq = PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll);  // Pow
     int ncRec = 0;  // Part-II: count of recorded candidate (skin) ids for this cell
+    const bool emitNear = oNear.extent(0) > 0 && nearCap > 0;
+    int nnRec = 0;  // near-miss candidates recorded for this cell
+    // With near-miss emission the worklist reach grows by the margin: a plane can miss the cell
+    // by less than the margin while its seed sits beyond the security radius.
+    const Real nm = emitNear ? nearMargin : Real(0);
     for (int g = 0; g < nOff && !c.overflow && !buried; ++g) {
       if constexpr (Weighted) {
-        if (wlRmin(base + g) > reachSq) break;
+        const Real rr = Kokkos::sqrt(reachSq) + Real(2) * nm;
+        if (wlRmin(base + g) > rr * rr)
+          break;
       } else {
-        if (wlRmin(base + g) > Real(2) * secR2) break;  // sorted ⇒ rest are farther; cell closed
+        // sorted ⇒ rest are farther; cell closed. Break radius² = 4·rSqMax = 2·secR2, extended to
+        // (2·rmax + 2·margin)² when near-misses are recorded.
+        const Real rr = Kokkos::sqrt(Real(2) * secR2) + Real(2) * nm;
+        if (wlRmin(base + g) > rr * rr)
+          break;
       }
       const int gc = worklistCell(base, g, cx, cy, cz);
       for (int q = cellStart(gc); q < cellStart(gc + 1) && !c.overflow && !buried; ++q) {
@@ -498,15 +518,25 @@ struct CellBuilder {
           }
           // Conservative cull: r·v ≤ |r|·√rSqMax, so |r|²·rSqMax ≤ d² ⇒ the plane cannot cut.
           const Real rho = pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2];
-          if (rho * c.maxVertexRsq() <= off * off)
+          if (!emitNear && rho * c.maxVertexRsq() <= off * off)
             continue;  // provably beyond reach
-          if (c.clip(pv, off, binned(q)))
+          if (c.clip(pv, off, binned(q))) {
             reachSq = PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll);
+          } else if (emitNear && c.planeGap(pv, off) > -nm) {
+            if (nnRec < nearCap)
+              oNear[(size_t)i * nearCap + nnRec] = binned(q);
+            ++nnRec;
+          }
         } else {
-          if (off >= secR2)
+          if (!emitNear && off >= secR2)
             continue;  // beyond the radius: cannot cut (bisector certificate)
-          if (c.clip(pv, off, binned(q)))
+          if (c.clip(pv, off, binned(q))) {
             secR2 = Real(2) * c.maxVertexRsq();
+          } else if (emitNear && c.planeGap(pv, off) > -nm) {
+            if (nnRec < nearCap)
+              oNear[(size_t)i * nearCap + nnRec] = binned(q);
+            ++nnRec;
+          }
         }
       }
     }
@@ -523,6 +553,8 @@ struct CellBuilder {
     }
     if (emitCand)
       oCandCnt(i) = ncRec;
+    if (emitNear)
+      oNearCnt(i) = nnRec > nearCap ? nearCap + 1 : nnRec;  // nearCap+1 = overflow marker
     // Completeness uses the conservative inscribed-sphere coverage (sw·minCsz)², the same
     // criterion the legacy gather used: complete iff (sw·minCsz)² > 4·rSqMax.
     const Real covSq = Real(sw) * minCsz * Real(sw) * minCsz;
@@ -563,7 +595,10 @@ TessellatorResult<Real> buildTessellation(
     Kokkos::View<unsigned*, peclet::core::MemSpace> outTri = {},
     Kokkos::View<int*, peclet::core::MemSpace> outCand = {},
     Kokkos::View<int*, peclet::core::MemSpace> outCandCnt = {}, int candCap = 0,
-    WorklistCache<Real>* wlc = nullptr, WallStore<Real> outWall = {}, bool withAreaGrad = false) {
+    WorklistCache<Real>* wlc = nullptr, WallStore<Real> outWall = {}, bool withAreaGrad = false,
+    Kokkos::View<int*, peclet::core::MemSpace> outNear = {},
+    Kokkos::View<int*, peclet::core::MemSpace> outNearCnt = {}, int nearCap = 0,
+    Real nearMargin = Real(0)) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin
@@ -720,7 +755,11 @@ TessellatorResult<Real> buildTessellation(
                                       oEdgeGrad,
                                       edgeCursor,
                                       edgeCap,
-                                      withAreaGrad};
+                                      withAreaGrad,
+                                      outNear,
+                                      outNearCnt,
+                                      nearCap,
+                                      nearMargin};
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
   Kokkos::parallel_for(

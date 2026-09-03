@@ -214,6 +214,12 @@ static int repairSweep(int N, int nSteps, real_t L) {
     peclet::voro::MovingTessellation<real_t, CMAXP, CMAXT> mt;
     mt.localCert = !bruteCert;
     mt.useGate = !noGate;
+    if (const char* e = std::getenv("VORO_NEAR_FRAC"))
+      mt.nearMarginFrac = (real_t)std::atof(e);
+    if (const char* e = std::getenv("VORO_NEAR_CAP"))
+      mt.kNearCap = std::atoi(e);
+    if (const char* e = std::getenv("VORO_NEAR_OFF"))
+      mt.useNearMiss = std::atoi(e) == 0;
     mt.alloc(N, Larr, tol, skin, 4, N);
     advance(scale, 0);
     mt.rebuild(pos);

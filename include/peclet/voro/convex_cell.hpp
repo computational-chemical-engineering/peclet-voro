@@ -486,6 +486,26 @@ struct ConvexCell {
     return consistent;
   }
 
+  /// Signed distance of the farthest live vertex BEYOND the half-space {x : pdir·x <= d}: positive
+  /// means the plane would cut the cell (exactly ConvexCell::clip's commit test, in distance
+  /// units), negative is the gap by which the plane misses the cell. Used to record NEAR-MISS
+  /// candidates for the moving-point certificate (a face can be gained without either seed
+  /// tripping the Verlet skin; the certificate re-tests these planes each step).
+  KOKKOS_INLINE_FUNCTION Real planeGap(const Real pdir[3], Real d) const {
+    const Real l2 = pdir[0] * pdir[0] + pdir[1] * pdir[1] + pdir[2] * pdir[2];
+    if (!(l2 > Real(0)))
+      return Real(-1e30);
+    Real m = Real(-1e30);
+    for (int t = 0; t < nt; ++t) {
+      if (!alive[t])
+        continue;
+      const Real s = pdir[0] * vx[t] + pdir[1] * vy[t] + pdir[2] * vz[t] - d;
+      if (s > m)
+        m = s;
+    }
+    return m / Kokkos::sqrt(l2);
+  }
+
   /// Drop every plane (k >= 6) that no LIVE triangle references and renumber the survivors in
   /// place, freeing plane slots. The clip commits every candidate that cut at the time, so a
   /// finished Voronoi cell typically holds 2-3x more committed planes than faces; an SDF wall clip

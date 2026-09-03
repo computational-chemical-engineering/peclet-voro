@@ -18,11 +18,12 @@
  * The skin wall mode (wallExact=false) is reported, only bounded: it trades exactness for fewer
  * wall re-gathers (stale tangent planes until the seed moved > wallSkin).
  *
- * MEASURED (host-openmp, 2026-09-03): the wall-free repair itself is exact to ~1.6e-3 per cell
- * over 400 steps at tol=1e-4·spacing (and does NOT tighten at tol=1e-7 — a pre-existing property
- * of the repair, recorded for A4); the SDF path lands at the same figure, so the gate is 10x the
- * baseline. Before the chord-plane fix in clipCellAgainstSdf the cold build produced silent
- * zero-volume overflow cells at curved walls and the two paths disagreed by O(1).
+ * MEASURED (host-openmp, 2026-09-03): with the seed-local certificate alone the wall-free repair
+ * was exact only to ~1.6e-3 per cell over 400 steps (a face-gain blind spot, ~250 missed
+ * neighbour relations per step); with the near-miss certificate (MovingTessellation::useNearMiss)
+ * it is 5.5e-11 at tol=1e-4·spacing and 1.2e-15 at tol=1e-7, and the SDF path 5.9e-8. Before the
+ * chord-plane fix in clipCellAgainstSdf the cold build produced silent zero-volume overflow cells
+ * at curved walls and the two paths disagreed by O(1).
  */
 #include <algorithm>
 #include <cmath>
@@ -379,7 +380,10 @@ int main(int argc, char** argv) {
         continue;
       }
       if (sp.exact) {
-        const double allow = std::max(10.0 * baseline[tb], 1e-9);
+        // 10x the wall-free figure, floored at 1e-6: with the near-miss certificate the wall-free
+        // repair is exact to ~1e-11..1e-15 and the SDF path to ~6e-8 (the wall re-clip's own
+        // round-off chain), so a purely relative gate would compare two round-off floors.
+        const double allow = std::max(10.0 * baseline[tb], 1e-6);
         if (!(r.maxRelV <= allow)) {
           std::printf("  FAIL: maxRelV %.2e > 10x wall-free baseline %.2e\n", r.maxRelV, allow);
           bad = 1;
@@ -388,7 +392,7 @@ int main(int argc, char** argv) {
           std::printf("  FAIL: emptiness mismatch\n");
           bad = 1;
         }
-        const double allowSum = std::max(10.0 * baseSum[tb], 1e-12);
+        const double allowSum = std::max(10.0 * baseSum[tb], 1e-10);
         if (!(r.sumRel <= allowSum)) {
           std::printf("  FAIL: fluid volume %.2e > 10x wall-free baseline %.2e\n", r.sumRel,
                       allowSum);

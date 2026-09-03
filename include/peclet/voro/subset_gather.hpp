@@ -61,7 +61,10 @@ SubsetGatherResult<Real> subsetGather(
     const Kokkos::View<unsigned*, peclet::core::MemSpace>& outTri,
     const Kokkos::View<Real*, peclet::core::MemSpace>& cellVol,
     const Kokkos::View<unsigned char*, peclet::core::MemSpace>& outPoke4 = {}, Sdf sdf = {},
-    bool withForceGeom = false, WallStore<Real> outWall = {}) {
+    bool withForceGeom = false, WallStore<Real> outWall = {},
+    Kokkos::View<int*, peclet::core::MemSpace> outNear = {},
+    Kokkos::View<int*, peclet::core::MemSpace> outNearCnt = {}, int nearCap = 0,
+    Real nearMargin = Real(0)) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Builder = CellBuilder<Real, Weighted, Sdf, TrackAdj>;
@@ -159,7 +162,11 @@ SubsetGatherResult<Real> subsetGather(
              /*oEdgeGrad=*/{},
              /*edgeCursor=*/{},
              /*edgeCap=*/0,
-             /*withAreaGrad=*/false};
+             /*withAreaGrad=*/false,
+             outNear,
+             outNearCnt,
+             nearCap,
+             nearMargin};
 
   auto slotOf = grid.slotOf;
   auto idx = indices;

@@ -227,6 +227,16 @@ horizon edge; there is no stored adjacency (the cell is tiny, so the triangle sh
 edge is found by a short scan). Cuts are applied closest-first with a security-radius
 early-out.
 
+**Certificate completeness (engine hardening, 2026-09-03).** The seed-local certificate of the
+repair cannot see a face GAINED from a seed outside the stored topology (its bisector drifts into
+the cell without either seed tripping the Verlet skin) — measured ~0.1 % of neighbour relations
+missed per step and a 1.6e-3 volume error over 400 steps. Every (re)build now records the
+candidates whose plane missed the cell by less than a margin (`MovingTessellation::nearMarginFrac`
+× skin, default ½) and the certificate re-tests those planes each step
+(`ConvexCell::planeGap`), flagging both cells of a new face. The repair is then exact to
+1e-11 (default tolerance) / 1e-15 (tight) over 400 steps at ~80 % of the previous speedup;
+`useNearMiss = false` restores the old certificate.
+
 **Curved walls (rung A1).** `clipCellAgainstSdf` places each wall plane to SECOND order: after the
 multi-plane tangent clip it re-clips the cell with every plane translated into the solid by the
 sagitta of its final face (`½ tr(∇²φ · M)/|∇φ| / A`, M the face's second moments about the tangency
