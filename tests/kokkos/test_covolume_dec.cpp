@@ -137,7 +137,8 @@ int main(int argc, char** argv) {
       const double s1 = fv::dotFaces(m, u, Lv), s2 = fv::dotFaces(m, v, Lu),
                    uu = fv::dotFaces(m, u, Lu), nrm = fv::dotFaces(m, u, u);
       const double sym = std::fabs(s1 - s2) / std::fabs(s1);
-      const bool bOk = sym < 1e-12 && uu <= 0 && d.nSkipped == 0;
+      const bool bOk =
+          sym < 1e-10 /* 4e-14 host, 6e-12 CUDA reductions */ && uu <= 0 && d.nSkipped == 0;
       std::printf(
           "  (B) DEC Laplacian on a random mesh (%d edges, %d skipped): symmetry %.1e, "
           "<u,Lu>_F/<u,u>_F = %.3e (must be <= 0)  %s\n",

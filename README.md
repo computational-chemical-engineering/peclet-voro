@@ -342,6 +342,15 @@ preconditions with the per-rank block of the GraphAMG. `tests/kokkos_mpi/test_fl
 recursive residual, K·1 = 0, symmetry) is what caught the rank-local total volume in the mean
 deflation. Covolume hooks and a device-resident halo are follow-ups.
 
+**Pore-mesh redistribution (rung B2).** `peclet.voro.redistribute_pore_mesh(positions, centres,
+radii, L, s_lo, s_hi, slope=…)` drives interstitial seeds to the graded target `V_ref = s(φ)³` by
+the topological moves a position-only optimiser cannot make — split oversized cells (along the
+wall for wall cells), remove undersized and dead ones, relax with a Lloyd blend plus the graded
+volume descent, re-seed the wall layers by the graded-shell heuristic, keep the best state.
+Measured from a 2× mismatched start: uniform target max |V/V_ref − 1| ≈ 0.1, rms ≈ 0.04, no dead
+cells; graded (slope 0.3) rms ≈ 0.08, max ≈ 0.5 in the first wall shell. The search grid now clamps
+the window `sw` to the grid (the optimiser's default `sw = 6` on a few hundred seeds segfaulted).
+
 **PolyMesh (rung B3).** `fv/polymesh.hpp` assembles the internal polyhedral mesh of a resident
 tessellation — shared vertices (periodic-aware), CCW face polygons, owner/neighbour, wall patches,
 cell→faces CSR — and writes VTU polyhedra (`writeVtu`). Watertight and Euler-exact off walls;

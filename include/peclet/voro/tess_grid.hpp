@@ -138,6 +138,16 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, peclet::core::MemSpace>& 
     invcsz[k] = Real(1) / csz[k];
   }
   const int dimx = dim[0], dimy = dim[1], dimz = dim[2];
+  // The periodic search window must not wrap onto itself: the offset shell reaches sw + 1 cells
+  // each way, so 2(sw + 1) + 1 ≤ min dim (a too-large sw on a small seed set — the pore-mesh
+  // optimiser's default sw = 6 on ~500 seeds — read out of the grid and segfaulted).
+  {
+    const int minDim = std::min({dimx, dimy, dimz});
+    const int swMax = std::max(1, (minDim - 1) / 2 - 1);
+    if (sw > swMax)
+      sw = swMax;
+    grid.sw = sw;
+  }
   const int ncell = dimx * dimy * dimz;
 
   // Morton (Z-order) cell indexing clusters each cell's spatial neighbourhood in memory.
