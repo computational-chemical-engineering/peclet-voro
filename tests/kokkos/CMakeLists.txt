@@ -35,6 +35,11 @@ add_vorflow_kokkos_test(test_energy_layer)
 # vs the bare tangent clip on a sphere and a cavity at three resolutions (10x + order gate).
 add_vorflow_kokkos_test(test_sdf_curved)
 
+# Track C, rung C1: the face mesh + covolume operators (div / two-point grad / Laplacian /
+# Green–Gauss / Perot): adjointness + symmetry to round-off, exact uniform-field reconstruction,
+# manufactured-solution convergence on a jittered lattice.
+add_vorflow_kokkos_test(test_fv_operators)
+
 # Oracle-free acceptance for the device tessellation: geometric invariants (space-filling, positive
 # volumes, completeness, facet-area reciprocity A_ij = -A_ji, area closure, topology reciprocity) over
 # several sizes/seeds. Replaces the retired half-edge-oracle comparison tests (tessellator,
