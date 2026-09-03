@@ -167,6 +167,10 @@ struct MovingTessellation {
   bool useNearMiss = true;
   int kNearCap = 32;                ///< per-cell list capacity (overflow ⇒ re-gather every step)
   Real nearMarginFrac = Real(0.5);  ///< margin = nearMarginFrac · skin
+  bool nearFresh = false;  ///< the lists cover every owned cell (a gate-rebuild skips emitting
+                           ///< them — its wider search reach costs a third of a cold build — and
+                           ///< the first low-churn step afterwards pays ONE emitting rebuild, the
+                           ///< adjacency's lazy pattern)
   Kokkos::View<int*, Mem> near, nearCnt;
   Kokkos::View<int, Mem> nearCounter;
 
@@ -261,11 +265,16 @@ struct MovingTessellation {
     Kokkos::View<long*, Mem> gd;
     const int nBuild =
         (nProc == N) ? -1 : nProc;  // build only the owned cells; ghosts are candidates
+    // A gate-rebuild (eagerAdj=false) stays in the high-churn regime and skips the near-miss
+    // emission like it skips the adjacency; the lists are rebuilt once churn drops (step()).
+    const bool emitNear = useNearMiss && eagerAdj;
     auto res = buildTessellation<Real, Weighted, Sdf>(
         pos, weight, N, L, sw, densityCount, gd, sdf, /*withForceGeom=*/false, nBuild, store.np,
         store.nt, store.pnbr, store.tri, /*outCand=*/{}, /*outCandCnt=*/{}, /*candCap=*/0,
-        /*wlc=*/nullptr, wall, /*withAreaGrad=*/false, near, nearCnt, useNearMiss ? kNearCap : 0,
+        /*wlc=*/nullptr, wall, /*withAreaGrad=*/false, emitNear ? near : Kokkos::View<int*, Mem>{},
+        emitNear ? nearCnt : Kokkos::View<int*, Mem>{}, emitNear ? kNearCap : 0,
         nearMarginFrac * skin);
+    nearFresh = emitNear;
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(xRef, pos);
     adjFresh = false;  // the cold build does not emit adjacency
@@ -333,7 +342,7 @@ struct MovingTessellation {
     auto NC = nearCnt;
     auto NCtr = nearCounter;
     const int nearCapL = kNearCap;  // a local: a member read inside the lambda would capture `this`
-    const bool nearOn = useNearMiss && useSkin;  // once per step, in the Pass-1 certify
+    const bool nearOn = useNearMiss && useSkin && nearFresh;  // once per step (Pass-1 certify)
     if (nearOn)
       Kokkos::deep_copy(nearCounter, 0);
     // SDF boundary watch captures (force-captured outside the constexpr-if, nvcc rule)
@@ -820,6 +829,14 @@ struct MovingTessellation {
     if (useGate && (double)n1 / (nProc > 0 ? nProc : 1) > churnThresh) {
       rebuild(pos,
               /*eagerAdj=*/false);  // high-churn regime: stay on brute, don't pay adj maintenance
+      s.route = RepairStats::kRebuildGate;
+      return s;
+    }
+    if (useNearMiss && !nearFresh) {
+      // First low-churn step after gate-rebuilds: the certificate above ran WITHOUT the near-miss
+      // lists (incomplete for face gains), so do not repair on it — pay one emitting rebuild
+      // (exact) and repair from the next step on with fresh lists.
+      rebuild(pos, /*eagerAdj=*/true);
       s.route = RepairStats::kRebuildGate;
       return s;
     }
