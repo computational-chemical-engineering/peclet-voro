@@ -28,6 +28,7 @@
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/sdf.hpp"  // WallStore
 #include "peclet/voro/tessellation_view.hpp"
 #include "peclet/voro/topology_store.hpp"
 
@@ -37,11 +38,15 @@ namespace peclet::voro {
 /// force-geometry TessellationView (facet neighbour / area / dV / connector CSR), reusing `vol` for
 /// the per-cell volume. `MAXP`/`MAXT` are the store's ConvexCell capacities; `N` cells; `L` the
 /// (cubic) box.
+/// `wall` + `xRef` (optional, rung A0): the resident SDF wall planes and the per-cell positions at
+/// which they were saved, so a wall-clipped cell's planes are restored for the seed's current
+/// position before the re-eval (see WallStore). Leave both empty for a wall-free tessellation.
 template <class Real, int MAXP, int MAXT>
 TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
                                      const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
                                      const Kokkos::View<Real*, peclet::core::MemSpace>& vol, int N,
-                                     const Real L[3]) {
+                                     const Real L[3], WallStore<Real> wall = {},
+                                     Kokkos::View<Real*, peclet::core::MemSpace> xRef = {}) {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Cell = ConvexCell<Real, MAXP, MAXT, false>;
@@ -93,10 +98,21 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
   Kokkos::View<Real*, Mem> fConn(view_alloc(std::string("rp.fConn"), WithoutInitializing), nF * 3);
   {
     Kokkos::View<int*, Mem> bs = base;
+    WallStore<Real> Wl = wall;
+    Kokkos::View<Real*, Mem> XR = xRef;
+    const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
     Kokkos::parallel_for(
         "reevalPublish.fill", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
           Cell c;
           st.load(i, c, Lx, Ly, Lz);
+          if (Wl.active()) {  // restore the wall planes for the seed's displacement since save
+            Real dx = P(3 * i) - XR(3 * i), dy = P(3 * i + 1) - XR(3 * i + 1),
+                 dz = P(3 * i + 2) - XR(3 * i + 2);
+            dx = dx > Lxh ? dx - Lx : (dx < -Lxh ? dx + Lx : dx);
+            dy = dy > Lyh ? dy - Ly : (dy < -Lyh ? dy + Ly : dy);
+            dz = dz > Lzh ? dz - Lz : (dz < -Lzh ? dz + Lz : dz);
+            Wl.load(i, c, dx, dy, dz);
+          }
           c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
           int idx = 0;
           const int b = bs(i);

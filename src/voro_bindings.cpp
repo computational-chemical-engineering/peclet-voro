@@ -45,15 +45,18 @@
 #include <cmath>
 #include <Kokkos_Core.hpp>
 #include <set>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 #include "peclet/core/common/view.hpp"
+#include "peclet/core/geom/scene_builder.hpp"
 #include "peclet/core/python/ndarray_interop.hpp"
 #include "peclet/voro/convex_cell.hpp"
 #include "peclet/voro/mesh_optimizer.hpp"
+#include "peclet/voro/physics/simulation.hpp"
 #include "peclet/voro/repair.hpp"
 #include "peclet/voro/topology_store.hpp"
-#include "peclet/voro/physics/simulation.hpp"
 
 #ifdef PECLET_VORO_MPI
 #include <mpi.h>
@@ -239,6 +242,77 @@ struct PoreReconstructor {
 // --------------------------------------------------------------------------------------------------
 // Tessellation: the bare moving-particle Voronoi tessellator (cold build + incremental repair).
 // --------------------------------------------------------------------------------------------------
+// ---- SDF geometry from Python (rung A0)
+// ----------------------------------------------------------
+using NoSdfT = peclet::voro::NoSdf;
+using SceneT = peclet::voro::SdfScene<real_t>;
+using Mem = peclet::core::MemSpace;
+
+// A device-resident core shape scene + the SdfScene provider over it. The node table comes from the
+// flat node encoding (3 int32 + 16 float64 per node) that peclet.core.geom.Scene.encode() returns
+// (the same arrays dem.add_analytic_wall takes); the encoding carries no sampled grids, so this is
+// the ANALYTIC vocabulary (primitives + CSG + transforms).
+struct SceneHolder {
+  Kokkos::View<peclet::core::geom::ShapeNode<real_t>*, Mem> nodes;
+  Kokkos::View<peclet::core::geom::GridDesc<real_t>*, Mem> grids;
+  Kokkos::View<float*, Mem> pool;
+  SceneT scene;
+  bool set = false;
+  void clear() {
+    nodes = {};
+    grids = {};
+    pool = {};
+    scene = SceneT{};
+    set = false;
+  }
+};
+
+SceneHolder makeSceneHolder(nb::ndarray<int, nb::c_contig> node_ints,
+                            nb::ndarray<real_t, nb::c_contig> node_reals, int root, real_t grad_h) {
+  using namespace peclet::core::geom;
+  std::vector<int> ni(node_ints.data(), node_ints.data() + node_ints.size());
+  std::vector<real_t> nr(node_reals.data(), node_reals.data() + node_reals.size());
+  SceneBuilder<real_t> b = SceneBuilder<real_t>::decode(ni, nr, {}, {}, {}, {});
+  const auto& nodes = b.nodes();
+  if (nodes.empty())
+    throw std::runtime_error("set_geometry: empty node table");
+  if (root < 0 || root >= static_cast<int>(nodes.size()))
+    throw std::runtime_error("set_geometry: root node index out of range");
+  SceneHolder h;
+  h.nodes = Kokkos::View<ShapeNode<real_t>*, Mem>("scene.nodes", nodes.size());
+  {
+    auto hn = Kokkos::create_mirror_view(h.nodes);
+    for (std::size_t i = 0; i < nodes.size(); ++i)
+      hn(i) = nodes[i];
+    Kokkos::deep_copy(h.nodes, hn);
+  }
+  const auto& grids = b.grids();
+  const auto& pool = b.samples();
+  h.grids = Kokkos::View<GridDesc<real_t>*, Mem>("scene.grids", grids.empty() ? 1 : grids.size());
+  h.pool = Kokkos::View<float*, Mem>("scene.pool", pool.empty() ? 1 : pool.size());
+  if (!grids.empty()) {
+    auto hg = Kokkos::create_mirror_view(h.grids);
+    for (std::size_t i = 0; i < grids.size(); ++i)
+      hg(i) = grids[i];
+    Kokkos::deep_copy(h.grids, hg);
+  }
+  if (!pool.empty())
+    Kokkos::deep_copy(h.pool,
+                      Kokkos::View<const float*, Kokkos::HostSpace>(pool.data(), pool.size()));
+  h.scene = SceneT{h.nodes, h.grids, h.pool, static_cast<int>(nodes.size()), root, grad_h};
+  h.set = true;
+  return h;
+}
+
+// --------------------------------------------------------------------------------------------------
+// Tessellation: the bare moving-point (power-)Voronoi tessellator, optionally SDF-clipped.
+// The engine is chosen at build() from what was set: {Voronoi, Power} x {no geometry, SdfScene}.
+// --------------------------------------------------------------------------------------------------
+template <bool W, class S>
+using MT = peclet::voro::MovingTessellation<real_t, 64, 112, W, S>;
+using MtVariant =
+    std::variant<MT<false, NoSdfT>, MT<true, NoSdfT>, MT<false, SceneT>, MT<true, SceneT>>;
+
 class Tess {
  public:
   Tess() { live().insert(this); }
@@ -248,6 +322,25 @@ class Tess {
   void set_tolerance(real_t frac) { tolFrac_ = frac; }
   void set_local_certificate(bool on) { localCert_ = on; }
   void set_gate(bool on) { useGate_ = on; }
+  void set_geometry(nb::ndarray<int, nb::c_contig> node_ints,
+                    nb::ndarray<real_t, nb::c_contig> node_reals, int root, real_t grad_h) {
+    scene_ = makeSceneHolder(node_ints, node_reals, root, grad_h);
+  }
+  void clear_geometry() { scene_.clear(); }
+  void set_wall_mode(bool exact, real_t skin_frac) {
+    wallExact_ = exact;
+    wallSkinFrac_ = skin_frac;
+  }
+  void set_weights(nb::ndarray<real_t, nb::c_contig> w) {
+    wHost_ = flatten1(w);
+    weighted_ = true;
+    wDirty_ = true;
+  }
+  void clear_weights() {
+    wHost_.clear();
+    weighted_ = false;
+    wDirty_ = false;
+  }
 
   // Cold build: (re)allocate the resident tessellation for N points and build it from scratch.
   void build(nb::ndarray<real_t, nb::c_contig> a) {
@@ -255,11 +348,37 @@ class Tess {
     N_ = static_cast<int>(p.size() / 3);
     const double boxVol = static_cast<double>(L_[0]) * L_[1] * L_[2];
     const real_t spacing = static_cast<real_t>(std::cbrt(boxVol / (N_ > 0 ? N_ : 1)));
-    mt_.localCert = localCert_;
-    mt_.useGate = useGate_;
-    mt_.alloc(N_, L_.data(), tolFrac_ * spacing, real_t(0.25) * spacing, 4, N_);
+    if (weighted_ && static_cast<int>(wHost_.size()) != N_)
+      throw std::runtime_error("build(): weights (N,) must match the particle count");
     pos_ = peclet::core::toDevice<real_t>(p, "pos");
-    mt_.rebuild(pos_);
+    if (weighted_) {
+      weight_ = peclet::core::toDevice<real_t>(wHost_, "w");
+      wDirty_ = false;
+    }
+    if (!weighted_ && !scene_.set)
+      mt_.template emplace<MT<false, NoSdfT>>();
+    else if (weighted_ && !scene_.set)
+      mt_.template emplace<MT<true, NoSdfT>>();
+    else if (!weighted_)
+      mt_.template emplace<MT<false, SceneT>>();
+    else
+      mt_.template emplace<MT<true, SceneT>>();
+    std::visit(
+        [&](auto& mt) {
+          using T = std::decay_t<decltype(mt)>;
+          mt.localCert = localCert_;
+          mt.useGate = useGate_;
+          if constexpr (T::kHasSdf) {
+            mt.sdf = scene_.scene;
+            mt.wallExact = wallExact_;
+            mt.wallSkin = wallSkinFrac_ * spacing;
+          }
+          if constexpr (std::is_same_v<typename T::PlanePolicy, peclet::voro::Power>)
+            mt.setWeights(weight_);
+          mt.alloc(N_, L_.data(), tolFrac_ * spacing, real_t(0.25) * spacing, 4, N_);
+          mt.rebuild(pos_);
+        },
+        mt_);
   }
 
   // Incremental repair: update the resident tessellation to new positions (same N) without a full
@@ -269,7 +388,14 @@ class Tess {
     if (static_cast<int>(p.size() / 3) != N_)
       throw std::runtime_error("step(): particle count differs from build(); call build() first");
     pos_ = peclet::core::toDevice<real_t>(p, "pos");
-    auto st = mt_.step(pos_);
+    if (weighted_ && wDirty_) {  // weights changed since the last build/step: refresh in place
+      if (static_cast<int>(wHost_.size()) != N_)
+        throw std::runtime_error("step(): weights (N,) must match the particle count");
+      Kokkos::deep_copy(
+          weight_, Kokkos::View<const real_t*, Kokkos::HostSpace>(wHost_.data(), wHost_.size()));
+      wDirty_ = false;
+    }
+    auto st = std::visit([&](auto& mt) { return mt.step(pos_); }, mt_);
     nb::dict d;
     d["flagged"] = st.pass1Raw;  // cells the certificate flagged
     d["pass1"] = st.pass1;       // cells gathered in Pass 1
@@ -280,12 +406,14 @@ class Tess {
     d["extra"] = st.extra;                  // cells gathered across the verify extra-passes
     d["surgical"] = st.surgical;            // Pass-1 cells repaired surgically (no grid gather)
     d["verify_passes"] = st.verifyPasses;   // number of verify iterations run
+    d["wall_flagged"] = st.wallFlagged;     // cells flagged by the SDF boundary watch
     return d;
   }
 
   nb::ndarray<nb::numpy, real_t> volumes() {
     const std::size_t N = static_cast<std::size_t>(N_);
-    auto v = Kokkos::subview(mt_.vol, Kokkos::make_pair(std::size_t(0), N));
+    DView vol = std::visit([](auto& mt) { return mt.vol; }, mt_);
+    auto v = Kokkos::subview(vol, Kokkos::make_pair(std::size_t(0), N));
     return peclet::core::python::vector_to_ndarray(peclet::core::toVector(v), {N}, {1});
   }
 
@@ -294,7 +422,7 @@ class Tess {
     using Cell = peclet::voro::ConvexCell<real_t, 64, 112, false>;
     const int N = N_;
     Kokkos::View<int*, peclet::core::MemSpace> cnt("nbr", N);
-    auto st = mt_.store;
+    auto st = std::visit([](auto& mt) { return mt.store; }, mt_);
     auto C = cnt;
     const real_t Lx = L_[0], Ly = L_[1], Lz = L_[2];
     Kokkos::parallel_for(
@@ -306,11 +434,28 @@ class Tess {
     return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cnt), {static_cast<std::size_t>(N)}, {1});
   }
 
+  // Per-cell number of resident SDF wall planes (0 everywhere without geometry).
+  nb::ndarray<nb::numpy, int> wall_counts() {
+    const std::size_t N = static_cast<std::size_t>(N_);
+    std::vector<int> v = std::visit(
+        [&](auto& mt) {
+          using T = std::decay_t<decltype(mt)>;
+          if constexpr (T::kHasSdf)
+            return peclet::core::toVector(mt.wall.cnt);
+          else
+            return std::vector<int>(N, 0);
+        },
+        mt_);
+    return peclet::core::python::vector_to_ndarray(std::move(v), {N}, {1});
+  }
+
   int num_particles() const { return N_; }
 
   void release() {
-    mt_ = peclet::voro::MovingTessellation<real_t, 64, 112>{};
+    mt_.template emplace<MT<false, NoSdfT>>();
     pos_ = DView{};
+    weight_ = DView{};
+    scene_.clear();
     N_ = 0;
   }
   static std::set<Tess*>& live() {
@@ -326,9 +471,14 @@ class Tess {
   std::array<real_t, 3> L_{1, 1, 1};
   real_t tolFrac_ = 1e-4;  // certificate tolerance as a fraction of the mean spacing
   bool localCert_ = true, useGate_ = true;
+  bool wallExact_ = true;
+  real_t wallSkinFrac_ = 0;
+  bool weighted_ = false, wDirty_ = false;
+  std::vector<real_t> wHost_;
   int N_ = 0;
-  DView pos_;
-  peclet::voro::MovingTessellation<real_t, 64, 112> mt_;
+  DView pos_, weight_;
+  SceneHolder scene_;
+  MtVariant mt_;
 };
 
 // --------------------------------------------------------------------------------------------------
@@ -341,8 +491,9 @@ class Sim {
 
   // Drop all Kokkos Views (so they free BEFORE Kokkos::finalize at shutdown).
   void release() {
-    sim_ = peclet::voro::physics::ExplicitEuler<real_t>{};
+    sim_.template emplace<EE<NoSdfT>>();
     dmass_ = DView{};
+    scene_.clear();
     pos_.clear();
     vel_.clear();
     mass_.clear();
@@ -366,37 +517,73 @@ class Sim {
   void set_viscosities(nb::ndarray<real_t, nb::c_contig> a) { visc_ = flatten1(a); }
   void set_bulk_viscosities(nb::ndarray<real_t, nb::c_contig> a) { bulk_ = flatten1(a); }
   // Opt-in incremental-repair path (E1 scaffolding, default off). Set before init().
-  void set_repair(bool on) { sim_.setRepair(on); }
+  void set_repair(bool on) { repair_ = on; }
+  void set_geometry(nb::ndarray<int, nb::c_contig> node_ints,
+                    nb::ndarray<real_t, nb::c_contig> node_reals, int root, real_t grad_h) {
+    scene_ = makeSceneHolder(node_ints, node_reals, root, grad_h);
+  }
+  void clear_geometry() { scene_.clear(); }
 
   void init() {
     const int N = static_cast<int>(mass_.size());
     std::vector<real_t> invm(N);
     for (int i = 0; i < N; ++i)
       invm[i] = real_t(1) / mass_[i];
-    sim_.init(peclet::core::toDevice<real_t>(pos_, "pos"), peclet::core::toDevice<real_t>(vel_, "vel"),
-              peclet::core::toDevice<real_t>(invm, "im"), L_, pressEq_);
+    if (scene_.set)
+      sim_.template emplace<EE<SceneT>>();
+    else
+      sim_.template emplace<EE<NoSdfT>>();
     dmass_ =
         peclet::core::toDevice<real_t>(mass_, "mass");  // resident; kinetic-energy reads it each call (E4b)
-    if (!visc_.empty()) {
-      if (bulk_.empty())
-        bulk_.assign(N, 0.0);
-      sim_.setViscous(peclet::core::toDevice<real_t>(visc_, "visc"), peclet::core::toDevice<real_t>(bulk_, "bulk"));
-    }
+    std::visit(
+        [&](auto& s) {
+          using T = std::decay_t<decltype(s)>;
+          s.setRepair(repair_);
+          if constexpr (std::is_same_v<T, EE<SceneT>>)
+            s.setSdf(scene_.scene);
+          s.init(peclet::core::toDevice<real_t>(pos_, "pos"),
+                 peclet::core::toDevice<real_t>(vel_, "vel"),
+                 peclet::core::toDevice<real_t>(invm, "im"), L_, pressEq_);
+          if (!visc_.empty()) {
+            if (bulk_.empty())
+              bulk_.assign(N, 0.0);
+            s.setViscous(peclet::core::toDevice<real_t>(visc_, "visc"),
+                         peclet::core::toDevice<real_t>(bulk_, "bulk"));
+          }
+        },
+        sim_);
   }
 
-  void step(int nsteps, real_t dt) { sim_.step(nsteps, dt); }
+  void step(int nsteps, real_t dt) {
+    std::visit([&](auto& s) { s.step(nsteps, dt); }, sim_);
+  }
 
-  nb::ndarray<nb::numpy, real_t> get_positions() { return from3(sim_.positions()); }
-  nb::ndarray<nb::numpy, real_t> get_velocities() { return from3(sim_.velocities()); }
-  nb::ndarray<nb::numpy, real_t> get_forces() { return from3(sim_.force()); }
-  real_t get_kinetic_energy() { return sim_.kineticEnergy(dmass_); }
-  real_t get_internal_energy() { return sim_.internalEnergy(); }
-  real_t get_time() { return sim_.time(); }
-  int num_particles() const { return sim_.numParticles(); }
+  nb::ndarray<nb::numpy, real_t> get_positions() {
+    return from3(std::visit([](auto& s) { return s.positions(); }, sim_));
+  }
+  nb::ndarray<nb::numpy, real_t> get_velocities() {
+    return from3(std::visit([](auto& s) { return s.velocities(); }, sim_));
+  }
+  nb::ndarray<nb::numpy, real_t> get_forces() {
+    return from3(std::visit([](auto& s) { return s.force(); }, sim_));
+  }
+  real_t get_kinetic_energy() {
+    return std::visit([&](auto& s) { return s.kineticEnergy(dmass_); }, sim_);
+  }
+  real_t get_internal_energy() {
+    return std::visit([](auto& s) { return s.internalEnergy(); }, sim_);
+  }
+  real_t get_time() {
+    return std::visit([](auto& s) { return s.time(); }, sim_);
+  }
+  int num_particles() const {
+    return std::visit([](auto& s) { return s.numParticles(); }, sim_);
+  }
 
   nb::ndarray<nb::numpy, real_t> get_volumes() {
-    const std::size_t N = static_cast<std::size_t>(sim_.numParticles());
-    auto cell = Kokkos::subview(sim_.view().cellVolume, Kokkos::make_pair(std::size_t(0), N));
+    const std::size_t N = static_cast<std::size_t>(num_particles());
+    DView cv = std::visit([](auto& s) { return s.view().cellVolume; }, sim_);
+    auto cell = Kokkos::subview(cv, Kokkos::make_pair(std::size_t(0), N));
     return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cell), {N}, {1});
   }
 
@@ -404,12 +591,17 @@ class Sim {
     // Per-cell facet (neighbour) count is the explicit cellFacetCount view. NOTE: the device
     // cellFacetOffset is a per-cell *base* into the facet buffer in cell-finish order, NOT a CSR
     // prefix sum (see tessellation_view.hpp), so off(i+1)-off(i) is meaningless — read the count.
-    const std::size_t N = static_cast<std::size_t>(sim_.numParticles());
-    auto cnt = Kokkos::subview(sim_.view().cellFacetCount, Kokkos::make_pair(std::size_t(0), N));
+    const std::size_t N = static_cast<std::size_t>(num_particles());
+    Kokkos::View<int*, Mem> fc = std::visit([](auto& s) { return s.view().cellFacetCount; }, sim_);
+    auto cnt = Kokkos::subview(fc, Kokkos::make_pair(std::size_t(0), N));
     return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cnt), {N}, {1});
   }
 
  private:
+  template <class S>
+  using EE = peclet::voro::physics::ExplicitEuler<real_t, S>;
+  using EeVariant = std::variant<EE<NoSdfT>, EE<SceneT>>;
+
   // Flat (3N,) host-or-device view -> (N,3) float64 numpy array (single D2H, no host loop — S2a).
   static nb::ndarray<nb::numpy, real_t> from3(const DView& d) {
     const std::size_t N = static_cast<std::size_t>(d.extent(0)) / 3;
@@ -418,9 +610,11 @@ class Sim {
 
   std::array<real_t, 3> L_{1, 1, 1};
   real_t pressEq_ = 0;
+  bool repair_ = false;
   std::vector<real_t> pos_, vel_, mass_, visc_, bulk_;
   DView dmass_;  // device-resident masses, uploaded once in init() (E4b)
-  peclet::voro::physics::ExplicitEuler<real_t> sim_;
+  SceneHolder scene_;
+  EeVariant sim_;
 };
 
 #ifdef PECLET_VORO_MPI
@@ -822,26 +1016,60 @@ NB_MODULE(_voro, m) {
            "Enable the adaptive gate (default True) that routes high-churn steps straight to a "
            "full\n"
            "rebuild — the 'never much slower than a cold build' guard.")
+      .def(
+          "set_geometry", &Tess::set_geometry, nb::arg("node_ints"), nb::arg("node_reals"),
+          nb::arg("root") = 0, nb::arg("grad_h") = 1e-5,
+          "Clip the cells by an SDF solid given as a core shape scene in the flat node encoding\n"
+          "(node_ints int32 (3 per node), node_reals float64 (16 per node)) — exactly what\n"
+          "peclet.core.geom.Scene.encode() returns and dem.add_analytic_wall takes; `root` is the\n"
+          "tree root to evaluate. Suite sign convention: sdf < 0 inside the solid. Seeds inside "
+          "the\n"
+          "solid get no cell (volume 0); cells reaching into it gain wall facets. Applies to the\n"
+          "next `build` and is carried through every `step` (wall planes are resident; a boundary\n"
+          "watch re-clips cells at the wall). `grad_h` is the central-difference step for the\n"
+          "SDF gradient. Analytic vocabulary only (no sampled grids through this path yet).")
+      .def("clear_geometry", &Tess::clear_geometry,
+           "Drop the SDF geometry (takes effect at the next `build`).")
+      .def(
+          "set_wall_mode", &Tess::set_wall_mode, nb::arg("exact") = true,
+          nb::arg("skin_frac") = 0.0,
+          "Wall re-gather policy for `step` (default exact=True): re-clip every wall-clipped cell\n"
+          "that moved, so the incremental result equals a cold rebuild. exact=False keeps a "
+          "cell's\n"
+          "stale tangent planes until it moved more than skin_frac × mean spacing (cheaper, not\n"
+          "exact by construction).")
+      .def(
+          "set_weights", &Tess::set_weights, nb::arg("weights"),
+          "Per-seed POWER (Laguerre) weights (N,) float64: the cells become the power diagram\n"
+          "(radical planes) instead of the Voronoi diagram. Takes effect at the next `build`;\n"
+          "call again before a `step` to update the weights alongside the positions. Exact in the\n"
+          "small-weight regime (see the docs).")
+      .def("clear_weights", &Tess::clear_weights,
+           "Back to the unweighted Voronoi diagram (next `build`).")
       .def("build", &Tess::build, nb::arg("positions"),
-           "Cold-build the Voronoi tessellation of `positions` (N,3) from scratch and make it "
-           "resident.\n"
+           "Cold-build the (power-)Voronoi tessellation of `positions` (N,3) from scratch and make "
+           "it resident, clipped by the geometry from `set_geometry` if any.\n"
            "Sets the particle count N for subsequent `step` calls.")
-      .def("step", &Tess::step, nb::arg("positions"),
-           "Incrementally repair the resident tessellation to new `positions` (N,3, same N as "
-           "`build`).\n"
-           "Returns a dict of per-step work stats: 'flagged' (cells the certificate flagged), "
-           "'pass1'\n"
-           "and 'pass2' (cells re-gathered in each pass), 'extra' (cells gathered across verify "
-           "extra-passes),\n"
-           "'surgical' (Pass-1 cells repaired surgically), 'verify_passes' (verify iterations run), "
-           "'rebuilt'\n"
-           "(True if the gate routed this step to a full rebuild), 'fell_back' (True if the verify "
-           "failed and\n"
-           "a cold rebuild was forced).")
+      .def(
+          "step", &Tess::step, nb::arg("positions"),
+          "Incrementally repair the resident tessellation to new `positions` (N,3, same N as "
+          "`build`).\n"
+          "Returns a dict of per-step work stats: 'flagged' (cells the certificate flagged), "
+          "'pass1'\n"
+          "and 'pass2' (cells re-gathered in each pass), 'extra' (cells gathered across verify "
+          "extra-passes),\n"
+          "'surgical' (Pass-1 cells repaired surgically), 'verify_passes' (verify iterations run), "
+          "'rebuilt'\n"
+          "(True if the gate routed this step to a full rebuild), 'fell_back' (True if the verify "
+          "failed and\n"
+          "a cold rebuild was forced).")
       .def("volumes", &Tess::volumes,
            "Per-particle Voronoi cell volume (N,) float64. Sums to the box volume (space-filling).")
       .def("neighbor_counts", &Tess::neighbor_counts,
-           "Per-particle Voronoi neighbour count (N,) int32 — the number of faces of each cell.")
+           "Per-particle Voronoi neighbour count (N,) int32 — the number of faces of each cell "
+           "(wall facets included).")
+      .def("wall_counts", &Tess::wall_counts,
+           "Per-particle number of resident SDF wall planes (N,) int32; all zero without geometry.")
       .def_prop_ro("num_particles", &Tess::num_particles,
                    "Particle count N set by the last `build`.");
 
@@ -853,7 +1081,8 @@ NB_MODULE(_voro, m) {
       "EOS plus an optional per-particle viscous (Navier-Stokes) term, with the tessellation\n"
       "repaired each step on the device. Set the particle state, `init`, then `step`.")
       .def(nb::init<>())
-      .def("set_box", &Sim::set_box, nb::arg("L"), "Set the periodic box edge lengths (Lx, Ly, Lz).")
+      .def("set_box", &Sim::set_box, nb::arg("L"),
+           "Set the periodic box edge lengths (Lx, Ly, Lz).")
       .def("set_positions", &Sim::set_positions, nb::arg("positions"),
            "Initial particle positions (N,3) float64.")
       .def("set_velocities", &Sim::set_velocities, nb::arg("velocities"),
@@ -868,6 +1097,13 @@ NB_MODULE(_voro, m) {
            "geometry each step instead of a full rebuild. Call before init().")
       .def("set_bulk_viscosities", &Sim::set_bulk_viscosities, nb::arg("viscosities"),
            "Per-particle bulk viscosity (N,) float64 (defaults to zero if unset).")
+      .def(
+          "set_geometry", &Sim::set_geometry, nb::arg("node_ints"), nb::arg("node_reals"),
+          nb::arg("root") = 0, nb::arg("grad_h") = 1e-5,
+          "SDF solid walls for the fluid (same flat node encoding as Tessellation.set_geometry).\n"
+          "The cells are clipped by the solid; the EOS pressure acts on the wall facets (the wall\n"
+          "pushes back). Call before init().")
+      .def("clear_geometry", &Sim::clear_geometry, "Drop the SDF geometry (before init()).")
       .def("init", &Sim::init,
            "Build the first tessellation and forces from the particle state set above.")
       .def("step", &Sim::step, nb::arg("num_steps"), nb::arg("dt"),

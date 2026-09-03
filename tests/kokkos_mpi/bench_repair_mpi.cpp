@@ -19,6 +19,14 @@
  * single-domain oracle. Space-filling (Σ owned volume == box) is also checked.
  *
  * Run:  OMP_NUM_THREADS=1 mpirun -np <R> --bind-to core ./bench_repair_mpi [N_global] [nSteps]
+ * [--sdf]
+ *
+ * --sdf (rung A0): the same run through an SDF solid (a sphere ∪ torus core scene, replicated on
+ * every rank as an SdfScene) — the distributed driver's tessellation carries the wall planes and
+ * the boundary watch. Two extra gates: the distributed repair matches the distributed cold SDF
+ * build (as above), AND the owned cells match a SINGLE-RANK cold SDF build of the whole point set
+ * (every rank holds the global seeds), keyed by global id — the "np = 1, 2, 4 identical to single
+ * rank" gate.
  */
 #include <mpi.h>
 
@@ -30,9 +38,11 @@
 #include <Kokkos_Core.hpp>
 #include <random>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #include "peclet/core/common/view.hpp"
+#include "peclet/core/geom/scene.hpp"
 #include "peclet/voro/mpi/distributed_moving.hpp"
 #include "peclet/voro/mpi/voronoi_halo.hpp"
 #include "peclet/voro/repair.hpp"
@@ -65,16 +75,37 @@ static Kokkos::View<real_t*, Mem> uploadCombined(const std::vector<Vec3>& p, con
   return d;
 }
 
-int main(int argc, char** argv) {
-  MPI_Init(&argc, &argv);
-  Kokkos::initialize(argc, argv);
+// Replicated SDF scene for --sdf: union( sphere r=0.2 @ centre , torus R=0.22 r=0.07 @
+// (0.2,0.25,0.75) ).
+struct SceneHold {
+  Kokkos::View<peclet::core::geom::ShapeNode<real_t>*, Mem> nodes;
+  Kokkos::View<peclet::core::geom::GridDesc<real_t>*, Mem> grids;
+  Kokkos::View<float*, Mem> pool;
+};
+static peclet::voro::SdfScene<real_t> makeScene(SceneHold& h) {
+  using namespace peclet::core::geom;
+  h.nodes = Kokkos::View<ShapeNode<real_t>*, Mem>("nodes", 3);
+  auto hn = Kokkos::create_mirror_view(h.nodes);
+  hn(0).kind = kUnion;
+  hn(0).aux0 = 1;
+  hn(0).aux1 = 2;
+  hn(1).kind = kSphere;
+  hn(1).params[0] = 0.2;
+  hn(1).transform.translation = peclet::core::Vec3<real_t>{0.5, 0.5, 0.5};
+  hn(2).kind = kTorus;
+  hn(2).params[0] = 0.22;
+  hn(2).params[1] = 0.07;
+  hn(2).transform.translation = peclet::core::Vec3<real_t>{0.2, 0.25, 0.75};
+  Kokkos::deep_copy(h.nodes, hn);
+  h.grids = Kokkos::View<GridDesc<real_t>*, Mem>("grids", 1);
+  h.pool = Kokkos::View<float*, Mem>("pool", 1);
+  return peclet::voro::SdfScene<real_t>{h.nodes, h.grids, h.pool, 3, 0, real_t(1e-5)};
+}
+
+template <class Sdf>
+static int runBench(int rank, int nproc, int N, int nSteps, const Sdf& sdf, bool withSdf) {
   int rcG = 0;
   {
-    int rank = 0, nproc = 1;
-    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    MPI_Comm_size(MPI_COMM_WORLD, &nproc);
-    const int N = (argc > 1) ? std::atoi(argv[1]) : 400000;
-    const int nSteps = (argc > 2) ? std::atoi(argv[2]) : 8;
     const Vec3 L = {1.0, 1.0, 1.0};
     const real_t spacing = std::cbrt((L[0] * L[1] * L[2]) / N);
     const double rcut =
@@ -85,8 +116,8 @@ int main(int argc, char** argv) {
     if (rank == 0)
       std::printf(
           "=== distributed repair vs cold build (np=%d, 1 proc/core) N=%d nSteps=%d sp=%.4g "
-          "rcut=%.2f·sp ===\n",
-          nproc, N, nSteps, (double)spacing, rcut / spacing);
+          "rcut=%.2f·sp%s ===\n",
+          nproc, N, nSteps, (double)spacing, rcut / spacing, withSdf ? " [SDF scene]" : "");
 
     // identical global seed set + velocities on every rank (deterministic ballistic motion).
     std::mt19937 rng(12345);
@@ -152,9 +183,8 @@ int main(int argc, char** argv) {
         auto dPos = uploadCombined(g.pos, L);
         Kokkos::View<real_t*, Mem> wd;
         Kokkos::View<long*, Mem> gd;
-        auto r = peclet::voro::buildTessellation<real_t, false>(
-            dPos, wd, (int)g.pos.size(), L.data(), 4, N, gd, peclet::voro::NoSdf{}, false,
-            g.nOwned);
+        auto r = peclet::voro::buildTessellation<real_t, false, Sdf>(
+            dPos, wd, (int)g.pos.size(), L.data(), 4, N, gd, sdf, false, g.nOwned);
         Kokkos::fence();
         tCold += MPI_Wtime() - t0;
         (void)r;
@@ -168,9 +198,10 @@ int main(int argc, char** argv) {
       // + the distributed Verlet-skin invariant now live in DistributedMovingTessellation; this
       // bench validates it via the exactness gate below).
       advanceOwned(scale, 0, owned);
-      peclet::voro::mpi::DistributedMovingTessellation<real_t, CMAXP, CMAXT> dmt;
+      peclet::voro::mpi::DistributedMovingTessellation<real_t, CMAXP, CMAXT, Sdf> dmt;
       dmt.init({0, 0, 0}, {L[0], L[1], L[2]}, {16, 16, 16}, {true, true, true}, (real_t)rcut, skin,
                tol, MPI_COMM_WORLD, 4, N);
+      dmt.setSdf(sdf);
       dmt.establish(owned, ownedGid, ownedW);
 
       for (int s = 1; s <= nSteps; ++s) {
@@ -190,13 +221,14 @@ int main(int argc, char** argv) {
 
       // ---------- exactness: cold-build the SAME final combined positions, compare owned volumes
       // ----------
-      double maxRelV = 0;
+      double maxRelV = 0, maxRelSingle = 0;
+      long emptyMM = 0;
       {
         Kokkos::View<real_t*, Mem> wd;
         Kokkos::View<long*, Mem> gd;
         auto& mt = dmt.tess();
-        auto rr = peclet::voro::buildTessellation<real_t, false>(
-            dmt.positions(), wd, mt.N, L.data(), 4, N, gd, peclet::voro::NoSdf{}, false, mt.nProc);
+        auto rr = peclet::voro::buildTessellation<real_t, false, Sdf>(
+            dmt.positions(), wd, mt.N, L.data(), 4, N, gd, sdf, false, mt.nProc);
         auto ov = Kokkos::create_mirror_view(rr.view.cellVolume);
         auto rv = Kokkos::create_mirror_view(mt.vol);
         Kokkos::deep_copy(ov, rr.view.cellVolume);
@@ -205,31 +237,91 @@ int main(int argc, char** argv) {
           const double o = ov(i);
           if (o > 0)
             maxRelV = std::max(maxRelV, std::fabs((double)rv(i) - o) / o);
+          else if (rv(i) != 0)
+            ++emptyMM;
+        }
+        // --sdf: the DISTRIBUTED cold SDF build of the owned cells vs a SINGLE-RANK cold SDF build
+        // of the whole point set at the same (final) positions, keyed by global id — np=1,2,4
+        // identical to single rank (cold vs cold: round-off). The repair's own deviation from the
+        // cold build is the wall-free gate above (the certificate tolerance, not the SDF).
+        if (withSdf) {
+          std::vector<Vec3> all(N);
+          const int sLast = nSteps;
+          const real_t sc = scale * sLast;
+          for (int i = 0; i < N; ++i)
+            for (int d = 0; d < 3; ++d)
+              all[i][d] = wrap1(p0[i][d] + vel[i][d] * sc, L[d]);
+          auto dAll = uploadCombined(all, L);
+          auto single = peclet::voro::buildTessellation<real_t, false, Sdf>(dAll, wd, N, L.data(),
+                                                                            4, N, gd, sdf, false);
+          auto sv = Kokkos::create_mirror_view(single.view.cellVolume);
+          Kokkos::deep_copy(sv, single.view.cellVolume);
+          const auto& cg = dmt.combinedGid();
+          for (int i = 0; i < mt.nProc; ++i) {
+            const double o = sv(cg[i]), d = ov(i);
+            if (o > 0)
+              maxRelSingle = std::max(maxRelSingle, std::fabs(d - o) / o);
+            else if (d != 0)
+              ++emptyMM;
+          }
         }
       }
 
       // aggregate across ranks (worst build/repair time = the distributed step cost; max error).
-      double maxCold = 0, maxRep = 0, gMaxRelV = 0;
-      long sumP1 = 0, sumP2 = 0, sumReg = 0;
+      double maxCold = 0, maxRep = 0, gMaxRelV = 0, gMaxRelSingle = 0;
+      long sumP1 = 0, sumP2 = 0, sumReg = 0, gEmptyMM = 0;
       const double coldMs = 1e3 * tCold / nSteps, repMs = 1e3 * tRep / nSteps;
       MPI_Allreduce(&coldMs, &maxCold, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
       MPI_Allreduce(&repMs, &maxRep, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
       MPI_Allreduce(&maxRelV, &gMaxRelV, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      MPI_Allreduce(&maxRelSingle, &gMaxRelSingle, 1, MPI_DOUBLE, MPI_MAX, MPI_COMM_WORLD);
+      MPI_Allreduce(&emptyMM, &gEmptyMM, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
       MPI_Allreduce(&p1, &sumP1, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
       MPI_Allreduce(&p2, &sumP2, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
       MPI_Allreduce(&regath, &sumReg, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
       if (gMaxRelV > 1e-2)
         rcG = 1;
+      if (withSdf && (gMaxRelSingle > 1e-9 || gEmptyMM != 0))
+        rcG = 1;  // A0 gate: distributed cold SDF == single-rank cold SDF, empties agree
       if (rank == 0) {
         const double nFast = (double)nSteps * nproc - sumReg;  // step-rank fast-path count
         std::printf("%6.3f %10.2f %10.2f %8.2f %8.1f %9.1f %9.1f %10.2e\n", (double)disp, maxCold,
                     maxRep, maxCold / maxRep, 100.0 * sumReg / ((double)nSteps * nproc),
                     nFast > 0 ? 100.0 * sumP1 / (nFast * (N / nproc)) : 0.0,
                     nFast > 0 ? 100.0 * sumP2 / (nFast * (N / nproc)) : 0.0, gMaxRelV);
+        if (withSdf)
+          std::printf("        vs single-rank cold SDF build: maxRelV=%.2e  emptyMismatch=%ld\n",
+                      gMaxRelSingle, gEmptyMM);
       }
     }
     if (rank == 0)
-      std::printf("REPAIR(MPI) exactness: %s\n", rcG == 0 ? "PASS" : "FAIL");
+      std::printf("REPAIR(MPI%s) exactness: %s\n", withSdf ? ",SDF" : "",
+                  rcG == 0 ? "PASS" : "FAIL");
+  }
+  return rcG;
+}
+
+int main(int argc, char** argv) {
+  MPI_Init(&argc, &argv);
+  Kokkos::initialize(argc, argv);
+  int rcG = 0;
+  {
+    int rank = 0, nproc = 1;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nproc);
+    const int N = (argc > 1) ? std::atoi(argv[1]) : 400000;
+    const int nSteps = (argc > 2) ? std::atoi(argv[2]) : 8;
+    bool withSdf = false;
+    for (int a = 3; a < argc; ++a)
+      if (std::string(argv[a]) == "--sdf")
+        withSdf = true;
+    if (withSdf) {
+      SceneHold hold;
+      auto sdf = makeScene(hold);
+      rcG = runBench(rank, nproc, N, nSteps, sdf, true);
+    } else {
+      rcG = runBench(rank, nproc, N, nSteps, peclet::voro::NoSdf{}, false);
+    }
   }
   Kokkos::finalize();
   MPI_Finalize();

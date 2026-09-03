@@ -21,6 +21,7 @@
 #define PECLET_VORO_SDF_HPP
 
 #include <Kokkos_Core.hpp>
+#include <string>
 #include <type_traits>
 
 #include "peclet/core/common/view.hpp"
@@ -273,12 +274,162 @@ KOKKOS_INLINE_FUNCTION void addSdfWallForce(const ConvexCell<Real, MAXP, MAXT, T
   }
 }
 
+/// Upper bound on the wall planes one SDF clip can commit: clipCellAgainstSdf runs at most
+/// `maxCuts` (24) iterations and each commits at most one plane.
+constexpr int kMaxWallPlanes = 24;
+
 /**
- * Clip a built scratch cell against the SDF solid. Faithful port of
- * clipCellAgainstBoundary (m_boundaryMaxCuts=24, m_boundaryTol=1e-8): empties the
- * cell if its seed is in the solid; otherwise iteratively projects the most
- * violating vertex onto sdf=0 and clips by the tangent plane there, so a curved
- * surface is approximated by a few planar wall facets.
+ * Resident per-cell SDF wall planes for the moving-point path (rung A0 of the Voronoi methods
+ * plan). The TopologyStore keeps only neighbour ids + triangles: a neighbour plane is rebuilt from
+ * the neighbour's current position (reevalGeometry), but a wall plane has no partner seed, so its
+ * equation must be PERSISTED. Each wall plane is stored in the form (û, h): û the unit foot-point
+ * direction (from the seed into the solid) and h the seed→plane distance at the time of the clip.
+ * When the seed has moved by d since then, the SAME world plane has foot distance h' = h − û·d, so
+ * the cell-frame plane is n = h' û, nn = h'² — exact for the stored tangent plane. h' ≤ 0 means the
+ * seed crossed its own wall plane: the cell is invalid and must be re-gathered.
+ *
+ * Records are listed in plane order among the cell's planes k ≥ 6 with pnbr[k] < 0 (the six box
+ * planes k < 6 are re-seeded by initBoxPlanes and never stored). Allocated only when an SDF is in
+ * use; a default-constructed (empty) store is a no-op in load/save.
+ */
+template <class Real>
+struct WallStore {
+  using MemSpace = peclet::core::MemSpace;
+  static constexpr int kMax = kMaxWallPlanes;
+  Kokkos::View<Real*, MemSpace> rec;  // N*kMax*4 : (ux, uy, uz, h) per wall plane
+  Kokkos::View<int*, MemSpace> cnt;   // N : wall planes stored for the cell
+
+  void alloc(int n) {
+    rec = Kokkos::View<Real*, MemSpace>(
+        Kokkos::view_alloc(std::string("wall.rec"), Kokkos::WithoutInitializing),
+        (size_t)n * kMax * 4);
+    cnt = Kokkos::View<int*, MemSpace>("wall.cnt", n);
+  }
+  KOKKOS_INLINE_FUNCTION bool active() const { return cnt.extent(0) > 0; }
+
+  /// Persist the wall planes of finalised cell `c` at slot i (cell frame = the seed position at
+  /// clip time). Returns the number stored.
+  template <class Cell>
+  KOKKOS_INLINE_FUNCTION int save(int i, const Cell& c) const {
+    if (!active())
+      return 0;
+    int r = 0;
+    for (int k = 6; k < c.np && r < kMax; ++k) {
+      if (c.pnbr[k] >= 0)
+        continue;
+      const Real h = Kokkos::sqrt(c.nn[k]);
+      const Real ih = h > Real(0) ? Real(1) / h : Real(0);
+      const size_t o = ((size_t)i * kMax + r) * 4;
+      rec(o + 0) = c.n[k][0] * ih;
+      rec(o + 1) = c.n[k][1] * ih;
+      rec(o + 2) = c.n[k][2] * ih;
+      rec(o + 3) = h;
+      ++r;
+    }
+    cnt(i) = r;
+    return r;
+  }
+
+  /// Restore the wall-plane equations of slot i into a cell just reloaded by TopologyStore::load,
+  /// for a seed displaced by (dx,dy,dz) (min-imaged) from where the planes were saved. Returns
+  /// false if the seed crossed one of its wall planes (h' ≤ 0) — the cell must be re-gathered.
+  template <class Cell>
+  KOKKOS_INLINE_FUNCTION bool load(int i, Cell& c, Real dx, Real dy, Real dz) const {
+    if (!active())
+      return true;
+    bool ok = true;
+    int r = 0;
+    const int nrec = cnt(i);
+    for (int k = 6; k < c.np; ++k) {
+      if (c.pnbr[k] >= 0)
+        continue;
+      if (r >= nrec) {  // store out of sync with the topology: treat as invalid
+        ok = false;
+        break;
+      }
+      const size_t o = ((size_t)i * kMax + r) * 4;
+      const Real ux = rec(o + 0), uy = rec(o + 1), uz = rec(o + 2);
+      const Real h = rec(o + 3) - (ux * dx + uy * dy + uz * dz);
+      c.n[k][0] = h * ux;
+      c.n[k][1] = h * uy;
+      c.n[k][2] = h * uz;
+      c.nn[k] = h * h;
+      if (!(h > Real(0)))
+        ok = false;
+      ++r;
+    }
+    return ok;
+  }
+};
+
+/**
+ * Would clipCellAgainstSdf commit at least one wall plane on this (un-clipped) cell? The exact
+ * decision the cold build makes, so the moving-point boundary watch flags precisely the cells whose
+ * cold rebuild would differ from a wall-free re-evaluation: the seed is in the solid (the cell
+ * would be emptied), OR the cell is within its circumradius of the surface AND (some vertex lies
+ * beyond the seed-foot tangent plane — the first cut — OR some vertex is inside the solid by more
+ * than the clip tolerance — a later cut). Reads the same tolerance and probe rule as the clip.
+ */
+template <class Real, int MAXP, int MAXT, bool TrackAdj, class Sdf>
+KOKKOS_INLINE_FUNCTION bool sdfWouldClip(const ConvexCell<Real, MAXP, MAXT, TrackAdj>& c,
+                                         const Real seed[3], const Sdf& sdf) {
+  const Real tol = Real(1e-8);
+  const Real phiCenter = sdf.eval(seed[0], seed[1], seed[2]);
+  if (phiCenter <= Real(0))
+    return true;
+  const Real maxRsq = c.maxVertexRsq();
+  const Real radius = Kokkos::sqrt(maxRsq > 0 ? maxRsq : Real(0));
+  if (phiCenter > radius + tol)
+    return false;
+  // first cut: the tangent plane at the seed's foot point (probe = seed)
+  Real g[3];
+  sdfGradient<Real>(sdf, seed[0], seed[1], seed[2], g);
+  const Real gsq = g[0] * g[0] + g[1] * g[1] + g[2] * g[2];
+  if (gsq > Real(0)) {
+    const Real invGsq = Real(1) / gsq, invG = Real(1) / Kokkos::sqrt(gsq);
+    Real surf[3], normal[3];
+    for (int k = 0; k < 3; ++k) {
+      surf[k] = seed[k] - phiCenter * g[k] * invGsq;
+      normal[k] = g[k] * invG;
+    }
+    Real eps = Real(1e-3) * (radius + Real(1));
+    if (eps < Real(1e-6))
+      eps = Real(1e-6);
+    if (sdf.eval(surf[0] + eps * normal[0], surf[1] + eps * normal[1], surf[2] + eps * normal[2]) <=
+        Real(0))
+      for (int k = 0; k < 3; ++k)
+        normal[k] = -normal[k];
+    const Real pv[3] = {-normal[0], -normal[1], -normal[2]};
+    const Real off =
+        pv[0] * (surf[0] - seed[0]) + pv[1] * (surf[1] - seed[1]) + pv[2] * (surf[2] - seed[2]);
+    // ConvexCell::clip commits iff some live vertex satisfies nf·v > nf·nf with nf = (off/|pv|²)
+    // pv; |pv| = 1 here, so the test is pv·v > off. The clip skips a first cut whose offset is not
+    // positive (see clipCellAgainstSdf), so only a positive offset can commit here.
+    if (off > Real(0))
+      for (int t = 0; t < c.nt; ++t) {
+        if (!c.alive[t])
+          continue;
+        if (pv[0] * c.vx[t] + pv[1] * c.vy[t] + pv[2] * c.vz[t] > off)
+          return true;
+      }
+  }
+  // later cuts: the most violating vertex must be inside the solid by more than tol
+  for (int t = 0; t < c.nt; ++t) {
+    if (!c.alive[t])
+      continue;
+    if (sdf.eval(seed[0] + c.vx[t], seed[1] + c.vy[t], seed[2] + c.vz[t]) < -tol)
+      return true;
+  }
+  return false;
+}
+
+/**
+ * Clip a built scratch cell against the SDF solid. Port of clipCellAgainstBoundary
+ * (m_boundaryMaxCuts=24, m_boundaryTol=1e-8): empties the cell if its seed is in the solid;
+ * otherwise iteratively projects the most violating vertex onto sdf=0 and clips by the tangent
+ * plane there, so a curved surface is approximated by a few planar wall facets. Rung A0 added the
+ * chord-plane fallback for a tangent plane that would exclude the seed (see the body) — the
+ * legacy port committed such planes and produced the dead cells seen in pore meshing.
  *
  * @param seed  seed world position (the cell's vpos are relative to it).
  * @return true if the cell was emptied (seed inside solid).
@@ -299,6 +450,10 @@ KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ConvexCell<Real, MAXP, MAXT, Trac
   const Real radius = Kokkos::sqrt(maxRsq > 0 ? maxRsq : Real(0));
   if (phiCenter > radius + tol)
     return false;  // cell fully in fluid
+  // Make room for the wall planes: the committed-plane list carries the clip's redundant
+  // candidates, and maxCuts more would overflow MAXP on a wall-hugging cell (see compactPlanes).
+  if (c.np + maxCuts > MAXP)
+    c.compactPlanes();
 
   bool seedPlaneApplied = false;
   for (int iter = 0; iter < maxCuts; ++iter) {
@@ -348,6 +503,43 @@ KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ConvexCell<Real, MAXP, MAXT, Trac
     Real pv[3] = {-normal[0], -normal[1], -normal[2]};
     Real off =
         pv[0] * (surf[0] - seed[0]) + pv[1] * (surf[1] - seed[1]) + pv[2] * (surf[2] - seed[2]);
+    if (off <= Real(0)) {
+      // The tangent plane at the probe's foot point puts the SEED on its solid side: the tangent
+      // approximation is invalid here (surface curvature strong on the scale of the cell — e.g. a
+      // seed hugging a sphere while a far vertex sits inside it near the equator). The foot-point
+      // half-space {n·x <= n·n} cannot even represent such a plane (n·n >= 0): committing it cut
+      // the WRONG side, the violating vertex survived, the same cut was re-applied maxCuts times
+      // and the cell overflowed into a silent zero-volume "dead cell" (the rim/collapse symptom
+      // seen in pore meshing). Cut instead with the CHORD plane: through the surface crossing of
+      // the seed->probe segment, normal along the segment — always a valid half-space that
+      // contains the seed and excludes the probe, so the iteration makes progress.
+      if (!seedPlaneApplied) {  // probe == seed: nothing to chord; leave the first cut out
+        seedPlaneApplied = true;
+        continue;
+      }
+      Real d[3] = {probe[0] - seed[0], probe[1] - seed[1], probe[2] - seed[2]};
+      const Real len = Kokkos::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+      if (len <= Real(0))
+        break;
+      for (int k = 0; k < 3; ++k)
+        d[k] /= len;
+      Real lo = Real(0), hi = len;  // phi(seed) > 0 >= phi(probe)
+      for (int it2 = 0; it2 < 40; ++it2) {
+        const Real mid = Real(0.5) * (lo + hi);
+        const Real ph = sdf.eval(seed[0] + mid * d[0], seed[1] + mid * d[1], seed[2] + mid * d[2]);
+        if (ph > Real(0))
+          lo = mid;
+        else
+          hi = mid;
+      }
+      const Real t = Real(0.5) * (lo + hi);
+      if (t <= Real(0))
+        break;
+      c.clip(d, t, kBoundaryFacet);
+      if (c.empty())
+        break;
+      continue;
+    }
     c.clip(pv, off, kBoundaryFacet);
     seedPlaneApplied = true;
     if (c.empty())

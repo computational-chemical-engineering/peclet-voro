@@ -150,6 +150,17 @@ s.step(num_steps=10, dt=1e-3)        # velocity-Verlet dynamics
 pos  = s.get_positions()             # (N,3)
 vol  = s.get_volumes()               # per-cell Voronoi volume (N,)
 ke   = s.get_kinetic_energy()
+
+# SDF solids + power weights on the moving-point path (Voronoi methods plan, rung A0)
+scene = peclet.core.geom.SceneBuilder()
+root = scene.add_leaf("sphere", [0.25], translation=(0.5, 0.5, 0.5))
+node_ints, node_reals, _, _ = scene.encode()
+t.set_geometry(node_ints, node_reals, root=root)   # any analytic core scene (CSG, transforms, ...)
+t.set_weights(w)                     # (N,) power (Laguerre) weights — optional
+t.build(pos)                         # cells clipped by the solid; in-solid seeds get volume 0
+stats = t.step(pos_moved)            # wall planes are resident; stats['wall_flagged'] = re-clips
+walls = t.wall_counts()              # (N,) wall planes per cell
+s.set_geometry(node_ints, node_reals)  # the same walls for the fluid (pressure acts on them)
 ```
 
 Array shapes follow the suite convention (`../docs/CONVENTIONS.md` §6): positions/velocities

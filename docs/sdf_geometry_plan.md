@@ -1,6 +1,19 @@
 # Plan — SDF-defined geometry for the tessellation (device + suite SDF)
 
-> **Status:** the device clip now lives in `include/peclet/voro/sdf.hpp` and operates on the
+> **Status (2026-09-03, Voronoi methods plan rung A0):** the SDF now runs on the MOVING-POINT
+> path too — `MovingTessellation<…, Sdf>` / `DistributedMovingTessellation<…, Sdf>` clip every
+> gather, persist the wall planes per cell (`WallStore` in `sdf.hpp`) and add a boundary watch to
+> the certificate (`repair.hpp` header comment); Python `Tessellation.set_geometry` /
+> `set_weights` / `Simulation.set_geometry` take any analytic core scene in the flat node
+> encoding. Gates: `tests/kokkos/test_sdf_dynamic` (repair == cold SDF build to the wall-free
+> repair's own accuracy, host + CUDA) and `tests/kokkos_mpi` `repair_sdf_mpi_np{1,2,4}`
+> (distributed cold SDF == single-rank cold SDF to 1e-9). The clip itself gained the CHORD-PLANE
+> fallback: a vertex-foot tangent plane that would exclude the seed (offset ≤ 0, common on curved
+> walls) used to be committed on the wrong side, re-found up to 24 times and overflow the cell into
+> a silent zero-volume "dead cell" — the collapse seen in pore meshing. Curved-wall FIDELITY
+> (the tangent-plane recession, ~0.65 % of a sphere's fluid volume at 12k seeds) is rung A1.
+>
+> Earlier status: the device clip lives in `include/peclet/voro/sdf.hpp` and operates on the
 > **ConvexCell** tessellator (`clipCellAgainstSdf(ConvexCell&, …)`). Device providers
 > `SdfSphere`/`SdfBox`/`SdfHollowCylinder` (analytic) and `SdfGrid` (VTI / sampled) port the
 > legacy `SignedDistanceBoundary` build. Originally validated to machine precision against the

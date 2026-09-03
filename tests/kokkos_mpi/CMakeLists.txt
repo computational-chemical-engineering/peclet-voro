@@ -52,6 +52,9 @@ foreach(np 1 2 4)
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:bench_voronoi_mpi> 20000 1)
   add_test(NAME repair_mpi_np${np}
            COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:bench_repair_mpi> 20000 4)
-  set_tests_properties(voronoi_mpi_np${np} repair_mpi_np${np} PROPERTIES
+  # Rung A0: the same through a replicated SDF scene — repair == distributed cold == single-rank cold.
+  add_test(NAME repair_sdf_mpi_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} $<TARGET_FILE:bench_repair_mpi> 20000 4 --sdf)
+  set_tests_properties(voronoi_mpi_np${np} repair_mpi_np${np} repair_sdf_mpi_np${np} PROPERTIES
     ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false" PROCESSORS ${np})
 endforeach()

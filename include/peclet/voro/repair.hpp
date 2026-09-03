@@ -21,8 +21,21 @@
  *
  * For separated events this is exact in two passes; the verify + bounded extra passes + rebuild
  * fallback make it exact in general. No adaptive per-backend gate, no single-face repair, no
- * ConnectivityArena, no SDF boundary trigger, no BVH (those are later phases). One Kokkos path for
- * CUDA/HIP/OpenMP/Serial. Voronoi only (Power deferred — see the static_asserts downstream).
+ * ConnectivityArena, no BVH (those are later phases). One Kokkos path for CUDA/HIP/OpenMP/Serial.
+ * Power via the `Weighted` flag.
+ *
+ * SDF solids (rung A0 of the Voronoi methods plan, `Sdf` template parameter): the cold build and
+ * every gather clip against the provider exactly as buildTessellation does, and the wall planes are
+ * PERSISTED per cell (WallStore, `wall`) so a re-eval restores them for the seed's displacement.
+ * The certify pass adds a BOUNDARY WATCH for what the seed-seed certificate cannot see (a wall has
+ * no partner cell): (a) a cell carrying wall planes is flagged for re-gather whenever it moved at
+ * all (`wallExact`, default — its tangent planes are anchored to vertices that moved, so only a
+ * fresh clip reproduces the cold build) or, in the skin mode (`wallExact=false`), when it moved
+ * more than `wallSkin` or a vertex entered the solid; (b) a wall-free cell is flagged when the cold
+ * build's clip would commit a plane on it (sdfWouldClip — the exact cold-build decision); (c) an
+ * empty cell (seed in the solid) is flagged when its seed re-enters the fluid; (d) a seed that
+ * crossed one of its own stored wall planes is flagged. Everything else is unchanged, so the
+ * NoSdf instantiation is byte-identical to before.
  *
  * Single-domain: the stored `pnbr` are local indices (== global), stable across steps. The
  * distributed (MPI) driver keeps its store keyed by global id and remaps around this primitive each
@@ -54,17 +67,19 @@ struct RepairStats {
   int extra = 0;     ///< cells gathered across the verify extra-passes
   int surgical = 0;  ///< Pass-1 cells repaired surgically (Phase 4, no grid gather)
   int verifyPasses = 0;  ///< number of verify iterations run
+  int wallFlagged = 0;   ///< cells flagged by the SDF boundary watch (0 without an SDF)
   Route route = kTwoPass;
   bool fellBack = false;  ///< true if the cold-build fallback was triggered (repair did not close)
 };
 
 /// Resident moving-point tessellation with two-pass gather repair. MAXP/MAXT must match
 /// CellBuilder::kMaxP / kMaxT (64 / 112).
-template <class Real, int MAXP = 64, int MAXT = 112, bool Weighted = false>
+template <class Real, int MAXP = 64, int MAXT = 112, bool Weighted = false, class Sdf = NoSdf>
 struct MovingTessellation {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using PlanePolicy = std::conditional_t<Weighted, Power, Voronoi>;  // radical vs bisector planes
+  static constexpr bool kHasSdf = !std::is_same_v<Sdf, NoSdf>;
   // The certificate/load/re-eval path reads the resident `poke4` plane set by pointer and never
   // touches the edge adjacency, so it uses a LEAN cell with NO `adj` member (TrackAdj=false) —
   // ~MAXT*3*4 bytes smaller per thread, which lifts occupancy on the full-N certify (the GPU
@@ -139,6 +154,13 @@ struct MovingTessellation {
 
   /// Set the per-seed power weights (Weighted only). Held by reference; the caller keeps it alive.
   void setWeights(const Kokkos::View<Real*, Mem>& w) { weight = w; }
+
+  // ---- SDF solid (rung A0) ----
+  Sdf sdf;                ///< the geometry provider (replicated on every rank under MPI)
+  WallStore<Real> wall;   ///< persisted wall planes (allocated by alloc() when kHasSdf)
+  bool wallExact = true;  ///< re-gather every wall-clipped cell that moved (== cold build)
+  Real wallSkin = 0;      ///< skin mode (wallExact=false): re-gather a wall cell only past this
+  Kokkos::View<int, Mem> wallCounter;
   // scratch
   Kokkos::View<int*, Mem> mask, mask2, mover, rebuilt, wl1, wl2, wlM;
   Kokkos::View<int*, Mem> cellFlag;            // per linear grid-cell flagged-seed count (dilation)
@@ -185,6 +207,25 @@ struct MovingTessellation {
     // verify-clean) per backend.
     constexpr bool host = Kokkos::SpaceAccessibility<Kokkos::HostSpace, Mem>::accessible;
     churnThresh = host ? 0.70 : 0.50;
+    if constexpr (kHasSdf) {
+      wall.alloc(n);
+      wallCounter = Kokkos::View<int, Mem>("mt.wallCounter");
+      surgical = false;  // the surgical re-clip knows nothing of walls; the gather does
+    }
+  }
+
+  /// Min-imaged displacement of seed i from its Verlet/wall reference (the position at its last
+  /// (re)build). The wall planes are restored relative to this.
+  KOKKOS_INLINE_FUNCTION static void dispFromRef(const Kokkos::View<Real*, Mem>& P,
+                                                 const Kokkos::View<Real*, Mem>& XR, int i, Real Lx,
+                                                 Real Ly, Real Lz, Real& dx, Real& dy, Real& dz) {
+    dx = P(3 * i) - XR(3 * i);
+    dy = P(3 * i + 1) - XR(3 * i + 1);
+    dz = P(3 * i + 2) - XR(3 * i + 2);
+    const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
+    dx = dx > Lxh ? dx - Lx : (dx < -Lxh ? dx + Lx : dx);
+    dy = dy > Lyh ? dy - Ly : (dy < -Lyh ? dy + Ly : dy);
+    dz = dz > Lzh ? dz - Lz : (dz < -Lzh ? dz + Lz : dz);
   }
 
   /// Full cold (re)build: the production tessellator emitting the resident topology + volume, then
@@ -199,9 +240,10 @@ struct MovingTessellation {
     Kokkos::View<long*, Mem> gd;
     const int nBuild =
         (nProc == N) ? -1 : nProc;  // build only the owned cells; ghosts are candidates
-    auto res = buildTessellation<Real, Weighted>(pos, weight, N, L, sw, densityCount, gd, NoSdf{},
-                                                 /*withForceGeom=*/false, nBuild, store.np, store.nt,
-                                                 store.pnbr, store.tri);
+    auto res = buildTessellation<Real, Weighted, Sdf>(
+        pos, weight, N, L, sw, densityCount, gd, sdf, /*withForceGeom=*/false, nBuild, store.np,
+        store.nt, store.pnbr, store.tri, /*outCand=*/{}, /*outCandCnt=*/{}, /*candCap=*/0,
+        /*wlc=*/nullptr, wall);
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(xRef, pos);
     adjFresh = false;  // the cold build does not emit adjacency
@@ -264,10 +306,26 @@ struct MovingTessellation {
     const bool skinOn = useSkin;
     const int nP_ = nProc;
     auto Wt = weight;  // power weights (empty for Voronoi; captured for reevalGeometry<PlanePolicy>)
+    // SDF boundary watch captures (force-captured outside the constexpr-if, nvcc rule)
+    WallStore<Real> Wl = wall;
+    Sdf Sd = sdf;
+    auto WC = wallCounter;
+    const bool wallExactL = wallExact;
+    const Real wallSkin2 = wallSkin * wallSkin;
+    if constexpr (kHasSdf)
+      Kokkos::deep_copy(wallCounter, 0);
     Kokkos::parallel_for(
         "mt.certify", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
           CertCell c;
           st.load(i, c, Lx, Ly, Lz);
+          Real dx, dy, dz;
+          dispFromRef(P, XR, i, Lx, Ly, Lz, dx, dy, dz);
+          const bool wallOk = Wl.load(i, c, dx, dy, dz);  // no-op (true) without a wall store
+          // force-capture everything the constexpr boundary watch reads OUTSIDE it (nvcc rule)
+          const Sdf SdC = Sd;
+          int* wcPtr = WC.data();
+          const bool wallExactC = wallExactL;
+          const Real wallSkin2C = wallSkin2;
           const Real* wPtr = Wt.data();  // force-capture Wt OUTSIDE the constexpr-if (nvcc rule)
           Real wSelfI = Real(0);
           if constexpr (Weighted) wSelfI = Wt(i);
@@ -290,16 +348,34 @@ struct MovingTessellation {
           }
           bool mover = false;
           if (skinOn) {
-            Real dx = P(3 * i) - XR(3 * i), dy = P(3 * i + 1) - XR(3 * i + 1),
-                 dz = P(3 * i + 2) - XR(3 * i + 2);
-            dx = dx > Lxh ? dx - Lx : (dx < -Lxh ? dx + Lx : dx);
-            dy = dy > Lyh ? dy - Ly : (dy < -Lyh ? dy + Ly : dy);
-            dz = dz > Lzh ? dz - Lz : (dz < -Lzh ? dz + Lz : dz);
             mover = (dx * dx + dy * dy + dz * dz) > half2;
             if (mover)
               Mv(i) = 1;
           }
-          if (!ok || mover)
+          // ---- SDF boundary watch (rung A0): what the seed-seed certificate cannot see ----
+          bool wflag = false;
+          if constexpr (kHasSdf) {
+            const Real seed[3] = {P(3 * i), P(3 * i + 1), P(3 * i + 2)};
+            if (!wallOk) {
+              wflag = true;  // crossed one of its own wall planes
+            } else if (Wl.cnt(i) > 0) {
+              if (wallExactC || (dx * dx + dy * dy + dz * dz) > wallSkin2C) {
+                wflag = true;  // a moved wall cell: only a fresh clip reproduces the cold build
+              } else {         // skin mode: keep the planes unless a vertex entered the solid
+                for (int t = 0; t < c.nt && !wflag; ++t)
+                  if (c.alive[t] && SdC.eval(seed[0] + c.vx[t], seed[1] + c.vy[t],
+                                             seed[2] + c.vz[t]) < Real(-1e-8))
+                    wflag = true;
+              }
+            } else if (c.nt == 0) {
+              wflag = SdC.eval(seed[0], seed[1], seed[2]) > Real(0);  // seed back in the fluid
+            } else {
+              wflag = sdfWouldClip(c, seed, SdC);  // the cold build would cut this cell
+            }
+            if (wflag)
+              Kokkos::atomic_inc(wcPtr);
+          }
+          if (!ok || mover || wflag)
             M(i) = 1;
           // only mark partners we MAINTAIN (owned); a ghost partner is the owning rank's
           // responsibility.
@@ -350,11 +426,18 @@ struct MovingTessellation {
     const Real tolL = tol;
     const int nP_ = nProc;
     auto Wt = weight;
+    WallStore<Real> Wl = wall;
+    auto XR = xRef;
     Kokkos::parallel_for(
         "mt.certifyList", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(int s) {
           const int i = list(s);
           CertCell c;
           st.load(i, c, Lx, Ly, Lz);
+          {
+            Real dx, dy, dz;
+            dispFromRef(P, XR, i, Lx, Ly, Lz, dx, dy, dz);
+            Wl.load(i, c, dx, dy, dz);  // no-op without a wall store
+          }
           const Real* wPtr = Wt.data();  // force-capture Wt OUTSIDE the constexpr-if (nvcc rule)
           Real wSelfI = Real(0);
           if constexpr (Weighted) wSelfI = Wt(i);
@@ -394,11 +477,18 @@ struct MovingTessellation {
     auto Pk4 = store.poke4;
     const Real Lx = L[0], Ly = L[1], Lz = L[2];
     auto Wt = weight;
+    WallStore<Real> Wl = wall;
+    auto XR = xRef;
     Kokkos::parallel_for(
         "mt.rebuildAdjAll", Kokkos::RangePolicy<Exec>(0, nProc), KOKKOS_LAMBDA(int i) {
           BuildCell c;
           st.load(i, c, Lx, Ly,
                   Lz);  // load brings topology; adj is rebuilt to derive the cert planes
+          {
+            Real dx, dy, dz;
+            dispFromRef(P, XR, i, Lx, Ly, Lz, dx, dy, dz);
+            Wl.load(i, c, dx, dy, dz);  // no-op without a wall store
+          }
           const Real* wPtr = Wt.data();  // force-capture Wt OUTSIDE the constexpr-if (nvcc rule)
           Real wSelfI = Real(0);
           if constexpr (Weighted) wSelfI = Wt(i);
@@ -433,8 +523,8 @@ struct MovingTessellation {
     // TrackAdj gather: clip stitches the edge adjacency incrementally; the builder derives the cert
     // plane set from it (computePoke4, no findSharing) into store.poke4, so the local cert stays
     // valid for the gathered cells with no separate maintenance pass.
-    subsetGather<Real, Weighted, true>(grid, wl, n, store.np, store.nt, store.pnbr, store.tri, vol,
-                                       store.poke4, NoSdf{}, /*withForceGeom=*/false);
+    subsetGather<Real, Weighted, true, Sdf>(grid, wl, n, store.np, store.nt, store.pnbr, store.tri,
+                                            vol, store.poke4, sdf, /*withForceGeom=*/false, wall);
     auto W = wl;
     auto rb = rebuilt;
     auto P = pos;
@@ -640,6 +730,8 @@ struct MovingTessellation {
     certifyDispatch(pos, mask, mover, /*useSkin=*/true);
     int n1 = compact(mask, wl1);
     s.pass1Raw = n1;
+    if constexpr (kHasSdf)
+      Kokkos::deep_copy(s.wallFlagged, wallCounter);
 
     // Small-displacement fast path: the certificate found every cell consistent and no skin-mover
     // (n1 counts flagged ∪ partners ∪ movers). By the §1 completeness argument a stale topology
@@ -673,7 +765,7 @@ struct MovingTessellation {
     // known candidates, no grid gather); far-mover insertions keep the full gather (their new
     // neighbours are in no candidate list). Default (surgical off): the whole Pass-1 set goes
     // through the full gather.
-    if (surgical) {
+    if (surgical && !kHasSdf) {
       auto Msk = mask;
       auto Mv = mover;
       auto M2 = mask2;

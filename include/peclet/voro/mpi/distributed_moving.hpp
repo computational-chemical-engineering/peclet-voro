@@ -31,7 +31,10 @@
 
 namespace peclet::voro::mpi {
 
-template <class Real, int MAXP = 64, int MAXT = 112>
+/// `Sdf` (rung A0): an SDF solid provider, replicated on every rank (set it with setSdf() before
+/// establish()); the owned cells are clipped and boundary-watched exactly as in the single-domain
+/// MovingTessellation. Default NoSdf leaves the driver unchanged.
+template <class Real, int MAXP = 64, int MAXT = 112, class Sdf = NoSdf>
 struct DistributedMovingTessellation {
   using Vec3 = std::array<Real, 3>;
   using Mem = typename Kokkos::DefaultExecutionSpace::memory_space;
@@ -57,6 +60,14 @@ struct DistributedMovingTessellation {
   }
 
   int ownerOf(const Vec3& x) const { return halo_.ownerOf(x); }
+
+  /// Replicated SDF geometry (every rank holds the same provider). Call before establish().
+  void setSdf(const Sdf& s) { sdf_ = s; }
+  /// Wall re-gather policy forwarded to the local tessellation (see MovingTessellation::wallExact).
+  void setWallMode(bool exact, Real skin = Real(0)) {
+    wallExact_ = exact;
+    wallSkin_ = skin;
+  }
 
   /// Establish the tessellation from this rank's owned seeds (collective). Call once after init
   /// and whenever ownership changes externally (e.g. after a rebalance/migration).
@@ -89,7 +100,8 @@ struct DistributedMovingTessellation {
   int nCombined() const { return nComb_; }
   int nOwned() const { return nOwned_; }
   /// The device tessellation (cells [0, nOwned) are this rank's owned cells).
-  MovingTessellation<Real, MAXP, MAXT>& tess() { return mt_; }
+  MovingTessellation<Real, MAXP, MAXT, false, Sdf>& tess() { return mt_; }
+  const Sdf& sdf() const { return sdf_; }
   const Kokkos::View<Real*, Mem>& positions() const { return dPos_; }
   /// Global ids of the combined (owned+ghost) seeds after the last (re)gather.
   const std::vector<long>& combinedGid() const { return combGid_; }
@@ -102,6 +114,9 @@ struct DistributedMovingTessellation {
     nOwned_ = g.nOwned;
     combGid_ = g.gid;
     upload(g.pos);
+    mt_.sdf = sdf_;
+    mt_.wallExact = wallExact_;
+    mt_.wallSkin = wallSkin_;
     mt_.alloc(nComb_, L_, tol_, skin_, sw_, density_, nOwned_);
     mt_.rebuild(dPos_);
     refPos_ = ownedPos;
@@ -144,7 +159,10 @@ struct DistributedMovingTessellation {
   }
 
   VoronoiHalo<Real> halo_;
-  MovingTessellation<Real, MAXP, MAXT> mt_;
+  MovingTessellation<Real, MAXP, MAXT, false, Sdf> mt_;
+  Sdf sdf_{};
+  bool wallExact_ = true;
+  Real wallSkin_ = 0;
   Kokkos::View<Real*, Mem> dPos_;
   std::vector<Vec3> refPos_;   // owned positions at the last (re)gather (Verlet reference)
   std::vector<long> gid_, combGid_;

@@ -486,6 +486,53 @@ struct ConvexCell {
     return consistent;
   }
 
+  /// Drop every plane (k >= 6) that no LIVE triangle references and renumber the survivors in
+  /// place, freeing plane slots. The clip commits every candidate that cut at the time, so a
+  /// finished Voronoi cell typically holds 2-3x more committed planes than faces; an SDF wall clip
+  /// that then adds up to kMaxWallPlanes tangent planes can run the cell into the MAXP cap (an
+  /// overflow the cold build reported as a silent zero-volume cell). Geometry and topology are
+  /// unchanged (only indices move); `adj` holds triangle indices so it is untouched; dead triangles
+  /// keep stale plane indices (never read). Returns the number of planes removed.
+  KOKKOS_INLINE_FUNCTION int compactPlanes() {
+    unsigned char used[MAXP];
+    for (int k = 0; k < np; ++k)
+      used[k] = (k < 6) ? 1 : 0;
+    for (int t = 0; t < nt; ++t)
+      if (alive[t]) {
+        used[t0[t]] = 1;
+        used[t1[t]] = 1;
+        used[t2[t]] = 1;
+      }
+    unsigned char map[MAXP];
+    int m = 0;
+    for (int k = 0; k < np; ++k) {
+      if (!used[k]) {
+        map[k] = 0;
+        continue;
+      }
+      map[k] = (unsigned char)m;
+      if (m != k) {
+        n[m][0] = n[k][0];
+        n[m][1] = n[k][1];
+        n[m][2] = n[k][2];
+        nn[m] = nn[k];
+        pnbr[m] = pnbr[k];
+      }
+      ++m;
+    }
+    const int removed = np - m;
+    if (removed > 0) {
+      for (int t = 0; t < nt; ++t)
+        if (alive[t]) {
+          t0[t] = map[t0[t]];
+          t1[t] = map[t1[t]];
+          t2[t] = map[t2[t]];
+        }
+      np = m;
+    }
+    return removed;
+  }
+
   /// Largest squared dual-vertex radius over live triangles (drives the security radius).
   KOKKOS_INLINE_FUNCTION Real maxVertexRsq() const {
     Real m = 0;

@@ -61,7 +61,7 @@ SubsetGatherResult<Real> subsetGather(
     const Kokkos::View<unsigned*, peclet::core::MemSpace>& outTri,
     const Kokkos::View<Real*, peclet::core::MemSpace>& cellVol,
     const Kokkos::View<unsigned char*, peclet::core::MemSpace>& outPoke4 = {}, Sdf sdf = {},
-    bool withForceGeom = false) {
+    bool withForceGeom = false, WallStore<Real> outWall = {}) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Builder = CellBuilder<Real, Weighted, Sdf, TrackAdj>;
@@ -91,8 +91,9 @@ SubsetGatherResult<Real> subsetGather(
   // scratch.
   Kokkos::View<int*, MemSpace> facetCount("subset.facetCount", N);
   Kokkos::View<int*, MemSpace> cellFacetBase("subset.cellFacetBase", N);
-  constexpr size_t kMeanFacets = 18;
-  const size_t facetCap = (size_t)(nSubset > 0 ? nSubset : 1) * kMeanFacets;
+  // Worst case per cell (MAXF_TMP): a subset of wall-clipped cells carries far more faces than the
+  // Poisson mean, and the buffer is only scratch.
+  const size_t facetCap = (size_t)(nSubset > 0 ? nSubset : 1) * (size_t)Builder::MAXF_TMP;
   Kokkos::View<int*, MemSpace> oNbr(view_alloc(std::string("subset.oNbr"), WithoutInitializing),
                                     facetCap);
   Kokkos::View<Real*, MemSpace> oArea(view_alloc(std::string("subset.oArea"), WithoutInitializing),
@@ -150,7 +151,8 @@ SubsetGatherResult<Real> subsetGather(
              noCandCnt,
              /*emitTopo=*/true,
              /*emitCand=*/false,
-             /*candCap=*/0};
+             /*candCap=*/0,
+             outWall};
 
   auto slotOf = grid.slotOf;
   auto idx = indices;

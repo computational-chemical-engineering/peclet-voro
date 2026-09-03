@@ -126,6 +126,10 @@ struct CellBuilder {
   Kokkos::View<int*, MemSpace> oCand, oCandCnt;
   bool emitTopo, emitCand;
   int candCap;
+  // Optional (rung A0): the resident SDF WALL planes of each finalised cell, persisted alongside
+  // the topology so the moving-point path can re-evaluate a wall-clipped cell (a wall plane has no
+  // partner seed to rebuild it from). No-op when the store is unallocated.
+  WallStore<Real> oWall;
 
   /// Minimal-image relative vector from the seed at (pix,piy,piz) to sorted seed q.
   KOKKOS_INLINE_FUNCTION void relVec(int q, Real pix, Real piy, Real piz, Real pv[3]) const {
@@ -174,6 +178,16 @@ struct CellBuilder {
     return gridCell(rgx, rgy, rgz);
   }
 
+  /// Persist an EMPTY cell (seed in the solid / buried power cell) into the topology store: the six
+  /// box planes and no triangles, so a later re-eval yields volume 0, a clean certificate and no
+  /// faces — instead of the stale pre-emptying topology the store would otherwise keep.
+  KOKKOS_INLINE_FUNCTION void emitEmptyTopo(int i) const {
+    oNp(i) = 6;
+    oNt(i) = 0;
+    if (oWall.active())
+      oWall.cnt(i) = 0;
+  }
+
   /// Finish a built cell: completeness flag (judged on the un-clipped cell), optional SDF
   /// boundary clip, status/volume, and the per-facet CSR write (one atomic reservation into
   /// the over-buffer). covSq is the attained coverage^2; covSq > 4*rSqMax => complete.
@@ -184,6 +198,8 @@ struct CellBuilder {
       facetCount(i) = 0;
       cellFacetBase(i) = 0;
       cellVol(i) = Real(0);
+      if (emitTopo)
+        emitEmptyTopo(i);  // an overflowed cell reads as empty, never as its stale predecessor
       return;
     }
     // Complete iff the gathered coverage inscribes past the reachability radius. Voronoi:
@@ -219,6 +235,9 @@ struct CellBuilder {
       if constexpr (TrackAdj)  // derive the local-cert plane set from the clip-maintained adj (no
                                // findSharing)
         c.computePoke4(&oPoke4[(size_t)i * kMaxT * 4]);
+      oWall.save(i, c);  // wall planes (no-op unless the store is allocated)
+    } else if (emitTopo && empty) {
+      emitEmptyTopo(i);
     }
 
     // Collect this cell's live faces (a plane with >=3 incident live triangles), then reserve
@@ -344,6 +363,8 @@ struct CellBuilder {
         facetCount(i) = 0;
         cellFacetBase(i) = 0;
         cellVol(i) = Real(0);
+        if (emitTopo)
+          emitEmptyTopo(i);
         return;
       }
     }
@@ -389,7 +410,7 @@ TessellatorResult<Real> buildTessellation(
     Kokkos::View<unsigned*, peclet::core::MemSpace> outTri = {},
     Kokkos::View<int*, peclet::core::MemSpace> outCand = {},
     Kokkos::View<int*, peclet::core::MemSpace> outCandCnt = {}, int candCap = 0,
-    WorklistCache<Real>* wlc = nullptr) {
+    WorklistCache<Real>* wlc = nullptr, WallStore<Real> outWall = {}) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin
@@ -522,7 +543,8 @@ TessellatorResult<Real> buildTessellation(
                                       outCandCnt,
                                       emitTopo,
                                       emitCand,
-                                      candCap};
+                                      candCap,
+                                      outWall};
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
   Kokkos::parallel_for(

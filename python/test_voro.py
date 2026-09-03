@@ -74,8 +74,112 @@ def test_simulation():
           f"IE={s.get_internal_energy():.3e}")
 
 
+def sphere_scene(centre, radius):
+    """Flat node encoding (3 int32 + 16 float64 per node) of one solid sphere — what
+    peclet.core.geom.Scene.encode() would return for scene.add_sphere(radius, translation=centre)."""
+    kSphere = 1
+    node_ints = np.array([kSphere, -1, -1], dtype=np.int32)
+    node_reals = np.zeros(16, dtype=np.float64)
+    node_reals[0] = radius                       # params[0]
+    node_reals[8:11] = centre                    # translation
+    node_reals[11:15] = (0.0, 0.0, 0.0, 1.0)     # rotation quaternion (identity)
+    node_reals[15] = 1.0                         # scale
+    return node_ints, node_reals
+
+
+def test_geometry():
+    """Rung A0: an SDF solid on the Tessellation, carried through cold build + incremental steps."""
+    rng = np.random.default_rng(2)
+    N, L, R = 12_000, 1.0, 0.25
+    pos = rng.random((N, 3)) * L
+    ni, nr = sphere_scene((0.5, 0.5, 0.5), R)
+
+    t = voro.Tessellation()
+    t.set_box((L, L, L))
+    t.set_geometry(ni, nr, root=0)
+    t.build(pos)
+    vol = t.volumes()
+    fluid = L**3 - 4.0 / 3.0 * np.pi * R**3
+    inside = np.linalg.norm(pos - 0.5, axis=1) < R
+    assert (vol[inside] == 0).all(), "seeds inside the solid must have no cell"
+    # the fluid volume is tiled up to the tangent-plane clip's recession from the curved wall
+    # (measured 0.65% here; rung A1 of the Voronoi methods plan tightens this to second order)
+    err0 = abs(vol.sum() / fluid - 1.0)
+    assert err0 < 2e-2, err0
+    wc = t.wall_counts()
+    assert wc.shape == (N,) and wc.dtype == np.int32 and (wc > 0).sum() > 0
+    assert (wc[inside] == 0).all()
+    # move + repair: the boundary watch must fire and the fluid volume stay tiled
+    flagged = 0
+    for _ in range(20):
+        pos = (pos + 2e-5 * rng.standard_normal((N, 3))) % L
+        st = t.step(pos)
+        flagged += st["wall_flagged"]
+        assert not st["fell_back"]
+    assert flagged > 0
+    vol = t.volumes()
+    inside = np.linalg.norm(pos - 0.5, axis=1) < R
+    assert (vol[inside] == 0).all()
+    err1 = abs(vol.sum() / fluid - 1.0)
+    assert err1 < 2e-2, err1
+    # the same geometry on the Simulation (walls push back through the EOS pressure)
+    s = voro.Simulation()
+    s.set_box((L, L, L))
+    keep = ~inside
+    s.set_positions(np.ascontiguousarray(pos[keep]))
+    s.set_velocities(np.zeros((keep.sum(), 3)))
+    s.set_masses(np.ones(keep.sum()))
+    s.set_pressure(1.0)
+    s.set_geometry(ni, nr)
+    s.init()
+    s.step(3, 1e-4)
+    assert np.isfinite(s.get_kinetic_energy())
+    p1 = s.get_positions()
+    assert (np.linalg.norm(p1 - 0.5, axis=1) > R * 0.9).all(), "fluid seeds pushed into the solid"
+    print(f"  Geometry:     N={N}  fluid_vol_err build={err0:.1e} after steps={err1:.1e}  "
+          f"wall_cells={(wc > 0).sum()}  wall_flagged/step={flagged / 20:.0f}")
+
+
+def test_weights():
+    """Rung A0: power weights on the Tessellation — equal weights reproduce Voronoi exactly."""
+    rng = np.random.default_rng(3)
+    N, L = 8_000, 1.0
+    pos = rng.random((N, 3)) * L
+    t0 = voro.Tessellation()
+    t0.set_box((L, L, L))
+    t0.build(pos)
+    v0 = t0.volumes()
+    t1 = voro.Tessellation()
+    t1.set_box((L, L, L))
+    t1.set_weights(np.zeros(N))          # w == 0: the radical planes ARE the bisectors; the
+    t1.build(pos)                        # weight-aware gather visits candidates in another
+    v1 = t1.volumes()                    # order, so equality is to round-off, not bit-for-bit
+    assert np.allclose(v1, v0, rtol=1e-12, atol=0), np.abs(v1 / v0 - 1).max()
+    t1.set_weights(np.full(N, 1e-3))     # equal nonzero weights: the same cells
+    t1.build(pos)
+    assert np.allclose(t1.volumes(), v0, rtol=1e-10, atol=0)
+    spacing = (L**3 / N) ** (1.0 / 3.0)
+    w = rng.random(N) * (0.05 * spacing) ** 2   # small-weight regime
+    t1.set_weights(w)
+    t1.build(pos)
+    v2 = t1.volumes()
+    # the periodic min-image power diagram is not an exact partition at nonzero weight spread
+    # (documented ~1e-2 floor; rung A2 of the Voronoi methods plan makes it exact)
+    err = abs(v2.sum() / L**3 - 1.0)
+    assert err < 1e-2 and (v2 >= 0).all(), err
+    assert not np.array_equal(v0, v2)
+    for _ in range(5):
+        pos = (pos + 2e-5 * rng.standard_normal((N, 3))) % L
+        st = t1.step(pos)
+        assert not st["fell_back"]
+    assert abs(t1.volumes().sum() / L**3 - 1.0) < 1e-2
+    print(f"  Weights:      N={N}  power volumes sum err={err:.1e} (periodic min-image floor)")
+
+
 if __name__ == "__main__":
     print(f"peclet.voro execution_space = {voro.execution_space}")
     test_tessellation()
     test_simulation()
+    test_geometry()
+    test_weights()
     print("peclet.voro python smoke test: PASS")

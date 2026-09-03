@@ -21,6 +21,11 @@ add_vorflow_kokkos_test(test_kokkos_smoke)
 # Also pins that a legacy provider and the same shape as a scene node agree bit-for-bit.
 add_vorflow_kokkos_test(test_sdf_scene)
 
+# Rung A0 (Voronoi methods plan): SDF solids on the MOVING-POINT path — persisted wall planes +
+# the boundary watch; repair vs cold SDF build through a sphere ∪ torus scene, cells entering /
+# leaving the solid, exact wall mode gated at 1e-9, skin mode reported.
+add_vorflow_kokkos_test(test_sdf_dynamic)
+
 # Oracle-free acceptance for the device tessellation: geometric invariants (space-filling, positive
 # volumes, completeness, facet-area reciprocity A_ij = -A_ji, area closure, topology reciprocity) over
 # several sizes/seeds. Replaces the retired half-edge-oracle comparison tests (tessellator,
