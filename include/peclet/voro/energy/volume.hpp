@@ -56,11 +56,12 @@ void volumeGradientForce(const TessellationView<Real>& view,
         const int b = view.facetBegin(i), nf = view.facetEnd(i) - b;
         if (nf > detail::kMaxLocalFacets)
           return;
+        const bool fd = view.hasWallFD();  // exact wall part (sdfWallFD) instead of the chain
         for (int k = 0; k < nf; ++k) {
           const int f = b + k;
           if (view.facetNbr(f) == kBoundaryFacet) {
             for (int c = 0; c < 3; ++c)
-              gl[3 * k + c] = de * view.area(f, c);
+              gl[3 * k + c] = fd ? Real(0) : de * view.area(f, c);
           } else {
             for (int c = 0; c < 3; ++c)
               gl[3 * k + c] = Real(2) * de * view.connect(f, c);
@@ -68,6 +69,9 @@ void volumeGradientForce(const TessellationView<Real>& view,
         }
         detail::routeCellGradient<Real, Policy>(view, i, gl, nf, pos, weight, L, sdf, force,
                                                 forceW);
+        if (fd)
+          for (int c = 0; c < 3; ++c)
+            Kokkos::atomic_add(&force(3 * i + c), de * view.wallDV(i, c));
       });
 }
 

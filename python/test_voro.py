@@ -173,7 +173,25 @@ def test_weights():
         st = t1.step(pos)
         assert not st["fell_back"]
     assert abs(t1.volumes().sum() / L**3 - 1.0) < 1e-2
-    print(f"  Weights:      N={N}  power volumes sum err={err:.1e} (periodic min-image floor)")
+    # A2a diagnostics: large-spread weights on overlapping (random) balls bury cells — reported,
+    # warned, and raised under strict=True; the small weights above bury none.
+    rep = t1.build_report()
+    import warnings
+    wbig = (rng.random(N) * 2.0 * spacing) ** 2
+    t1.set_weights(wbig)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        t1.build(pos)
+        assert any("buried" in str(x.message) for x in w)
+    big = t1.build_report()
+    assert big["buried"] > 0
+    try:
+        t1.build(pos, strict=True)
+        raise AssertionError("strict build must raise on buried cells")
+    except RuntimeError:
+        pass
+    print(f"  Weights:      N={N}  power volumes sum err={err:.1e} (periodic min-image floor); "
+          f"small-w report {rep}; large-w buried={big['buried']}")
 
 
 def test_energy_forces():

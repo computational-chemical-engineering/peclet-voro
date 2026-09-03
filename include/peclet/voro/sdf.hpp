@@ -729,6 +729,42 @@ KOKKOS_INLINE_FUNCTION bool clipCellAgainstSdf(ConvexCell<Real, MAXP, MAXT, Trac
   return false;
 }
 
+/**
+ * Rung A1 (force half) — the wall part of a cell's geometry gradient, exact for WHATEVER the clip
+ * does (tangent planes, chord planes, the sagitta re-clip): central differences of the clipped
+ * cell's volume and wall area with respect to the seed position, with the neighbour planes held
+ * fixed in the seed frame (the chain-rule split the energy layer uses: neighbour planes go
+ * through the plane policy, wall planes through this). `unclipped` is the cell BEFORE the SDF
+ * clip; six SDF clips of a copy at seed ± h e_d. Writes dV/dx and dA_wall/dx (3 each).
+ */
+template <class Real, int MAXP, int MAXT, bool TrackAdj, class Sdf>
+KOKKOS_INLINE_FUNCTION void sdfWallFD(const ConvexCell<Real, MAXP, MAXT, TrackAdj>& unclipped,
+                                      const Real seed[3], const Sdf& sdf, Real h, Real dV[3],
+                                      Real dA[3]) {
+  for (int d = 0; d < 3; ++d) {
+    Real vpm[2], apm[2];
+    for (int s = 0; s < 2; ++s) {
+      ConvexCell<Real, MAXP, MAXT, TrackAdj> c = unclipped;
+      Real sd[3] = {seed[0], seed[1], seed[2]};
+      sd[d] += (s == 0 ? h : -h);
+      clipCellAgainstSdf<Real, MAXP, MAXT, TrackAdj>(c, sd, sdf);
+      vpm[s] = (c.empty() || c.overflow) ? Real(0) : c.volumePerVertex();
+      Real area[MAXP];
+      for (int k = 0; k < c.np; ++k)
+        area[k] = Real(0);
+      if (!(c.empty() || c.overflow))
+        c.facetAreasPerVertex(area);
+      Real aw = Real(0);
+      for (int k = 0; k < c.np; ++k)
+        if (c.pnbr[k] == kBoundaryFacet)
+          aw += area[k];
+      apm[s] = aw;
+    }
+    dV[d] = (vpm[0] - vpm[1]) / (Real(2) * h);
+    dA[d] = (apm[0] - apm[1]) / (Real(2) * h);
+  }
+}
+
 }  // namespace peclet::voro
 
 #endif  // PECLET_VORO_SDF_HPP

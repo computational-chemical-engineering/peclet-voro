@@ -348,8 +348,20 @@ class Tess {
     wDirty_ = false;
   }
 
+  // A2a: validity diagnostics of the last cold build.
+  nb::dict build_report() {
+    auto r = std::visit([](auto& mt) { return mt.report(); }, mt_);
+    nb::dict d;
+    d["buried"] = r.buried;
+    d["reach_exceeded"] = r.reachExceeded;
+    d["empty"] = r.empty;
+    d["overflow"] = r.overflow;
+    d["incomplete"] = r.incomplete;
+    return d;
+  }
+
   // Cold build: (re)allocate the resident tessellation for N points and build it from scratch.
-  void build(nb::ndarray<real_t, nb::c_contig> a) {
+  void build(nb::ndarray<real_t, nb::c_contig> a, bool strict) {
     std::vector<real_t> p = flatten3(a);
     N_ = static_cast<int>(p.size() / 3);
     const double boxVol = static_cast<double>(L_[0]) * L_[1] * L_[2];
@@ -385,6 +397,19 @@ class Tess {
           mt.rebuild(pos_);
         },
         mt_);
+    auto r = std::visit([](auto& mt) { return mt.report(); }, mt_);
+    if (r.buried > 0 || r.reachExceeded > 0 || r.overflow > 0) {
+      const std::string msg =
+          "peclet.voro: the tessellation is not a guaranteed-exact partition: " +
+          std::to_string(r.buried) +
+          " buried power cell(s) (seed outside its own cell, emptied), " +
+          std::to_string(r.reachExceeded) + " cell(s) with a search reach beyond half the box " +
+          "(min-image invalid), " + std::to_string(r.overflow) +
+          " overflowed cell(s). See voro/docs/power_large_weights_plan.md.";
+      if (strict)
+        throw std::runtime_error(msg);
+      nb::module_::import_("warnings").attr("warn")(msg);
+    }
   }
 
   // Incremental repair: update the resident tessellation to new positions (same N) without a full
@@ -1121,10 +1146,18 @@ NB_MODULE(_voro, m) {
           "small-weight regime (see the docs).")
       .def("clear_weights", &Tess::clear_weights,
            "Back to the unweighted Voronoi diagram (next `build`).")
-      .def("build", &Tess::build, nb::arg("positions"),
+      .def("build", &Tess::build, nb::arg("positions"), nb::arg("strict") = false,
            "Cold-build the (power-)Voronoi tessellation of `positions` (N,3) from scratch and make "
            "it resident, clipped by the geometry from `set_geometry` if any.\n"
-           "Sets the particle count N for subsequent `step` calls.")
+           "Sets the particle count N for subsequent `step` calls. Warns (raises if strict=True)\n"
+           "when the result is not a guaranteed-exact partition: buried power cells (a seed "
+           "outside\n"
+           "its own cell — never for w = r² of non-overlapping spheres), a search reach beyond "
+           "half\n"
+           "the box, or overflowed cells; see `build_report()`.")
+      .def("build_report", &Tess::build_report,
+           "Validity counts of the last build: {'buried', 'reach_exceeded', 'empty', 'overflow',\n"
+           "'incomplete'} — all zero for a guaranteed-exact partition.")
       .def(
           "step", &Tess::step, nb::arg("positions"),
           "Incrementally repair the resident tessellation to new `positions` (N,3, same N as "

@@ -73,6 +73,15 @@ struct RepairStats {
   bool fellBack = false;  ///< true if the cold-build fallback was triggered (repair did not close)
 };
 
+/// A2a validity diagnostics of a cold (re)build (counts over the maintained cells).
+struct BuildReport {
+  long buried = 0;         ///< power seeds outside their own cell (emptied — see kBuried)
+  long reachExceeded = 0;  ///< cells whose search reach passed half the box (min-image invalid)
+  long empty = 0;          ///< cells with no volume (in-solid seeds + buried)
+  long overflow = 0;       ///< cells that hit a capacity (planes / triangles / facets)
+  long incomplete = 0;     ///< cells whose coverage did not close
+};
+
 /// Resident moving-point tessellation with two-pass gather repair. MAXP/MAXT must match
 /// CellBuilder::kMaxP / kMaxT (64 / 112).
 template <class Real, int MAXP = 64, int MAXT = 112, bool Weighted = false, class Sdf = NoSdf>
@@ -146,6 +155,24 @@ struct MovingTessellation {
               ///< emit adj, so it clears this and maybeBuildAdj repopulates lazily (skipped
               ///< on a gate-rebuild so a sustained high-churn regime stays on the brute cert).
   bool useLocalNow = false;  ///< this step's certify uses the local cert (= localCert && adjFresh)
+
+  Kokkos::View<int*, Mem> lastStatus;  ///< per-cell StatusBit mask of the last cold (re)build
+  /// A2a validity diagnostics of the last cold (re)build (counts over the maintained cells).
+  BuildReport report() const {
+    BuildReport r;
+    if (lastStatus.extent(0) == 0)
+      return r;
+    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, lastStatus);
+    for (int i = 0; i < nProc; ++i) {
+      const int s = h(i);
+      r.buried += (s & kBuried) ? 1 : 0;
+      r.reachExceeded += (s & kReachExceeded) ? 1 : 0;
+      r.empty += (s & kEmpty) ? 1 : 0;
+      r.overflow += (s & kOverflow) ? 1 : 0;
+      r.incomplete += (s & kIncomplete) ? 1 : 0;
+    }
+    return r;
+  }
 
   Store store;
   Kokkos::View<Real*, Mem> vol;   // N : cell volumes (the published geometry scalar)
@@ -275,6 +302,7 @@ struct MovingTessellation {
         emitNear ? nearCnt : Kokkos::View<int*, Mem>{}, emitNear ? kNearCap : 0,
         nearMarginFrac * skin);
     nearFresh = emitNear;
+    lastStatus = res.status;
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(xRef, pos);
     adjFresh = false;  // the cold build does not emit adjacency

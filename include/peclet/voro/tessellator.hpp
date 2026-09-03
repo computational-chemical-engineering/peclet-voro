@@ -56,7 +56,14 @@ enum StatusBit {
   // always contains the seed, so it cannot represent such a plane; the cut is skipped and the cell
   // flagged (never silently mis-clipped). Full support needs a generalized (origin-excluding)
   // half-space representation — a follow-up to this weighted build.
-  kNegOffset = 8
+  kNegOffset = 8,
+  // Rung A2a validity diagnostics. kBuried: a power seed lies outside its own cell (d ≤ 0 to some
+  // neighbour) — the engine EMPTIES it, which is wrong in general (the cell exists elsewhere);
+  // never happens for w = r² of non-overlapping spheres. kReachExceeded: the cell's converged
+  // search reach exceeded half the smallest box edge, so the min-image gather may have missed a
+  // non-nearest periodic image and the partition is not guaranteed exact.
+  kBuried = 16,
+  kReachExceeded = 32
 };
 
 template <class Real>
@@ -267,6 +274,9 @@ struct CellBuilder {
   Kokkos::View<int*, MemSpace> oNear, oNearCnt;
   int nearCap = 0;
   Real nearMargin = Real(0);
+  // Optional (rung A1, force half): per-cell wall part of dV/dx and dA_wall/dx by in-kernel
+  // central differences of the SDF clip (sdfWallFD). Emitted only when oWallDV is sized.
+  Kokkos::View<Real*, MemSpace> oWallDV, oWallDA;
 
   /// Rung A3: publish the per-facet area Jacobians of finalised cell `c` (facets `faces[0..nf)`
   /// at CSR base `base`) into the facet-edge CSR: one atomic reservation on `edgeCursor`, then
@@ -370,11 +380,43 @@ struct CellBuilder {
     (void)sdf;
     if constexpr (!std::is_same_v<Sdf, NoSdf>) {
       const Real seedW[3] = {pix, piy, piz};
-      clipCellAgainstSdf<Real, kMaxP, kMaxT>(c, seedW, sdf);
+      const bool wallFD = oWallDV.extent(0) > 0;
+      Real dV[3] = {Real(0), Real(0), Real(0)}, dA[3] = {Real(0), Real(0), Real(0)};
+      if (wallFD) {
+        // the un-clipped cell is only needed when the clip will act (seed within the circumradius)
+        const Real phiC = sdf.eval(pix, piy, piz);
+        const Real rad = Kokkos::sqrt(c.maxVertexRsq());
+        if (phiC > Real(0) && phiC <= rad + Real(1e-8)) {
+          const Cell unclipped = c;
+          clipCellAgainstSdf<Real, kMaxP, kMaxT>(c, seedW, sdf);
+          bool hasWall = false;
+          for (int k = 0; k < c.np && !hasWall; ++k)
+            hasWall = (c.pnbr[k] == kBoundaryFacet);
+          if (hasWall && !c.empty() && !c.overflow)
+            sdfWallFD<Real, kMaxP, kMaxT>(unclipped, seedW, sdf, Real(1e-4) * rad, dV, dA);
+        } else {
+          clipCellAgainstSdf<Real, kMaxP, kMaxT>(c, seedW, sdf);
+        }
+        for (int d = 0; d < 3; ++d) {
+          oWallDV(3 * (size_t)i + d) = dV[d];
+          oWallDA(3 * (size_t)i + d) = dA[d];
+        }
+      } else {
+        clipCellAgainstSdf<Real, kMaxP, kMaxT>(c, seedW, sdf);
+      }
     }
     int st = kOk;
     if (c.overflow)
       st |= kOverflow;
+    // A2a: the converged search reach must stay within the min-image half box.
+    {
+      const Real reachR =
+          Kokkos::sqrt(PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll));
+      Real Lmin = Lx < Ly ? Lx : Ly;
+      Lmin = Lmin < Lz ? Lmin : Lz;
+      if (reachR > Real(0.5) * Lmin)
+        st |= kReachExceeded;
+    }
     const bool empty = c.empty();
     if (empty)
       st |= kEmpty;
@@ -544,7 +586,7 @@ struct CellBuilder {
     }
     if constexpr (Weighted) {
       if (buried) {  // buried power cell: emit as empty (kEmpty), like an in-solid SDF seed
-        status(i) = kEmpty;
+        status(i) = kEmpty | kBuried;
         facetCount(i) = 0;
         cellFacetBase(i) = 0;
         cellVol(i) = Real(0);
@@ -600,7 +642,7 @@ TessellatorResult<Real> buildTessellation(
     WorklistCache<Real>* wlc = nullptr, WallStore<Real> outWall = {}, bool withAreaGrad = false,
     Kokkos::View<int*, peclet::core::MemSpace> outNear = {},
     Kokkos::View<int*, peclet::core::MemSpace> outNearCnt = {}, int nearCap = 0,
-    Real nearMargin = Real(0)) {
+    Real nearMargin = Real(0), bool withWallFD = false) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin
@@ -685,6 +727,12 @@ TessellatorResult<Real> buildTessellation(
         view_alloc(std::string("oEdgeGrad"), WithoutInitializing), edgeCap * 3);
     edgeCursor = Kokkos::View<int*, MemSpace>("edgeCursor", 1);
   }
+  // Rung A1 (force half): per-cell wall FD outputs (opt-in; SDF builds only).
+  Kokkos::View<Real*, MemSpace> oWallDV, oWallDA;
+  if (withWallFD && !std::is_same_v<Sdf, NoSdf>) {
+    oWallDV = Kokkos::View<Real*, MemSpace>("cellWallDV", (size_t)N * 3);
+    oWallDA = Kokkos::View<Real*, MemSpace>("cellWallDA", (size_t)N * 3);
+  }
   if (prof)
     std::fprintf(stderr, "[worklist] sw=%d nOff=%d\n", sw, nOff);
 
@@ -761,7 +809,9 @@ TessellatorResult<Real> buildTessellation(
                                       outNear,
                                       outNearCnt,
                                       nearCap,
-                                      nearMargin};
+                                      nearMargin,
+                                      oWallDV,
+                                      oWallDA};
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
   Kokkos::parallel_for(
@@ -861,6 +911,10 @@ TessellatorResult<Real> buildTessellation(
   // Rung A3: pack the facet-edge area-Jacobian CSR (prefix [0,nEdges) of the over-buffer). The
   // per-facet offsets are already global into the over-buffer and the pack keeps indices, so
   // they carry over unchanged; the facet permutation of the pack (facet g -> g) is the identity.
+  if (oWallDV.extent(0) > 0) {
+    view.cellWallDV = oWallDV;
+    view.cellWallDA = oWallDA;
+  }
   if (withAreaGrad) {
     int nEdgesRaw = 0;
     Kokkos::deep_copy(nEdgesRaw, Kokkos::subview(edgeCursor, 0));

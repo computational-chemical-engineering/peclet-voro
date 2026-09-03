@@ -14,8 +14,10 @@
  * Interior cells only: the cell must be fully bounded by neighbour planes + the wall (no seed-box
  * face, which would move with the seed and contaminate the FD).
  */
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <Kokkos_Core.hpp>
 #include <random>
 #include <vector>
@@ -64,6 +66,20 @@ bool buildWallCell(const real_t seed[3], const std::vector<real_t>& nbr, const S
   return hasWall;
 }
 
+// The same cell BEFORE the SDF clip (for the FD wall Jacobian, rung A1 force half).
+bool buildRawCell(const real_t seed[3], const std::vector<real_t>& nbr, Cell& c) {
+  c.initBox(100.0, 100.0, 100.0);
+  const int M = (int)nbr.size() / 3;
+  for (int j = 0; j < M; ++j) {
+    real_t r[3] = {nbr[3 * j] - seed[0], nbr[3 * j + 1] - seed[1], nbr[3 * j + 2] - seed[2]};
+    const real_t off = real_t(0.5) * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
+    c.clip(r, off, j);
+    if (c.overflow)
+      return false;
+  }
+  return true;
+}
+
 // Topology signature: sorted list of face-plane neighbour ids (real + wall + box), so a face
 // gain/loss between two nearby seeds is detectable (an FD across it must be skipped).
 std::vector<int> topoSig(const Cell& c) {
@@ -81,7 +97,7 @@ std::vector<int> topoSig(const Cell& c) {
 // error on FD-resolvable components; sets nCells to the number checked.
 template <class Sdf>
 double sweep(const Sdf& sdf, real_t seedPhiTarget, unsigned seed, int trials, double tolPass,
-             long& nCells, long& nComp, long& nPass) {
+             long& nCells, long& nComp, long& nPass, bool wallFD = false) {
   std::mt19937 rng(seed);
   std::uniform_real_distribution<real_t> U(0.0, 1.0);
   // FD-resolvable floor: below this the central-difference round-off (~vol_eps/2eps) swamps the
@@ -128,7 +144,21 @@ double sweep(const Sdf& sdf, real_t seedPhiTarget, unsigned seed, int trials, do
     peclet::voro::chainToDofs<peclet::voro::Voronoi>(c, s, (const double*)nullptr, 0.0,
                                                      (const double*)nullptr, 1e30, dgx, dgy, dgz,
                                                      fSelf, fwSelf, fnx, fny, fnz, fwn);
-    peclet::voro::addSdfWallForce(c, s, sdf, dgx, dgy, dgz, fSelf);
+    if (wallFD) {  // rung A1 force half: the wall part by in-kernel finite differences
+      Cell raw;
+      buildRawCell(s, nbr, raw);
+      real_t dV[3], dA[3];
+      peclet::voro::sdfWallFD<real_t, 128, 256, false>(
+          raw, s, sdf, real_t(1e-4) * std::sqrt(c.maxVertexRsq()), dV, dA);
+      if (std::getenv("VORO_WALLFD_DEBUG") && nCells <= 3)
+        std::printf("      cell %ld: chain=(%.4e %.4e %.4e) wallFD=(%.4e %.4e %.4e) nWall=%d\n",
+                    nCells, fSelf[0], fSelf[1], fSelf[2], dV[0], dV[1], dV[2],
+                    (int)std::count(c.pnbr, c.pnbr + c.np, peclet::voro::kBoundaryFacet));
+      for (int d = 0; d < 3; ++d)
+        fSelf[d] += dV[d];
+    } else {
+      peclet::voro::addSdfWallForce(c, s, sdf, dgx, dgy, dgz, fSelf);
+    }
 
     const std::vector<int> sig0 = topoSig(c);
     for (int cc = 0; cc < 3; ++cc) {
@@ -196,6 +226,47 @@ int main(int argc, char** argv) {
       std::printf(
           "  (C) sphere      cells=%ld comps=%ld pass(<1e-2)=%ld/%ld maxRel=%.2e "
           "(sagitta clip vs the tangent-plane force model; informational)\n",
+          nc, ncomp, npass, ncomp, mr);
+    }
+    // (A2) the FD wall Jacobian on the flat wall must reproduce the exact model.
+    {
+      const real_t n0[3] = {0.3, -0.4, 0.8660254};
+      const real_t nn = std::sqrt(n0[0] * n0[0] + n0[1] * n0[1] + n0[2] * n0[2]);
+      FlatWall wall{n0[0] / nn, n0[1] / nn, n0[2] / nn, -0.4};
+      long nc = 0, ncomp = 0, npass = 0;
+      const double mr = sweep(wall, 0.4, 12345u, 300, 1e-5, nc, ncomp, npass, /*wallFD=*/true);
+      const bool pass = nc > 20 && ncomp > 20 && (double)npass / ncomp > 0.99 && mr < 1e-2;
+      std::printf(
+          "  (A2) flat wall  cells=%ld comps=%ld pass(<1e-5)=%ld/%ld maxRel=%.2e (FD wall "
+          "Jacobian)  %s\n",
+          nc, ncomp, npass, ncomp, mr, pass ? "OK" : "FAIL");
+      rc |= pass ? 0 : 1;
+    }
+    // (D) rung A1 force half: the FD wall Jacobian (sdfWallFD) on a CURVED wall with the tangent
+    // clip — the wall-plane part is exact for whatever the clip does, so the sphere now passes
+    // the flat-wall standard (the seed-foot model was first-order here, (B)).
+    {
+      peclet::voro::TangentOnly<peclet::voro::SdfSphere<real_t>> ball{{0.0, 0.0, 0.0, 3.0}};
+      long nc = 0, ncomp = 0, npass = 0;
+      const double mr = sweep(ball, 0.5, 999u, 400, 1e-4, nc, ncomp, npass, /*wallFD=*/true);
+      const bool pass = nc > 20 && ncomp > 20 && (double)npass / ncomp > 0.99 && mr < 1e-2;
+      std::printf(
+          "  (D) sphere      cells=%ld comps=%ld pass(<1e-4)=%ld/%ld maxRel=%.2e "
+          "(tangent clip, FD wall Jacobian)  %s\n",
+          nc, ncomp, npass, ncomp, mr, pass ? "OK" : "FAIL");
+      rc |= pass ? 0 : 1;
+    }
+    // (D2) the same with the SAGITTA clip: the wall-plane part is still exact, but the shift also
+    // depends on the face polygon, i.e. on the NEIGHBOUR planes, and that cross term is not in
+    // the per-plane chain (∂V/∂n_k holds the other planes fixed). Informational: the analytic
+    // cross term (second-moment derivatives) is the open half of A1.
+    {
+      peclet::voro::SdfSphere<real_t> ball{0.0, 0.0, 0.0, 3.0};
+      long nc = 0, ncomp = 0, npass = 0;
+      const double mr = sweep(ball, 0.5, 999u, 400, 1e-2, nc, ncomp, npass, /*wallFD=*/true);
+      std::printf(
+          "  (D2) sphere     cells=%ld comps=%ld pass(<1e-2)=%ld/%ld maxRel=%.2e "
+          "(sagitta clip, FD wall part; missing the polygon cross term; informational)\n",
           nc, ncomp, npass, ncomp, mr);
     }
     std::printf("%s\n", rc == 0 ? "SDF WALL-FORCE CHECKS PASS" : "SDF WALL-FORCE CHECKS FAILED");

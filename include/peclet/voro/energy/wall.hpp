@@ -60,6 +60,7 @@ Real wallEnergyForce(const TessellationView<Real>& view,
         for (int k = 0; k < 3 * nf; ++k)
           gl[k] = Real(0);
         bool any = false;
+        const bool fd = view.hasWallFD();  // exact wall-plane part (sdfWallFD) instead of the chain
         for (int f = b; f < b + nf; ++f) {
           if (view.facetNbr(f) != kBoundaryFacet)
             continue;
@@ -68,13 +69,19 @@ Real wallEnergyForce(const TessellationView<Real>& view,
           acc += sig * Kokkos::sqrt(ax * ax + ay * ay + az * az);
           for (int e = view.edgeBegin(f); e < view.edgeEnd(f); ++e) {
             const int p = view.edgePartner(e) - b;
+            if (fd && view.facetNbr(b + p) == kBoundaryFacet)
+              continue;  // wall-plane dependence comes from the FD part below
             for (int c = 0; c < 3; ++c)
               gl[3 * p + c] += sig * view.areaGrad(e, c);
           }
         }
-        if (any)
+        if (any) {
           detail::routeCellGradient<Real, Policy>(view, i, gl, nf, pos, weight, L, sdf, force,
                                                   forceW);
+          if (fd)
+            for (int c = 0; c < 3; ++c)
+              Kokkos::atomic_add(&force(3 * i + c), sig * view.wallDA(i, c));
+        }
       },
       E);
   return E;

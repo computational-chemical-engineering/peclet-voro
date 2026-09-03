@@ -70,9 +70,9 @@ static double energyForce(int kind, const std::vector<Real>& x, const std::vecto
   constexpr bool W = Policy::kHasWeightDof;
   DV dpos = up(x, "pos"), dw = W ? up(w, "w") : DV{};
   Kokkos::View<long*, Mem> gd;
-  auto res = peclet::voro::buildTessellation<Real, W, Sdf>(dpos, dw, N, L, 4, N, gd, sdf, true, -1,
-                                                           {}, {}, {}, {}, {}, {}, 0, nullptr, {},
-                                                           /*withAreaGrad=*/true);
+  auto res = peclet::voro::buildTessellation<Real, W, Sdf>(
+      dpos, dw, N, L, 4, N, gd, sdf, true, -1, {}, {}, {}, {}, {}, {}, 0, nullptr, {},
+      /*withAreaGrad=*/true, {}, {}, 0, Real(0), /*withWallFD=*/true);
   DV force("force", 3 * N), forceW("forceW", W ? N : 0);
   Kokkos::deep_copy(force, Real(0));
   if (W)
@@ -388,6 +388,32 @@ int main(int argc, char** argv) {
         bad = 1;
       if (!fdCheck<Voronoi>("(E) volume energy FD (flat wall)", 2, posW, w, type, 1.0, L, N, wall,
                             rng, 12, 1e-5))
+        bad = 1;
+      // ---- (G) rung A1 force half: a CURVED wall (sphere, tangent clip) with the FD wall part;
+      // the sagitta clip's polygon cross term is the open item (see test_sdf_policy (D2)) ------
+      peclet::voro::TangentOnly<peclet::voro::SdfSphere<Real>> ball{
+          {Real(0.5), Real(0.5), Real(0.5), Real(0.25)}};
+      std::vector<Real> posS = pos;
+      for (int i = 0; i < N; ++i) {  // keep seeds out of the ball (fluid only)
+        Real d[3] = {posS[3 * i] - Real(0.5), posS[3 * i + 1] - Real(0.5),
+                     posS[3 * i + 2] - Real(0.5)};
+        const Real r = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (r < 0.25 + 0.2 * spacing) {
+          const Real rn = 0.25 + 0.2 * spacing + 0.8 * spacing * U(rng);
+          for (int c = 0; c < 3; ++c)
+            posS[3 * i + c] = Real(0.5) + d[c] / std::max(r, Real(1e-12)) * rn;
+        }
+      }
+      std::vector<int> typeS(N);  // species 1 = a cap on the sphere (sessile drop, curved wall)
+      for (int i = 0; i < N; ++i) {
+        const Real dx = posS[3 * i] - 0.5, dy = posS[3 * i + 1] - 0.5, dz = posS[3 * i + 2] - 0.8;
+        typeS[i] = (dx * dx + dy * dy + dz * dz < 0.2 * 0.2) ? 1 : 0;
+      }
+      if (!fdCheck<Voronoi>("(G) volume energy FD (sphere wall)", 2, posS, w, typeS, 1.0, L, N,
+                            ball, rng, 12, 1e-5))
+        bad = 1;
+      if (!fdCheck<Voronoi>("(G) wetting energy FD (sphere wall)", 1, posS, w, typeS, 1.0, L, N,
+                            ball, rng, 12, 1e-5))
         bad = 1;
     }
   }

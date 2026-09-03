@@ -140,6 +140,16 @@ struct TessellationView {
   Kokkos::View<int*, peclet::core::MemSpace> edgeFacet;        // nEdges
   Kokkos::View<Real*, peclet::core::MemSpace> edgeAreaGrad;    // 3*nEdges
 
+  // Rung A1 (force half; opt-in `withWallFD`): per cell, the WALL part of dV/dx and dA_wall/dx
+  // by in-kernel central differences of the SDF clip (sdfWallFD) — exact for the clip actually
+  // used (sagitta placement included), where the seed-foot chain is the tangent-plane model.
+  // Zero for cells without wall planes. Empty unless requested.
+  Kokkos::View<Real*, peclet::core::MemSpace> cellWallDV;  // 3*nCells
+  Kokkos::View<Real*, peclet::core::MemSpace> cellWallDA;  // 3*nCells
+  KOKKOS_INLINE_FUNCTION bool hasWallFD() const { return cellWallDV.extent(0) > 0; }
+  KOKKOS_INLINE_FUNCTION Real wallDV(int i, int c) const { return cellWallDV(3 * i + c); }
+  KOKKOS_INLINE_FUNCTION Real wallDA(int i, int c) const { return cellWallDA(3 * i + c); }
+
   KOKKOS_INLINE_FUNCTION bool hasAreaGrad() const { return facetEdgeOffset.extent(0) > 0; }
   KOKKOS_INLINE_FUNCTION int numEdges() const { return static_cast<int>(edgeFacet.extent(0)); }
   KOKKOS_INLINE_FUNCTION int edgeBegin(int f) const { return facetEdgeOffset(f); }

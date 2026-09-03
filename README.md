@@ -227,6 +227,12 @@ horizon edge; there is no stored adjacency (the cell is tiny, so the triangle sh
 edge is found by a short scan). Cuts are applied closest-first with a security-radius
 early-out.
 
+**Validity diagnostics (rung A2a).** `Tessellation.build(positions, strict=False)` warns (raises
+if strict) when the result is not a guaranteed-exact partition — buried power cells (a seed
+outside its own cell, which the engine empties; never for w = r² of non-overlapping spheres),
+a search reach beyond half the box (min-image invalid), overflowed cells — and
+`build_report()` returns the counts (`StatusBit` kBuried / kReachExceeded).
+
 **Certificate completeness (engine hardening, 2026-09-03).** The seed-local certificate of the
 repair cannot see a face GAINED from a seed outside the stored topology (its bisector drifts into
 the cell without either seed tripping the Verlet skin) — measured ~0.1 % of neighbour relations
@@ -242,8 +248,15 @@ multi-plane tangent clip it re-clips the cell with every plane translated into t
 sagitta of its final face (`½ tr(∇²φ · M)/|∇φ| / A`, M the face's second moments about the tangency
 point). Measured on a sphere: the fluid-volume error drops 17–90× (1e-3 → 2e-5 at 12k seeds, seeds
 in the fluid); flat walls are bit-identical to the tangent clip; `TangentOnly<Sdf>` restores the
-first-order cut. The seed-foot wall FORCE model (`sdfWallChain`) is still the tangent-plane model —
-consistent with `TangentOnly`, first-order against the sagitta placement (`test_sdf_policy` (C)).
+first-order cut. The wall FORCE has two forms: the seed-foot chain (`sdfWallChain`, the tangent-plane model,
+first-order on curved walls) and the exact in-kernel finite-difference wall part
+(`buildTessellation(..., withWallFD=true)` publishes `cellWallDV`/`cellWallDA` per cell via
+`sdfWallFD`; the energy layer's volume and wetting terms use it when present) — exact for whatever
+the clip does on the wall plane itself (`test_sdf_policy` (D): sphere 1194/1200 at 1e-4). What
+neither has yet is the sagitta placement's dependence on the NEIGHBOUR planes through the face
+polygon (its second moments): with the sagitta clip a consistent gradient is still open
+(`test_sdf_policy` (D2)); wrap the provider in `TangentOnly<Sdf>` where gradient consistency
+matters more than second-order tiling (the mesh optimiser at curved walls).
 
 **Energies (rung A3 of the Voronoi methods plan).** `buildTessellation(..., withAreaGrad=true)`
 additionally publishes a facet-edge CSR of area Jacobians `∂A_f/∂n_l` (a facet's area depends on
