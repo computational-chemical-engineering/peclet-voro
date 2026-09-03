@@ -16,6 +16,7 @@
 #include <Kokkos_Core.hpp>
 #include <random>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "peclet/core/common/view.hpp"
@@ -121,6 +122,75 @@ static int checkMesh(const char* name, const std::vector<Real>& pos, int N, cons
   for (int f = 0; f < m.nFaces; ++f) {
     wallFaces += (m.patch[f] == 1);
     boxFaces += (m.patch[f] == 2);
+  }
+  // (C) conforming wall faces (B3 follow-up): merge the wall vertices closer than 0.05 h, then
+  // Euler must hold on EVERY cell (the wall layer included) — a watertight polyhedral mesh
+  long mergedBad = 0, nMerged = 0, wallVolMax = 0;
+  double wallVolWorst = 0;
+  if (expectWall) {
+    auto mm = m;  // keep the raw mesh for the VTU
+    const Real h = std::cbrt(Real(1) / N);
+    nMerged = peclet::voro::fv::mergeWallVertices<Real>(mm, L, Real(0.05) * h);
+    for (int i = 0; i < N; ++i) {
+      if (mm.cellFaceOffset[i + 1] == mm.cellFaceOffset[i])
+        continue;
+      std::set<int> V;
+      std::set<std::pair<int, int>> E;
+      int F = 0;
+      for (int q = mm.cellFaceOffset[i]; q < mm.cellFaceOffset[i + 1]; ++q) {
+        const int f = mm.cellFace[q];
+        const int b = mm.faceOffset[f], e = mm.faceOffset[f + 1];
+        for (int t = b; t < e; ++t) {
+          const int v0 = mm.faceVerts[t], v1 = mm.faceVerts[t + 1 < e ? t + 1 : b];
+          V.insert(v0);
+          E.insert({std::min(v0, v1), std::max(v0, v1)});
+        }
+        ++F;
+      }
+      if ((long)V.size() - (long)E.size() + F != 2)
+        ++mergedBad;
+      // assembled volume of the merged polyhedron vs the engine (wall cells move O(tol·A))
+      double Vp = 0;
+      for (int q = mm.cellFaceOffset[i]; q < mm.cellFaceOffset[i + 1]; ++q) {
+        const int f = mm.cellFace[q];
+        const int b = mm.faceOffset[f], e = mm.faceOffset[f + 1];
+        const double s = mm.owner[f] == i ? 1.0 : -1.0;
+        const int v0 = mm.faceVerts[b];
+        for (int t = b + 1; t + 1 < e; ++t) {
+          const int v1 = mm.faceVerts[t], v2 = mm.faceVerts[t + 1];
+          double a[3], bb[3], c[3];
+          for (int k = 0; k < 3; ++k) {
+            a[k] = mm.points[3 * v0 + k] - pos[3 * i + k];
+            bb[k] = mm.points[3 * v1 + k] - pos[3 * i + k];
+            c[k] = mm.points[3 * v2 + k] - pos[3 * i + k];
+            a[k] -= L[k] * std::round(a[k] / L[k]);
+            bb[k] -= L[k] * std::round(bb[k] / L[k]);
+            c[k] -= L[k] * std::round(c[k] / L[k]);
+          }
+          Vp += s *
+                (a[0] * (bb[1] * c[2] - bb[2] * c[1]) - a[1] * (bb[0] * c[2] - bb[2] * c[0]) +
+                 a[2] * (bb[0] * c[1] - bb[1] * c[0])) /
+                6.0;
+        }
+      }
+      if (vol(i) > 0) {
+        const double r = std::fabs(Vp / vol(i) - 1.0);
+        if (r > wallVolWorst) {
+          wallVolWorst = r;
+          wallVolMax = i;
+        }
+      }
+    }
+    // MEASURED (2026-09-04): 391 vertices merged, 106 of the 108 non-conforming wall cells still
+    // fail Euler and one wall cell's volume moves 9.6 %: the mismatch is TOPOLOGICAL — the two
+    // cells' copies of a shared interface face are clipped by different tangent planes into
+    // polygons of different shape — so no vertex merge closes them. Conforming walls need one
+    // wall plane per wall EDGE inside the clipper (engine-side follow-up). Informational.
+    std::printf(
+        "  (C) wall-vertex merge (tol 0.05 h): %ld merged -> Euler failures on ALL cells %ld "
+        "(of %ld non-conforming wall cells), worst assembled/engine volume %.2e (cell %ld) "
+        " informational: the mismatch is topological, see the note\n",
+        nMerged, mergedBad, eulerBadWall, wallVolWorst, wallVolMax);
   }
   const bool ok =
       worst < 1e-12 && eulerBad == 0 && boxFaces == 0 && (expectWall == (wallFaces > 0));

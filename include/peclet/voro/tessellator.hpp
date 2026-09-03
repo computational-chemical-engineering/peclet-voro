@@ -225,12 +225,16 @@ KOKKOS_INLINE_FUNCTION void areaGradFill(const Cell& c, const int* faces, int nf
   }
 }
 
-template <class Real, bool Weighted, class Sdf, bool TrackAdj = false>
+template <class Real, bool Weighted, class Sdf, bool TrackAdj = false, int MAXP = 64,
+          int MAXT = 112>
 struct CellBuilder {
   using MemSpace = peclet::core::MemSpace;
-  static constexpr int kMaxP = 64;     // plane cap (overflow -> kOverflow)
-  static constexpr int kMaxT = 112;    // dual-triangle (vertex) cap
-  static constexpr int MAXF_TMP = 50;  // max facets one cell may publish
+  // Cell capacities: 64 planes / 112 dual triangles is the production layout (the topology
+  // store's strides). A static build may ask for more (wall-adapted seed shells around curved
+  // walls need ~100 planes per wall cell — rung C4/B follow-up): buildTessellation<…, MAXP, MAXT>.
+  static constexpr int kMaxP = MAXP;      // plane cap (overflow -> kOverflow)
+  static constexpr int kMaxT = MAXT;      // dual-triangle (vertex) cap
+  static constexpr int MAXF_TMP = MAXP;   // max facets one cell may publish
   using Cell = ConvexCell<Real, kMaxP, kMaxT, TrackAdj>;
   using PlanePolicy = std::conditional_t<Weighted, Power, Voronoi>;  // radical vs bisector planes
 
@@ -540,6 +544,28 @@ struct CellBuilder {
     Real wSelf = Real(0);
     if constexpr (Weighted) wSelf = wSorted(pi);
     bool buried = false;  // Power: some neighbour dominates the seed at its own location (d≤0)
+    // Early wall clip (rung C4/B follow-up): the tangent plane at the SEED'S OWN FOOT on the wall
+    // bounds the cell toward the solid before any neighbour is gathered. Without it a cell next
+    // to a curved wall extends through the solid to the far side until the SDF clip runs after
+    // the gather — for nearly cospherical seeds (a wall-adapted shell around a sphere) every
+    // shell seed then neighbours every other through the sphere's centre and the plane cap
+    // overflows at any capacity. The plane is the first wall facet; the full clip refines it.
+    if constexpr (!std::is_same_v<Sdf, NoSdf>) {
+      const Real phi0 = sdf.eval(pix, piy, piz);
+      if (phi0 > Real(0)) {
+        Real g[3];
+        sdfGradient(sdf, pix, piy, piz, g);
+        const Real gl = Kokkos::sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
+        if (gl > Real(0)) {
+          // RETREATED by φ₀ into the solid (plane at 2φ₀): the tangent plane itself would cut the
+          // fluid sliver between it and a convex wall (w²/2R deep at lateral distance w — measured
+          // 1 % of the fluid volume on the sphere array); at 2φ₀ it only bounds the reach, the
+          // vertex-foot clip (A0/A1) then places the exact wall facets.
+          const Real pdir[3] = {-g[0] / gl, -g[1] / gl, -g[2] / gl};
+          c.clip(pdir, Real(2) * phi0, kBoundaryFacet);
+        }
+      }
+    }
 
     // The worklist is sorted by nearest-corner dist², so once wlRmin exceeds the reachability radius
     // every remaining block is too far to cut — break. Voronoi keeps the exact bisector certificate
@@ -670,7 +696,7 @@ struct CellBuilder {
  *                 needed only as cutting seeds, so building them is wasted work (~the
  *                 ghost fraction of the cold build).
  */
-template <class Real, bool Weighted, class Sdf = NoSdf>
+template <class Real, bool Weighted, class Sdf = NoSdf, int MAXP = 64, int MAXT = 112>
 TessellatorResult<Real> buildTessellation(
     const Kokkos::View<Real*, peclet::core::MemSpace>& posFlat,
     const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N, const Real L[3], int sw = 4,
@@ -803,7 +829,7 @@ TessellatorResult<Real> buildTessellation(
     }
   }
 
-  CellBuilder<Real, Weighted, Sdf> op{grid.binned,
+  CellBuilder<Real, Weighted, Sdf, false, MAXP, MAXT> op{grid.binned,
                                       grid.posSorted,
                                       grid.wSorted,
                                       grid.gidSorted,
@@ -1014,7 +1040,7 @@ TessellatorResult<Real> buildTessellation(
         "tess.maxFacets", Kokkos::RangePolicy<Exec>(0, N),
         KOKKOS_LAMBDA(const int c, int& m) { m = fc(c) > m ? fc(c) : m; }, Kokkos::Max<int>(maxF));
     std::fprintf(stderr, "[tess N=%d] maxFacets/cell=%d (=> maxVerts ~ %d; CAP=%d)\n", N, maxF,
-                 2 * maxF - 4, CellBuilder<Real, Weighted, Sdf>::kMaxT);
+                 2 * maxF - 4, (CellBuilder<Real, Weighted, Sdf, false, MAXP, MAXT>::kMaxT));
   }
 
   TessellatorResult<Real> res;

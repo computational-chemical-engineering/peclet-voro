@@ -301,6 +301,14 @@ a 0.2h-jittered lattice / a Lloyd CVT (plain pair 1.97 / 1.72 / 1.17; covolume f
 / 1.29), energy drift O(dt·h²), face divergence 3e-14. The comparison page is
 `suite/docs/studies/voro_covolume_vs_collocated.md`.
 
+**Early wall clip.** The cell build clips first with the tangent plane at the seed's own wall
+foot, retreated by the seed's wall distance into the solid, so a cell next to a curved wall never
+extends through the solid before its neighbours are gathered: wall-adapted seed shells (nearly
+cospherical seeds) no longer overflow the plane cap, and `kIncomplete` no longer fires on wall
+cells; the cell capacities are template parameters of `buildTessellation<…, MAXP, MAXT>` (64/112
+production). The PolyMesh's wall layer is still non-conforming (a topological mismatch of the
+shared interface faces; `mergeWallVertices` measured it).
+
 **Semi-implicit step (rung C2c).** `CollocatedNS::implicitDiffusion` is flow's step: explicit
 convection, a backward-Euler viscous solve per component (two-point Laplacian and two-point wall
 term implicit, the quadratic wall correction lagged; `PressureSolver::setupVelocity`, GraphAMG-PCG),

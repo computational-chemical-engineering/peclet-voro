@@ -108,8 +108,12 @@ static KResult dragK(int n, double phi, double nu, double f, bool verbose, bool 
   DV dpos = up(pos, "pos"), dw;
   Kokkos::View<long*, Mem> gd;
   const Real Lb[3] = {L, L, L};
-  auto res =
-      peclet::voro::buildTessellation<Real, false, Sphere>(dpos, dw, N, Lb, 4, N, gd, sdf, true);
+  // the wall shell packs ~100 planes into the wall cells: build it with the 96/176 capacities
+  const bool cap96 = shell && std::getenv("PERMEABILITY_CAP64") == nullptr;
+  auto res = cap96 ? peclet::voro::buildTessellation<Real, false, Sphere, 96, 176>(
+                         dpos, dw, N, Lb, 4, N, gd, sdf, true)
+                   : peclet::voro::buildTessellation<Real, false, Sphere>(dpos, dw, N, Lb, 4, N, gd,
+                                                                          sdf, true);
   auto aux = peclet::voro::buildAuxMaps(res.view);
   auto m = fv::buildFaceMesh(res.view, aux);
   auto vol = down(m.cellVolume);
@@ -227,7 +231,8 @@ int main(int argc, char** argv) {
       if (n > nMax)
         break;
       const double kzh = zhRef(0.216);
-      for (int sh = 0; sh < 1; ++sh) {  // the wall-shell seeding overflows the 64-plane cell cap
+      const int nSh = std::getenv("PERMEABILITY_SHELL") ? 2 : 1;  // the shell needs cap 96
+      for (int sh = 0; sh < nSh; ++sh) {
         auto r = dragK(n, 0.216, nu, f, false, sh == 1);
         if (sh == 0)
           errs[nr++] = (r.K - kzh) / kzh;

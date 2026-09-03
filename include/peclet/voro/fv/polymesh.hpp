@@ -20,6 +20,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <functional>
 #include <Kokkos_Core.hpp>
 #include <string>
 #include <unordered_map>
@@ -61,6 +62,141 @@ struct VertexKeyHash {
   }
 };
 }  // namespace detail
+
+/// Conforming wall faces (rung B3 follow-up): every wall cell clips its wall-adjacent faces with
+/// ITS OWN tangent plane of a curved wall, so the two copies of a shared edge's wall endpoint (one
+/// per cell) differ by the tangent-plane mismatch (~the sagitta, O(h²/R)). This post-pass merges
+/// wall vertices closer than `tol` (union–find on a hash grid, periodic min-image distances) into
+/// their mean, rewrites the face polygons, drops repeated vertices and degenerate (< 3-vertex)
+/// faces. MEASURED (2026-09-04, test_polymesh): it does NOT make the wall layer conforming — the
+/// mismatch is topological (the two cells' copies of a shared interface face are clipped by
+/// different tangent planes into polygons of different shape), 106 of 108 non-conforming wall
+/// cells keep failing Euler. Conforming walls need one wall plane per wall EDGE inside the
+/// clipper. Kept as a coincident-vertex cleanup. Returns the number of vertices merged away.
+template <class Real>
+int mergeWallVertices(PolyMesh<Real>& m, const Real L[3], Real tol) {
+  const int nP = m.nPoints();
+  std::vector<char> onWall(nP, 0);
+  for (int f = 0; f < m.nFaces; ++f)
+    if (m.patch[f] == 1)
+      for (int q = m.faceOffset[f]; q < m.faceOffset[f + 1]; ++q)
+        onWall[m.faceVerts[q]] = 1;
+  std::vector<int> ids;
+  for (int p = 0; p < nP; ++p)
+    if (onWall[p])
+      ids.push_back(p);
+  // hash grid of cell size tol over the periodic box
+  std::unordered_map<detail::VertexKey, std::vector<int>, detail::VertexKeyHash> grid;
+  long long Mq[3];
+  for (int k = 0; k < 3; ++k)
+    Mq[k] = std::max<long long>(1, (long long)std::floor(L[k] / tol));
+  auto cellOf = [&](Real x, int k) {
+    long long c = (long long)std::floor(x / L[k] * (Real)Mq[k]);
+    c %= Mq[k];
+    return c < 0 ? c + Mq[k] : c;
+  };
+  for (int p : ids)
+    grid[detail::VertexKey{cellOf(m.points[3 * p], 0), cellOf(m.points[3 * p + 1], 1),
+                           cellOf(m.points[3 * p + 2], 2)}]
+        .push_back(p);
+  std::vector<int> parent(nP);
+  for (int p = 0; p < nP; ++p)
+    parent[p] = p;
+  std::function<int(int)> find = [&](int a) {
+    while (parent[a] != a)
+      a = parent[a] = parent[parent[a]];
+    return a;
+  };
+  const Real tol2 = tol * tol;
+  for (int p : ids) {
+    const long long c0[3] = {cellOf(m.points[3 * p], 0), cellOf(m.points[3 * p + 1], 1),
+                             cellOf(m.points[3 * p + 2], 2)};
+    for (int dz = -1; dz <= 1; ++dz)
+      for (int dy = -1; dy <= 1; ++dy)
+        for (int dx = -1; dx <= 1; ++dx) {
+          auto w = [&](long long c, long long M) { return ((c % M) + M) % M; };
+          auto it = grid.find(
+              detail::VertexKey{w(c0[0] + dx, Mq[0]), w(c0[1] + dy, Mq[1]), w(c0[2] + dz, Mq[2])});
+          if (it == grid.end())
+            continue;
+          for (int q : it->second) {
+            if (q <= p)
+              continue;
+            Real d2 = 0;
+            for (int k = 0; k < 3; ++k) {
+              Real d = m.points[3 * q + k] - m.points[3 * p + k];
+              d -= L[k] * std::round(d / L[k]);
+              d2 += d * d;
+            }
+            if (d2 <= tol2) {
+              const int ra = find(p), rb = find(q);
+              if (ra != rb)
+                parent[rb] = ra;
+            }
+          }
+        }
+  }
+  // merged position = the mean of the group (min-image about the root)
+  std::vector<Real> acc(3 * (size_t)nP, Real(0));
+  std::vector<int> cnt(nP, 0);
+  int merged = 0;
+  for (int p : ids) {
+    const int r = find(p);
+    for (int k = 0; k < 3; ++k) {
+      Real d = m.points[3 * p + k] - m.points[3 * r + k];
+      d -= L[k] * std::round(d / L[k]);
+      acc[3 * r + k] += d;
+    }
+    ++cnt[r];
+    if (r != p)
+      ++merged;
+  }
+  for (int p : ids)
+    if (find(p) == p && cnt[p] > 1)
+      for (int k = 0; k < 3; ++k)
+        m.points[3 * p + k] += acc[3 * p + k] / (Real)cnt[p];
+  // rewrite the faces
+  std::vector<int> newVerts, newOff(1, 0), newOwner, newNbr, newPatch;
+  std::vector<int> faceMap(m.nFaces, -1);
+  for (int f = 0; f < m.nFaces; ++f) {
+    std::vector<int> poly;
+    for (int q = m.faceOffset[f]; q < m.faceOffset[f + 1]; ++q) {
+      const int v = find(m.faceVerts[q]);
+      if (poly.empty() || poly.back() != v)
+        poly.push_back(v);
+    }
+    while (poly.size() > 1 && poly.front() == poly.back())
+      poly.pop_back();
+    if (poly.size() < 3)
+      continue;  // a degenerate face (collapsed by the merge)
+    faceMap[f] = (int)newOff.size() - 1;
+    newVerts.insert(newVerts.end(), poly.begin(), poly.end());
+    newOff.push_back((int)newVerts.size());
+    newOwner.push_back(m.owner[f]);
+    newNbr.push_back(m.neighbour[f]);
+    newPatch.push_back(m.patch[f]);
+  }
+  std::vector<int> cf, cfo(1, 0);
+  for (int i = 0; i < m.nCells; ++i) {
+    for (int q = m.cellFaceOffset[i]; q < m.cellFaceOffset[i + 1]; ++q)
+      if (faceMap[m.cellFace[q]] >= 0)
+        cf.push_back(faceMap[m.cellFace[q]]);
+    cfo.push_back((int)cf.size());
+  }
+  int nInt = 0;
+  for (int f = 0; f < (int)newPatch.size(); ++f)
+    nInt += newPatch[f] == 0;
+  m.faceVerts = newVerts;
+  m.faceOffset = newOff;
+  m.owner = newOwner;
+  m.neighbour = newNbr;
+  m.patch = newPatch;
+  m.cellFace = cf;
+  m.cellFaceOffset = cfo;
+  m.nFaces = (int)newPatch.size();
+  m.nInterior = nInt;
+  return merged;
+}
 
 /// Assemble the polyhedral mesh of a store at positions `posHost` (3N, world, in [0,L)).
 template <class Real, int MAXP, int MAXT>

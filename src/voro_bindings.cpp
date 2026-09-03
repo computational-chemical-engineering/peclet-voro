@@ -617,6 +617,7 @@ class Tess {
 class Flow {
  public:
   Flow(Tess& t, real_t nu, const std::string& layout, bool amg) : layout_(layout) {
+    live().insert(this);
     m_ = t.face_mesh();
     if (layout == "collocated") {
       co_ = std::make_unique<peclet::voro::fv::CollocatedNS<real_t>>();
@@ -627,6 +628,21 @@ class Flow {
     } else {
       throw std::runtime_error("FlowSolver: layout must be 'collocated' or 'covolume'");
     }
+  }
+  ~Flow() { live().erase(this); }
+  // Drop the solvers and the face mesh (Kokkos Views) BEFORE Kokkos::finalize at shutdown.
+  void release() {
+    co_.reset();
+    cv_.reset();
+    m_ = peclet::voro::fv::FaceMesh<real_t>{};
+  }
+  static std::set<Flow*>& live() {
+    static std::set<Flow*> s;
+    return s;
+  }
+  static void releaseAll() {
+    for (Flow* f : live())
+      f->release();
   }
   int num_cells() const { return m_.nCells; }
   int num_faces() const { return m_.nFaces; }
@@ -999,6 +1015,7 @@ NB_MODULE(_voro, m) {
   // only one of the two aborts on CUDA. Returned arrays are backed by host std::vectors (no device
   // Views), so they need no special handling.
   auto shutdown = []() {
+    Flow::releaseAll();
     Tess::releaseAll();
     Sim::releaseAll();
     if (Kokkos::is_initialized() && !Kokkos::is_finalized())
