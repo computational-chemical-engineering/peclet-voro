@@ -56,6 +56,8 @@
 #include "peclet/core/python/ndarray_interop.hpp"
 #include "peclet/voro/convex_cell.hpp"
 #include "peclet/voro/energy/interface.hpp"
+#include "peclet/voro/energy/lloyd.hpp"
+#include "peclet/voro/energy/tension.hpp"
 #include "peclet/voro/energy/volume.hpp"
 #include "peclet/voro/energy/wall.hpp"
 #include "peclet/voro/mesh_optimizer.hpp"
@@ -472,7 +474,8 @@ class Tess {
   nb::dict energy_forces(nb::ndarray<int, nb::c_contig> types,
                          nb::ndarray<real_t, nb::c_contig> tension,
                          std::optional<nb::ndarray<real_t, nb::c_contig>> sigma_wall,
-                         std::optional<nb::ndarray<real_t, nb::c_contig>> dEdV) {
+                         std::optional<nb::ndarray<real_t, nb::c_contig>> dEdV, real_t lloyd,
+                         real_t facet_tension) {
     const int N = N_;
     if ((int)types.shape(0) != N)
       throw std::runtime_error("energy_forces(): types must be (N,)");
@@ -505,14 +508,20 @@ class Tess {
     Kokkos::deep_copy(force, real_t(0));
     if (weighted_)
       Kokkos::deep_copy(forceW, real_t(0));
-    real_t eIf = 0, eWall = 0;
+    real_t eIf = 0, eWall = 0, eLloyd = 0, eTen = 0;
     const real_t Larr[3] = {L_[0], L_[1], L_[2]};
     std::visit(
         [&](auto& mt) {
           using T = std::decay_t<decltype(mt)>;
           using Policy = typename T::PlanePolicy;
           auto view = peclet::voro::reevalPublish<real_t, 64, 112>(
-              mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef, /*withAreaGrad=*/true);
+              mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef, /*withAreaGrad=*/true,
+              /*withMoments=*/lloyd != 0);
+          if (lloyd != 0)
+            eLloyd = peclet::voro::energy::lloydEnergyForce<real_t>(view, pos_, lloyd, force);
+          if (facet_tension != 0)
+            eTen = peclet::voro::energy::facetTensionEnergyForce<real_t, Policy>(
+                view, facet_tension, pos_, weight_, L_[0], force, forceW, mt.sdf);
           eIf = peclet::voro::energy::interfaceEnergyForce<real_t, Policy>(
               view, dtype, dten, nT, pos_, weight_, L_[0], force, forceW, mt.sdf);
           if (dsw.extent(0) > 0)
@@ -526,6 +535,8 @@ class Tess {
     nb::dict d;
     d["interface_energy"] = eIf;
     d["wall_energy"] = eWall;
+    d["lloyd_energy"] = eLloyd;
+    d["tension_energy"] = eTen;
     d["force"] = peclet::core::python::vector_to_ndarray(
         peclet::core::toVector(force), {static_cast<std::size_t>(N), std::size_t(3)}, {3, 1});
     if (weighted_)
@@ -1180,7 +1191,8 @@ NB_MODULE(_voro, m) {
            "Per-particle number of resident SDF wall planes (N,) int32; all zero without geometry.")
       .def(
           "energy_forces", &Tess::energy_forces, nb::arg("types"), nb::arg("tension"),
-          nb::arg("sigma_wall") = nb::none(), nb::arg("dEdV") = nb::none(),
+          nb::arg("sigma_wall") = nb::none(), nb::arg("dEdV") = nb::none(), nb::arg("lloyd") = 0.0,
+          nb::arg("facet_tension") = 0.0,
           "Energies and their exact gradients on the RESIDENT cells (after build/step), no "
           "rebuild:\n"
           "  interfacial  E = Σ σ(t_i,t_j) A_ij over facets between different `types` (N,) int32,\n"
@@ -1190,6 +1202,11 @@ NB_MODULE(_voro, m) {
           "               is given (a uniform wall tension is a constant — only the species\n"
           "               difference does work, which is what sets the contact angle);\n"
           "  volume       Σ e_i(V_i) for a caller-supplied e'(V_i) = `dEdV` (N,) (e.g. "
+          "  centroidal   `lloyd` · Σ ∫_cell |y − x_i|² (Lloyd/CVT; gradient 2V(x−c) drives seeds "
+          "to\n"
+          "               their centroids — the skewness the grid solver's two-point operators "
+          "need gone);\n"
+          "  roundness    `facet_tension` · Σ A_f over all interior faces.\n"
           "2(V/Vref−1)/Vref).\n"
           "Returns {'interface_energy', 'wall_energy', 'force' (N,3) = dE/dx, 'force_w' (N,) = "
           "dE/dw\n"

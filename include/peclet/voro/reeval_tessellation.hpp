@@ -51,7 +51,7 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
                                      const Kokkos::View<Real*, peclet::core::MemSpace>& vol, int N,
                                      const Real L[3], WallStore<Real> wall = {},
                                      Kokkos::View<Real*, peclet::core::MemSpace> xRef = {},
-                                     bool withAreaGrad = false) {
+                                     bool withAreaGrad = false, bool withMoments = false) {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Cell = ConvexCell<Real, MAXP, MAXT, false>;
@@ -138,6 +138,9 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
                                  withAreaGrad ? nE : 0);
   Kokkos::View<Real*, Mem> eGrad(view_alloc(std::string("rp.eGrad"), WithoutInitializing),
                                  withAreaGrad ? nE * 3 : 0);
+  Kokkos::View<Real*, Mem> fM2(view_alloc(std::string("rp.fM2"), WithoutInitializing),
+                               withMoments ? nF : 0);
+  const bool wm = withMoments;
   {
     Kokkos::View<int*, Mem> bs = base, eb = ebase;
     WallStore<Real> Wl = wall;
@@ -180,6 +183,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
               fDV(3 * g + cc) = dv[cc];
               fConn(3 * g + cc) = conn[cc];
             }
+            if (wm)
+              fM2(g) = c.faceMoment2(k);
             ++idx;
           }
           if (wag && idx > 0 && idx <= kMaxF) {
@@ -209,6 +214,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
   view.facetArea = fArea;
   view.facetConnect = fDV;
   view.facetConnVec = fConn;
+  if (withMoments)
+    view.facetMoment2 = fM2;
   if (withAreaGrad) {
     view.facetEdgeOffset = eOff;
     view.facetEdgeCount = eCnt;

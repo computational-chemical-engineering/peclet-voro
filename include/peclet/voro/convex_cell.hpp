@@ -486,6 +486,35 @@ struct ConvexCell {
     return consistent;
   }
 
+  /// ∫_face |s|² dA of face k about the seed's foot point on its plane (s in-plane): the second
+  /// moment the Lloyd energy needs (a pyramid's ∫|y|² dy = h (h² A + M2)/5). Fan from the foot
+  /// over the CCW-ordered polygon with SIGNED triangle areas (the foot may lie outside the face).
+  KOKKOS_INLINE_FUNCTION Real faceMoment2(int k) const {
+    Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
+    const int m = faceOrdered(k, fx, fy, fz);
+    if (m < 3)
+      return Real(0);
+    const Real nx = n[k][0], ny = n[k][1], nz = n[k][2];
+    const Real nl = Kokkos::sqrt(nn[k]);
+    if (!(nl > Real(0)))
+      return Real(0);
+    const Real ux = nx / nl, uy = ny / nl, uz = nz / nl;
+    Real M2 = Real(0);
+    for (int q = 0; q < m; ++q) {
+      const int r = (q + 1) % m;
+      const Real a[3] = {fx[q] - nx, fy[q] - ny, fz[q] - nz};
+      const Real b[3] = {fx[r] - nx, fy[r] - ny, fz[r] - nz};
+      const Real cr[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                          a[0] * b[1] - a[1] * b[0]};
+      const Real At = Real(0.5) * (cr[0] * ux + cr[1] * uy + cr[2] * uz);
+      const Real aa = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+      const Real bb = b[0] * b[0] + b[1] * b[1] + b[2] * b[2];
+      const Real ab = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      M2 += At / Real(6) * (aa + bb + ab);  // (A/12)(|a|²+|b|²+|a+b|²)
+    }
+    return M2;
+  }
+
   /// Signed distance of the farthest live vertex BEYOND the half-space {x : pdir·x <= d}: positive
   /// means the plane would cut the cell (exactly ConvexCell::clip's commit test, in distance
   /// units), negative is the gap by which the plane misses the cell. Used to record NEAR-MISS

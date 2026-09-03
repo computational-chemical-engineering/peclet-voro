@@ -26,6 +26,8 @@
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/convex_cell.hpp"
 #include "peclet/voro/energy/interface.hpp"
+#include "peclet/voro/energy/lloyd.hpp"
+#include "peclet/voro/energy/tension.hpp"
 #include "peclet/voro/energy/volume.hpp"
 #include "peclet/voro/energy/wall.hpp"
 #include "peclet/voro/mesh_optimizer.hpp"
@@ -72,7 +74,7 @@ static double energyForce(int kind, const std::vector<Real>& x, const std::vecto
   Kokkos::View<long*, Mem> gd;
   auto res = peclet::voro::buildTessellation<Real, W, Sdf>(
       dpos, dw, N, L, 4, N, gd, sdf, true, -1, {}, {}, {}, {}, {}, {}, 0, nullptr, {},
-      /*withAreaGrad=*/true, {}, {}, 0, Real(0), /*withWallFD=*/true);
+      /*withAreaGrad=*/true, {}, {}, 0, Real(0), /*withWallFD=*/true, /*withMoments=*/true);
   DV force("force", 3 * N), forceW("forceW", W ? N : 0);
   Kokkos::deep_copy(force, Real(0));
   if (W)
@@ -95,6 +97,11 @@ static double energyForce(int kind, const std::vector<Real>& x, const std::vecto
     Kokkos::deep_copy(Kokkos::subview(ss, 1), sigma);
     E = peclet::voro::energy::wallEnergyForce<Real, Policy, Sdf>(res.view, dtype, ss, sdf, dpos, dw,
                                                                  L[0], force, forceW);
+  } else if (kind == 3) {  // Lloyd (centroidal) energy
+    E = peclet::voro::energy::lloydEnergyForce<Real>(res.view, dpos, sigma, force);
+  } else if (kind == 4) {  // uniform facet tension
+    E = peclet::voro::energy::facetTensionEnergyForce<Real, Policy, Sdf>(res.view, sigma, dpos, dw,
+                                                                         L[0], force, forceW, sdf);
   } else {
     auto vol = down(res.view.cellVolume);
     const Real Vref = (L[0] * L[1] * L[2]) / N;
@@ -417,6 +424,49 @@ int main(int argc, char** argv) {
         bad = 1;
     }
   }
+  // ---- (H) track B: Lloyd energy exact on a cubic lattice, FD-exact on the random mesh; the
+  // facet-tension term FD-exact --------------------------------------------------------------
+  {
+    const Real L[3] = {1, 1, 1};
+    std::mt19937 rng(9);
+    std::uniform_real_distribution<Real> U(0, 1);
+    const int n = 8, Nl = n * n * n;
+    std::vector<Real> lat(3 * Nl), w0;
+    int k = 0;
+    for (int a = 0; a < n; ++a)
+      for (int b = 0; b < n; ++b)
+        for (int c = 0; c < n; ++c) {
+          lat[3 * k] = (a + 0.5) / n;
+          lat[3 * k + 1] = (b + 0.5) / n;
+          lat[3 * k + 2] = (c + 0.5) / n;
+          ++k;
+        }
+    std::vector<int> t0(Nl, 0);
+    std::vector<Real> f, fw;
+    const double El = energyForce<Voronoi>(3, lat, w0, t0, 1.0, L, Nl, NoSdf{}, f, fw);
+    const double h = 1.0 / n, exact = Nl * h * h * h * h * h / 4.0;  // ∫_cube |y|² = h⁵/4 per cell
+    double fmax = 0;
+    for (Real v : f)
+      fmax = std::max(fmax, (double)std::fabs(v));
+    const bool latOk = std::fabs(El / exact - 1.0) < 1e-12 && fmax < 1e-12;
+    std::printf(
+        "  (H) Lloyd on a cubic lattice: E=%.12e exact=%.12e rel=%.1e, |grad| max=%.1e  %s\n", El,
+        exact, El / exact - 1.0, fmax, latOk ? "OK" : "FAIL");
+    if (!latOk)
+      bad = 1;
+    const int N = 1500;
+    std::vector<Real> pos(3 * N), w(N, Real(0));
+    for (auto& v : pos)
+      v = U(rng);
+    std::vector<int> type(N, 0);
+    if (!fdCheck<Voronoi>("(H) Lloyd energy FD (random mesh)", 3, pos, w, type, 1.0, L, N, NoSdf{},
+                          rng, 12, 1e-5))
+      bad = 1;
+    if (!fdCheck<Voronoi>("(H) facet tension FD (random mesh)", 4, pos, w, type, 1.0, L, N, NoSdf{},
+                          rng, 12, 1e-5))
+      bad = 1;
+  }
+
   // ---- (F) the incremental path: reevalPublish(withAreaGrad) == cold build, cell by cell -------
   {
     const int N = 3000;

@@ -150,6 +150,13 @@ struct TessellationView {
   KOKKOS_INLINE_FUNCTION Real wallDV(int i, int c) const { return cellWallDV(3 * i + c); }
   KOKKOS_INLINE_FUNCTION Real wallDA(int i, int c) const { return cellWallDA(3 * i + c); }
 
+  // Track B, rung B1 (opt-in `withMoments`): per facet ∫_face |s|² dA, the second moment of the
+  // face polygon about the seed's foot point on its plane — what the Lloyd (centroidal) energy
+  // value needs (a pyramid's ∫|y|² dy = h (h² A + M2)/5). Empty unless requested.
+  Kokkos::View<Real*, peclet::core::MemSpace> facetMoment2;  // nFacets
+  KOKKOS_INLINE_FUNCTION bool hasMoments() const { return facetMoment2.extent(0) > 0; }
+  KOKKOS_INLINE_FUNCTION Real moment2(int f) const { return facetMoment2(f); }
+
   KOKKOS_INLINE_FUNCTION bool hasAreaGrad() const { return facetEdgeOffset.extent(0) > 0; }
   KOKKOS_INLINE_FUNCTION int numEdges() const { return static_cast<int>(edgeFacet.extent(0)); }
   KOKKOS_INLINE_FUNCTION int edgeBegin(int f) const { return facetEdgeOffset(f); }

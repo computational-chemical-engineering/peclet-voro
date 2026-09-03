@@ -228,8 +228,23 @@ def test_energy_forces():
     dEdV = np.where(vol > 0, 2.0 * (vol / vref - 1.0) / vref, 0.0)
     rw = tw.energy_forces(types, tension, sigma_wall=np.array([0.0, 0.5]), dEdV=dEdV)
     assert rw["wall_energy"] > 0 and np.isfinite(rw["force"]).all()
+    # centroidal (Lloyd) relaxation of a random grid through the resident cells: E and the mean
+    # seed-to-centroid distance both fall (the B1 gate in miniature)
+    pos = rng.random((N, 3)) * L
+    tg = voro.Tessellation()
+    tg.set_box((L, L, L))
+    tg.build(pos)
+    rl = tg.energy_forces(np.zeros(N, dtype=np.int32), np.zeros((1, 1)), lloyd=1.0)
+    e_l0 = rl["lloyd_energy"]
+    vol = tg.volumes()
+    for _ in range(10):
+        pos = (pos - rl["force"] / (2.0 * vol[:, None])) % L   # x <- centroid (Lloyd's step)
+        tg.step(pos)
+        vol = tg.volumes()
+        rl = tg.energy_forces(np.zeros(N, dtype=np.int32), np.zeros((1, 1)), lloyd=1.0)
+    assert rl["lloyd_energy"] < 0.8 * e_l0, (e_l0, rl["lloyd_energy"])
     print(f"  Energies:     N={N}  E_if {e0:.4f} -> {r['interface_energy']:.4f} after 5 descent steps;"
-          f"  wetting E={rw['wall_energy']:.4f}")
+          f"  wetting E={rw['wall_energy']:.4f};  Lloyd E {e_l0:.3e} -> {rl['lloyd_energy']:.3e} in 10 steps")
 
 
 if __name__ == "__main__":

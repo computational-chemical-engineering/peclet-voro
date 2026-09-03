@@ -258,6 +258,22 @@ polygon (its second moments): with the sagitta clip a consistent gradient is sti
 (`test_sdf_policy` (D2)); wrap the provider in `TangentOnly<Sdf>` where gradient consistency
 matters more than second-order tiling (the mesh optimiser at curved walls).
 
+**Grids and the covolume solver (tracks B and C).** `fv/mesh.hpp` turns a published tessellation
+into a face mesh (one record per geometric face, owner/neighbour, centroid, both seed distances,
+cell→faces CSR) and `fv/operators.hpp` provides the staggered covolume operators on it —
+divergence of face fluxes, the two-point gradient/Laplacian (exact on Voronoi orthogonality; `L`
+is the graph Laplacian `A_f/d_f`), Green–Gauss, Perot reconstruction, adjoint inner products and a
+matrix-free Poisson CG. Measured: the Poisson solution converges at second order on a jittered
+lattice while the cellwise residual of the two-point flux is skewness-limited; the centroidal
+(Lloyd) energy `energy/lloyd.hpp` removes that skewness (random grid: skewness 0.23 → 0.04, volume
+CV 0.42 → 0.06, residual consistency 0.17 → 0.04 in 40 steps; `tests/kokkos/test_grid_relax`).
+
+**PolyMesh (rung B3).** `fv/polymesh.hpp` assembles the internal polyhedral mesh of a resident
+tessellation — shared vertices (periodic-aware), CCW face polygons, owner/neighbour, wall patches,
+cell→faces CSR — and writes VTU polyhedra (`writeVtu`). Watertight and Euler-exact off walls;
+along a CURVED wall each cell clips with its own tangent plane, so wall-adjacent faces of two cells
+differ slightly (not watertight there — a conforming per-edge wall plane is the follow-up).
+
 **Energies (rung A3 of the Voronoi methods plan).** `buildTessellation(..., withAreaGrad=true)`
 additionally publishes a facet-edge CSR of area Jacobians `∂A_f/∂n_l` (a facet's area depends on
 its own plane and on its edge-neighbours' planes; `TessellationView::edgeBegin/edgeEnd/edgePartner/

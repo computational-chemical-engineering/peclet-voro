@@ -40,6 +40,18 @@ add_vorflow_kokkos_test(test_sdf_curved)
 # manufactured-solution convergence on a jittered lattice.
 add_vorflow_kokkos_test(test_fv_operators)
 
+# Track B, rung B1: centroidal (Lloyd) relaxation of a random grid — skewness / volume spread /
+# Poisson residual consistency all drop (grid quality is solver quality).
+add_vorflow_kokkos_test(test_grid_relax)
+
+# Track B, rung B3: the internal PolyMesh (shared vertices, ordered polygons, owner/neighbour,
+# wall patches) — watertight, Euler-exact, volumes == engine to 1e-12, VTU written.
+add_vorflow_kokkos_test(test_polymesh)
+
+# Track B, rung B4: grid quality IS solver quality — Poisson residual/solution error vs skewness at
+# fixed h (Lloyd-relaxed jittered lattices) and the solution's convergence order on relaxed grids.
+add_vorflow_kokkos_test(test_grid_quality)
+
 # Oracle-free acceptance for the device tessellation: geometric invariants (space-filling, positive
 # volumes, completeness, facet-area reciprocity A_ij = -A_ji, area closure, topology reciprocity) over
 # several sizes/seeds. Replaces the retired half-edge-oracle comparison tests (tessellator,

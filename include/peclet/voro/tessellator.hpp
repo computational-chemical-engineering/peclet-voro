@@ -277,6 +277,9 @@ struct CellBuilder {
   // Optional (rung A1, force half): per-cell wall part of dV/dx and dA_wall/dx by in-kernel
   // central differences of the SDF clip (sdfWallFD). Emitted only when oWallDV is sized.
   Kokkos::View<Real*, MemSpace> oWallDV, oWallDA;
+  // Optional (track B, rung B1): per-facet second moment ∫|s|² dA about the foot point (over-buffer
+  // like oArea; packed with the facet CSR). Emitted only when oMoment2 is sized.
+  Kokkos::View<Real*, MemSpace> oMoment2;
 
   /// Rung A3: publish the per-facet area Jacobians of finalised cell `c` (facets `faces[0..nf)`
   /// at CSR base `base`) into the facet-edge CSR: one atomic reservation on `edgeCursor`, then
@@ -481,6 +484,8 @@ struct CellBuilder {
       conn[2] = Real(2) * c.n[k][2];
       if (withForceGeom)
         c.facetGeometry(k, area, dv, conn);  // area vector + dV + connector
+      if (oMoment2.extent(0) > 0)
+        oMoment2((size_t)base + idx) = c.faceMoment2(k);
       oNbr((size_t)base + idx) = c.pnbr[k];
       const size_t o = ((size_t)base + idx) * 3;
       for (int cc = 0; cc < 3; ++cc) {
@@ -541,6 +546,19 @@ struct CellBuilder {
           continue;
         if (haveGid && gidSorted(q) == gidSorted(pi))
           continue;
+        // A seed already clipped is a SECOND PERIODIC IMAGE reaching the worklist (a large cell
+        // whose search radius, block-rounded and extended by the near-miss margin, passes half
+        // the box): keep the first, nearest image — the min-image the re-evaluation rebuilds —
+        // and skip the rest, or the resident topology carries two planes for one neighbour and
+        // re-evaluates to a different cell (measured on a wall-hugging cell: 1.24e-3 vs 2.3e-4).
+        {
+          const int id = binned(q);
+          bool dup = false;
+          for (int k = 6; k < c.np && !dup; ++k)
+            dup = (c.pnbr[k] == id);
+          if (dup)
+            continue;
+        }
         // record the examined neighbour as a skin candidate (within the worklist's security reach),
         // capped.
         if (emitCand && ncRec < candCap)
@@ -642,7 +660,7 @@ TessellatorResult<Real> buildTessellation(
     WorklistCache<Real>* wlc = nullptr, WallStore<Real> outWall = {}, bool withAreaGrad = false,
     Kokkos::View<int*, peclet::core::MemSpace> outNear = {},
     Kokkos::View<int*, peclet::core::MemSpace> outNearCnt = {}, int nearCap = 0,
-    Real nearMargin = Real(0), bool withWallFD = false) {
+    Real nearMargin = Real(0), bool withWallFD = false, bool withMoments = false) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin
@@ -727,6 +745,11 @@ TessellatorResult<Real> buildTessellation(
         view_alloc(std::string("oEdgeGrad"), WithoutInitializing), edgeCap * 3);
     edgeCursor = Kokkos::View<int*, MemSpace>("edgeCursor", 1);
   }
+  // Track B (B1): per-facet second moments (opt-in), over-buffered like the facet arrays.
+  Kokkos::View<Real*, MemSpace> oMoment2;
+  if (withMoments)
+    oMoment2 = Kokkos::View<Real*, MemSpace>(
+        view_alloc(std::string("oMoment2"), WithoutInitializing), facetCap);
   // Rung A1 (force half): per-cell wall FD outputs (opt-in; SDF builds only).
   Kokkos::View<Real*, MemSpace> oWallDV, oWallDA;
   if (withWallFD && !std::is_same_v<Sdf, NoSdf>) {
@@ -811,7 +834,8 @@ TessellatorResult<Real> buildTessellation(
                                       nearCap,
                                       nearMargin,
                                       oWallDV,
-                                      oWallDA};
+                                      oWallDA,
+                                      oMoment2};
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
   Kokkos::parallel_for(
@@ -914,6 +938,11 @@ TessellatorResult<Real> buildTessellation(
   if (oWallDV.extent(0) > 0) {
     view.cellWallDV = oWallDV;
     view.cellWallDA = oWallDA;
+  }
+  if (withMoments) {
+    view.facetMoment2 = Kokkos::View<Real*, MemSpace>(
+        view_alloc(std::string("facetMoment2"), WithoutInitializing), nFacets);
+    Kokkos::deep_copy(view.facetMoment2, Kokkos::subview(oMoment2, std::make_pair(0, nFacets)));
   }
   if (withAreaGrad) {
     int nEdgesRaw = 0;

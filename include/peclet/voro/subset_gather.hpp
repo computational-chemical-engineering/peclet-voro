@@ -168,7 +168,8 @@ SubsetGatherResult<Real> subsetGather(
              nearCap,
              nearMargin,
              /*oWallDV=*/{},
-             /*oWallDA=*/{}};
+             /*oWallDA=*/{},
+             /*oMoment2=*/{}};
 
   auto slotOf = grid.slotOf;
   auto idx = indices;
