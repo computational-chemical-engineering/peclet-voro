@@ -86,7 +86,11 @@ namespace nb = nanobind;
 using real_t = double;
 using DView = Kokkos::View<real_t*, peclet::core::MemSpace>;
 
-namespace {
+// A NAMED namespace on purpose: Tess / Flow / Sim have virtual methods (Releasable), and under
+// hipcc/lld a virtual class in an anonymous namespace leaves its vtable unemitted in the host
+// object ("undefined hidden symbol: vtable for (anonymous namespace)::Tess"). Same fix as
+// core/python/amr_bindings.cpp.
+namespace peclet::voro::pybind {
 
 // (N,3) c-contiguous array -> flat row-major host vector of length 3N.
 std::vector<real_t> flatten3(nb::ndarray<real_t, nb::c_contig> a) {
@@ -975,7 +979,9 @@ class VHalo {
 };
 #endif  // PECLET_VORO_MPI
 
-}  // namespace
+}  // namespace peclet::voro::pybind
+
+using namespace peclet::voro::pybind;
 
 NB_MODULE(_voro, m) {
   m.attr("__doc__") =
