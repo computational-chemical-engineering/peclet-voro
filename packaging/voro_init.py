@@ -14,7 +14,14 @@ top-level ``__init__.py``.
 
 from ._voro import *  # noqa: F401,F403
 
-__version__ = "0.3.3"
+# The installed distribution's metadata (pyproject.toml) is the single source of truth for the version;
+# a build-tree import (PYTHONPATH=<build>) has no metadata and reports "0+unknown". This replaces a
+# hand-maintained literal that had drifted behind pyproject.toml in every package at 0.6.0.
+try:
+    from importlib.metadata import version as _dist_version
+    __version__ = _dist_version("peclet-voro")
+except Exception:  # PackageNotFoundError (dev build), or a broken metadata install
+    __version__ = "0+unknown"
 
 
 # --------------------------------------------------------------------------------------------------
