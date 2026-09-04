@@ -1,0 +1,44 @@
+# CUDA (single-GPU) packaging variant of peclet-voro, published to PyPI as `peclet-voro-cu13`.
+#
+# Same source/CMake as the CPU peclet-voro, but: (1) built against a CUDA Kokkos prefix
+# (CMAKE_PREFIX_PATH -> extern/install/nvidia-cuda, bootstrapped in the release workflow's cuda job --
+# Kokkos is static, so it is embedded in the module), (2) libcudart is NOT bundled but supplied by the
+# `nvidia-cuda-runtime` dependency wheel, reached via the module RPATH set by
+# -DPECLET_CUDA_RUNTIME_WHEEL=ON. Installs the SAME `peclet.voro` import; it is mutually exclusive with
+# the CPU `peclet-voro` (the CuPy `cupy` vs `cupy-cuda12x` model). AMD/HIP + multi-GPU MPI stay
+# source/container builds. Mirrors flow/packaging/pyproject-cuda.toml (peclet-flow-cu13).
+#
+# The release workflow copies this over pyproject.toml for the cuda-wheel job; keep it in lockstep with
+# ../pyproject.toml (only name / dependencies / the CUDA cmake.define differ; the PECLET_VORO_* defines
+# are the same as the CPU pyproject's and MUST stay — the module target only exists with
+# PECLET_VORO_KOKKOS + PECLET_VORO_BUILD_PYTHON on).
+
+[build-system]
+requires = ["scikit-build-core>=0.8", "nanobind>=2.0"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "peclet-voro-cu13"
+version = "0.4.0"
+description = "peclet.voro (CUDA / single-GPU) — device-native (Kokkos) moving-particle Voronoi dynamics + unstructured mesh gen"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Frank Peters", email = "e.a.j.f.peters@gmail.com" }]
+# libcudart.so.13 from the CUDA-13 runtime wheel (NVIDIA dropped the -cuXX suffix at CUDA 13:
+# `nvidia-cuda-runtime`, not `-cu13`). libcuda.so.1 (the driver) is host-provided, never a wheel.
+dependencies = ["numpy>=1.20", "nvidia-cuda-runtime>=13,<14"]
+
+[project.urls]
+Homepage = "https://github.com/computational-chemical-engineering/peclet"
+Documentation = "https://github.com/computational-chemical-engineering/peclet"
+Source = "https://github.com/computational-chemical-engineering/peclet-voro"
+
+[tool.scikit-build]
+minimum-version = "0.8"
+cmake.version = ">=3.24"
+cmake.define = { PECLET_VORO_KOKKOS = "ON", PECLET_VORO_BUILD_PYTHON = "ON", PECLET_VORO_BUILD_TESTS = "OFF", PECLET_CUDA_RUNTIME_WHEEL = "ON" }
+wheel.install-dir = "."
+wheel.packages = []
+sdist.include = ["src", "include", "packaging", "cmake", "CMakeLists.txt", "README.md", "LICENSE"]

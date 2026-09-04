@@ -74,6 +74,12 @@ endif()
 # Add -DVORFLOW_MPI=ON to link MPI + core for the distributed path.
 option(PECLET_VORO_KOKKOS "Build the Kokkos device path (find_package(Kokkos))" OFF)
 option(PECLET_VORO_MPI "Build the distributed path against MPI + core" OFF)
+# Redistributable single-GPU CUDA wheel: libcudart is provided by the `nvidia-cuda-runtime` PyPI
+# dependency (installed to site-packages/nvidia/cu13/lib), not the system. ON sets the module's RPATH
+# to reach that wheel from its install location so `import peclet.voro` works with no system CUDA. Used
+# by the peclet-voro-cu13 packaging (packaging/pyproject-cuda.toml + the release workflow's cuda job).
+# Mirrors peclet-flow.
+option(PECLET_CUDA_RUNTIME_WHEEL "RPATH the module to the nvidia-cuda-runtime wheel's libcudart" OFF)
 
 if(PECLET_VORO_KOKKOS)
   # Dependencies via the vendored PecletDeps helper: installed prefix + sibling checkouts for the
@@ -148,6 +154,12 @@ if(PECLET_VORO_KOKKOS)
     if(PECLET_VORO_MPI)
       target_compile_definitions(voro PRIVATE PECLET_VORO_MPI)
       target_link_libraries(voro PRIVATE MPI::MPI_CXX)
+    endif()
+    # Redistributable CUDA wheel: point the module at the nvidia-cuda-runtime wheel's libcudart via a
+    # relative $ORIGIN RPATH (peclet/voro -> site-packages -> nvidia/cu13/lib).
+    if(PECLET_CUDA_RUNTIME_WHEEL)
+      set_target_properties(voro PROPERTIES
+        INSTALL_RPATH "$ORIGIN/../../nvidia/cu13/lib" INSTALL_RPATH_USE_LINK_PATH OFF)
     endif()
     # `pip install .` (scikit-build-core, via pyproject.toml) installs the module as peclet.voro. Inert
     # for a plain `cmake --build`, so the developer workflow is unchanged.
