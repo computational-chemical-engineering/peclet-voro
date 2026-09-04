@@ -16,9 +16,13 @@
  * scalars (masses, viscosities, volumes) are `(N,)`. Arrays move through the shared `peclet::core::python`
  * bridge (core): returned arrays are backed by host buffers (no extra device copy).
  *
- * Kokkos is initialized at import and finalized via a Python `atexit` hook (with every live
- * object's Views released first — required on CUDA). Call `peclet.voro.finalize()` for deterministic
- * teardown.
+ * Kokkos teardown follows the suite-wide pattern of peclet/core/python/kokkos_teardown.hpp: Kokkos
+ * is initialized at import; every bound Tessellation / FlowSolver / Simulation is a `Releasable`
+ * (registered on construction, release() drops its Views) and every zero-copy capsule of the shared
+ * bridge is one too; the module's single `atexit` hook (also `peclet.voro.finalize()`) releases all
+ * of them and THEN calls Kokkos::finalize, so an object still referenced at interpreter exit (script
+ * globals, a Jupyter/Quarto kernel) can no longer be destroyed after finalize -- which is a
+ * Kokkos::abort (SIGABRT / exit 134, on OpenMP as on CUDA). Nothing needs `del` before exit.
  *
  * Example
  * -------
@@ -53,6 +57,7 @@
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/core/geom/scene_builder.hpp"
+#include "peclet/core/python/kokkos_teardown.hpp"
 #include "peclet/core/python/ndarray_interop.hpp"
 #include "peclet/voro/convex_cell.hpp"
 #include "peclet/voro/energy/interface.hpp"
@@ -324,10 +329,9 @@ using MT = peclet::voro::MovingTessellation<real_t, 64, 112, W, S>;
 using MtVariant =
     std::variant<MT<false, NoSdfT>, MT<true, NoSdfT>, MT<false, SceneT>, MT<true, SceneT>>;
 
-class Tess {
+class Tess : public peclet::core::python::Releasable {
  public:
-  Tess() { live().insert(this); }
-  ~Tess() { live().erase(this); }
+  Tess() = default;
 
   void set_box(std::array<real_t, 3> L) { L_ = L; }
   void set_tolerance(real_t frac) { tolFrac_ = frac; }
@@ -580,20 +584,13 @@ class Tess {
 
   int num_particles() const { return N_; }
 
-  void release() {
+  // Drop every Kokkos View (teardown registry: runs before Kokkos::finalize at shutdown).
+  void release() noexcept override {
     mt_.template emplace<MT<false, NoSdfT>>();
     pos_ = DView{};
     weight_ = DView{};
     scene_.clear();
     N_ = 0;
-  }
-  static std::set<Tess*>& live() {
-    static std::set<Tess*> s;
-    return s;
-  }
-  static void releaseAll() {
-    for (Tess* t : live())
-      t->release();
   }
 
  private:
@@ -614,10 +611,9 @@ class Tess {
 // Tessellation — the collocated solver (peclet.flow's approximate projection with the
 // skew-corrected adjoint constraint pair, the default) or the staggered covolume solver. The
 // mesh is frozen at construction (rebuild the FlowSolver after moving seeds).
-class Flow {
+class Flow : public peclet::core::python::Releasable {
  public:
   Flow(Tess& t, real_t nu, const std::string& layout, bool amg) : layout_(layout) {
-    live().insert(this);
     m_ = t.face_mesh();
     if (layout == "collocated") {
       co_ = std::make_unique<peclet::voro::fv::CollocatedNS<real_t>>();
@@ -629,20 +625,11 @@ class Flow {
       throw std::runtime_error("FlowSolver: layout must be 'collocated' or 'covolume'");
     }
   }
-  ~Flow() { live().erase(this); }
   // Drop the solvers and the face mesh (Kokkos Views) BEFORE Kokkos::finalize at shutdown.
-  void release() {
+  void release() noexcept override {
     co_.reset();
     cv_.reset();
     m_ = peclet::voro::fv::FaceMesh<real_t>{};
-  }
-  static std::set<Flow*>& live() {
-    static std::set<Flow*> s;
-    return s;
-  }
-  static void releaseAll() {
-    for (Flow* f : live())
-      f->release();
   }
   int num_cells() const { return m_.nCells; }
   int num_faces() const { return m_.nFaces; }
@@ -755,13 +742,12 @@ class Flow {
 // --------------------------------------------------------------------------------------------------
 // Simulation: device-native compressible-Euler / Navier-Stokes Voronoi fluid dynamics.
 // --------------------------------------------------------------------------------------------------
-class Sim {
+class Sim : public peclet::core::python::Releasable {
  public:
-  Sim() { live().insert(this); }
-  ~Sim() { live().erase(this); }
+  Sim() = default;
 
   // Drop all Kokkos Views (so they free BEFORE Kokkos::finalize at shutdown).
-  void release() {
+  void release() noexcept override {
     sim_.template emplace<EE<NoSdfT>>();
     dmass_ = DView{};
     scene_.clear();
@@ -770,14 +756,6 @@ class Sim {
     mass_.clear();
     visc_.clear();
     bulk_.clear();
-  }
-  static std::set<Sim*>& live() {
-    static std::set<Sim*> s;
-    return s;
-  }
-  static void releaseAll() {
-    for (Sim* d : live())
-      d->release();
   }
 
   void set_box(std::array<real_t, 3> L) { L_ = L; }
@@ -1007,26 +985,10 @@ NB_MODULE(_voro, m) {
       "positions/\n"
       "velocities (N,3) float64, scalars (N,). The backend (Serial/OpenMP/CUDA) is fixed at build\n"
       "time; see peclet.voro.execution_space.";
-  if (!Kokkos::is_initialized())
-    Kokkos::initialize();
-  // Teardown order matters on CUDA: releaseAll() drops every live object's Views FIRST (so none
-  // outlive finalize -> no "deallocated after Kokkos::finalize"), THEN Kokkos::finalize() runs from
-  // a Python atexit hook while the CUDA driver is still up (so no cudaErrorCudartUnloading). Doing
-  // only one of the two aborts on CUDA. Returned arrays are backed by host std::vectors (no device
-  // Views), so they need no special handling.
-  auto shutdown = []() {
-    Flow::releaseAll();
-    Tess::releaseAll();
-    Sim::releaseAll();
-    if (Kokkos::is_initialized() && !Kokkos::is_finalized())
-      Kokkos::finalize();
-  };
-  m.def("finalize", shutdown,
-        "Release every live Tessellation/Simulation and finalize Kokkos (deterministic teardown; "
-        "also "
-        "run automatically at interpreter exit).");
-  m.attr("execution_space") = nb::str(Kokkos::DefaultExecutionSpace::name());
-  nb::module_::import_("atexit").attr("register")(nb::cpp_function(shutdown));
+  // Kokkos init + the release-then-finalize atexit hook + finalize() + execution_space: the
+  // suite-wide teardown pattern (file comment; peclet/core/python/kokkos_teardown.hpp). Every
+  // Tess/Flow/Sim is a Releasable, so the registry releases them in one sweep before finalize.
+  peclet::core::python::install(m);
 
   // ---- mesh optimiser ---------------------------------------------------------------------------
   m.def(
