@@ -137,6 +137,11 @@ if(PECLET_VORO_KOKKOS)
     # HIP/lld: keep sections so Kokkos SharedAllocationRecord<HIPSpace> vtables aren't gc'd (see flow).
     if(Kokkos_ENABLE_HIP)
       target_link_options(voro PRIVATE -Wl,--no-gc-sections)
+  # HIP/lld experiment 1 (docs/RELEASE.md §8): nanobind sets CXX_VISIBILITY_PRESET hidden, and under hipcc
+  # the host objects then reference the Kokkos SharedAllocationRecord / shared_ptr control-block vtables
+  # as hidden symbols that nothing defines ("undefined hidden symbol: vtable for ..."). Default visibility
+  # on the HIP path only; CUDA/OpenMP builds are untouched.
+  set_target_properties(voro PROPERTIES CXX_VISIBILITY_PRESET default)
     endif()
     # Distributed surface: compile the VoronoiHalo binding (guarded by PECLET_VORO_MPI) and link MPI +
     # the core particle halo. Default (OFF) leaves the single-rank module untouched.
