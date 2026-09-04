@@ -348,7 +348,9 @@ preconditions with the per-rank block of the GraphAMG. `tests/kokkos_mpi/test_fl
 (`flow_mpi_np{1,2,4}`): np = 1 bit-exact to single rank, np = 2/4 within 3e-15 (velocity) and
 2e-16 (energy) of it, divergence 2e-14. The isolated pressure-solve gate (true residual ==
 recursive residual, K·1 = 0, symmetry) is what caught the rank-local total volume in the mean
-deflation. Covolume hooks and a device-resident halo are follow-ups.
+deflation. The covolume solver carries the same hooks (`flow_mpi_covolume_np{1,2,4}`), and the
+exchange packs on the device (only the send/receive buffers cross to the host for MPI, bitwise
+equal to the host path).
 
 **Pore-mesh redistribution (rung B2).** `peclet.voro.redistribute_pore_mesh(positions, centres,
 radii, L, s_lo, s_hi, slope=…)` drives interstitial seeds to the graded target `V_ref = s(φ)³` by

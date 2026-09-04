@@ -63,4 +63,8 @@ foreach(np 1 2 4)
     ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false" PROCESSORS ${np})
   set_tests_properties(flow_mpi_implicit_np${np} PROPERTIES
     ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false;FLOW_MPI_IMPLICIT=1" PROCESSORS ${np})
+  add_test(NAME flow_mpi_covolume_np${np}
+           COMMAND ${MPIEXEC_EXECUTABLE} -np ${np} -x FLOW_MPI_COVOLUME $<TARGET_FILE:test_flow_mpi> 12 20)
+  set_tests_properties(flow_mpi_covolume_np${np} PROPERTIES
+    ENVIRONMENT "OMP_NUM_THREADS=1;OMP_PROC_BIND=false;FLOW_MPI_COVOLUME=1" PROCESSORS ${np})
 endforeach()

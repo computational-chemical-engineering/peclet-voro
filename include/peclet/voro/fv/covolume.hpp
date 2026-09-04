@@ -367,16 +367,29 @@ struct CovolumeNS {
   DV<Real> decOut, decDiv;
   DV<Real> U, a, k, u1, u2, div, gphi;  // workspace
   PressureSolver<Real> poisson;
+  // Distributed hooks (rung C5, fv/distributed.hpp): the reconstructed cell velocity and the cell
+  // tendency are refreshed at the ghosts (interface faces read both cells), the energy counts an
+  // interface face once (½ on each rank), the pressure PCG uses the same hooks.
+  std::function<void(const DV<Real>&, int)> exchange;
+  std::function<Real(Real)> sum, max;
+  template <class Ex>
+  void setExchange(Ex& ex) {
+    exchange = [&ex](const DV<Real>& f, int nc) { ex.exchange(f, nc); };
+    sum = [&ex](Real v) { return ex.sum(v); };
+    max = [&ex](Real v) { return ex.max(v); };
+    poisson.setHooks(exchange, sum);
+  }
   Real lastDiv = 0;
 
   void setup(const FaceMesh<Real>& mesh, Real viscosity, bool amg = false) {
     m = mesh;
     nu = viscosity;
     const int N = m.nCells, F = m.nFaces;
+    const int NC = m.nCombined > 0 ? m.nCombined : N;
     u = DV<Real>("ns.u", F);
-    p = DV<Real>("ns.p", N);
-    U = DV<Real>("ns.U", 3 * N);
-    a = DV<Real>("ns.a", 3 * N);
+    p = DV<Real>("ns.p", NC);
+    U = DV<Real>("ns.U", 3 * NC);
+    a = DV<Real>("ns.a", 3 * NC);
     k = DV<Real>("ns.k", F);
     u1 = DV<Real>("ns.u1", F);
     u2 = DV<Real>("ns.u2", F);
@@ -422,7 +435,11 @@ struct CovolumeNS {
   void rhs(const DV<Real>& uf, const DV<Real>& out) {
     if (viscousDEC) {  // convection (+ force) through Rᵀ, viscous term directly on the faces
       perotVelocity(m, uf, U);
+      if (exchange)
+        exchange(U, 3);
       cellTendency(m, uf, U, Real(0), a, force, convScale, Uwall);
+      if (exchange)
+        exchange(a, 3);
       perotTranspose(m, a, out);
       decLaplacian(m, dec, uf, decDiv, decOut);
       const DV<Real> dO = decOut;
@@ -433,10 +450,12 @@ struct CovolumeNS {
       return;
     }
     perotVelocity(m, uf, U);
+    if (exchange)
+      exchange(U, 3);  // the ghosts' reconstructed velocity (the convective face mean, walls)
     if (wallQuadratic && m.nFaces > m.nInterior) {
       if (wg.extent(0) == 0) {
         wg = DV<Real>("ns.wg", 3 * (m.nFaces - m.nInterior));
-        g9w = DV<Real>("ns.g9w", 9 * m.nCells);
+        g9w = DV<Real>("ns.g9w", 9 * (m.nCombined > 0 ? m.nCombined : m.nCells));
       }
       vectorGreenGauss(m, U, g9w, Uwall);
       wallGradientLS(m, U, g9w, Uwall, wg);
@@ -444,6 +463,8 @@ struct CovolumeNS {
     } else {
       cellTendency(m, uf, U, nu, a, force, convScale, Uwall);
     }
+    if (exchange)
+      exchange(a, 3);  // Rᵀ reads the ghost cell's tendency on an interface face
     perotTranspose(m, a, out);
   }
   /// Make uf divergence-free: L φ = div uf / dt, uf −= dt grad φ; p = φ.
@@ -482,7 +503,23 @@ struct CovolumeNS {
     project(uu, Real(2) / Real(3) * dt);
   }
   /// ½⟨u,u⟩_F — the energy the scheme conserves.
-  Real kineticEnergy() const { return Real(0.5) * dotFaces(m, u, u); }
+  Real kineticEnergy() const {
+    // ½⟨u,u⟩_F over the owned faces; an interface face exists on both ranks → weight ½
+    const FaceMesh<Real> mm = m;
+    const DV<Real> uu = u;
+    const int nOwn = m.nCells;
+    Real e = 0;
+    Kokkos::parallel_reduce(
+        "ns.ke", Kokkos::RangePolicy<Exec>(0, m.nInterior),
+        KOKKOS_LAMBDA(const int f, Real& acc) {
+          const Real w = mm.faceCellB(f) >= nOwn ? Real(0.5) : Real(1);
+          acc += w * mm.faceArea(f) * mm.faceDist(f) * uu(f) * uu(f);
+        },
+        e);
+    if (sum)
+      e = sum(e);
+    return Real(0.5) * e;
+  }
   /// max_i |div u|_i
   Real maxDivergence() {
     const DV<Real> dv = div;
@@ -496,7 +533,7 @@ struct CovolumeNS {
             acc = v;
         },
         Kokkos::Max<Real>(mx));
-    return mx;
+    return max ? max(mx) : mx;
   }
 };
 

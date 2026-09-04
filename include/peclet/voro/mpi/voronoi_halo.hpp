@@ -131,6 +131,11 @@ class VoronoiHalo {
     halo_.forward(owned, ghost);
   }
   MPI_Comm comm() const { return comm_; }
+  /// The send/recv topology of the last gather() in core's flat, device-friendly form (the
+  /// device-packed exchange of fv/distributed.hpp gathers the sends on the device from it).
+  typename peclet::core::halo::ParticleHaloTopology<3>::FlatTopo flatTopology() const {
+    return halo_.flatten();
+  }
 
   /// Position-only halo refresh: re-forward the CURRENT owned positions onto the EXISTING ghost
   /// topology (the one built by the last gather()), WITHOUT re-decomposing or re-selecting ghosts.
