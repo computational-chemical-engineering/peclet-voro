@@ -19,7 +19,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "peclet-voro-cu13"
-version = "0.5.0"
+version = "0.5.1"
 description = "peclet.voro (CUDA / single-GPU) — device-native (Kokkos) moving-particle Voronoi dynamics + unstructured mesh gen"
 readme = "README.md"
 requires-python = ">=3.10"
