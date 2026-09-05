@@ -44,7 +44,7 @@ jobs:
 
       - name: Build & install Kokkos (OpenMP + Serial)
         run: |
-          git clone --depth 1 --branch 4.5.00 https://github.com/kokkos/kokkos.git /tmp/kokkos
+          git clone --depth 1 --branch 5.1.1 https://github.com/kokkos/kokkos.git /tmp/kokkos   # lockstep with ../tools/bootstrap_deps.sh KOKKOS_TAG (flow/pnm/dem CI pin the same)
           cmake -S /tmp/kokkos -B /tmp/kokkos/build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=$HOME/kokkos-install \
