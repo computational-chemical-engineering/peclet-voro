@@ -214,11 +214,13 @@ int main(int argc, char** argv) {
       const double s0 = spread(volS0);
       std::vector<real_t> posH = posS, posD = posS, volH, volD;
       std::vector<real_t> vsetU(N, boxVol / N), noW2;
-      peclet::voro::meshVolumeOptimize<real_t, false>(posH, noW2, vsetU, (real_t[3]){L, L, L}, N,
-                                                      sw, ball, 60, 1e-10, 300,
-                                                      peclet::voro::Precond::Jacobi, false);
-      auto RD = peclet::voro::meshVolumeOptimizeDevice<real_t>(
-          posD, vsetU, (real_t[3]){L, L, L}, N, sw, ball, 60, 1e-10, 300, true);
+      const real_t Lbox[3] = {L, L, L};  // a named array: the compound literal is a GNU extension
+                                         // that g++ 13 rejects ("taking address of temporary array")
+      peclet::voro::meshVolumeOptimize<real_t, false>(posH, noW2, vsetU, Lbox, N, sw, ball, 60,
+                                                      1e-10, 300, peclet::voro::Precond::Jacobi,
+                                                      false);
+      auto RD = peclet::voro::meshVolumeOptimizeDevice<real_t>(posD, vsetU, Lbox, N, sw, ball, 60,
+                                                               1e-10, 300, true);
       volumesSdf(posH, N, L, sw, ball, volH);
       volumesSdf(posD, N, L, sw, ball, volD);
       const double sH = spread(volH), sD = spread(volD);
