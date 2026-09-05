@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <Kokkos_Core.hpp>
+#include <type_traits>
 #include <map>
 #include <random>
 #include <vector>
@@ -473,8 +474,16 @@ int main(int argc, char** argv) {
     // implicit variant (FLOW_MPI_IMPLICIT): three velocity PCG solves per step at 1e-12 with the
     // block-Jacobi preconditioner — measured 2e-11 / 2e-14 at np = 2/4
     const bool impl = std::getenv("FLOW_MPI_IMPLICIT") != nullptr;
-    const double tolU = np == 1 ? 0.0 : (impl ? 1e-9 : 1e-12),
-                 tolE = np == 1 ? 0.0 : (impl ? 1e-12 : 1e-13);
+    // np = 1 is bit-exact to the single-rank reference on the HOST backends (OpenMP / Serial:
+    // identical kernels, identical summation order). On a DEVICE backend the two runs differ at
+    // round-off and are not even reproducible run-to-run (measured on CUDA, 2026-09-05: 7.2e-16 /
+    // 8.7e-16 in two runs of the same binary; the tessellator's facet CSR is assembled with
+    // atomics, so per-cell sums land in a different order each launch) — the suite-wide policy
+    // (core tests, 2026-07-23): bit-exact on OpenMP/Serial, round-off tolerance on CUDA/HIP.
+    const bool deviceBackend =
+        !std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
+    const double tolU = np == 1 ? (deviceBackend ? 1e-13 : 0.0) : (impl ? 1e-9 : 1e-12),
+                 tolE = np == 1 ? (deviceBackend ? 1e-14 : 0.0) : (impl ? 1e-12 : 1e-13);
     const bool ok = solveOk && rel <= tolU && eRel <= tolE && divMax < 1e-11 && flaggedG == 0;
     if (rank == 0)
       std::printf(

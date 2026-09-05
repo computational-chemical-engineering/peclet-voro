@@ -345,8 +345,10 @@ decomposition: `buildFaceMesh(view, aux, nOwned)` keeps facets toward ghost seed
 faces owned locally, cell fields are sized owned+ghost and refreshed through the halo's `forward`
 at every stage, the pressure PCG exchanges its search direction, all-reduces its dot products and
 preconditions with the per-rank block of the GraphAMG. `tests/kokkos_mpi/test_flow_mpi`
-(`flow_mpi_np{1,2,4}`): np = 1 bit-exact to single rank, np = 2/4 within 3e-15 (velocity) and
-2e-16 (energy) of it, divergence 2e-14. The isolated pressure-solve gate (true residual ==
+(`flow_mpi_np{1,2,4}`): np = 1 bit-exact to single rank on the host backends (on CUDA/HIP the
+two runs differ at round-off, ~1e-15, and are not reproducible run-to-run — the tessellator's
+facet CSR is assembled with atomics — so the device gate is 1e-13 / 1e-14), np = 2/4 within
+3e-15 (velocity) and 2e-16 (energy) of it, divergence 2e-14. The isolated pressure-solve gate (true residual ==
 recursive residual, K·1 = 0, symmetry) is what caught the rank-local total volume in the mean
 deflation. The covolume solver carries the same hooks (`flow_mpi_covolume_np{1,2,4}`), and the
 exchange packs on the device (only the send/receive buffers cross to the host for MPI, bitwise
