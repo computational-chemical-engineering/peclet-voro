@@ -172,8 +172,8 @@ Array shapes follow the suite convention (`../docs/CONVENTIONS.md` §6): positio
 `(N,3)` float64, masses/viscosities/volumes `(N,)`. Call `peclet.voro.finalize()` for
 deterministic Kokkos teardown (also run from an `atexit` hook).
 
-For the distributed (MPI) validation scripts see [`mpi/README.md`](mpi/README.md) and
-[`docs/distributed_voronoi.md`](docs/distributed_voronoi.md).
+For the distributed (MPI) validation scripts see [`mpi/README.md`](https://github.com/computational-chemical-engineering/peclet-voro/blob/main/mpi/README.md) and
+[`docs/distributed_voronoi.md`](https://github.com/computational-chemical-engineering/peclet-voro/blob/main/docs/distributed_voronoi.md).
 
 ---
 
@@ -337,10 +337,12 @@ flux gave −13 % / −7.5 % on the same meshes (fat wall cells). A cubic (unjit
 a sphere is degenerate and overflows the clipper — jitter the seeds; a seed shell at h/2 overflows
 the 64-plane cell cap.
 
-**Python `FlowSolver` (rung C5, Python half).** `peclet.voro.FlowSolver(tess, viscosity,
-layout='collocated'|'covolume')` runs either static solver on the face mesh of a resident
+**Python `FlowSolver` (rung C5, Python half).** `peclet.voro.FlowSolver(tess, viscosity, layout='collocated'|'covolume')`
+runs either static solver on the face mesh of a resident
 `Tessellation` (walls from its SDF geometry): body force, Stokes switch, wall velocities, initial
-velocity, `step`, cell velocity / pressure / volumes, kinetic energy, divergence. **Distributed (MPI).** `fv/distributed.hpp` runs the collocated solver over `VoronoiHalo`'s
+velocity, `step`, cell velocity / pressure / volumes, kinetic energy, divergence.
+
+**Distributed (MPI).** `fv/distributed.hpp` runs the collocated solver over `VoronoiHalo`'s
 decomposition: `buildFaceMesh(view, aux, nOwned)` keeps facets toward ghost seeds as interface
 faces owned locally, cell fields are sized owned+ghost and refreshed through the halo's `forward`
 at every stage, the pressure PCG exchanges its search direction, all-reduces its dot products and
@@ -395,5 +397,3 @@ cross-backend performance/memory/accuracy study.
 ## License
 
 See [LICENSE](https://github.com/computational-chemical-engineering/peclet-voro/blob/main/LICENSE) for details.
-</content>
-</invoke>

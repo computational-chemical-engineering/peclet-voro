@@ -1,0 +1,110 @@
+/**
+ * \namespace peclet::voro
+ * \brief Device-native Voronoi tessellation, geometry and finite-volume physics.
+ *
+ * \page architecture Architecture — how peclet.voro is put together
+ *
+ * The README is the front page: what the library is, how to build it, how to call it.
+ * This page is the design overview — the representation choices and the layers built on
+ * them. It is written to be read top to bottom.
+ *
+ * \section arch_intro Overview
+ *
+ * peclet.voro computes and dynamically maintains the 3D Voronoi tessellation of a set of
+ * moving points in a periodic box, on the **device path** (Kokkos: Serial / OpenMP / CUDA /
+ * HIP — one source, the backend fixed at build time), with optional MPI domain
+ * decomposition. It is built around a compact, register-resident cell representation and an
+ * incremental *repair* update that makes per-step tessellation of moving points several
+ * times cheaper than rebuilding. The legacy half-edge CPU engine has been retired;
+ * everything below is the device path.
+ *
+ * \section arch_cell The cell: a compact dual ConvexCell
+ *
+ * A Voronoi cell is the intersection of half-spaces — one per neighbour, plus the box.
+ * Rather than an explicit half-edge mesh, peclet.voro stores the cell in the **dual**
+ * (`peclet::voro::ConvexCell`, \ref convex_cell.hpp): each primal vertex is the intersection
+ * of three planes, kept as a *triple of plane indices*, so the whole cell is a small
+ * dual-triangle list that lives in registers or a tiny per-thread frame. That is what lifts
+ * GPU occupancy far above the old half-edge frame. Cell geometry — volume, per-facet area
+ * vector, volume gradient dV, connector — is computed **sort-free and adjacency-free** by a
+ * per-vertex divergence-theorem scatter.
+ *
+ * The plane set is policy-driven (\ref plane_policy.hpp), which is what lets the same cell
+ * code serve plain Voronoi and **power (Laguerre)** cells, where each seed carries a weight.
+ *
+ * \section arch_build Cold build
+ *
+ * `peclet::voro::buildTessellation` (\ref tessellator.hpp) builds the whole tessellation: a
+ * counting-sort grid (\ref tess_grid.hpp) plus a voro++-derived presorted *worklist* gathers
+ * each cell's candidate neighbours closest-first — the dominant cost — then clips the
+ * `ConvexCell` on the fly and publishes a read-only `peclet::voro::TessellationView`
+ * (\ref tessellation_view.hpp). It optionally emits a compact resident topology store
+ * (\ref topology_store.hpp) so a later step can re-evaluate or repair without re-gathering.
+ *
+ * \section arch_repair Moving-point repair
+ *
+ * `peclet::voro::MovingTessellation` (\ref repair.hpp) updates a resident tessellation each
+ * step without a full rebuild: re-evaluate every cell's geometry on the fixed stored topology
+ * (\ref reeval_tessellation.hpp), run an O(nt) Lawson convexity **certificate**
+ * (`isLocallyConvex`, complete via the dual tet's four faces) to find which cells changed,
+ * then a **two-pass gather repair** of just those cells (\ref subset_gather.hpp), with an
+ * adaptive **gate** that routes high-churn steps to a full rebuild — so it is never much
+ * slower than a cold build — and a verify pass (\ref dynamic_validate.hpp) that keeps it
+ * exact. A Verlet skin (\ref verlet_skin.hpp) flags which seeds have moved far enough to
+ * matter.
+ *
+ * \section arch_geometry Solid geometry
+ *
+ * \ref sdf.hpp embeds a solid into the tessellation: a cell that would reach into the solid
+ * is clipped against the signed-distance surface, device-side, so walls and immersed bodies
+ * are part of the same cell representation rather than a special case around it.
+ *
+ * \section arch_fv The finite-volume layer
+ *
+ * `peclet::voro::fv` turns the tessellation into a mesh a solver can use.
+ * \ref polymesh.hpp builds the face mesh (`buildPolyMesh`, with wall-vertex merging);
+ * \ref operators.hpp provides the primitive operators — `faceGradient`, `divergence`, and the
+ * cell/face inner products that make the discrete adjoint pairing explicit. On top of those
+ * sit two Navier–Stokes solvers, deliberately kept side by side:
+ *
+ *  - `CovolumeNS` (\ref covolume.hpp) — **staggered**: face-normal fluxes as the velocity
+ *    unknown, cell pressures, exact projection with the two-point Laplacian.
+ *  - `CollocatedNS` (\ref collocated.hpp) — **collocated**, with the approximate projection
+ *    of `peclet.flow`'s `SolverColocated` (Almgren–Bell–Colella structure, not Rhie–Chow),
+ *    so the two codes answer the same question the same way.
+ *
+ * \section arch_optim Mesh optimisation
+ *
+ * The geometry is differentiable, which makes the tessellation itself an optimisation
+ * variable. \ref mesh_optimizer.hpp minimises a geometry energy over seed positions and,
+ * optionally, the power weights — a Surface-Evolver-style tool on (power-)Voronoi geometry,
+ * with the energy terms in `peclet::voro::energy` (volume, interface tension, Lloyd, wall).
+ * \ref ot_optimizer.hpp does semi-discrete **optimal-transport volume control** on the power
+ * tessellation: move cells to target volumes, which is how unstructured grids get built by
+ * energy minimisation rather than by meshing.
+ *
+ * \section arch_physics Physics
+ *
+ * `peclet::voro::physics` provides a device-native compressible Euler / Navier–Stokes
+ * Voronoi fluid (\ref simulation.hpp), with the `euler_pressure`, `viscous` and `interface`
+ * force consumers operating over the published view.
+ *
+ * \section arch_mpi Distributed
+ *
+ * `peclet::voro::mpi::VoronoiHalo` (\ref voronoi_halo.hpp) exchanges the ghost seeds a rank
+ * needs to close its own cells, and `DistributedMovingTessellation`
+ * (\ref distributed_moving.hpp) is the library-level driver that runs the cold build and the
+ * repair loop across ranks.
+ *
+ * \section arch_python Python
+ *
+ * The nanobind module `peclet.voro` (`src/voro_bindings.cpp`) exposes `Tessellation` (cold
+ * build, incremental repair, volumes, neighbour counts), `Simulation` (the fluid solver),
+ * `FlowSolver` and `VoronoiHalo`. Build with `-DPECLET_VORO_BUILD_PYTHON=ON`, or
+ * `pip install .`. See `python/test_voro.py` for usage.
+ *
+ * \section arch_perf Performance
+ *
+ * A cross-backend performance, memory and accuracy study — cold build and repair throughput,
+ * scaling, volume conservation — is in `docs/performance_report.md`.
+ */

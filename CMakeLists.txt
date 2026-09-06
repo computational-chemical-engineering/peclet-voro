@@ -200,15 +200,19 @@ if(PECLET_VORO_BUILD_DOCS)
     set(DOXYGEN_DISABLE_INDEX NO)
     set(DOXYGEN_FULL_SIDEBAR NO)
     set(DOXYGEN_HTML_COLORSTYLE LIGHT)
-    # The \mainpage lives in docs/mainpage.dox (the architecture overview); the design notes under
-    # docs/ are not part of the API reference. power_cell_solver_spec.md uses LaTeX \dot{...}, which
-    # collides with Doxygen's \dot graph command.
+    # The README is the landing page, as in core/flow/pnm/dem; the architecture overview that
+    # used to be the \mainpage is now a \page of its own (docs/architecture.dox), reachable
+    # from the sidebar.  The design notes under docs/ are not part of the API reference.
+    # power_cell_solver_spec.md uses LaTeX \dot{...}, which collides with Doxygen's \dot
+    # graph command.
     set(DOXYGEN_EXCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/docs/power_cell_solver_spec.md")
+    set(DOXYGEN_USE_MDFILE_AS_MAINPAGE "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
     doxygen_add_docs(
       docs
+      "${CMAKE_CURRENT_SOURCE_DIR}/README.md"
       "${CMAKE_CURRENT_SOURCE_DIR}/include"
       "${CMAKE_CURRENT_SOURCE_DIR}/src"
-      "${CMAKE_CURRENT_SOURCE_DIR}/docs/mainpage.dox"
+      "${CMAKE_CURRENT_SOURCE_DIR}/docs/architecture.dox"
       COMMENT "Generating Doxygen documentation"
     )
   endif()
