@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/peclet-voro.svg)](https://pypi.org/project/peclet-voro/)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://pypi.org/project/peclet-voro/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/computational-chemical-engineering/peclet-voro/blob/main/LICENSE)
 [![CI](https://github.com/computational-chemical-engineering/peclet-voro/actions/workflows/ci.yml/badge.svg)](https://github.com/computational-chemical-engineering/peclet-voro/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21132443.svg)](https://doi.org/10.5281/zenodo.21132443)
 
@@ -394,6 +394,6 @@ cross-backend performance/memory/accuracy study.
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+See [LICENSE](https://github.com/computational-chemical-engineering/peclet-voro/blob/main/LICENSE) for details.
 </content>
 </invoke>
