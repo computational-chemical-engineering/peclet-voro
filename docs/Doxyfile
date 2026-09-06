@@ -1,3 +1,8 @@
+# NOTE: this file is for local runs only.  The published site is built by the
+# `docs` target in ../CMakeLists.txt, which uses doxygen_add_docs() - that writes
+# its own Doxyfile from DOXYGEN_* variables and does NOT read this one.  Change
+# both, or the change will not reach the site.
+
 # Doxyfile 1.7.6.1
 
 # This file describes the settings to be used by the documentation system

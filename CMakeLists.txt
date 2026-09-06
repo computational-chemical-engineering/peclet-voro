@@ -191,6 +191,15 @@ if(PECLET_VORO_BUILD_DOCS)
     set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/docs")
     set(DOXYGEN_EXTRACT_ALL YES)
     set(DOXYGEN_RECURSIVE YES)
+    # Match the presentation the rest of the family pins (core, flow, pnm, dem).  These have
+    # to be set HERE, not in docs/Doxyfile: doxygen_add_docs() writes its own Doxyfile from
+    # the DOXYGEN_* variables and never reads that file, so the published site ignored it.
+    # HTML_COLORSTYLE especially - its default AUTO_LIGHT follows the reader's browser theme,
+    # which is why this page could come out dark while the others stayed light.
+    set(DOXYGEN_GENERATE_TREEVIEW YES)
+    set(DOXYGEN_DISABLE_INDEX NO)
+    set(DOXYGEN_FULL_SIDEBAR NO)
+    set(DOXYGEN_HTML_COLORSTYLE LIGHT)
     # The \mainpage lives in docs/mainpage.dox (the architecture overview); the design notes under
     # docs/ are not part of the API reference. power_cell_solver_spec.md uses LaTeX \dot{...}, which
     # collides with Doxygen's \dot graph command.
