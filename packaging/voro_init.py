@@ -1,7 +1,7 @@
 """peclet.voro — dynamic 3D Voronoi tessellation of moving particles.
 
-A device-native (Kokkos) moving-cell Voronoi engine: periodic & Lees–Edwards boxes, incremental cell
-repair, and compressible Euler / Navier–Stokes / multiphase dynamics on the moving cells. Also serves as
+A device-native (Kokkos) moving-cell Voronoi engine: periodic boxes, incremental cell repair, and
+compressible Euler / Navier–Stokes / multiphase dynamics on the moving cells. Also serves as
 an unstructured-mesh generator that can feed an Eulerian solve in :mod:`peclet.flow`. The compiled
 backend (Serial / OpenMP / CUDA / HIP) is chosen at build time — ``peclet.voro.execution_space`` reports
 which one this build has.
@@ -30,25 +30,25 @@ except Exception:  # PackageNotFoundError (dev build), or a broken metadata inst
 # --------------------------------------------------------------------------------------------------
 # Track B, rung B2 (Voronoi methods plan): global redistribution of interstitial seeds.
 # --------------------------------------------------------------------------------------------------
-def _union_sdf(pts, centres, radii, L):
+def _union_sdf(pts, centers, radii, L):
     """min_i(|x − c_i|_minimage − r_i): < 0 inside a sphere, > 0 in the fluid (periodic box L)."""
     import numpy as np
 
-    d = pts[:, None, :] - centres[None, :, :]
+    d = pts[:, None, :] - centers[None, :, :]
     d -= L * np.round(d / L)
     return (np.linalg.norm(d, axis=2) - radii[None, :]).min(axis=1)
 
 
-def sphere_union_scene(centres, radii):
+def sphere_union_scene(centers, radii):
     """Flat scene encoding (node_ints (n,3) int32, node_reals (n,16) float64, root) of the CSG union
     of solid spheres — the geometry for :meth:`Tessellation.set_geometry`."""
     import numpy as np
 
-    centres = np.asarray(centres, dtype=np.float64).reshape(-1, 3)
+    centers = np.asarray(centers, dtype=np.float64).reshape(-1, 3)
     radii = np.asarray(radii, dtype=np.float64).ravel()
     m = len(radii)
     ints, reals = [], []
-    for c, r in zip(centres, radii):  # leaves
+    for c, r in zip(centers, radii):  # leaves
         ints.append([1, -1, -1])  # kSphere
         row = np.zeros(16)
         row[0] = r
@@ -68,7 +68,7 @@ def sphere_union_scene(centres, radii):
             np.ascontiguousarray(np.array(reals, dtype=np.float64)), root)
 
 
-def redistribute_pore_mesh(positions, centres, radii, L, s_lo, s_hi, *, slope=1.0, beta=2.0,
+def redistribute_pore_mesh(positions, centers, radii, L, s_lo, s_hi, *, slope=1.0, beta=2.0,
                            beta_decay=0.9, max_rounds=40, lloyd_steps=8, lloyd_weight=0.3,
                            margin=None, max_change=0.1, tol=0.1, polish=False, wall_shell=True,
                            seed=0, verbose=False):
@@ -88,18 +88,18 @@ def redistribute_pore_mesh(positions, centres, radii, L, s_lo, s_hi, *, slope=1.
     now-feasible start. Returns a dict: positions, volumes, vref, max_rel, rms_rel, rounds,
     n_added, n_removed, n_dead, history (per-round (N, max_rel, rms_rel, n_dead)).
 
-    The sphere packing is the periodic wall geometry (centres (M,3), radii (M,), box L)."""
+    The sphere packing is the periodic wall geometry (centers (M,3), radii (M,), box L)."""
     import numpy as np
 
     from ._voro import Tessellation, optimize_pore_mesh
 
     rng = np.random.default_rng(seed)
-    centres = np.asarray(centres, dtype=np.float64).reshape(-1, 3)
+    centers = np.asarray(centers, dtype=np.float64).reshape(-1, 3)
     radii = np.asarray(radii, dtype=np.float64).ravel()
     pos = np.ascontiguousarray(np.asarray(positions, dtype=np.float64).reshape(-1, 3) % L)
     if margin is None:
         margin = 0.4 * s_lo
-    ni, nr, root = sphere_union_scene(centres, radii)
+    ni, nr, root = sphere_union_scene(centers, radii)
     def size_of(phi):
         # s(φ) = clip(s_lo + slope (φ − s_lo), s_lo, s_hi): slope 1 is the example's s = clip(φ);
         # a Voronoi cell's size cannot change faster than its neighbours' — with slope 1 the
@@ -116,12 +116,12 @@ def redistribute_pore_mesh(positions, centres, radii, L, s_lo, s_hi, *, slope=1.
         while d < 1.5 * s_hi:
             dists.append(d)
             d += float(size_of(d))
-        phi0 = _union_sdf(pos, centres, radii, L)
+        phi0 = _union_sdf(pos, centers, radii, L)
         keep = phi0 >= dists[-1] + 0.5 * size_of(dists[-1])
         shells = []
         for d in dists:
             h = float(size_of(d))
-            for c, r in zip(centres, radii):
+            for c, r in zip(centers, radii):
                 R = r + d
                 n = max(6, int(4 * np.pi * R * R / (h * h)))
                 i = np.arange(n) + 0.5
@@ -130,23 +130,23 @@ def redistribute_pore_mesh(positions, centres, radii, L, s_lo, s_hi, *, slope=1.
                 p = np.c_[np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)] * R + c
                 p += rng.normal(0, 0.15 * h, p.shape)
                 p %= L
-                pd = _union_sdf(p, centres, radii, L)
+                pd = _union_sdf(p, centers, radii, L)
                 shells.append(p[np.abs(pd - d) < 0.5 * h])
         pos = np.ascontiguousarray(np.vstack([pos[keep]] + shells) % L)
 
 
     def measure(p):
         t = Tessellation()
-        t.set_box((L, L, L))
+        t.set_domain(extent=(L, L, L))
         t.set_geometry(ni, nr, root=root)
         if verbose:
             print(f"    measure: build N={len(p)}", flush=True)
         t.build(p, strict=False)
-        vol = t.volumes()
+        vol = t.get_volumes()
         rep = t.build_report()
         if verbose:
             print(f"    measure: report {rep}", flush=True)
-        phi = _union_sdf(p, centres, radii, L)
+        phi = _union_sdf(p, centers, radii, L)
         dead = (vol <= 0) | (phi <= 0)
         vref = size_of(phi) ** 3  # ABSOLUTE target: the seed count adjusts until Σ V_ref = fluid
         live = ~dead
@@ -199,7 +199,7 @@ def redistribute_pore_mesh(positions, centres, radii, L, s_lo, s_hi, *, slope=1.
             if np.linalg.norm(off) < 0.2 * s:  # symmetric cell: a random direction
                 off = rng.standard_normal(3)
             if phi[i] < s:  # wall cell: split ALONG the wall (outward seeds get merged away)
-                d = pos[i] - centres
+                d = pos[i] - centers
                 d -= L * np.round(d / L)
                 nrm = d[np.argmin(np.linalg.norm(d, axis=1) - radii)]
                 nrm /= max(np.linalg.norm(nrm), 1e-300)
@@ -209,7 +209,7 @@ def redistribute_pore_mesh(positions, centres, radii, L, s_lo, s_hi, *, slope=1.
                     off -= np.dot(off, nrm) * nrm
             off *= 0.6 * s / max(np.linalg.norm(off), 1e-300)
             q = (pos[i] + off) % L
-            if _union_sdf(q[None, :], centres, radii, L)[0] > margin:
+            if _union_sdf(q[None, :], centers, radii, L)[0] > margin:
                 new.append(q)
         keep = np.ones(n, dtype=bool)
         keep[remove] = False
@@ -223,7 +223,7 @@ def redistribute_pore_mesh(positions, centres, radii, L, s_lo, s_hi, *, slope=1.
             vol, vref, rel, dead, cen, phi, rep, step = measure(pos)
             live = ~dead
             q = (pos + lloyd_weight * (cen - pos) + step) % L
-            ok = live & (_union_sdf(q, centres, radii, L) > margin)
+            ok = live & (_union_sdf(q, centers, radii, L) > margin)
             pos[ok] = q[ok]
             pos = np.ascontiguousarray(pos % L)
     vol, vref, rel, dead, cen, phi, rep, step = measure(pos)
@@ -231,7 +231,7 @@ def redistribute_pore_mesh(positions, centres, radii, L, s_lo, s_hi, *, slope=1.
         pos = best[1]
         vol, vref, rel, dead, cen, phi, rep, step = measure(pos)
     if polish and not dead.any():
-        r = optimize_pore_mesh(pos, np.ascontiguousarray(vref), centres, radii, L, sw=4,
+        r = optimize_pore_mesh(pos, np.ascontiguousarray(vref), centers, radii, L, sw=4,
                                max_iter=60, tol=1e-8, method="graphamg")
         p2 = np.ascontiguousarray(np.asarray(r["positions"]) % L)
         vol2, vref2, rel2, dead2, cen2, phi2, rep2, step2 = measure(p2)

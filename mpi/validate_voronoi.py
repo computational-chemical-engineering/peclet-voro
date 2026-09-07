@@ -35,7 +35,7 @@ def tessellate(pos, box=L):
     s.set_pressure(1.0)
     if not s.init():
         raise RuntimeError("tessellation init failed")
-    return np.array(s.get_volumes()), np.array(s.get_num_neighbors())
+    return np.array(s.get_volumes()), np.array(s.get_neighbor_counts())
 
 
 # global particle set (perturbed lattice -> a robust, non-degenerate tessellation)

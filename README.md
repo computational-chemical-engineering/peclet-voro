@@ -126,8 +126,9 @@ cmake --build build --target voro -j
 PYTHONPATH=build python3 -c "import peclet.voro; print(peclet.voro.execution_space)"
 ```
 
-The module exposes two surfaces — the bare **`Tessellation`** (cold build + incremental repair of a
-moving point set) and the **`Simulation`** fluid solver:
+The module exposes three classes — the bare **`Tessellation`** (cold build + incremental repair of a
+moving point set), the moving-cell **`Simulation`** fluid solver, and the static **`FlowSolver`** on
+the face mesh of a resident tessellation — plus the mesh-optimiser functions:
 
 ```python
 import numpy as np
@@ -135,26 +136,28 @@ import peclet.voro as voro
 
 # bare moving-point Voronoi tessellation
 t = voro.Tessellation()
-t.set_box([1.0, 1.0, 1.0])
+t.set_domain(extent=(1.0, 1.0, 1.0))  # the box SIZE; origin (0,0,0) and periodic on every axis
 t.build(pos)                         # cold build, pos = (N,3) float64
-vol = t.volumes()                    # (N,) cell volumes (sum ~= box volume)
-nbr = t.neighbor_counts()            # (N,) Voronoi neighbours per cell
+vol = t.get_volumes()                # (N,) cell volumes (sum ~= box volume)
+nbr = t.get_neighbor_counts()        # (N,) Voronoi neighbours per cell
 stats = t.step(pos_moved)            # incremental repair to new positions
 
 # compressible-Euler / Navier-Stokes fluid on top of it
 s = voro.Simulation()
-s.set_box([6.0, 6.0, 6.0])
+s.set_domain(extent=(6.0, 6.0, 6.0))
 s.set_positions(pos)                 # (N,3) float64
 s.set_velocities(vel)                # (N,3) float64
 s.set_masses(masses)                 # (N,) float64
 s.set_pressure(1.0)
 s.set_viscosities(nu)                # (N,) float64 — enables the viscous Navier–Stokes term
 s.init()                             # build the first tessellation + forces
-s.step(num_steps=10, dt=1e-3)        # velocity-Verlet dynamics
+s.set_dt(1e-3)
+s.step(num_steps=10)                 # velocity-Verlet dynamics, 10 steps of s.dt
 
 pos  = s.get_positions()             # (N,3)
 vol  = s.get_volumes()               # per-cell Voronoi volume (N,)
-ke   = s.get_kinetic_energy()
+ke   = s.kinetic_energy()            # scalars are bare names; arrays that copy out are get_*
+t_now = s.time
 
 # SDF solids + power weights on the moving-point path (Voronoi methods plan, rung A0)
 scene = peclet.core.geom.SceneBuilder()
@@ -164,8 +167,16 @@ t.set_geometry(node_ints, node_reals, root=root)   # any analytic core scene (CS
 t.set_weights(w)                     # (N,) power (Laguerre) weights — optional
 t.build(pos)                         # cells clipped by the solid; in-solid seeds get volume 0
 stats = t.step(pos_moved)            # wall planes are resident; stats['wall_flagged'] = re-clips
-walls = t.wall_counts()              # (N,) wall planes per cell
+walls = t.get_wall_counts()          # (N,) wall planes per cell
 s.set_geometry(node_ints, node_reals)  # the same walls for the fluid (pressure acts on them)
+
+# static Navier–Stokes on the face mesh of the resident cells (track C)
+f = voro.FlowSolver(t, viscosity=0.01, layout="collocated")   # or "covolume"
+f.set_velocity(U0)                   # (num_cells, 3)
+f.set_dt(1e-3)
+f.step(100)
+U, p = f.get_velocities(), f.get_pressure()
+print(f.num_cells, f.num_wall_faces, f.kinetic_energy(), f.max_divergence(), f.pressure_iterations)
 ```
 
 Array shapes follow the suite convention (`../docs/CONVENTIONS.md` §6): positions/velocities

@@ -31,13 +31,13 @@
  *   rng = np.random.default_rng(0)
  *   pos = rng.random((100_000, 3))            # uniform points in the unit box
  *   t = peclet.voro.Tessellation()
- *   t.set_box((1.0, 1.0, 1.0))
+ *   t.set_domain(extent=(1.0, 1.0, 1.0))
  *   t.build(pos)                              # cold tessellation
- *   vol = t.volumes()                         # (N,) cell volumes; sum ~= box volume
+ *   vol = t.get_volumes()                     # (N,) cell volumes; sum ~= box volume
  *   for _ in range(50):                       # move + repair each step (faster than rebuilding)
  *       pos = (pos + 1e-4 * rng.standard_normal(pos.shape)) % 1.0
  *       stats = t.step(pos)                   # {'flagged','pass1','pass2','rebuilt','fell_back'}
- *   nbr = t.neighbor_counts()                 # (N,) Voronoi neighbours per cell
+ *   nbr = t.get_neighbor_counts()             # (N,) Voronoi neighbours per cell
  * @endcode
  */
 #include <nanobind/nanobind.h>
@@ -338,12 +338,10 @@ class Tess : public peclet::core::python::Releasable {
  public:
   Tess() = default;
 
-  void set_box(std::array<real_t, 3> L) { L_ = L; }
-  // The suite-canonical spelling of the same thing (docs/NAMING.md 1.1). `extent` is the box SIZE;
-  // this engine's box always starts at the origin and is periodic on all three axes, so the other
-  // two arguments exist to be CHECKED rather than stored — a caller who writes what every other
-  // code in the suite writes gets an error naming the limitation instead of a silently ignored
-  // argument.
+  // The suite-wide domain setter (docs/NAMING.md 1.1). `extent` is the box SIZE; this engine's box
+  // always starts at the origin and is periodic on all three axes, so the other two arguments
+  // exist to be CHECKED rather than stored — a caller who writes what every other code in the
+  // suite writes gets an error naming the limitation instead of a silently ignored argument.
   void set_domain(std::array<real_t, 3> extent, std::array<real_t, 3> origin,
                   std::array<bool, 3> periodic) {
     for (int a = 0; a < 3; ++a) {
@@ -475,7 +473,7 @@ class Tess : public peclet::core::python::Releasable {
     return d;
   }
 
-  nb::ndarray<nb::numpy, real_t> volumes() {
+  nb::ndarray<nb::numpy, real_t> get_volumes() {
     const std::size_t N = static_cast<std::size_t>(N_);
     DView vol = std::visit([](auto& mt) { return mt.vol; }, mt_);
     auto v = Kokkos::subview(vol, Kokkos::make_pair(std::size_t(0), N));
@@ -483,7 +481,7 @@ class Tess : public peclet::core::python::Releasable {
   }
 
   // Per-cell Voronoi neighbour (= face) count, recomputed from the resident topology store.
-  nb::ndarray<nb::numpy, int> neighbor_counts() {
+  nb::ndarray<nb::numpy, int> get_neighbor_counts() {
     using Cell = peclet::voro::ConvexCell<real_t, 64, 112, false>;
     const int N = N_;
     Kokkos::View<int*, peclet::core::MemSpace> cnt("nbr", N);
@@ -593,7 +591,7 @@ class Tess : public peclet::core::python::Releasable {
   }
 
   // Per-cell number of resident SDF wall planes (0 everywhere without geometry).
-  nb::ndarray<nb::numpy, int> wall_counts() {
+  nb::ndarray<nb::numpy, int> get_wall_counts() {
     const std::size_t N = static_cast<std::size_t>(N_);
     std::vector<int> v = std::visit(
         [&](auto& mt) {
@@ -723,25 +721,24 @@ class Flow : public peclet::core::python::Releasable {
       cv_->project(cv_->u, real_t(1));
     }
   }
-  // docs/NAMING.md 1.5: configured with set_dt, read back as dt, overridable per call.
+  // docs/NAMING.md 1.5: the time step is configured with set_dt and read back as dt; step(n)
+  // advances n steps of it and raises if none was set.
   void set_dt(real_t dt) {
     if (!(dt > real_t(0))) throw std::invalid_argument("voro: set_dt(dt) needs dt > 0.");
     dt_ = dt;
   }
   real_t dt() const { return dt_; }
-  void step(int n, std::optional<real_t> dtOpt) {
-    const real_t dt = dtOpt.value_or(dt_);
-    if (!(dt > real_t(0)))
-      throw std::invalid_argument(
-          "voro: step() has no time step — pass step(n, dt) or call set_dt(dt) first.");
+  void step(int n) {
+    if (!(dt_ > real_t(0)))
+      throw std::invalid_argument("voro: step() has no time step — call set_dt(dt) first.");
     for (int i = 0; i < n; ++i) {
       if (co_)
-        co_->step(dt);
+        co_->step(dt_);
       else
-        cv_->step(dt);
+        cv_->step(dt_);
     }
   }
-  nb::ndarray<nb::numpy, real_t> get_velocity() {
+  nb::ndarray<nb::numpy, real_t> get_velocities() {
     const std::size_t N = m_.nCells;
     std::vector<real_t> v;
     if (co_) {
@@ -758,7 +755,7 @@ class Flow : public peclet::core::python::Releasable {
     return peclet::core::python::vector_to_ndarray(peclet::core::toVector(co_ ? co_->p : cv_->p),
                                                    {N}, {1});
   }
-  nb::ndarray<nb::numpy, real_t> get_cell_volume() {
+  nb::ndarray<nb::numpy, real_t> get_volumes() {
     const std::size_t N = m_.nCells;
     return peclet::core::python::vector_to_ndarray(peclet::core::toVector(m_.cellVolume), {N}, {1});
   }
@@ -794,12 +791,10 @@ class Sim : public peclet::core::python::Releasable {
     bulk_.clear();
   }
 
-  void set_box(std::array<real_t, 3> L) { L_ = L; }
-  // The suite-canonical spelling of the same thing (docs/NAMING.md 1.1). `extent` is the box SIZE;
-  // this engine's box always starts at the origin and is periodic on all three axes, so the other
-  // two arguments exist to be CHECKED rather than stored — a caller who writes what every other
-  // code in the suite writes gets an error naming the limitation instead of a silently ignored
-  // argument.
+  // The suite-wide domain setter (docs/NAMING.md 1.1). `extent` is the box SIZE; this engine's box
+  // always starts at the origin and is periodic on all three axes, so the other two arguments
+  // exist to be CHECKED rather than stored — a caller who writes what every other code in the
+  // suite writes gets an error naming the limitation instead of a silently ignored argument.
   void set_domain(std::array<real_t, 3> extent, std::array<real_t, 3> origin,
                   std::array<bool, 3> periodic) {
     for (int a = 0; a < 3; ++a) {
@@ -860,20 +855,17 @@ class Sim : public peclet::core::python::Releasable {
   }
 
   // The time step is configured with `set_dt` and read back as `dt`, like every other stepper in
-  // the suite (docs/NAMING.md 1.5). `step(n)` then advances n steps of it; `step(n, dt)` is the
-  // pre-existing spelling and still overrides for that call (it does NOT change the stored value).
+  // the suite (docs/NAMING.md 1.5); `step(n)` advances n steps of it and raises if none was set.
   void set_dt(real_t dt) {
     if (!(dt > real_t(0)))
       throw std::invalid_argument("voro: set_dt(dt) needs dt > 0.");
     dt_ = dt;
   }
   real_t dt() const { return dt_; }
-  void step(int nsteps, std::optional<real_t> dt) {
-    const real_t h = dt.value_or(dt_);
-    if (!(h > real_t(0)))
-      throw std::invalid_argument(
-          "voro: step() has no time step — pass step(n, dt) or call set_dt(dt) first.");
-    std::visit([&](auto& s) { s.step(nsteps, h); }, sim_);
+  void step(int nsteps) {
+    if (!(dt_ > real_t(0)))
+      throw std::invalid_argument("voro: step() has no time step — call set_dt(dt) first.");
+    std::visit([&](auto& s) { s.step(nsteps, dt_); }, sim_);
   }
 
   nb::ndarray<nb::numpy, real_t> get_positions() {
@@ -885,13 +877,13 @@ class Sim : public peclet::core::python::Releasable {
   nb::ndarray<nb::numpy, real_t> get_forces() {
     return from3(std::visit([](auto& s) { return s.force(); }, sim_));
   }
-  real_t get_kinetic_energy() {
+  real_t kinetic_energy() {
     return std::visit([&](auto& s) { return s.kineticEnergy(dmass_); }, sim_);
   }
-  real_t get_internal_energy() {
+  real_t internal_energy() {
     return std::visit([](auto& s) { return s.internalEnergy(); }, sim_);
   }
-  real_t get_time() {
+  real_t time() {
     return std::visit([](auto& s) { return s.time(); }, sim_);
   }
   int num_particles() const {
@@ -905,7 +897,7 @@ class Sim : public peclet::core::python::Releasable {
     return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cell), {N}, {1});
   }
 
-  nb::ndarray<nb::numpy, int> get_num_neighbors() {
+  nb::ndarray<nb::numpy, int> get_neighbor_counts() {
     // Per-cell facet (neighbour) count is the explicit cellFacetCount view. NOTE: the device
     // cellFacetOffset is a per-cell *base* into the facet buffer in cell-finish order, NOT a CSR
     // prefix sum (see tessellation_view.hpp), so off(i+1)-off(i) is meaningless — read the count.
@@ -1140,12 +1132,12 @@ NB_MODULE(_voro, m) {
         d["n_empty"] = R.nEmpty;
         return d;
       },
-      nb::arg("positions"), nb::arg("vref"), nb::arg("sphere_centres"), nb::arg("sphere_radii"),
+      nb::arg("positions"), nb::arg("vref"), nb::arg("sphere_centers"), nb::arg("sphere_radii"),
       nb::arg("L"), nb::arg("sw") = 6, nb::arg("max_iter") = 80, nb::arg("tol") = 1e-9,
       nb::arg("cg_iters") = 400, nb::arg("method") = "graphamg", nb::arg("mu_barrier") = 0.0,
       nb::arg("free_energy") = false,
       "Relax interstitial seeds (N,3) so their SDF-clipped Voronoi cell volumes approach the per-cell\n"
-      "targets vref (N,), with the sphere packing (sphere_centres (M,3), sphere_radii (M,)) as periodic\n"
+      "targets vref (N,), with the sphere packing (sphere_centers (M,3), sphere_radii (M,)) as periodic\n"
       "walls. method: 'graphamg'|'jacobi'|'colored_gs' (Gauss-Newton CG) or 'steepest' (descent).\n"
       "free_energy=True uses E=-Σ V_ref·log V (pressure V_ref/V, resists collapse); mu_barrier>0 adds a\n"
       "log-barrier. EXPERIMENTAL (pore-space meshing; see the pore-mesh-voronoi example).");
@@ -1215,7 +1207,7 @@ NB_MODULE(_voro, m) {
         d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nCells}, {1});
         return d;
       },
-      nb::arg("positions"), nb::arg("sphere_centres"), nb::arg("sphere_radii"), nb::arg("L"),
+      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("L"),
       "Reconstruct the SDF-clipped interstitial Voronoi cells and return their polyhedra as flat\n"
       "arrays (VTK_POLYHEDRON layout): 'points' (Np,3), 'faces' + 'face_offsets' (per-cell face lists,\n"
       "global point ids), 'volume' (Nc,), 'boundary' (Nc, 1 where the cell touches a sphere wall).");
@@ -1261,7 +1253,7 @@ NB_MODULE(_voro, m) {
         d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nP}, {1});
         return d;
       },
-      nb::arg("positions"), nb::arg("sphere_centres"), nb::arg("sphere_radii"), nb::arg("L"),
+      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("L"),
       nb::arg("origin"), nb::arg("normal"),
       "Cross-section of the SDF-clipped interstitial Voronoi mesh by the plane through `origin` with\n"
       "`normal`: cut every cell directly (ConvexCell::sectionPolygon, robust — works from the dual\n"
@@ -1306,14 +1298,11 @@ NB_MODULE(_voro, m) {
       "rebuild (via an adaptive gate) when displacements are large, so it is never much\n"
       "slower than a cold build. Periodic cubic box. Single domain (one process).")
       .def(nb::init<>())
-      .def("set_box", &Tess::set_box, nb::arg("L"),
-           "Set the periodic box edge lengths (Lx, Ly, Lz). Call before `build`. ALIAS of the "
-           "canonical `set_domain(extent=...)` (suite/docs/NAMING.md 1.1); both ship.")
       .def("set_domain", &Tess::set_domain, nb::arg("extent"),
            nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
            nb::arg("periodic") = std::array<bool, 3>{true, true, true},
-           "Set the domain: `extent` is the box SIZE (Lx, Ly, Lz). The suite-canonical spelling "
-           "(suite/docs/NAMING.md 1.1) and the same call `dem.Simulation.set_domain` takes. "
+           "Set the periodic box before `build`: `extent` is the box SIZE (Lx, Ly, Lz). The "
+           "suite-wide spelling (suite/docs/NAMING.md 1.1), the same call `dem.Simulation.set_domain` takes. "
            "`origin` must be (0, 0, 0) and `periodic` (True, True, True) — this engine's box is "
            "anchored at the origin and periodic on every axis; both are checked rather than "
            "ignored, so a caller who writes the suite-wide form gets an error naming the "
@@ -1389,13 +1378,15 @@ NB_MODULE(_voro, m) {
           "(True if the gate routed this step to a full rebuild), 'fell_back' (True if the verify "
           "failed and\n"
           "a cold rebuild was forced).")
-      .def("volumes", &Tess::volumes,
-           "Per-particle Voronoi cell volume (N,) float64. Sums to the box volume (space-filling).")
-      .def("neighbor_counts", &Tess::neighbor_counts,
-           "Per-particle Voronoi neighbour count (N,) int32 — the number of faces of each cell "
-           "(wall facets included).")
-      .def("wall_counts", &Tess::wall_counts,
-           "Per-particle number of resident SDF wall planes (N,) int32; all zero without geometry.")
+      .def("get_volumes", &Tess::get_volumes,
+           "Per-particle Voronoi cell volume (N,) float64 (a copy). Sums to the box volume "
+           "(space-filling).")
+      .def("get_neighbor_counts", &Tess::get_neighbor_counts,
+           "Per-particle Voronoi neighbour count (N,) int32 (a copy) — the number of faces of each "
+           "cell (wall facets included).")
+      .def("get_wall_counts", &Tess::get_wall_counts,
+           "Per-particle number of resident SDF wall planes (N,) int32 (a copy); all zero without "
+           "geometry.")
       .def(
           "energy_forces", &Tess::energy_forces, nb::arg("types"), nb::arg("tension"),
           nb::arg("sigma_wall") = nb::none(), nb::arg("dEdV") = nb::none(), nb::arg("lloyd") = 0.0,
@@ -1409,12 +1400,12 @@ NB_MODULE(_voro, m) {
           "               is given (a uniform wall tension is a constant — only the species\n"
           "               difference does work, which is what sets the contact angle);\n"
           "  volume       Σ e_i(V_i) for a caller-supplied e'(V_i) = `dEdV` (N,) (e.g. "
+          "2(V/Vref−1)/Vref);\n"
           "  centroidal   `lloyd` · Σ ∫_cell |y − x_i|² (Lloyd/CVT; gradient 2V(x−c) drives seeds "
           "to\n"
           "               their centroids — the skewness the grid solver's two-point operators "
           "need gone);\n"
           "  roundness    `facet_tension` · Σ A_f over all interior faces.\n"
-          "2(V/Vref−1)/Vref).\n"
           "Returns {'interface_energy', 'wall_energy', 'force' (N,3) = dE/dx, 'force_w' (N,) = "
           "dE/dw\n"
           "when weights are set}. Descend along −force to minimise.")
@@ -1432,16 +1423,23 @@ NB_MODULE(_voro, m) {
       "set_wall_velocity). SSP-RK3 with a projection per stage; GraphAMG-PCG pressure solve.")
       .def(nb::init<Tess&, real_t, const std::string&, bool>(), nb::arg("tessellation"),
            nb::arg("viscosity"), nb::arg("layout") = "collocated", nb::arg("amg") = true)
-      .def("num_cells", &Flow::num_cells)
-      .def("num_faces", &Flow::num_faces)
-      .def("num_wall_faces", &Flow::num_wall_faces)
-      .def("layout", &Flow::layout)
-      .def("set_body_force", &Flow::set_body_force, nb::arg("fx"), nb::arg("fy"), nb::arg("fz"))
+      .def_prop_ro("num_cells", &Flow::num_cells,
+                   "Number of cells of the face mesh (= the tessellation's particle count).")
+      .def_prop_ro("num_faces", &Flow::num_faces,
+                   "Number of faces of the face mesh: interior faces first, then the wall faces.")
+      .def_prop_ro("num_wall_faces", &Flow::num_wall_faces,
+                   "Number of SDF wall faces (the trailing block of the faces); 0 without geometry.")
+      .def_prop_ro("layout", &Flow::layout,
+                   "The solver layout this instance was built with: 'collocated' or 'covolume'.")
+      .def("set_body_force", &Flow::set_body_force, nb::arg("fx"), nb::arg("fy"), nb::arg("fz"),
+           "Uniform body force per unit mass (fx, fy, fz) applied to every cell (a pressure "
+           "gradient drive, gravity).")
       .def("set_stokes", &Flow::set_stokes, nb::arg("on"),
            "Drop the convective term (creeping flow).")
       .def("set_skew_corrected", &Flow::set_skew_corrected, nb::arg("on"),
            "Collocated only: the centroid-consistent constraint pair (default on).")
-      .def("set_pressure_tolerance", &Flow::set_pressure_tolerance, nb::arg("tol"))
+      .def("set_pressure_tolerance", &Flow::set_pressure_tolerance, nb::arg("tol"),
+           "Relative residual at which the pressure PCG stops (default set by the solver).")
       .def("set_implicit_diffusion", &Flow::set_implicit_diffusion, nb::arg("on"),
            "Collocated: flow's semi-implicit step (explicit convection, backward-Euler viscous "
            "solve, approximate projection) — no diffusive dt limit, first order in time.")
@@ -1453,17 +1451,23 @@ NB_MODULE(_voro, m) {
       .def("set_velocity", &Flow::set_velocity, nb::arg("U"),
            "Initial cell velocity (num_cells, 3); projected once.")
       .def("set_dt", &Flow::set_dt, nb::arg("dt"),
-           "Set the time step (suite/docs/NAMING.md 1.5).")
+           "Set the time step (suite/docs/NAMING.md 1.5); `step` uses it.")
       .def_prop_ro("dt", &Flow::dt, "The stored time step (0 until `set_dt`).")
-      .def("step", &Flow::step, nb::arg("num_steps"), nb::arg("dt") = nb::none(),
-           "Advance `num_steps` steps. `dt` defaults to the value `set_dt` stored; passing it "
-           "overrides for this call only.")
-      .def("get_velocity", &Flow::get_velocity, "Cell velocity (num_cells, 3).")
-      .def("get_pressure", &Flow::get_pressure)
-      .def("get_cell_volume", &Flow::get_cell_volume)
-      .def("kinetic_energy", &Flow::kinetic_energy)
-      .def("max_divergence", &Flow::max_divergence)
-      .def("pressure_iterations", &Flow::pressure_iterations);
+      .def("step", &Flow::step, nb::arg("num_steps"),
+           "Advance `num_steps` steps of the stored time step (`set_dt`); raises if none was set.")
+      .def("get_velocities", &Flow::get_velocities,
+           "Cell velocity (num_cells, 3) float64 (a copy; the covolume layout reconstructs it "
+           "from the face fluxes).")
+      .def("get_pressure", &Flow::get_pressure, "Cell pressure (num_cells,) float64 (a copy).")
+      .def("get_volumes", &Flow::get_volumes,
+           "Cell volume (num_cells,) float64 (a copy) — the face mesh's, i.e. the tessellation's.")
+      .def("kinetic_energy", &Flow::kinetic_energy,
+           "Total kinetic energy ½ Σ V_i |U_i|² over the cells (a device reduction).")
+      .def("max_divergence", &Flow::max_divergence,
+           "Max over the cells of the discrete divergence of the transporting face flux — "
+           "round-off after a projection.")
+      .def_prop_ro("pressure_iterations", &Flow::pressure_iterations,
+                   "PCG iteration count of the last pressure solve.");
 
   nb::class_<Sim>(
       m, "Simulation",
@@ -1472,14 +1476,11 @@ NB_MODULE(_voro, m) {
       "EOS plus an optional per-particle viscous (Navier-Stokes) term, with the tessellation\n"
       "repaired each step on the device. Set the particle state, `init`, then `step`.")
       .def(nb::init<>())
-      .def("set_box", &Sim::set_box, nb::arg("L"),
-           "Set the periodic box edge lengths (Lx, Ly, Lz). ALIAS of the canonical "
-           "`set_domain(extent=...)` (suite/docs/NAMING.md 1.1); both ship.")
       .def("set_domain", &Sim::set_domain, nb::arg("extent"),
            nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
            nb::arg("periodic") = std::array<bool, 3>{true, true, true},
-           "Set the domain: `extent` is the box SIZE (Lx, Ly, Lz). The suite-canonical spelling "
-           "(suite/docs/NAMING.md 1.1) and the same call `dem.Simulation.set_domain` takes. "
+           "Set the periodic box before `init`: `extent` is the box SIZE (Lx, Ly, Lz). The "
+           "suite-wide spelling (suite/docs/NAMING.md 1.1), the same call `dem.Simulation.set_domain` takes. "
            "`origin` must be (0, 0, 0) and `periodic` (True, True, True) — this engine's box is "
            "anchored at the origin and periodic on every axis; both are checked rather than "
            "ignored, so a caller who writes the suite-wide form gets an error naming the "
@@ -1510,14 +1511,13 @@ NB_MODULE(_voro, m) {
       .def("init", &Sim::init,
            "Build the first tessellation and forces from the particle state set above.")
       .def("set_dt", &Sim::set_dt, nb::arg("dt"),
-           "Set the time step. The suite-canonical way to configure a stepper "
+           "Set the time step. The suite-wide way to configure a stepper "
            "(suite/docs/NAMING.md 1.5) — `flow.Solver`, `dem.Simulation` and `tpx_amr.Flow` all "
            "take `set_dt`.")
       .def_prop_ro("dt", &Sim::dt, "The stored time step (0 until `set_dt`).")
-      .def("step", &Sim::step, nb::arg("num_steps"), nb::arg("dt") = nb::none(),
-           "Advance the velocity-Verlet dynamics by `num_steps` steps. `dt` defaults to the value "
-           "`set_dt` stored; passing it overrides for this call only and does not change the "
-           "stored value. Raises if neither is set.")
+      .def("step", &Sim::step, nb::arg("num_steps"),
+           "Advance the velocity-Verlet dynamics by `num_steps` steps of the stored time step "
+           "(`set_dt`); raises if none was set.")
       .def("get_positions", &Sim::get_positions, "Current particle positions (N,3) float64.")
       .def("get_velocities", &Sim::get_velocities, "Current particle velocities (N,3) float64.")
       .def("get_forces", &Sim::get_forces,
@@ -1525,13 +1525,14 @@ NB_MODULE(_voro, m) {
            "viscous Navier-Stokes term, as used by the last velocity-Verlet kick. Useful for\n"
            "force-field analysis, equilibrium/convergence checks, and coupling.")
       .def_prop_ro("num_particles", &Sim::num_particles, "Particle count N.")
-      .def("get_kinetic_energy", &Sim::get_kinetic_energy, "Total kinetic energy (scalar).")
-      .def("get_internal_energy", &Sim::get_internal_energy,
-           "Total internal (EOS) energy (scalar).")
-      .def("get_time", &Sim::get_time, "Current simulation time (scalar).")
-      .def("get_volumes", &Sim::get_volumes, "Per-particle Voronoi cell volume (N,) float64.")
-      .def("get_num_neighbors", &Sim::get_num_neighbors,
-           "Per-particle Voronoi neighbour (facet) count (N,) int32.");
+      .def("kinetic_energy", &Sim::kinetic_energy,
+           "Total kinetic energy ½ Σ m_i |v_i|² (a device reduction).")
+      .def("internal_energy", &Sim::internal_energy, "Total internal (EOS) energy (scalar).")
+      .def_prop_ro("time", &Sim::time, "Current simulation time.")
+      .def("get_volumes", &Sim::get_volumes,
+           "Per-particle Voronoi cell volume (N,) float64 (a copy).")
+      .def("get_neighbor_counts", &Sim::get_neighbor_counts,
+           "Per-particle Voronoi neighbour (facet) count (N,) int32 (a copy).");
 
 #ifdef PECLET_VORO_MPI
   // ---- VoronoiHalo (distributed) ----------------------------------------------------------------

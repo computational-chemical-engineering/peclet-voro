@@ -63,7 +63,8 @@ def make_sim(pos, vel):
 ref = None
 if rank == 0:
     s = make_sim(g_pos, g_vel)
-    s.step(nsteps, dt)
+    s.set_dt(dt)
+    s.step(nsteps)
     ref = np.array(s.get_positions()) % L
 
 
@@ -87,7 +88,8 @@ def run_regather():
         cpos = np.vstack([pos, gpos]) if gpos.shape[0] else pos
         cvel = np.vstack([vel, gpay[:, 0:3]]) if gpos.shape[0] else vel
         s = make_sim(cpos, cvel)
-        s.step(1, dt)
+        s.set_dt(dt)
+        s.step(1)
         pos = np.array(s.get_positions())[:no] % L
         vel = np.array(s.get_velocities())[:no]
     return pos, idd, t_mpi

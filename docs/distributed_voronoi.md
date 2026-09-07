@@ -4,7 +4,7 @@ Suite roadmap Phase 5: decompose the periodic domain into blocks across MPI rank
 **ghost particles** one interaction radius deep so the Voronoi cells touching its block boundary close
 correctly; validate the owned cells against the serial tessellation. The Lagrangian halo (migration +
 ghost particles) is reused from `core` via its `peclet.core.mpi` Python shim, exactly as in
-`dem`. The per-cell observables (`peclet.voro.get_volumes()` / `get_num_neighbors()`, the latter reading the
+`dem`. The per-cell observables (`peclet.voro.get_volumes()` / `get_neighbor_counts()`, the latter reading the
 `cellFacetCount` view) give the serial-vs-distributed comparison.
 
 **Status: implemented and validated.**

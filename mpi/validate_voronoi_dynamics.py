@@ -62,7 +62,8 @@ ref = None
 if rank == 0:
     s = make_sim(g_pos, g_vel)
     s.init()
-    s.step(nsteps, dt)
+    s.set_dt(dt)
+    s.step(nsteps)
     ref = np.array(s.get_positions()) % L
 
 # distributed
@@ -82,7 +83,8 @@ for _ in range(nsteps):
     cvel = np.vstack([vel, gpay[:, 0:3]]) if gpos.shape[0] else vel
     s = make_sim(cpos, cvel)
     s.init()
-    s.step(1, dt)
+    s.set_dt(dt)
+    s.step(1)
     pos = (np.array(s.get_positions())[:n_owned]) % L
     vel = np.array(s.get_velocities())[:n_owned]
 

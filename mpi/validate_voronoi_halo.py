@@ -29,9 +29,9 @@ gs = [16, 16, 16]                          # ORB decomposition granularity
 def tessellate(pos):
     """Single-rank tessellation of `pos` (n,3) in the periodic box -> (n,) volumes."""
     t = voro.Tessellation()
-    t.set_box((L, L, L))
+    t.set_domain(extent=(L, L, L))
     t.build(np.ascontiguousarray(pos % L, dtype=np.float64))
-    return np.asarray(t.volumes())
+    return np.asarray(t.get_volumes())
 
 
 # Identical global seed set on every rank (deterministic).

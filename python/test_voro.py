@@ -6,7 +6,7 @@ compressible-Euler Simulation — on a small uniform point set and checks the ba
 (space-filling volume, plausible neighbour counts, finite energies). Run with the built module
 on PYTHONPATH, e.g.:
 
-    PYTHONPATH=build_nb python python/test_vorflow.py
+    PYTHONPATH=<build> python python/test_voro.py
 """
 import numpy as np
 from peclet import voro
@@ -18,17 +18,17 @@ def test_tessellation():
     pos = rng.random((N, 3)) * L
 
     t = voro.Tessellation()
-    t.set_box((L, L, L))
+    t.set_domain(extent=(L, L, L))
     t.build(pos)
     assert t.num_particles == N
 
-    vol = t.volumes()
+    vol = t.get_volumes()
     assert vol.shape == (N,) and vol.dtype == np.float64
     # space-filling: cell volumes sum to the box volume
     assert abs(vol.sum() / L**3 - 1.0) < 1e-9, vol.sum()
     assert (vol > 0).all()
 
-    nbr = t.neighbor_counts()
+    nbr = t.get_neighbor_counts()
     assert nbr.shape == (N,) and nbr.dtype == np.int32
     # a 3D Voronoi cell has at least 4 faces; the Poisson mean is ~15.5
     assert nbr.min() >= 4 and 13 < nbr.mean() < 18, (nbr.min(), nbr.mean())
@@ -44,10 +44,41 @@ def test_tessellation():
     # `set(last) == {...}` here even though nothing had regressed. A removed or renamed key is
     # the real regression, and this still catches that.
     assert set(last) >= {"flagged", "pass1", "pass2", "rebuilt", "fell_back"}, sorted(last)
-    assert abs(t.volumes().sum() / L**3 - 1.0) < 1e-9
+    assert abs(t.get_volumes().sum() / L**3 - 1.0) < 1e-9
     assert last["flagged"] < N // 2  # small per-step displacement -> not a full rebuild
-    print(f"  Tessellation: N={N}  vol_err={abs(t.volumes().sum()/L**3-1):.1e}  "
+    print(f"  Tessellation: N={N}  vol_err={abs(t.get_volumes().sum()/L**3-1):.1e}  "
           f"mean_nbr={nbr.mean():.2f}  last_step_flagged={last['flagged']}")
+
+
+def test_api_contract():
+    """The suite-wide names (suite/docs/NAMING.md): set_domain CHECKS origin / periodic, the time
+    step is set_dt + dt, and step() without one raises instead of guessing."""
+    t = voro.Tessellation()
+    t.set_domain(extent=(2.0, 1.0, 1.0))
+    assert tuple(t.extent) == (2.0, 1.0, 1.0)
+    for bad in (dict(origin=(0.1, 0.0, 0.0)), dict(periodic=(True, True, False))):
+        try:
+            t.set_domain(extent=(1.0, 1.0, 1.0), **bad)
+            raise AssertionError(f"set_domain must reject {bad}")
+        except ValueError:
+            pass
+    s = voro.Simulation()
+    s.set_domain(extent=(1.0, 1.0, 1.0))
+    s.set_positions(np.random.default_rng(9).random((500, 3)))
+    s.set_velocities(np.zeros((500, 3)))
+    s.set_masses(np.ones(500))
+    s.set_pressure(1.0)
+    s.init()
+    assert s.dt == 0.0
+    try:
+        s.step(1)
+        raise AssertionError("step() without set_dt must raise")
+    except ValueError:
+        pass
+    s.set_dt(1e-4)
+    s.step(1)
+    assert s.dt == 1e-4 and abs(s.time - 1e-4) < 1e-18
+    print("  API contract: set_domain checks, set_dt/dt/step OK")
 
 
 def test_simulation():
@@ -58,20 +89,21 @@ def test_simulation():
     mass = np.ones(N)
 
     s = voro.Simulation()
-    s.set_box((L, L, L))
+    s.set_domain(extent=(L, L, L))
     s.set_positions(pos)
     s.set_velocities(vel)
     s.set_masses(mass)
     s.set_pressure(1.0)
     s.init()
-    e0 = s.get_kinetic_energy() + s.get_internal_energy()
-    s.step(5, 1e-4)
-    e1 = s.get_kinetic_energy() + s.get_internal_energy()
+    e0 = s.kinetic_energy() + s.internal_energy()
+    s.set_dt(1e-4)
+    s.step(5)
+    e1 = s.kinetic_energy() + s.internal_energy()
     assert np.isfinite(e0) and np.isfinite(e1)
     assert s.get_positions().shape == (N, 3)
     assert abs(s.get_volumes().sum() / L**3 - 1.0) < 1e-9
-    print(f"  Simulation:   N={N}  t={s.get_time():.2e}  KE={s.get_kinetic_energy():.3e}  "
-          f"IE={s.get_internal_energy():.3e}")
+    print(f"  Simulation:   N={N}  t={s.time:.2e}  KE={s.kinetic_energy():.3e}  "
+          f"IE={s.internal_energy():.3e}")
 
 
 def sphere_scene(centre, radius):
@@ -95,10 +127,10 @@ def test_geometry():
     ni, nr = sphere_scene((0.5, 0.5, 0.5), R)
 
     t = voro.Tessellation()
-    t.set_box((L, L, L))
+    t.set_domain(extent=(L, L, L))
     t.set_geometry(ni, nr, root=0)
     t.build(pos)
-    vol = t.volumes()
+    vol = t.get_volumes()
     fluid = L**3 - 4.0 / 3.0 * np.pi * R**3
     inside = np.linalg.norm(pos - 0.5, axis=1) < R
     assert (vol[inside] == 0).all(), "seeds inside the solid must have no cell"
@@ -106,7 +138,7 @@ def test_geometry():
     # (measured 0.65% here; rung A1 of the Voronoi methods plan tightens this to second order)
     err0 = abs(vol.sum() / fluid - 1.0)
     assert err0 < 2e-2, err0
-    wc = t.wall_counts()
+    wc = t.get_wall_counts()
     assert wc.shape == (N,) and wc.dtype == np.int32 and (wc > 0).sum() > 0
     assert (wc[inside] == 0).all()
     # move + repair: the boundary watch must fire and the fluid volume stay tiled
@@ -117,14 +149,14 @@ def test_geometry():
         flagged += st["wall_flagged"]
         assert not st["fell_back"]
     assert flagged > 0
-    vol = t.volumes()
+    vol = t.get_volumes()
     inside = np.linalg.norm(pos - 0.5, axis=1) < R
     assert (vol[inside] == 0).all()
     err1 = abs(vol.sum() / fluid - 1.0)
     assert err1 < 2e-2, err1
     # the same geometry on the Simulation (walls push back through the EOS pressure)
     s = voro.Simulation()
-    s.set_box((L, L, L))
+    s.set_domain(extent=(L, L, L))
     keep = ~inside
     s.set_positions(np.ascontiguousarray(pos[keep]))
     s.set_velocities(np.zeros((keep.sum(), 3)))
@@ -132,8 +164,9 @@ def test_geometry():
     s.set_pressure(1.0)
     s.set_geometry(ni, nr)
     s.init()
-    s.step(3, 1e-4)
-    assert np.isfinite(s.get_kinetic_energy())
+    s.set_dt(1e-4)
+    s.step(3)
+    assert np.isfinite(s.kinetic_energy())
     p1 = s.get_positions()
     assert (np.linalg.norm(p1 - 0.5, axis=1) > R * 0.9).all(), "fluid seeds pushed into the solid"
     print(f"  Geometry:     N={N}  fluid_vol_err build={err0:.1e} after steps={err1:.1e}  "
@@ -146,23 +179,23 @@ def test_weights():
     N, L = 8_000, 1.0
     pos = rng.random((N, 3)) * L
     t0 = voro.Tessellation()
-    t0.set_box((L, L, L))
+    t0.set_domain(extent=(L, L, L))
     t0.build(pos)
-    v0 = t0.volumes()
+    v0 = t0.get_volumes()
     t1 = voro.Tessellation()
-    t1.set_box((L, L, L))
+    t1.set_domain(extent=(L, L, L))
     t1.set_weights(np.zeros(N))          # w == 0: the radical planes ARE the bisectors; the
     t1.build(pos)                        # weight-aware gather visits candidates in another
-    v1 = t1.volumes()                    # order, so equality is to round-off, not bit-for-bit
+    v1 = t1.get_volumes()                    # order, so equality is to round-off, not bit-for-bit
     assert np.allclose(v1, v0, rtol=1e-12, atol=0), np.abs(v1 / v0 - 1).max()
     t1.set_weights(np.full(N, 1e-3))     # equal nonzero weights: the same cells
     t1.build(pos)
-    assert np.allclose(t1.volumes(), v0, rtol=1e-10, atol=0)
+    assert np.allclose(t1.get_volumes(), v0, rtol=1e-10, atol=0)
     spacing = (L**3 / N) ** (1.0 / 3.0)
     w = rng.random(N) * (0.05 * spacing) ** 2   # small-weight regime
     t1.set_weights(w)
     t1.build(pos)
-    v2 = t1.volumes()
+    v2 = t1.get_volumes()
     # the periodic min-image power diagram is not an exact partition at nonzero weight spread
     # (documented ~1e-2 floor; rung A2 of the Voronoi methods plan makes it exact)
     err = abs(v2.sum() / L**3 - 1.0)
@@ -172,7 +205,7 @@ def test_weights():
         pos = (pos + 2e-5 * rng.standard_normal((N, 3))) % L
         st = t1.step(pos)
         assert not st["fell_back"]
-    assert abs(t1.volumes().sum() / L**3 - 1.0) < 1e-2
+    assert abs(t1.get_volumes().sum() / L**3 - 1.0) < 1e-2
     # A2a diagnostics: large-spread weights on overlapping (random) balls bury cells — reported,
     # warned, and raised under strict=True; the small weights above bury none.
     rep = t1.build_report()
@@ -202,7 +235,7 @@ def test_energy_forces():
     types = (np.linalg.norm(pos - 0.5, axis=1) < 0.2).astype(np.int32)   # a blob of species 1
     tension = np.array([[0.0, 1.0], [1.0, 0.0]])
     t = voro.Tessellation()
-    t.set_box((L, L, L))
+    t.set_domain(extent=(L, L, L))
     t.build(pos)
     r = t.energy_forces(types, tension)
     assert r["force"].shape == (N, 3) and np.isfinite(r["force"]).all()
@@ -220,10 +253,10 @@ def test_energy_forces():
     # with a wall: wetting energy of species 1 on a sphere, plus a volume-target term
     ni, nr = sphere_scene((0.5, 0.5, 0.8), 0.2)
     tw = voro.Tessellation()
-    tw.set_box((L, L, L))
+    tw.set_domain(extent=(L, L, L))
     tw.set_geometry(ni, nr)
     tw.build(pos)
-    vol = tw.volumes()
+    vol = tw.get_volumes()
     vref = vol[vol > 0].mean()
     dEdV = np.where(vol > 0, 2.0 * (vol / vref - 1.0) / vref, 0.0)
     rw = tw.energy_forces(types, tension, sigma_wall=np.array([0.0, 0.5]), dEdV=dEdV)
@@ -232,15 +265,15 @@ def test_energy_forces():
     # seed-to-centroid distance both fall (the B1 gate in miniature)
     pos = rng.random((N, 3)) * L
     tg = voro.Tessellation()
-    tg.set_box((L, L, L))
+    tg.set_domain(extent=(L, L, L))
     tg.build(pos)
     rl = tg.energy_forces(np.zeros(N, dtype=np.int32), np.zeros((1, 1)), lloyd=1.0)
     e_l0 = rl["lloyd_energy"]
-    vol = tg.volumes()
+    vol = tg.get_volumes()
     for _ in range(10):
         pos = (pos - rl["force"] / (2.0 * vol[:, None])) % L   # x <- centroid (Lloyd's step)
         tg.step(pos)
-        vol = tg.volumes()
+        vol = tg.get_volumes()
         rl = tg.energy_forces(np.zeros(N, dtype=np.int32), np.zeros((1, 1)), lloyd=1.0)
     assert rl["lloyd_energy"] < 0.8 * e_l0, (e_l0, rl["lloyd_energy"])
     print(f"  Energies:     N={N}  E_if {e0:.4f} -> {r['interface_energy']:.4f} after 5 descent steps;"
@@ -264,27 +297,28 @@ def test_flow_solver():
     U0[:, 0] = np.sin(k * pos[:, 0]) * np.cos(k * pos[:, 1])
     U0[:, 1] = -np.cos(k * pos[:, 0]) * np.sin(k * pos[:, 1])
     t = voro.Tessellation()
-    t.set_box((L, L, L))
+    t.set_domain(extent=(L, L, L))
     t.build(pos)
     T, dt = 0.25, 0.2 * h
     steps = int(np.ceil(T / dt))
     exact = np.exp(-4 * nu * k * k * T)
     for layout, tol in (("collocated", 0.03), ("covolume", 0.05)):
         f = voro.FlowSolver(t, nu, layout=layout)
-        assert f.num_cells() == n**3 and f.num_wall_faces() == 0 and f.layout() == layout
+        assert f.num_cells == n**3 and f.num_wall_faces == 0 and f.layout == layout
         f.set_velocity(U0)
         E0 = f.kinetic_energy()
-        f.step(steps, T / steps)
+        f.set_dt(T / steps)
+        f.step(steps)
         ratio = f.kinetic_energy() / E0
         div = f.max_divergence()
         assert abs(ratio / exact - 1) < tol, (layout, ratio, exact)
         assert div < 1e-9, (layout, div)
-        vel = f.get_velocity()
+        vel = f.get_velocities()
         assert vel.shape == (n**3, 3) and np.isfinite(vel).all()
         assert f.get_pressure().shape == (n**3,)
-        assert abs(f.get_cell_volume().sum() - L**3) < 1e-9
+        assert abs(f.get_volumes().sum() - L**3) < 1e-9
         print(f"  FlowSolver[{layout}]: E/E0 {ratio:.5f} (exact {exact:.5f}), face div {div:.1e}, "
-              f"PCG iters {f.pressure_iterations()}")
+              f"PCG iters {f.pressure_iterations}")
 
 
 def test_redistribute():
@@ -299,22 +333,22 @@ def test_redistribute():
     graded-0.3 rms < 0.16; no dead cells."""
     rng = np.random.default_rng(11)
     L = 1.0
-    centres, radii = [], []
-    while len(centres) < 6:
+    centers, radii = [], []
+    while len(centers) < 6:
         c, r = rng.uniform(0, L, 3), rng.uniform(0.14, 0.2)
         ok = all(np.linalg.norm((c - cc) - L * np.round((c - cc) / L)) > r + rr + 0.06
-                 for cc, rr in zip(centres, radii))
+                 for cc, rr in zip(centers, radii))
         if ok:
-            centres.append(c)
+            centers.append(c)
             radii.append(r)
-    centres, radii = np.array(centres), np.array(radii)
+    centers, radii = np.array(centers), np.array(radii)
     phi_solid = (4 / 3 * np.pi * radii**3).sum()
     pos = rng.uniform(0, L, (2500, 3))
-    pos = pos[voro._union_sdf(pos, centres, radii, L) > 0.03]  # a uniform (mismatched) start
+    pos = pos[voro._union_sdf(pos, centers, radii, L) > 0.03]  # a uniform (mismatched) start
     out = {}
     for name, kw in (("uniform", dict(s_lo=0.10, s_hi=0.10)),
                      ("graded", dict(s_lo=0.08, s_hi=0.25, slope=0.3))):
-        res = voro.redistribute_pore_mesh(pos, centres, radii, L, **kw)
+        res = voro.redistribute_pore_mesh(pos, centers, radii, L, **kw)
         n0, mx0 = res["history"][0][0], res["history"][0][1]
         print(f"  Redistribute[{name}]: solid fraction {phi_solid:.3f}; start N={n0} max|r|={mx0:.2f} "
               f"-> N={len(res['positions'])} max|r|={res['max_rel']:.3f} rms|r|={res['rms_rel']:.3f} "
@@ -329,6 +363,7 @@ def test_redistribute():
 if __name__ == "__main__":
     print(f"peclet.voro execution_space = {voro.execution_space}")
     test_tessellation()
+    test_api_contract()
     test_simulation()
     test_geometry()
     test_weights()
