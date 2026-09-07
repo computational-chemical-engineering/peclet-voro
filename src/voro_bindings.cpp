@@ -51,6 +51,7 @@
 #include <Kokkos_Core.hpp>
 #include <optional>
 #include <set>
+#include <stdexcept>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -338,6 +339,26 @@ class Tess : public peclet::core::python::Releasable {
   Tess() = default;
 
   void set_box(std::array<real_t, 3> L) { L_ = L; }
+  // The suite-canonical spelling of the same thing (docs/NAMING.md 1.1). `extent` is the box SIZE;
+  // this engine's box always starts at the origin and is periodic on all three axes, so the other
+  // two arguments exist to be CHECKED rather than stored — a caller who writes what every other
+  // code in the suite writes gets an error naming the limitation instead of a silently ignored
+  // argument.
+  void set_domain(std::array<real_t, 3> extent, std::array<real_t, 3> origin,
+                  std::array<bool, 3> periodic) {
+    for (int a = 0; a < 3; ++a) {
+      if (origin[a] != real_t(0))
+        throw std::invalid_argument(
+            "voro: set_domain(origin=...) must be (0, 0, 0) — the tessellator's periodic box is "
+            "anchored at the origin. Shift your points instead.");
+      if (!periodic[a])
+        throw std::invalid_argument(
+            "voro: set_domain(periodic=...) must be (True, True, True) — this engine has no "
+            "non-periodic axis. Use a wall SDF (set_geometry) to bound the domain.");
+    }
+    L_ = extent;
+  }
+  std::array<real_t, 3> extent() const { return L_; }
   void set_tolerance(real_t frac) { tolFrac_ = frac; }
   void set_local_certificate(bool on) { localCert_ = on; }
   void set_gate(bool on) { useGate_ = on; }
@@ -702,7 +723,17 @@ class Flow : public peclet::core::python::Releasable {
       cv_->project(cv_->u, real_t(1));
     }
   }
-  void step(int n, real_t dt) {
+  // docs/NAMING.md 1.5: configured with set_dt, read back as dt, overridable per call.
+  void set_dt(real_t dt) {
+    if (!(dt > real_t(0))) throw std::invalid_argument("voro: set_dt(dt) needs dt > 0.");
+    dt_ = dt;
+  }
+  real_t dt() const { return dt_; }
+  void step(int n, std::optional<real_t> dtOpt) {
+    const real_t dt = dtOpt.value_or(dt_);
+    if (!(dt > real_t(0)))
+      throw std::invalid_argument(
+          "voro: step() has no time step — pass step(n, dt) or call set_dt(dt) first.");
     for (int i = 0; i < n; ++i) {
       if (co_)
         co_->step(dt);
@@ -738,6 +769,7 @@ class Flow : public peclet::core::python::Releasable {
 
  private:
   std::string layout_;
+  real_t dt_{0};
   peclet::voro::fv::FaceMesh<real_t> m_;
   std::unique_ptr<peclet::voro::fv::CollocatedNS<real_t>> co_;
   std::unique_ptr<peclet::voro::fv::CovolumeNS<real_t>> cv_;
@@ -763,6 +795,26 @@ class Sim : public peclet::core::python::Releasable {
   }
 
   void set_box(std::array<real_t, 3> L) { L_ = L; }
+  // The suite-canonical spelling of the same thing (docs/NAMING.md 1.1). `extent` is the box SIZE;
+  // this engine's box always starts at the origin and is periodic on all three axes, so the other
+  // two arguments exist to be CHECKED rather than stored — a caller who writes what every other
+  // code in the suite writes gets an error naming the limitation instead of a silently ignored
+  // argument.
+  void set_domain(std::array<real_t, 3> extent, std::array<real_t, 3> origin,
+                  std::array<bool, 3> periodic) {
+    for (int a = 0; a < 3; ++a) {
+      if (origin[a] != real_t(0))
+        throw std::invalid_argument(
+            "voro: set_domain(origin=...) must be (0, 0, 0) — the tessellator's periodic box is "
+            "anchored at the origin. Shift your points instead.");
+      if (!periodic[a])
+        throw std::invalid_argument(
+            "voro: set_domain(periodic=...) must be (True, True, True) — this engine has no "
+            "non-periodic axis. Use a wall SDF (set_geometry) to bound the domain.");
+    }
+    L_ = extent;
+  }
+  std::array<real_t, 3> extent() const { return L_; }
   void set_positions(nb::ndarray<real_t, nb::c_contig> a) { pos_ = flatten3(a); }
   void set_velocities(nb::ndarray<real_t, nb::c_contig> a) { vel_ = flatten3(a); }
   void set_masses(nb::ndarray<real_t, nb::c_contig> a) { mass_ = flatten1(a); }
@@ -807,8 +859,21 @@ class Sim : public peclet::core::python::Releasable {
         sim_);
   }
 
-  void step(int nsteps, real_t dt) {
-    std::visit([&](auto& s) { s.step(nsteps, dt); }, sim_);
+  // The time step is configured with `set_dt` and read back as `dt`, like every other stepper in
+  // the suite (docs/NAMING.md 1.5). `step(n)` then advances n steps of it; `step(n, dt)` is the
+  // pre-existing spelling and still overrides for that call (it does NOT change the stored value).
+  void set_dt(real_t dt) {
+    if (!(dt > real_t(0)))
+      throw std::invalid_argument("voro: set_dt(dt) needs dt > 0.");
+    dt_ = dt;
+  }
+  real_t dt() const { return dt_; }
+  void step(int nsteps, std::optional<real_t> dt) {
+    const real_t h = dt.value_or(dt_);
+    if (!(h > real_t(0)))
+      throw std::invalid_argument(
+          "voro: step() has no time step — pass step(n, dt) or call set_dt(dt) first.");
+    std::visit([&](auto& s) { s.step(nsteps, h); }, sim_);
   }
 
   nb::ndarray<nb::numpy, real_t> get_positions() {
@@ -861,6 +926,7 @@ class Sim : public peclet::core::python::Releasable {
     return peclet::core::python::vector_to_ndarray(peclet::core::toVector(d), {N, std::size_t(3)}, {3, 1});
   }
 
+  real_t dt_{0};
   std::array<real_t, 3> L_{1, 1, 1};
   real_t pressEq_ = 0;
   bool repair_ = false;
@@ -1241,7 +1307,19 @@ NB_MODULE(_voro, m) {
       "slower than a cold build. Periodic cubic box. Single domain (one process).")
       .def(nb::init<>())
       .def("set_box", &Tess::set_box, nb::arg("L"),
-           "Set the periodic box edge lengths (Lx, Ly, Lz). Call before `build`.")
+           "Set the periodic box edge lengths (Lx, Ly, Lz). Call before `build`. ALIAS of the "
+           "canonical `set_domain(extent=...)` (suite/docs/NAMING.md 1.1); both ship.")
+      .def("set_domain", &Tess::set_domain, nb::arg("extent"),
+           nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
+           nb::arg("periodic") = std::array<bool, 3>{true, true, true},
+           "Set the domain: `extent` is the box SIZE (Lx, Ly, Lz). The suite-canonical spelling "
+           "(suite/docs/NAMING.md 1.1) and the same call `dem.Simulation.set_domain` takes. "
+           "`origin` must be (0, 0, 0) and `periodic` (True, True, True) — this engine's box is "
+           "anchored at the origin and periodic on every axis; both are checked rather than "
+           "ignored, so a caller who writes the suite-wide form gets an error naming the "
+           "limitation.")
+      .def_prop_ro("extent", &Tess::extent,
+                   "The box size (Lx, Ly, Lz) — read-only; set it with `set_domain`.")
       .def("set_tolerance", &Tess::set_tolerance, nb::arg("frac") = 1e-4,
            "Certificate tolerance as a fraction of the mean inter-particle spacing (default 1e-4). "
            "A\n"
@@ -1374,7 +1452,12 @@ NB_MODULE(_voro, m) {
            "Prescribed velocity on the wall faces, (num_wall_faces, 3).")
       .def("set_velocity", &Flow::set_velocity, nb::arg("U"),
            "Initial cell velocity (num_cells, 3); projected once.")
-      .def("step", &Flow::step, nb::arg("num_steps"), nb::arg("dt"))
+      .def("set_dt", &Flow::set_dt, nb::arg("dt"),
+           "Set the time step (suite/docs/NAMING.md 1.5).")
+      .def_prop_ro("dt", &Flow::dt, "The stored time step (0 until `set_dt`).")
+      .def("step", &Flow::step, nb::arg("num_steps"), nb::arg("dt") = nb::none(),
+           "Advance `num_steps` steps. `dt` defaults to the value `set_dt` stored; passing it "
+           "overrides for this call only.")
       .def("get_velocity", &Flow::get_velocity, "Cell velocity (num_cells, 3).")
       .def("get_pressure", &Flow::get_pressure)
       .def("get_cell_volume", &Flow::get_cell_volume)
@@ -1390,7 +1473,19 @@ NB_MODULE(_voro, m) {
       "repaired each step on the device. Set the particle state, `init`, then `step`.")
       .def(nb::init<>())
       .def("set_box", &Sim::set_box, nb::arg("L"),
-           "Set the periodic box edge lengths (Lx, Ly, Lz).")
+           "Set the periodic box edge lengths (Lx, Ly, Lz). ALIAS of the canonical "
+           "`set_domain(extent=...)` (suite/docs/NAMING.md 1.1); both ship.")
+      .def("set_domain", &Sim::set_domain, nb::arg("extent"),
+           nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
+           nb::arg("periodic") = std::array<bool, 3>{true, true, true},
+           "Set the domain: `extent` is the box SIZE (Lx, Ly, Lz). The suite-canonical spelling "
+           "(suite/docs/NAMING.md 1.1) and the same call `dem.Simulation.set_domain` takes. "
+           "`origin` must be (0, 0, 0) and `periodic` (True, True, True) — this engine's box is "
+           "anchored at the origin and periodic on every axis; both are checked rather than "
+           "ignored, so a caller who writes the suite-wide form gets an error naming the "
+           "limitation.")
+      .def_prop_ro("extent", &Sim::extent,
+                   "The box size (Lx, Ly, Lz) — read-only; set it with `set_domain`.")
       .def("set_positions", &Sim::set_positions, nb::arg("positions"),
            "Initial particle positions (N,3) float64.")
       .def("set_velocities", &Sim::set_velocities, nb::arg("velocities"),
@@ -1414,8 +1509,15 @@ NB_MODULE(_voro, m) {
       .def("clear_geometry", &Sim::clear_geometry, "Drop the SDF geometry (before init()).")
       .def("init", &Sim::init,
            "Build the first tessellation and forces from the particle state set above.")
-      .def("step", &Sim::step, nb::arg("num_steps"), nb::arg("dt"),
-           "Advance the velocity-Verlet dynamics by `num_steps` steps of size `dt`.")
+      .def("set_dt", &Sim::set_dt, nb::arg("dt"),
+           "Set the time step. The suite-canonical way to configure a stepper "
+           "(suite/docs/NAMING.md 1.5) — `flow.Solver`, `dem.Simulation` and `tpx_amr.Flow` all "
+           "take `set_dt`.")
+      .def_prop_ro("dt", &Sim::dt, "The stored time step (0 until `set_dt`).")
+      .def("step", &Sim::step, nb::arg("num_steps"), nb::arg("dt") = nb::none(),
+           "Advance the velocity-Verlet dynamics by `num_steps` steps. `dt` defaults to the value "
+           "`set_dt` stored; passing it overrides for this call only and does not change the "
+           "stored value. Raises if neither is set.")
       .def("get_positions", &Sim::get_positions, "Current particle positions (N,3) float64.")
       .def("get_velocities", &Sim::get_velocities, "Current particle velocities (N,3) float64.")
       .def("get_forces", &Sim::get_forces,
