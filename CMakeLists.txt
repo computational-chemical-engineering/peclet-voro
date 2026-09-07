@@ -1,14 +1,24 @@
 cmake_minimum_required(VERSION 3.16)
 
+# One version source per repo (suite/docs/QUALITY_PLAN.md D4): pyproject.toml's `version = "x.y.z"`.
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/pyproject.toml" _peclet_voro_version_line
+     REGEX "^version = \"[0-9]+\.[0-9]+\.[0-9]+")
+string(REGEX REPLACE "^version = \"([0-9]+\.[0-9]+\.[0-9]+).*" "\\1"
+       PECLET_VORO_VERSION "${_peclet_voro_version_line}")
+if(NOT PECLET_VORO_VERSION MATCHES "^[0-9]+\.[0-9]+\.[0-9]+$")
+  message(FATAL_ERROR "voro: could not read `version = \"x.y.z\"` from pyproject.toml")
+endif()
+
 project(
   peclet_voro
-  VERSION 1.0.0
-  DESCRIPTION "Header-only Voronoi-dynamics simulation library for moving-particle methods"
+  VERSION ${PECLET_VORO_VERSION}
+  DESCRIPTION "Dynamic Voronoi tessellation of moving particles (Kokkos)"
   LANGUAGES CXX
 )
 
 # ── C++ standard ─────────────────────────────────────────────────────────────
-set(CMAKE_CXX_STANDARD 17)
+# C++20 everywhere (suite/docs/STYLE.md); every device target below also states cxx_std_20.
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -19,15 +29,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # ── Compile options ───────────────────────────────────────────────────────────
-add_compile_options(
-  -Wall
-  -Wextra
-  -Wpedantic
-  -Wno-unused-variable
-  -Wno-unused-parameter
-  -Wno-sign-compare
-  -Wno-reorder
-)
+add_compile_options(-Wall -Wextra -Wpedantic)
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
 find_package(OpenMP)

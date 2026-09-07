@@ -12,7 +12,7 @@ dimensions, part of the `peclet` suite. The same sources run on **CUDA / HIP / O
 hard-coded), and the distributed path is built on the shared `core` MPI halo.
 Features:
 
-- Periodic boundary conditions (cubic and Lees–Edwards shear boxes)
+- Periodic boundary conditions (origin-anchored box, periodic on every axis; walls through SDF solids)
 - Incremental cell updates under particle motion (persistent Verlet-skin worklist)
 - Compressible and incompressible Euler / Navier–Stokes dynamics
 - Multiphase interface-tension (surface-tension) forces
@@ -37,27 +37,41 @@ voro/
 │       ├── subset_gather.hpp        #   the cold-build kernel restricted to an index list (repair)
 │       ├── dynamic_validate.hpp     #   geometric invariants + oracle diff (validators)
 │       ├── verlet_skin.hpp          #   per-particle Verlet-skin (insertion) tracker
-│       ├── sdf.hpp                  #   SDF half-space clipping (solid boundaries)
+│       ├── reeval_tessellation.hpp  #   re-publish geometry (+ area Jacobians) over the resident topology
+│       ├── sdf.hpp                  #   SDF half-space clipping (solid boundaries), wall store
 │       ├── plane_policy.hpp         #   Voronoi / Power / SDF plane-definition policies
 │       ├── transpose.hpp            #   neighbour<->facet reciprocal map helpers
+│       ├── mesh_optimizer.hpp       #   volume / interface / pore-mesh optimisers (Gauss-Newton, GraphAMG)
+│       ├── ot_optimizer.hpp         #   semi-discrete OT volume control on the power weights
 │       ├── energy/                  # rung A3: energy terms on the published view (+ area Jacobians)
 │       │   ├── route.hpp            #   per-facet gradient -> seed DOFs (Voronoi/Power chain, wall chain)
 │       │   ├── interface.hpp        #   Σ σ(t_i,t_j) A_ij  (surface tension between species)
 │       │   ├── wall.hpp             #   Σ σ_s(t_i) A_wall   (wetting; Young's angle from σ_sg − σ_sl)
-│       │   └── volume.hpp           #   Σ e_i(V_i)         (target / log-barrier / free energy)
-│       ├── physics/                 # simulation + forces over the published view
+│       │   ├── volume.hpp           #   Σ e_i(V_i)         (target / log-barrier / free energy)
+│       │   ├── lloyd.hpp            #   centroidal (CVT) energy
+│       │   └── tension.hpp          #   facet-tension (roundness) energy
+│       ├── fv/                      # track C: the face mesh + finite-volume solvers on it
+│       │   ├── mesh.hpp             #   FaceMesh (owner/neighbour records, cell->faces CSR)
+│       │   ├── operators.hpp        #   covolume operators (div, two-point grad/Laplacian, Perot, CG)
+│       │   ├── covolume.hpp         #   staggered covolume Navier–Stokes (CovolumeNS)
+│       │   ├── collocated.hpp       #   collocated Navier–Stokes, flow's projection (CollocatedNS)
+│       │   ├── dec.hpp              #   Nicolaides DEC viscous term (measured, shelved)
+│       │   ├── polymesh.hpp         #   internal polyhedral mesh + VTU writer
+│       │   └── distributed.hpp      #   the collocated solver over VoronoiHalo
+│       ├── physics/                 # moving-cell simulation + forces over the published view
 │       │   ├── simulation.hpp       #   Euler / Navier-Stokes facade (ExplicitEuler)
 │       │   ├── euler_pressure.hpp   #   EOS pressure force
-│       │   ├── viscous.hpp          #   viscous Navier-Stokes term
-│       │   └── interface.hpp        #   multiphase interface-tension force
+│       │   └── viscous.hpp          #   viscous Navier-Stokes term
 │       ├── mpi/
-│       │   └── voronoi_halo.hpp     #   distributed halo glue over core
+│       │   ├── voronoi_halo.hpp     #   distributed ghost-gather over core's ParticleMigrator
+│       │   └── distributed_moving.hpp #  distributed MovingTessellation (repair under MPI)
 │       └── tessellation_view.hpp    # published read-only CSR device view (engine<->consumer seam)
 ├── src/voro_bindings.cpp     # nanobind Python module (`peclet.voro`)
-├── python/test_voro.py       # Python smoke test (Tessellation + Simulation)
-├── tests/kokkos/                # device unit tests + benchmarks
-├── tests/kokkos_mpi/            # distributed benchmarks
-├── docs/                        # design notes, performance_report.md, Doxygen config
+├── packaging/voro_init.py    # the package __init__ (+ redistribute_pore_mesh, sphere_union_scene)
+├── python/test_voro.py       # Python smoke test (Tessellation, Simulation, FlowSolver, optimisers)
+├── tests/kokkos/                # device unit tests + benchmarks (registered under PECLET_VORO_KOKKOS)
+├── tests/kokkos_mpi/            # the MPI tests (standalone CMake project, np = 1, 2, 4)
+├── docs/                        # design notes, performance_report.md, architecture.dox
 └── CMakeLists.txt               # build system (Kokkos device path)
 ```
 
@@ -78,7 +92,7 @@ voro/
 
 The Kokkos/ArborX backend and target architecture come from the bootstrapped prefix
 `../extern/install/<backend>` (built once by `../tools/bootstrap_deps.sh`), exactly as in
-`sdflow` and `dem`. Put `nvcc` on `PATH` for the CUDA backend.
+`flow` and `dem`. Put `nvcc` on `PATH` for the CUDA backend.
 
 ---
 
@@ -103,8 +117,7 @@ Add `-DPECLET_VORO_MPI=ON` to link MPI + `core` for the distributed path.
 | `PECLET_VORO_KOKKOS` | `OFF` | Build the Kokkos device path (`find_package(Kokkos)`) |
 | `PECLET_VORO_MPI` | `OFF` | Build the distributed path against MPI + core |
 | `PECLET_VORO_BUILD_PYTHON` | `OFF` | Build the device-native nanobind module `peclet.voro` (under `PECLET_VORO_KOKKOS`) |
-| `PECLET_VORO_BUILD_TESTS` | `ON` | Build the test executables |
-| `PECLET_VORO_BUILD_BENCHMARKS` | `OFF` | Build the performance benchmarks |
+| `PECLET_VORO_BUILD_TESTS` | `ON` | Build the test executables and the `bench_*` benchmarks (both live in `tests/kokkos`) |
 | `PECLET_VORO_BUILD_DOCS` | `OFF` | Build Doxygen HTML documentation |
 
 ---
@@ -114,7 +127,7 @@ Add `-DPECLET_VORO_MPI=ON` to link MPI + `core` for the distributed path.
 The device tessellator is exposed to Python through a **nanobind** module that uses the
 shared `core` **zero-copy** array bridge (numpy `(N,3)` / `(N,)` arrays alias the
 device-staged buffers — no per-call copies). This is the same drive-from-Python pattern as
-the rest of the suite (`sdflow`/`pnm`, `dem`). The module is **not** pybind11 and is **not**
+the rest of the suite (`flow`/`pnm`, `dem`). The module is **not** pybind11 and is **not**
 fetched automatically: nanobind is located via the active interpreter through the suite's
 `cmake/SuiteNanobind.cmake`. The built module is importable as `peclet.voro` (formerly
 `vordyn`).
@@ -192,10 +205,11 @@ For the distributed (MPI) validation scripts see [`mpi/README.md`](https://githu
 
 ### Formatting
 
-The codebase follows the Google C++ Style Guide enforced by `clang-format`:
+The codebase follows the Google C++ Style Guide, checked by `clang-format` (informational in
+CI, not enforced — the tree carries pre-existing violations; keep new code clean):
 
 ```bash
-clang-format --dry-run --Werror include/peclet/voro/**/*.hpp tests/kokkos/*.cpp src/*.cpp
+CLANG_FORMAT_BIN=clang-format-18 bash tools/clang_format_check.sh
 ```
 
 ### Static analysis
@@ -400,7 +414,7 @@ ordered. Consumers (physics, microstructure analysis) read the results through t
 read-only **facetGeometry CSR** in `tessellation_view.hpp` (`TessellationView`: a Kokkos
 View CSR of per-cell / per-facet quantities) rather than touching the cell internals.
 
-See `docs/mainpage.dox` for the architecture overview and `docs/performance_report.md` for the
+See `docs/architecture.dox` for the architecture overview and `docs/performance_report.md` for the
 cross-backend performance/memory/accuracy study.
 
 ---
