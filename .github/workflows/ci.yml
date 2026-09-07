@@ -53,7 +53,7 @@ jobs:
           cmake --build /tmp/kokkos/build --parallel
           cmake --install /tmp/kokkos/build
 
-      - name: Configure (VORFLOW_KOKKOS=ON)
+      - name: Configure (PECLET_VORO_KOKKOS=ON)
         working-directory: voro
         run: |
           cmake -B build -G Ninja \

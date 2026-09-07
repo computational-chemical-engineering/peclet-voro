@@ -58,20 +58,20 @@ endif()
 
 # ── Python bindings ───────────────────────────────────────────────────────────
 # The Python surface is the device-native nanobind module `peclet.voro` (src/voro_bindings.cpp),
-# configured below with -DVORFLOW_BUILD_PYTHON=ON. The legacy pybind11 module over the retired
+# configured below with -DPECLET_VORO_BUILD_PYTHON=ON. The legacy pybind11 module over the retired
 # half-edge engine has been removed.
 
 # ── Kokkos / suite device build (migration) ───────────────────────────────────
 # Suite-aligned build: find_package(Kokkos/ArborX) against the bootstrapped prefix
 # (../extern/install/<backend>, built by ../tools/bootstrap_deps.sh), mirroring
-# dem/sdflow. Device kernels are added across the migration phases; Phase 0 wires
+# dem/flow. Device kernels are added across the migration phases; Phase 0 wires
 # the toolchain and a smoke test. The legacy header-only path above is untouched.
 #
-#   cmake -S . -B build/host-openmp -DVORFLOW_KOKKOS=ON \
+#   cmake -S . -B build/host-openmp -DPECLET_VORO_KOKKOS=ON \
 #     -DCMAKE_PREFIX_PATH="$PWD/../extern/install/host-openmp"
 #   cmake --build build/host-openmp -j
 #
-# Add -DVORFLOW_MPI=ON to link MPI + core for the distributed path.
+# Add -DPECLET_VORO_MPI=ON to link MPI + core for the distributed path.
 option(PECLET_VORO_KOKKOS "Build the Kokkos device path (find_package(Kokkos))" OFF)
 option(PECLET_VORO_MPI "Build the distributed path against MPI + core" OFF)
 # Redistributable single-GPU CUDA wheel: libcudart is provided by the `nvidia-cuda-runtime` PyPI

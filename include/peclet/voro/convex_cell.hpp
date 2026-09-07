@@ -334,7 +334,7 @@ struct ConvexCell {
   /// trigger (Risk 1d) is the deferred complement that catches *gained* wall faces. Returns true
   /// iff the cell is self-consistent (no violation past `tol`).
   ///
-  /// WEIGHTED/POWER (deferred, see [[vorflow-power-cells-deferred]]): for a Laguerre cell the
+  /// WEIGHTED/POWER (deferred; see docs/power_large_weights_plan.md): for a Laguerre cell the
   /// in-sphere test `n_k·v ≤ nn_k` must become the empty-**orthosphere** (power-distance) predicate
   /// so completeness carries to the regular triangulation. The ConvexCell device path is
   /// Voronoi-only today (no radical-plane geometry), so only the unweighted form is implemented;

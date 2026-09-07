@@ -1,76 +1,80 @@
 #!/usr/bin/env bash
-# check_include_graph.sh — enforce the migration's one-way dependency rule (plan §1):
-#   physics -> TessellationView -> engine -> core
-# The tessellation *core* must never include a *physics* header, so the cutter
-# stays reusable for non-physics consumers (packing/microstructure/meshing).
+# check_include_graph.sh — enforce the acyclic layering of include/peclet/voro (voro/CLAUDE.md):
 #
-# Core headers may include each other and transport-core (tpx/...); physics
-# headers may include core. A core header that includes a physics header fails.
+#   L0  convex_cell + leaves      convex_cell.hpp plane_policy.hpp tessellation_view.hpp
+#                                 topology_store.hpp transpose.hpp verlet_skin.hpp tess_grid.hpp
+#   L1  sdf                       sdf.hpp
+#   L2  tessellator               tessellator.hpp subset_gather.hpp
+#   L3  repair / reeval           repair.hpp reeval_tessellation.hpp dynamic_validate.hpp
+#   L4  consumers                 physics/ energy/ fv/ mpi/ mesh_optimizer.hpp ot_optimizer.hpp
+#
+# A header may include headers of its own layer or of a LOWER layer, never a higher one — so the
+# cutter (L0-L2) stays reusable without the physics, and a physics header can never be pulled
+# into the engine. Every listed header must exist: a missing file is a FAILURE (the old version
+# of this script `continue`d over files that had been renamed away and checked nothing).
 #
 # Usage: check_include_graph.sh [include/peclet/voro]
 set -euo pipefail
 
 INC_DIR="${1:-$(cd "$(dirname "$0")/.." && pwd)/include/peclet/voro}"
 
-# Physics (downstream) headers — extend as physics modules are added.
-PHYSICS_HEADERS=(simulation.hpp)
-
-# Core/engine headers — everything else under include/peclet/voro that is not physics.
-CORE_HEADERS=(vor_types.hpp nbrlist.hpp voronoi.hpp tessellation_view.hpp device/cell_cutter.hpp device/sdf.hpp device/tessellator.hpp)
+layer_of() {  # header path relative to INC_DIR -> layer number
+  case "$1" in
+    convex_cell.hpp|plane_policy.hpp|tessellation_view.hpp|topology_store.hpp|transpose.hpp|verlet_skin.hpp|tess_grid.hpp) echo 0 ;;
+    sdf.hpp) echo 1 ;;
+    tessellator.hpp|subset_gather.hpp) echo 2 ;;
+    repair.hpp|reeval_tessellation.hpp|dynamic_validate.hpp) echo 3 ;;
+    physics/*|energy/*|fv/*|mpi/*|mesh_optimizer.hpp|ot_optimizer.hpp) echo 4 ;;
+    *) echo "" ;;
+  esac
+}
 
 status=0
-for core in "${CORE_HEADERS[@]}"; do
-  f="$INC_DIR/$core"
-  [ -f "$f" ] || continue  # not all exist yet (added across phases)
-  for phys in "${PHYSICS_HEADERS[@]}"; do
-    # Match an actual #include directive (not a comment/word in prose).
-    if grep -Eq "^[[:space:]]*#[[:space:]]*include[[:space:]]*[<\"][^>\"]*${phys}" "$f"; then
-      echo "VIOLATION: core header '$core' includes physics header '$phys'"
+n_headers=0
+n_edges=0
+while IFS= read -r f; do
+  rel="${f#"$INC_DIR"/}"
+  lf="$(layer_of "$rel")"
+  if [ -z "$lf" ]; then
+    echo "VIOLATION: '$rel' is not assigned to a layer — add it to layer_of() in $0"
+    status=1
+    continue
+  fi
+  n_headers=$((n_headers + 1))
+  # Every `#include "peclet/voro/<x>"` directive of this header (not comments / prose).
+  while IFS= read -r inc; do
+    [ -n "$inc" ] || continue
+    n_edges=$((n_edges + 1))
+    if [ ! -f "$INC_DIR/$inc" ]; then
+      echo "VIOLATION: '$rel' includes '$inc', which does not exist"
+      status=1
+      continue
+    fi
+    li="$(layer_of "$inc")"
+    if [ -z "$li" ]; then
+      echo "VIOLATION: '$rel' includes '$inc', which is not assigned to a layer"
+      status=1
+    elif [ "$li" -gt "$lf" ]; then
+      echo "VIOLATION: '$rel' (layer $lf) includes '$inc' (layer $li) — upward include"
       status=1
     fi
-  done
-done
+  done < <(sed -nE 's|^[[:space:]]*#[[:space:]]*include[[:space:]]*"peclet/voro/([^"]+)".*|\1|p' "$f")
+done < <(find "$INC_DIR" -type f -name '*.hpp' | sort)
 
-if [ "$status" -eq 0 ]; then
-  echo "include-graph OK: no physics header is included by a core header"
+if [ "$n_headers" -eq 0 ]; then
+  echo "VIOLATION: no headers found under $INC_DIR"
+  status=1
 fi
 
-# Reference physics modules must compile against the published view ONLY — they
-# must not reach into the legacy engine (voronoi.hpp) or other physics
-# (simulation.hpp). This is the plan §4 "compiles against TessellationView only".
-VIEW_ONLY=(physics/euler_pressure.hpp physics/viscous.hpp physics/interface.hpp physics/simulation.hpp)
-FORBIDDEN=(voronoi.hpp simulation.hpp)
-for mod in "${VIEW_ONLY[@]}"; do
-  f="$INC_DIR/$mod"
-  [ -f "$f" ] || continue
-  for bad in "${FORBIDDEN[@]}"; do
-    if grep -Eq "^[[:space:]]*#[[:space:]]*include[[:space:]]*[<\"][^>\"]*${bad}" "$f"; then
-      echo "VIOLATION: view-only physics '$mod' includes engine header '$bad'"
-      status=1
-    fi
-  done
+# The header set must not have silently shrunk below the engine's known core: these must exist.
+for must in convex_cell.hpp sdf.hpp tessellator.hpp repair.hpp tessellation_view.hpp physics/simulation.hpp fv/mesh.hpp; do
+  if [ ! -f "$INC_DIR/$must" ]; then
+    echo "VIOLATION: expected header '$must' is missing"
+    status=1
+  fi
 done
-if [ "$status" -eq 0 ]; then
-  echo "include-graph OK: view-only physics modules depend on the view alone"
-fi
 
-# De-legacy invariant: the PRODUCTION device path (shipped library + device Python
-# bindings) must not include the legacy engine (voronoi.hpp / simulation.hpp). The
-# legacy engine is retained only as a TEST ORACLE and as the legacy<->view bridge
-# tessellation_build.hpp, until the oracle is converted to golden data and deleted.
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-for g in "$INC_DIR/device" "$INC_DIR/physics" "$INC_DIR/host" \
-         "$INC_DIR/tessellation_view.hpp" "$ROOT/src"; do
-  [ -e "$g" ] || continue
-  while IFS= read -r f; do
-    # Anchor to the exact legacy paths so simulation.hpp is not a false hit.
-    if grep -Eq "^[[:space:]]*#[[:space:]]*include[[:space:]]*[<\"]voro/(voronoi|simulation)\.hpp" "$f"; then
-      echo "VIOLATION: production file '${f#"$ROOT"/}' includes the legacy engine"
-      status=1
-    fi
-  done < <(find "$g" -type f \( -name '*.hpp' -o -name '*.cpp' \) 2>/dev/null)
-done
 if [ "$status" -eq 0 ]; then
-  echo "include-graph OK: the production device path is legacy-free"
+  echo "include-graph OK: $n_headers headers, $n_edges intra-voro includes, all downward or same-layer"
 fi
 exit "$status"

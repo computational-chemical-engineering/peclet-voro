@@ -8,7 +8,7 @@
 #         -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun
 #   cmake --build build_kmpi -j && ctest --test-dir build_kmpi --output-on-failure
 cmake_minimum_required(VERSION 3.24)
-project(vorflow_mpi_tests LANGUAGES CXX)
+project(peclet_voro_mpi_tests LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -27,7 +27,7 @@ set(MORTON_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../../../morton/include"
     CACHE PATH "morton repo include/")
 if(NOT EXISTS "${MORTON_INCLUDE}/morton/morton.hpp")
   message(FATAL_ERROR
-    "vorflow_mpi_tests: morton not found at ${MORTON_INCLUDE} (clone it as a sibling repo)")
+    "peclet_voro_mpi_tests: morton not found at ${MORTON_INCLUDE} (clone it as a sibling repo)")
 endif()
 if(NOT MPIEXEC_EXECUTABLE)
   set(MPIEXEC_EXECUTABLE /usr/bin/mpirun)
@@ -35,7 +35,7 @@ endif()
 
 enable_testing()
 
-# Distributed benchmarks (run manually under mpirun -np <R> [N ...] for at-scale numbers).
+# The MPI test binaries (also runnable by hand under mpirun -np <R> [N ...] for at-scale numbers).
 foreach(b bench_voronoi_mpi bench_repair_mpi test_flow_mpi)
   add_executable(${b} ${b}.cpp)
   target_include_directories(${b} PRIVATE

@@ -84,7 +84,7 @@ static const char* distName(int d) {
 }
 
 // Fill x0 (3N) with the chosen distribution; weights w (N) only meaningful for kPoly (inert on the
-// Voronoi device path — see [[vorflow-power-cells-deferred]]).
+// Voronoi device path — see docs/power_large_weights_plan.md).
 static void makeDistribution(int dist, int N, real_t L, std::mt19937& rng, std::vector<real_t>& x0,
                              std::vector<real_t>& w) {
   std::uniform_real_distribution<real_t> U(0, 1);

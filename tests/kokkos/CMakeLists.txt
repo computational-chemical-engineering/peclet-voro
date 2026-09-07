@@ -1,6 +1,6 @@
 # Kokkos device tests + benchmarks for peclet.voro (built only when -DPECLET_VORO_KOKKOS=ON).
 
-function(add_vorflow_kokkos_test name)
+function(add_voro_kokkos_test name)
   add_executable(${name} ${name}.cpp)
   target_link_libraries(${name} PRIVATE Kokkos::kokkos)
   target_include_directories(${name} PRIVATE
@@ -13,70 +13,70 @@ function(add_vorflow_kokkos_test name)
   set_tests_properties(${name} PROPERTIES ENVIRONMENT "OMP_PROC_BIND=false")
 endfunction()
 
-add_vorflow_kokkos_test(test_kokkos_smoke)
+add_voro_kokkos_test(test_kokkos_smoke)
 
 # voro over the SHARED core geometry: SdfScene wraps peclet::core::geom::evalTree, so the cell
 # clipper and mesh optimiser reach the whole analytic vocabulary (capsule/torus/cone/ellipsoid/
 # superquadric + CSG + transforms + grids), not just the three legacy single-shape providers.
 # Also pins that a legacy provider and the same shape as a scene node agree bit-for-bit.
-add_vorflow_kokkos_test(test_sdf_scene)
+add_voro_kokkos_test(test_sdf_scene)
 
 # Rung A0 (Voronoi methods plan): SDF solids on the MOVING-POINT path — persisted wall planes +
 # the boundary watch; repair vs cold SDF build through a sphere ∪ torus scene, cells entering /
 # leaving the solid, exact wall mode gated at 1e-9, skin mode reported.
-add_vorflow_kokkos_test(test_sdf_dynamic)
+add_voro_kokkos_test(test_sdf_dynamic)
 
 # Rung A3: the facet-edge area-Jacobian CSR the build publishes + the energy layer on it
 # (interface / wall / volume terms, Voronoi + Power chains, the shared seed-foot wall chain):
 # published == reconstruction to round-off, FD-exact gradients incl. weights and a flat wall.
-add_vorflow_kokkos_test(test_energy_layer)
+add_voro_kokkos_test(test_energy_layer)
 
 # Rung A1: second-order (sagitta-shifted) wall placement on curved solids — fluid-volume error
 # vs the bare tangent clip on a sphere and a cavity at three resolutions (10x + order gate).
-add_vorflow_kokkos_test(test_sdf_curved)
+add_voro_kokkos_test(test_sdf_curved)
 
 # Track C, rung C1: the face mesh + covolume operators (div / two-point grad / Laplacian /
 # Green–Gauss / Perot): adjointness + symmetry to round-off, exact uniform-field reconstruction,
 # manufactured-solution convergence on a jittered lattice.
-add_vorflow_kokkos_test(test_fv_operators)
+add_voro_kokkos_test(test_fv_operators)
 
 # Track B, rung B1: centroidal (Lloyd) relaxation of a random grid — skewness / volume spread /
 # Poisson residual consistency all drop (grid quality is solver quality).
-add_vorflow_kokkos_test(test_grid_relax)
+add_voro_kokkos_test(test_grid_relax)
 
 # Track B, rung B3: the internal PolyMesh (shared vertices, ordered polygons, owner/neighbour,
 # wall patches) — watertight, Euler-exact, volumes == engine to 1e-12, VTU written.
-add_vorflow_kokkos_test(test_polymesh)
+add_voro_kokkos_test(test_polymesh)
 
 # Track B, rung B4: grid quality IS solver quality — Poisson residual/solution error vs skewness at
 # fixed h (Lloyd-relaxed jittered lattices) and the solution's convergence order on relaxed grids.
-add_vorflow_kokkos_test(test_grid_quality)
-add_vorflow_kokkos_test(test_covolume_ns)
-add_vorflow_kokkos_test(test_collocated_ns)
-add_vorflow_kokkos_test(test_body_fitted)
-add_vorflow_kokkos_test(test_covolume_dec)
-add_vorflow_kokkos_test(test_permeability)
+add_voro_kokkos_test(test_grid_quality)
+add_voro_kokkos_test(test_covolume_ns)
+add_voro_kokkos_test(test_collocated_ns)
+add_voro_kokkos_test(test_body_fitted)
+add_voro_kokkos_test(test_covolume_dec)
+add_voro_kokkos_test(test_permeability)
 
 # Oracle-free acceptance for the device tessellation: geometric invariants (space-filling, positive
 # volumes, completeness, facet-area reciprocity A_ij = -A_ji, area closure, topology reciprocity) over
 # several sizes/seeds. Replaces the retired half-edge-oracle comparison tests (tessellator,
 # device_geometry, tessellation_view, sdf_boundary_device) and the device-vs-legacy-physics tests
 # (euler_pressure, viscous_device, interface_energy, device_step); the device physics path is now
-# exercised end-to-end by the Python smoke test (python/test_vorflow.py).
-add_vorflow_kokkos_test(test_tessellation_invariants)
+# exercised end-to-end by the Python smoke test (python/test_voro.py).
+add_voro_kokkos_test(test_tessellation_invariants)
 
 # P1 acceptance for the POWER (Laguerre) tessellation: equal-weights regression to Voronoi
 # (machine-exact), oracle-free power-diagram invariants (space-filling / radical-facet reciprocity),
 # and an independent host brute-force radical-plane oracle (per-cell volume + neighbour set).
-add_vorflow_kokkos_test(test_power_cells)
+add_voro_kokkos_test(test_power_cells)
 
 # P5: differentiable SDF wall force (seed-foot J_wall). FD-vs-analytic — flat wall exact, sphere
 # first-order.
-add_vorflow_kokkos_test(test_sdf_policy)
+add_voro_kokkos_test(test_sdf_policy)
 
 # Semi-discrete OT volume-control optimiser: Newton on the power weights (L δw = Vset−V) via the core
 # MomentumSolver, driving cells to target volumes (uniform + spatially-graded refinement).
-add_vorflow_kokkos_test(test_mesh_optimizer)
+add_voro_kokkos_test(test_mesh_optimizer)
 
 # voro++ reference (fetched once; the serial throughput target for bench_convexcell).
 include(FetchContent)
@@ -89,13 +89,13 @@ set(VORO_ENABLE_DOXYGEN OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(voropp)
 
 # Option-A prototype: ConvexCell controlled unit tests (known cells, exact volumes).
-add_vorflow_kokkos_test(test_convexcell_unit)
+add_voro_kokkos_test(test_convexcell_unit)
 
 # TrackAdj axis: incremental edge-adjacency + Lawson local-convexity certificate foundation gates.
-add_vorflow_kokkos_test(test_convexcell_adj)
+add_voro_kokkos_test(test_convexcell_adj)
 
 # Vertex-local sort-free geometry (design note): acceptance criteria in FP64.
-add_vorflow_kokkos_test(test_pervertex_geometry)
+add_voro_kokkos_test(test_pervertex_geometry)
 
 # Option-A prototype: compact ConvexCell (dual-triangle) one-cell-per-thread benchmark.
 add_executable(bench_convexcell bench_convexcell.cpp)

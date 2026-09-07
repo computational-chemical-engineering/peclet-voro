@@ -12,7 +12,7 @@ _CPack_Packages/
 
 # ── Generated CMake / package files (keep the .cmake.in template) ─────────────
 *.cmake
-!cmake/vorflowConfig.cmake.in
+!cmake/voroConfig.cmake.in
 
 # ── Compiled objects and binaries ─────────────────────────────────────────────
 *.o
@@ -33,6 +33,9 @@ docs/latex/
 # ── Benchmark output ──────────────────────────────────────────────────────────
 benchmarks/results/
 benchmarks/archive_pending/
+
+# ── Python bytecode ──────────────────────────────────────────────────────────
+__pycache__/
 
 # ── IDE / editor artifacts ───────────────────────────────────────────────────
 .vscode/

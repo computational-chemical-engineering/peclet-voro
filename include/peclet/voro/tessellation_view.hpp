@@ -20,7 +20,7 @@
  * arrays. Per-facet 3-vectors are stored flat (3*f + c) so the layout is
  * unambiguous across backends; coalescing layout is retuned in Phase 7.
  *
- * Requires Kokkos; only included by the device build (-DVORFLOW_KOKKOS=ON). This
+ * Requires Kokkos; only included by the device build (-DPECLET_VORO_KOKKOS=ON). This
  * is a *core* header: it must never include a physics header (see §1).
  */
 #ifndef PECLET_VORO_TESSELLATION_VIEW_HPP
