@@ -1512,7 +1512,7 @@ NB_MODULE(_voro, m) {
            "Build the first tessellation and forces from the particle state set above.")
       .def("set_dt", &Sim::set_dt, nb::arg("dt"),
            "Set the time step. The suite-wide way to configure a stepper "
-           "(suite/docs/NAMING.md 1.5) — `flow.Solver`, `dem.Simulation` and `tpx_amr.Flow` all "
+           "(suite/docs/NAMING.md 1.5) — `flow.Solver`, `dem.Simulation` and `peclet.core.amr.Flow` all "
            "take `set_dt`.")
       .def_prop_ro("dt", &Sim::dt, "The stored time step (0 until `set_dt`).")
       .def("step", &Sim::step, nb::arg("num_steps"),

@@ -1,3 +1,4 @@
+# stale: predates the Kokkos voro API (voro.ExplicitEuler / set_l no longer exist); kept as the distributed-scheme record.
 """Scheme C (force-communication) vs re-gather, for distributed Voronoi dynamics + MPI profiling.
 
 Two distributed schemes for the same compressible-Euler dynamics, both compared to the serial run:
@@ -69,7 +70,7 @@ if rank == 0:
 
 
 def own_initial():
-    mig = peclet.core.mpi.Migrator(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
+    mig = peclet.core.mpi.ParticleMigrator(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
     o = np.array([mig.owner_of(tuple(p)) for p in g_pos])
     m = np.where(o == rank)[0]
     return mig, g_pos[m].copy(), g_vel[m].copy(), ids[m].astype(np.float64)
@@ -97,7 +98,7 @@ def run_regather():
 
 def run_scheme_c():
     mig, pos, vel, idd = own_initial()
-    halo = peclet.core.mpi.Halo(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
+    halo = peclet.core.mpi.ParticleHalo(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
     t_mpi = 0.0
     s = None
     x = v = F = None

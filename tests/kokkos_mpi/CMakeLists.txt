@@ -19,7 +19,7 @@ endif()
 find_package(Kokkos CONFIG REQUIRED)
 find_package(MPI REQUIRED)
 
-set(TPX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../core" CACHE PATH "core repo")
+set(PECLET_CORE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../core" CACHE PATH "core repo")
 # The device tessellator's Z-order grid ordering uses morton::Morton<3,21> (a sibling
 # suite repo). Mirror the main build's include + MORTON_ENABLE_KOKKOS define so the
 # software bit path is device-callable (MORTON_HD -> KOKKOS_FUNCTION).
@@ -39,7 +39,7 @@ enable_testing()
 foreach(b bench_voronoi_mpi bench_repair_mpi test_flow_mpi)
   add_executable(${b} ${b}.cpp)
   target_include_directories(${b} PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${TPX_DIR}/include ${MORTON_INCLUDE})
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include ${PECLET_CORE_DIR}/include ${MORTON_INCLUDE})
   target_compile_definitions(${b} PRIVATE PECLET_VORO_MPI MORTON_ENABLE_KOKKOS=1)
   target_link_libraries(${b} PRIVATE Kokkos::kokkos MPI::MPI_CXX)
 endforeach()

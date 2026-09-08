@@ -102,14 +102,14 @@ if(PECLET_VORO_KOKKOS)
 
   # core's zero-copy bridge + the morton spatial-index primitive (the device tessellator's
   # Z-order grid uses morton::Morton<3,21>; MORTON_ENABLE_KOKKOS -> MORTON_HD is KOKKOS_FUNCTION).
-  peclet_sibling_include(peclet-core "${PECLET_TPX_TAG}" "../core" PECLET_VORO_TPX_INCLUDE)
+  peclet_sibling_include(peclet-core "${PECLET_CORE_TAG}" "../core" PECLET_CORE_INCLUDE)
   peclet_sibling_include(peclet-morton         "${PECLET_MORTON_TAG}" "../morton"      PECLET_VORO_MORTON_INCLUDE)
 
   if(PECLET_VORO_MPI)
     find_package(MPI REQUIRED COMPONENTS CXX)
-    if(NOT EXISTS "${PECLET_VORO_TPX_INCLUDE}/peclet/core/halo/particle_halo.hpp")
+    if(NOT EXISTS "${PECLET_CORE_INCLUDE}/peclet/core/halo/particle_halo.hpp")
       message(FATAL_ERROR
-        "core not found at ${PECLET_VORO_TPX_INCLUDE} (clone it as a sibling repo)")
+        "core not found at ${PECLET_CORE_INCLUDE} (clone it as a sibling repo)")
     endif()
     message(STATUS "voro: distributed path ENABLED (MPI + core)")
   endif()
@@ -138,7 +138,7 @@ if(PECLET_VORO_KOKKOS)
     configure_file("${CMAKE_CURRENT_SOURCE_DIR}/packaging/voro_init.py"
                    "${CMAKE_CURRENT_BINARY_DIR}/peclet/voro/__init__.py" COPYONLY)
     target_include_directories(voro PRIVATE
-      "${CMAKE_CURRENT_SOURCE_DIR}/include" "${PECLET_VORO_TPX_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
+      "${CMAKE_CURRENT_SOURCE_DIR}/include" "${PECLET_CORE_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
     target_compile_definitions(voro PRIVATE MORTON_ENABLE_KOKKOS=1 PECLET_CORE_HAVE_MORTON=1)
     target_link_libraries(voro PRIVATE Kokkos::kokkos)
     target_compile_features(voro PRIVATE cxx_std_20)

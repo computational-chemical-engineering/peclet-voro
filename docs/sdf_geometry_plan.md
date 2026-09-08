@@ -47,7 +47,7 @@ This mechanism is **already implemented on the legacy CPU path** and tested:
 - `tests/test_sdf_boundary.cpp` validates it for slab, spherical-hole, and cylinder boundaries.
 
 The suite also already has the shared SDF the rest of this migration reused: **`peclet::core::geom`**
-(`core/include/tpx/geom/sdf.hpp`) — the `Sdf` concept (`eval(p)`), analytic `Sphere`,
+(`core/include/peclet/core/geom/sdf.hpp`) — the `Sdf` concept (`eval(p)`), analytic `Sphere`,
 `Box`, `HollowCylinder`, `Complement`, a central-difference `gradient`, plus `GridSdf` (trilinear
 sampling) and VTI read/write.
 
@@ -110,7 +110,7 @@ a few planar facets approximating the curve.
    a Python smoke test bounds a packing by a sphere/box.
 
 ## Critical files
-- Reuse: `core/include/tpx/geom/{sdf,grid_sdf,vti_io}.hpp`, `tpx/common/view.hpp` (`Field3D`).
+- Reuse: `core/include/peclet/core/geom/{sdf,grid_sdf,vti_io}.hpp`, `peclet/core/common/view.hpp` (`Field3D`).
 - Port from: `include/peclet/voro/voronoi.hpp` (`SignedDistanceBoundary`, `clipCellAgainstBoundary`),
   `tests/test_sdf_boundary.cpp` (golden geometries + tolerances).
 - New: `include/peclet/voro/sdf.hpp`, clip stage in `include/peclet/voro/{cell_cutter,tessellator}.hpp`,

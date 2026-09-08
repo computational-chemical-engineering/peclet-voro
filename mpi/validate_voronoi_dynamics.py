@@ -1,3 +1,4 @@
+# stale: predates the Kokkos voro API (voro.ExplicitEuler / set_l no longer exist); kept as the distributed-scheme record.
 """Distributed Voronoi DYNAMICS validated against serial.
 
 Beyond the static tessellation (validate_voronoi.py), this runs the actual compressible-Euler
@@ -67,7 +68,7 @@ if rank == 0:
     ref = np.array(s.get_positions()) % L
 
 # distributed
-mig = peclet.core.mpi.Migrator(origin=[0, 0, 0], size=[L, L, L], gsize=gs, periodic=[True, True, True])
+mig = peclet.core.mpi.ParticleMigrator(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
 own = np.array([mig.owner_of(tuple(p)) for p in g_pos])
 mine = np.where(own == rank)[0]
 pos, vel, idd = g_pos[mine].copy(), g_vel[mine].copy(), ids[mine].astype(np.float64)
