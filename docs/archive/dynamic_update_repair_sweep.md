@@ -28,11 +28,11 @@ the full curve and the per-pass fractions are visible; the production curve (gat
 
 ## Speedup vs displacement
 
-![speedup](figs/repair_speedup.png)
+![speedup](../figs/repair_speedup.png)
 
 ## Cells re-gathered per step (Pass 1 / Pass 2)
 
-![pass fractions](figs/repair_passfrac.png)
+![pass fractions](../figs/repair_passfrac.png)
 
 The Pass-1 and Pass-2 fractions are a property of the *geometry* (the certificate + the displacement),
 not the device — they are within ~0.05 pp across all backends, so one curve suffices.
@@ -164,7 +164,7 @@ stale) — and the Phase-3 gate rebuilds that regime anyway. The repair's exactn
 one step (no poke cost in a high-churn regime), and a low-churn streak builds the poke once and then
 maintains it incrementally, so the local path is never slower than brute.
 
-![local vs brute certificate](figs/repair_cert_speedup.png)
+![local vs brute certificate](../figs/repair_cert_speedup.png)
 
 | device | δ/h=0.0001 brute → local | speedup of the repair |
 |---|---|---|

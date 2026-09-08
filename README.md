@@ -71,7 +71,12 @@ voro/
 ├── python/test_voro.py       # Python smoke test (Tessellation, Simulation, FlowSolver, optimisers)
 ├── tests/kokkos/                # device unit tests (+ opt-in benchmarks, label `bench`)
 ├── tests/kokkos_mpi/            # the MPI tests (np = 1, 2, 4; same tree under PECLET_VORO_MPI)
-├── docs/                        # design notes, performance_report.md, architecture.dox
+├── mpi/                         # standalone MPI validation scripts (see mpi/README.md)
+├── examples/                    # runnable examples (packed_bed_voronoi)
+├── benchmarks/                  # benchmark result data
+├── tools/                       # include-graph + clang-format checks, the Snellius MPI script
+├── docs/                        # architecture.dox, distributed_voronoi.md, performance_report.md
+│   └── archive/                 #   dated design notes, plans and benchmark records (not maintained)
 └── CMakeLists.txt               # build system (Kokkos device path)
 ```
 
@@ -88,7 +93,7 @@ voro/
 | **morton** | sibling repo | Z-order spatial-index primitive used by the device tessellator |
 | MPI | any | Distributed path (`-DPECLET_VORO_MPI=ON`) |
 | nanobind | ≥ 2.0 | Python module (`-DPECLET_VORO_BUILD_PYTHON=ON`); found via the active interpreter |
-| Voro++ | master | Fetched by CMake FetchContent as the throughput reference for `bench_convexcell` |
+| Voro++ | pinned commit | Fetched by FetchContent **only** under `-DPECLET_VORO_BUILD_BENCHMARKS=ON`, as the serial throughput reference for `bench_convexcell` |
 
 The Kokkos/ArborX backend and target architecture come from the bootstrapped prefix
 `../extern/install/<backend>` (built once by `../tools/bootstrap_deps.sh`), exactly as in
@@ -207,11 +212,12 @@ For the distributed (MPI) validation scripts see [`mpi/README.md`](https://githu
 
 ### Formatting
 
-The codebase follows the Google C++ Style Guide (`.clang-format`), enforced in CI with clang-format
-18.1.8 over `include/`, `src/` and `tests/`:
+The codebase follows the Google C++ Style Guide (`.clang-format`), checked **blocking** in CI
+(`quality.yml`) with clang-format 18.1.8 over `include/`, `src/` and `tests/`. The script walks those
+directories itself — do not hand-roll globs:
 
 ```bash
-CLANG_FORMAT_BIN=clang-format-18 bash tools/clang_format_check.sh
+CLANG_FORMAT_BIN=../.venv/bin/clang-format bash tools/clang_format_check.sh   # 18.1.8, as in CI
 ```
 
 ### Static analysis
@@ -416,8 +422,10 @@ ordered. Consumers (physics, microstructure analysis) read the results through t
 read-only **facetGeometry CSR** in `tessellation_view.hpp` (`TessellationView`: a Kokkos
 View CSR of per-cell / per-facet quantities) rather than touching the cell internals.
 
-See `docs/architecture.dox` for the architecture overview and `docs/performance_report.md` for the
-cross-backend performance/memory/accuracy study.
+See `docs/architecture.dox` for the architecture overview, `docs/performance_report.md` for the
+cross-backend performance/memory/accuracy study and `docs/distributed_voronoi.md` for the MPI path.
+The dated design notes, phased plans and benchmark records that steered this work are kept, no
+longer maintained, under [`docs/archive/`](https://github.com/computational-chemical-engineering/peclet-voro/blob/main/docs/archive/README.md).
 
 ---
 

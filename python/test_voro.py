@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Smoke test for the device-native `peclet.voro` nanobind module.
 
-Exercises the two surfaces — the bare Tessellation (cold build + incremental repair) and the
-compressible-Euler Simulation — on a small uniform point set and checks the basic invariants
-(space-filling volume, plausible neighbour counts, finite energies). Run with the built module
-on PYTHONPATH, e.g.:
+Exercises the three surfaces — the bare Tessellation (cold build + incremental repair, SDF
+geometry, power weights, energy forces), the compressible-Euler Simulation, and the static
+FlowSolver on the face mesh — plus the pore-mesh redistribution helper, on small point sets, and
+checks the basic invariants (space-filling volume, plausible neighbour counts, finite energies,
+face divergence). Run with the built module on PYTHONPATH, e.g.:
 
     PYTHONPATH=<build> python python/test_voro.py
 """

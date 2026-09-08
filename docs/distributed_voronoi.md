@@ -7,6 +7,11 @@ ghost particles) is reused from `core` via its `peclet.core.mpi` Python shim, ex
 `dem`. The per-cell observables (`peclet.voro.get_volumes()` / `get_neighbor_counts()`, the latter reading the
 `cellFacetCount` view) give the serial-vs-distributed comparison.
 
+This page documents the **Python validation path** under `mpi/` (the scripts named below). The
+distributed engine itself lives in C++ — `include/peclet/voro/mpi/` (`VoronoiHalo`,
+`DistributedMovingTessellation`) and `fv/distributed.hpp` (the collocated solver over the halo) —
+and is gated by `tests/kokkos_mpi` at np = 1, 2, 4; see the README's "Distributed (MPI)" section.
+
 **Status: implemented and validated.**
 - *Tessellation* (`mpi/validate_voronoi.py`): owned-cell **volumes and neighbour counts** match the
   serial full-box tessellation to **machine precision** (max ~1e-15, 0 neighbour mismatches) at
@@ -53,7 +58,7 @@ These were tried before the periodic-subset insight above; keep to step 3 instea
   hangs; the cell grid is also sized for the huge empty box.
 - **Axis-aligned box SDF boundary** to clip a sub-block: the boundary clipping is built for *smooth*
   SDFs (slab/cylinder/sphere); a box SDF has creases at edges/corners and hangs in the clip, even with
-  all particles inside and via the `CellComplex` path.
+  all particles inside.
 
 ## Two communication schemes (`mpi/validate_voronoi_scheme_c.py`)
 
@@ -91,8 +96,8 @@ between rebuilds (the usual neighbour-list-rebuild trade-off).
 ## Notes / future work
 
 - For a **non-periodic** domain (walls), step 3 would need genuine open/bounded tessellation; that is
-  the only case requiring the smooth-SDF boundary or a polytope (multi-plane) clip via
-  `Cell::clipByPlane`. The periodic case (above) needs none of it.
+  the only case requiring the smooth-SDF boundary (`sdf.hpp`'s `clipCellAgainstSdf`) or a polytope
+  (multi-plane) clip. The periodic case (above) needs none of it.
 - Lees–Edwards (sheared) boxes: the migrator/halo would need the LE image shift (deferred; see the
   suite `docs/ROADMAP.md` Phase 1 note).
 - Perf: each rank currently rebuilds a `peclet.voro.Simulation` per validation; a persistent tessellation

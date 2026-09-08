@@ -41,8 +41,9 @@ assigning it a layer in the script, or the test fails.
 
 ## Tests vs benchmarks
 
-`tests/kokkos/test_*.cpp` are the 22 device ctests (`add_voro_kokkos_test`); plus `test_include_graph`
-(script) and `test_voro_python` (`python/test_voro.py`, needs `PECLET_VORO_BUILD_PYTHON=ON`) = 24.
+`tests/kokkos/test_*.cpp` are the 21 device ctests (`add_voro_kokkos_test`); plus
+`bench_dynamic_update_gates`, `test_include_graph` (script) and `test_voro_python`
+(`python/test_voro.py`, needs `PECLET_VORO_BUILD_PYTHON=ON`) = 24.
 `bench_dynamic_update --gates` (ctest `bench_dynamic_update_gates`) is a real gate — its FP64 binary is
 always built with the tests. Every other `bench_*` (incl. the `_f32` precision variants and Voro++, the
 `bench_convexcell` throughput reference, pinned by commit) is opt-in via `PECLET_VORO_BUILD_BENCHMARKS=ON`
@@ -63,5 +64,9 @@ Google style via `.clang-format` (+ `.clang-tidy`), checked BLOCKING in CI (`qua
 18.1.8 = the venv's) over `include/ src/ tests/`: `CLANG_FORMAT_BIN=../.venv/bin/clang-format bash
 tools/clang_format_check.sh`. The tree was reformatted in one commit (2026-09-08); run
 `clang-format -i` on what you touch. `-Wall -Wextra -Wpedantic` with no blanket `-Wno-*`: keep
-`include/` warning-free (it hits every consumer's build). Design notes live in `docs/*.md`;
-`docs/architecture.dox` is the Doxygen page.
+`include/` warning-free (it hits every consumer's build). `docs/` holds only the live documents — `architecture.dox` (the Doxygen page),
+`distributed_voronoi.md` (the MPI path) and `performance_report.md`; the dated design notes, phased
+plans and benchmark records are in `docs/archive/` (indexed by its README, NOT maintained — several
+describe the retired half-edge engine or the `vordyn` module name as current). A new document that
+describes what the code does belongs in `docs/`; a plan or a campaign record belongs in
+`docs/archive/`.
