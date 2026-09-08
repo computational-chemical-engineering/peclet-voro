@@ -651,10 +651,20 @@ void interfaceGradReconstruct(const std::vector<Real>& x, const std::vector<int>
 }
 }  // namespace detail
 
+/// Result of interfaceMinimize: the interfacial energy E = Σ σ A_ij at the returned positions and
+/// its ratio to the starting energy (its own record — it is not a volume-error report, so it does
+/// not reuse OtResult's fields).
+struct InterfaceResult {
+  int iters = 0;
+  double energy = 0.0;       ///< final interfacial energy
+  double energyRatio = 1.0;  ///< energy / initial energy
+  bool converged = false;
+};
+
 template <class Real, class Sdf = NoSdf>
-OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type, double sigma,
-                           const Real L[3], int N, int sw, const Sdf& sdf, int maxIter, Real tol,
-                           bool verbose = false) {
+InterfaceResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type,
+                                  double sigma, const Real L[3], int N, int sw, const Sdf& sdf,
+                                  int maxIter, Real tol, bool verbose = false) {
   using MemSpace = peclet::core::MemSpace;
   const Real Larr[3] = {L[0], L[1], L[2]};
   Kokkos::View<Real*, MemSpace> dw;
@@ -689,7 +699,7 @@ OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type,
     g.assign(gh.begin(), gh.end());
   };
 
-  OtResult R;
+  InterfaceResult R;
   std::vector<double> g;
   double E;
   energyGrad(pos, g, E);
@@ -711,7 +721,7 @@ OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type,
     for (double v : g)
       gnorm = std::max(gnorm, std::fabs(v));
     R.iters = it;
-    R.maxVolErr = E;  // report energy in maxVolErr slot
+    R.energy = E;
     if (verbose)
       std::printf("  [iface] iter %2d  E=%.6e gnorm=%.3e\n", it, E, gnorm);
     if (gnorm < tol) {
@@ -744,7 +754,7 @@ OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type,
     if (!accepted)
       break;
   }
-  R.meanVolErr = E / std::max(E0, 1e-30);  // final/initial energy ratio
+  R.energyRatio = E / std::max(E0, 1e-30);
   return R;
 }
 

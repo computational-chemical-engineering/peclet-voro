@@ -3,14 +3,29 @@
  * @brief Kokkos nanobind Python module `peclet.voro`.
  *
  * Drives the production device path — multicore CPU (OpenMP), or GPU (CUDA/HIP), selected by the
- * Kokkos backend the extension was built against — from Python. Two surfaces:
+ * Kokkos backend the extension was built against — from Python. The PUBLIC surface (what a user of
+ * the method needs to set up, run and read out a computation; suite/docs/QUALITY_PLAN.md D2):
  *
- *  - @ref Tess "peclet.voro.Tessellation" — the bare moving-particle Voronoi tessellator: a cold
- * build plus the incremental two-pass *repair* update (the fast per-step path for moving points),
- * exposing per-cell volumes and neighbour counts. This is the core primitive all the geometry work
- * builds on.
- *  - @ref Sim "peclet.voro.Simulation" — a device-native compressible-Euler / Navier–Stokes Voronoi
- * fluid simulation (velocity-Verlet over the tessellation) on top of that primitive.
+ *  - @ref Tess "peclet.voro.Tessellation" — the bare moving-particle (power-)Voronoi tessellator,
+ *    optionally SDF-clipped: a cold build plus the incremental two-pass *repair* update (the fast
+ *    per-step path for moving points); volumes, neighbour / wall counts, and the energy layer.
+ *  - @ref Flow "peclet.voro.FlowSolver" — the static collocated / covolume Navier–Stokes solvers on
+ *    the face mesh of a resident tessellation.
+ *  - @ref Sim "peclet.voro.Simulation" — the device-native compressible-Euler / Navier–Stokes
+ *    moving-cell fluid (velocity-Verlet over the tessellation).
+ *  - `optimize_volume_mesh`, `minimize_interface` — the mesh optimisers on a periodic box.
+ *  - `peclet.voro.pore_mesh` (a lazily imported submodule) carries the SDF-walled pore-space
+ *    family bound here (`optimize_pore_mesh`, `sdf_voronoi_cells`, `sdf_voronoi_section`).
+ *  - under `PECLET_VORO_MPI`: `VoronoiHalo` (ghost gather) and `DistributedTessellation` (the
+ *    distributed repair driver, `mpi/distributed_moving.hpp`).
+ *
+ * Every instrument, ablation switch and validity report lives on the object's `diagnostics`
+ * sub-object (`t.diagnostics.build_report()`), one per class, holding a reference to its owner.
+ *
+ * String modes are validated against the accepted set and the error lists it; call-order
+ * requirements are state checks that name the correct order; the literals the engine is driven
+ * with are the named `defaults` below (also `peclet.voro.defaults`), and the docstrings are
+ * generated from them so they cannot drift.
  *
  * Particle data crosses the boundary as NumPy arrays: positions/velocities are `(N,3)` float64,
  * scalars (masses, viscosities, volumes) are `(N,)`. Arrays move through the shared
@@ -49,10 +64,13 @@
 
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <deque>
 #include <Kokkos_Core.hpp>
 #include <optional>
 #include <set>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -80,6 +98,7 @@
 #include <mpi.h>
 #include <nanobind/stl/tuple.h>
 
+#include "peclet/voro/mpi/distributed_moving.hpp"
 #include "peclet/voro/mpi/voronoi_halo.hpp"
 #endif
 
@@ -92,6 +111,64 @@ using DView = Kokkos::View<real_t*, peclet::core::MemSpace>;
 // object ("undefined hidden symbol: vtable for (anonymous namespace)::Tess"). Same fix as
 // core/python/amr_bindings.cpp.
 namespace peclet::voro::pybind {
+
+// --------------------------------------------------------------------------------------------------
+// The named defaults (QUALITY_PLAN G.7 "TessellationParams"): every literal the bound surface drives
+// the engine with, in one place. `peclet.voro.defaults` exposes them and the docstrings below are
+// generated from them.
+// --------------------------------------------------------------------------------------------------
+namespace defaults {
+// ConvexCell capacity (planes / dual triangles) of the resident tessellation — the production 64/112
+// (README "Early wall clip"); the pore-space reconstruction uses a larger cell because wall-cut
+// interstitial cells carry more planes.
+constexpr int kMaxPlanes = 64;
+constexpr int kMaxTriangles = 112;
+constexpr int kPoreMaxPlanes = 128;
+constexpr int kPoreMaxTriangles = 256;
+// Repair: the certificate tolerance and the Verlet skin, both as fractions of the mean spacing
+// cbrt(V/N); the grid gather window of the tessellator (cells per axis around a seed).
+constexpr double kCertificateTolerance = 1e-4;
+constexpr double kSkin = 0.25;
+constexpr int kSearchWindow = 4;
+// SDF geometry: the central-difference step of the SDF gradient; the wall re-gather skin
+// (fraction of the mean spacing) of the 'skin' wall mode.
+constexpr double kSdfGradientStep = 1e-5;
+constexpr double kWallSkin = 0.0;
+// Mesh optimisers (Gauss-Newton on Σ(V/V_ref − 1)², the interface minimiser): the optimiser's own
+// search window, iteration caps, gradient tolerance, CG iteration caps, the log-barrier decay of the
+// pore-space optimiser, and the interface tension.
+constexpr int kOptimizerSearchWindow = 5;
+constexpr int kPoreSearchWindow = 6;
+constexpr int kOptimizerMaxIter = 60;
+constexpr int kPoreMaxIter = 80;
+constexpr double kOptimizerTolerance = 1e-9;
+constexpr int kOptimizerCgIters = 300;
+constexpr int kPoreCgIters = 400;
+constexpr double kBarrierDecay = 0.7;
+constexpr double kInterfaceSigma = 1.0;
+// Pore-space cell reconstruction: nearest seeds gathered per cell, and the cap on the counting-sort
+// grid resolution.
+constexpr int kPoreNeighbors = 80;
+constexpr int kPoreMaxBins = 96;
+// Distributed repair driver (validated by tests/kokkos_mpi/bench_repair_mpi at np = 1, 2, 4): the
+// ghost cutoff, in mean spacings, and the ORB granularity per axis.
+constexpr double kDistributedRcut = 3.5;
+constexpr long kDistributedCells = 16;
+}  // namespace defaults
+
+// A docstring assembled at module init from the defaults (nanobind keeps the pointer; the deque
+// keeps the storage stable).
+const char* doc(std::string s) {
+  static std::deque<std::string> keep;
+  keep.push_back(std::move(s));
+  return keep.back().c_str();
+}
+std::string fmt(double v) {
+  char b[32];
+  std::snprintf(b, sizeof b, "%g", v);
+  return b;
+}
+std::string fmt(int v) { return std::to_string(v); }
 
 // (N,3) c-contiguous array -> flat row-major host vector of length 3N.
 std::vector<real_t> flatten3(nb::ndarray<real_t, nb::c_contig> a) {
@@ -106,17 +183,44 @@ std::vector<real_t> flatten1(nb::ndarray<real_t, nb::c_contig> a) {
   return peclet::core::python::ndarray_to_vector<real_t>(nb::ndarray<>(a));
 }
 
-// ---- pore-space meshing helpers (SDF-walled interstitial Voronoi + geometry export)
-// --------------
-using PoreCell = peclet::voro::ConvexCell<real_t, 128, 256>;
+// The union-of-spheres wall SDF is cubic-periodic (one L), so the pore-space functions take the
+// suite-wide `extent` triple and check it is a cube.
+real_t cubicExtent(std::array<real_t, 3> e, const char* fn) {
+  if (!(e[0] > real_t(0)) || e[0] != e[1] || e[1] != e[2])
+    throw std::invalid_argument(std::string("voro: ") + fn +
+                                "(extent=...) must be a cubic box (Lx == Ly == Lz > 0) — the "
+                                "union-of-spheres wall SDF is cubic-periodic.");
+  return e[0];
+}
 
-// Build a periodic union-of-balls SDF from (M,3) centres + (M,) radii; the Views must outlive its
+// The CG preconditioner / descent method of the mesh optimisers, as a string mode.
+constexpr const char* kMethodList = "'jacobi', 'colored_gs', 'graphamg', 'steepest'";
+peclet::voro::Precond parseMethod(const std::string& m, const char* fn) {
+  if (m == "jacobi")
+    return peclet::voro::Precond::Jacobi;
+  if (m == "colored_gs")
+    return peclet::voro::Precond::ColoredGS;
+  if (m == "graphamg")
+    return peclet::voro::Precond::GraphAMG;
+  if (m == "steepest")
+    return peclet::voro::Precond::SteepestDescent;
+  throw std::invalid_argument(std::string("voro: ") + fn + "(method='" + m +
+                              "') is not a method; accepted: " + kMethodList + ".");
+}
+
+// ---- pore-space meshing helpers (SDF-walled interstitial Voronoi + geometry export) ----------
+using PoreCell =
+    peclet::voro::ConvexCell<real_t, defaults::kPoreMaxPlanes, defaults::kPoreMaxTriangles>;
+
+// Build a periodic union-of-balls SDF from (M,3) centers + (M,) radii; the Views must outlive its
 // use.
-peclet::voro::SdfSpheres<real_t> makeSpheresSdf(nb::ndarray<real_t, nb::c_contig> centres,
+peclet::voro::SdfSpheres<real_t> makeSpheresSdf(nb::ndarray<real_t, nb::c_contig> centers,
                                                 nb::ndarray<real_t, nb::c_contig> radii, real_t L,
                                                 DView& cenHold, DView& radHold) {
   const int M = (int)radii.shape(0);
-  auto cflat = flatten3(centres);
+  auto cflat = flatten3(centers);
+  if ((int)(cflat.size() / 3) != M)
+    throw std::runtime_error("sphere_centers (M,3) and sphere_radii (M,) must agree on M");
   cenHold = DView("sph.cen", 3 * M);
   radHold = DView("sph.rad", M);
   Kokkos::deep_copy(cenHold, Kokkos::View<const real_t*, Kokkos::HostSpace>(cflat.data(), 3 * M));
@@ -203,10 +307,10 @@ int faceOrderedIdx(const PoreCell& c, int k, int out[PoreCell::MAXFV]) {
 }
 
 // Reconstructs the SDF-clipped interstitial Voronoi cell of any seed. Builds a periodic
-// counting-sort grid once; each build() gathers the ~80 nearest seeds via an O(1) Chebyshev shell
-// walk (stop once the 80th nearest is provably found), builds the ConvexCell against a far box, and
-// clips it to the SDF. Shared by sdf_voronoi_cells (polyhedra) and sdf_voronoi_section (plane
-// cross-section).
+// counting-sort grid once; each build() gathers the kPoreNeighbors nearest seeds via an O(1)
+// Chebyshev shell walk (stop once the last wanted neighbour is provably found), builds the
+// ConvexCell against a far box, and clips it to the SDF. Shared by sdf_voronoi_cells (polyhedra)
+// and sdf_voronoi_section (plane cross-section). Host-serial; the device version is G.7's.
 struct PoreReconstructor {
   const real_t* seed;
   int N;
@@ -225,7 +329,7 @@ struct PoreReconstructor {
   }
   PoreReconstructor(const std::vector<real_t>& s, real_t L_, peclet::voro::SdfSpheres<real_t> sdf_)
       : seed(s.data()), N((int)(s.size() / 3)), L(L_), Lh(0.5 * L_), big(4 * L_), sdf(sdf_) {
-    nb = std::max(1, std::min((int)std::cbrt((double)N / 2.0 + 1.0), 96));
+    nb = std::max(1, std::min((int)std::cbrt((double)N / 2.0 + 1.0), defaults::kPoreMaxBins));
     hbin = L / nb;
     const int nbin = nb * nb * nb;
     binStart.assign(nbin + 1, 0);
@@ -239,9 +343,10 @@ struct PoreReconstructor {
       binItem[cur[cellOf(i)]++] = i;
   }
   bool build(int i, PoreCell& c) const {
+    constexpr int Kwant = defaults::kPoreNeighbors;
     const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
     ord.clear();
-    const int Kwant = 80, bx = binOf(sx), by = binOf(sy), bz = binOf(sz);
+    const int bx = binOf(sx), by = binOf(sy), bz = binOf(sz);
     for (int R = 0; R <= nb; ++R) {
       for (int dz2 = -R; dz2 <= R; ++dz2)
         for (int dy2 = -R; dy2 <= R; ++dy2)
@@ -273,9 +378,9 @@ struct PoreReconstructor {
       }
     }
     std::sort(ord.begin(), ord.end());
-    const int M = std::min((int)ord.size(), 80);
-    real_t rx[80], ry[80], rz[80];
-    int ids[80];
+    const int M = std::min((int)ord.size(), Kwant);
+    real_t rx[Kwant], ry[Kwant], rz[Kwant];
+    int ids[Kwant];
     for (int k = 0; k < M; ++k) {
       const int j = ord[k].second;
       real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
@@ -290,16 +395,13 @@ struct PoreReconstructor {
     const real_t Lbig[3] = {big, big, big};
     peclet::voro::buildConvexCell(c, Lbig, rx, ry, rz, ids, M);
     const real_t seedW[3] = {sx, sy, sz};
-    peclet::voro::clipCellAgainstSdf<real_t, 128, 256, false>(c, seedW, sdf);
+    peclet::voro::clipCellAgainstSdf<real_t, defaults::kPoreMaxPlanes, defaults::kPoreMaxTriangles,
+                                     false>(c, seedW, sdf);
     return !(c.empty() || c.overflow);
   }
 };
 
-// --------------------------------------------------------------------------------------------------
-// Tessellation: the bare moving-particle Voronoi tessellator (cold build + incremental repair).
-// --------------------------------------------------------------------------------------------------
-// ---- SDF geometry from Python (rung A0)
-// ----------------------------------------------------------
+// ---- SDF geometry from Python (rung A0) ---------------------------------------------------------
 using NoSdfT = peclet::voro::NoSdf;
 using SceneT = peclet::voro::SdfScene<real_t>;
 using Mem = peclet::core::MemSpace;
@@ -360,51 +462,135 @@ SceneHolder makeSceneHolder(nb::ndarray<int, nb::c_contig> node_ints,
   return h;
 }
 
+// The suite-wide domain contract of this engine (docs/NAMING.md 1.1): `extent` is the box SIZE;
+// the tessellator's periodic box always starts at the origin and is periodic on all three axes, so
+// `origin` and `periodic` exist to be CHECKED rather than stored — a caller who writes what every
+// other code in the suite writes gets an error naming the limitation instead of a silently
+// ignored argument.
+void checkDomain(const char* cls, std::array<real_t, 3> extent, std::array<real_t, 3> origin,
+                 std::array<bool, 3> periodic) {
+  for (int a = 0; a < 3; ++a) {
+    if (!(extent[a] > real_t(0)))
+      throw std::invalid_argument(std::string("voro: ") + cls +
+                                  ".set_domain(extent=...) needs three positive lengths.");
+    if (origin[a] != real_t(0))
+      throw std::invalid_argument(std::string("voro: ") + cls +
+                                  ".set_domain(origin=...) must be (0, 0, 0) — the tessellator's "
+                                  "periodic box is anchored at the origin. Shift your points "
+                                  "instead.");
+    if (!periodic[a])
+      throw std::invalid_argument(std::string("voro: ") + cls +
+                                  ".set_domain(periodic=...) must be (True, True, True) — this "
+                                  "engine has no non-periodic axis. Use a wall SDF (set_geometry) "
+                                  "to bound the domain.");
+  }
+}
+
+// Wall re-gather policy of the incremental step, as a string mode.
+constexpr const char* kWallModeList = "'exact', 'skin'";
+bool parseWallMode(const std::string& mode) {
+  if (mode == "exact")
+    return true;
+  if (mode == "skin")
+    return false;
+  throw std::invalid_argument("voro: set_wall_mode(mode='" + mode +
+                              "') is not a wall mode; accepted: " + kWallModeList + ".");
+}
+
+nb::ndarray<nb::numpy, real_t> toNumpy3(std::vector<real_t> v) {
+  const std::size_t N = v.size() / 3;
+  return peclet::core::python::vector_to_ndarray(std::move(v), {N, std::size_t(3)}, {3, 1});
+}
+nb::ndarray<nb::numpy, real_t> toNumpy1(std::vector<real_t> v) {
+  const std::size_t N = v.size();
+  return peclet::core::python::vector_to_ndarray(std::move(v), {N}, {1});
+}
+
+// --------------------------------------------------------------------------------------------------
+// Typed results of the mesh optimisers (no dict-of-strings, no field reuse across meanings).
+// --------------------------------------------------------------------------------------------------
+struct OptimizeResult {
+  nb::object positions;  ///< (N,3) float64
+  nb::object weights;    ///< (N,) float64 when the power weights were optimised, else None
+  int iters = 0;
+  double max_vol_err = 0, mean_vol_err = 0;
+  bool converged = false;
+  int num_empty = 0;
+};
+OptimizeResult makeOptimizeResult(std::vector<real_t> pos, std::optional<std::vector<real_t>> w,
+                                  const peclet::voro::OtResult& R) {
+  OptimizeResult r;
+  r.positions = toNumpy3(std::move(pos));
+  r.weights = w ? nb::object(toNumpy1(std::move(*w))) : nb::none();
+  r.iters = R.iters;
+  r.max_vol_err = R.maxVolErr;
+  r.mean_vol_err = R.meanVolErr;
+  r.converged = R.converged;
+  r.num_empty = (int)R.nEmpty;
+  return r;
+}
+
+struct InterfaceResult {
+  nb::object positions;  ///< (N,3) float64
+  double energy = 0, energy_ratio = 1;
+  int iters = 0;
+  bool converged = false;
+};
+
 // --------------------------------------------------------------------------------------------------
 // Tessellation: the bare moving-point (power-)Voronoi tessellator, optionally SDF-clipped.
 // The engine is chosen at build() from what was set: {Voronoi, Power} x {no geometry, SdfScene}.
 // --------------------------------------------------------------------------------------------------
 template <bool W, class S>
-using MT = peclet::voro::MovingTessellation<real_t, 64, 112, W, S>;
+using MT =
+    peclet::voro::MovingTessellation<real_t, defaults::kMaxPlanes, defaults::kMaxTriangles, W, S>;
 using MtVariant =
     std::variant<MT<false, NoSdfT>, MT<true, NoSdfT>, MT<false, SceneT>, MT<true, SceneT>>;
+
+nb::dict repairStatsDict(const peclet::voro::RepairStats& st) {
+  nb::dict d;
+  d["flagged"] = st.pass1Raw;  // cells the certificate flagged
+  d["pass1"] = st.pass1;       // cells gathered in Pass 1
+  d["pass2"] = st.pass2;       // cells gathered in Pass 2
+  d["rebuilt"] =
+      (st.route == peclet::voro::RepairStats::kRebuildGate);  // gate routed to a full rebuild
+  d["fell_back"] = st.fellBack;                               // verify failed -> cold rebuild
+  d["extra"] = st.extra;                 // cells gathered across the verify extra-passes
+  d["surgical"] = st.surgical;           // Pass-1 cells repaired surgically (no grid gather)
+  d["verify_passes"] = st.verifyPasses;  // number of verify iterations run
+  d["wall_flagged"] = st.wallFlagged;    // cells flagged by the SDF boundary watch
+  return d;
+}
 
 class Tess : public peclet::core::python::Releasable {
  public:
   Tess() = default;
 
-  // The suite-wide domain setter (docs/NAMING.md 1.1). `extent` is the box SIZE; this engine's box
-  // always starts at the origin and is periodic on all three axes, so the other two arguments
-  // exist to be CHECKED rather than stored — a caller who writes what every other code in the
-  // suite writes gets an error naming the limitation instead of a silently ignored argument.
   void set_domain(std::array<real_t, 3> extent, std::array<real_t, 3> origin,
                   std::array<bool, 3> periodic) {
-    for (int a = 0; a < 3; ++a) {
-      if (origin[a] != real_t(0))
-        throw std::invalid_argument(
-            "voro: set_domain(origin=...) must be (0, 0, 0) — the tessellator's periodic box is "
-            "anchored at the origin. Shift your points instead.");
-      if (!periodic[a])
-        throw std::invalid_argument(
-            "voro: set_domain(periodic=...) must be (True, True, True) — this engine has no "
-            "non-periodic axis. Use a wall SDF (set_geometry) to bound the domain.");
-    }
+    checkDomain("Tessellation", extent, origin, periodic);
     L_ = extent;
   }
   std::array<real_t, 3> extent() const { return L_; }
-  void set_tolerance(real_t frac) { tolFrac_ = frac; }
-  void set_local_certificate(bool on) { localCert_ = on; }
-  void set_gate(bool on) { useGate_ = on; }
+  void set_tolerance(real_t frac) {
+    if (!(frac > real_t(0)))
+      throw std::invalid_argument("voro: set_tolerance(frac) needs frac > 0.");
+    tolFrac_ = frac;
+  }
   void set_geometry(nb::ndarray<int, nb::c_contig> node_ints,
                     nb::ndarray<real_t, nb::c_contig> node_reals, int root, real_t grad_h) {
     scene_ = makeSceneHolder(node_ints, node_reals, root, grad_h);
   }
   void clear_geometry() { scene_.clear(); }
-  void set_wall_mode(bool exact, real_t skin_frac) {
-    wallExact_ = exact;
+  void set_wall_mode(const std::string& mode, real_t skin_frac) {
+    wallExact_ = parseWallMode(mode);
+    if (skin_frac < real_t(0))
+      throw std::invalid_argument("voro: set_wall_mode(skin_frac=...) needs skin_frac >= 0.");
     wallSkinFrac_ = skin_frac;
   }
   void set_weights(nb::ndarray<real_t, nb::c_contig> w) {
+    if (w.ndim() != 1)
+      throw std::runtime_error("set_weights(): expected an (N,) array");
     wHost_ = flatten1(w);
     weighted_ = true;
     wDirty_ = true;
@@ -415,7 +601,10 @@ class Tess : public peclet::core::python::Releasable {
     wDirty_ = false;
   }
 
-  // A2a: validity diagnostics of the last cold build.
+  // diagnostics: ablation switches of the repair (both certificates are complete; the gate is the
+  // "never slower than a cold build" guard) and the validity counts of the last cold build.
+  void set_local_certificate(bool on) { localCert_ = on; }
+  void set_gate(bool on) { useGate_ = on; }
   nb::dict build_report() {
     auto r = std::visit([](auto& mt) { return mt.report(); }, mt_);
     nb::dict d;
@@ -431,8 +620,10 @@ class Tess : public peclet::core::python::Releasable {
   void build(nb::ndarray<real_t, nb::c_contig> a, bool strict) {
     std::vector<real_t> p = flatten3(a);
     N_ = static_cast<int>(p.size() / 3);
+    if (N_ <= 0)
+      throw std::runtime_error("voro: build() needs at least one point");
     const double boxVol = static_cast<double>(L_[0]) * L_[1] * L_[2];
-    const real_t spacing = static_cast<real_t>(std::cbrt(boxVol / (N_ > 0 ? N_ : 1)));
+    const real_t spacing = static_cast<real_t>(std::cbrt(boxVol / N_));
     if (weighted_ && static_cast<int>(wHost_.size()) != N_)
       throw std::runtime_error("build(): weights (N,) must match the particle count");
     pos_ = peclet::core::toDevice<real_t>(p, "pos");
@@ -460,7 +651,8 @@ class Tess : public peclet::core::python::Releasable {
           }
           if constexpr (std::is_same_v<typename T::PlanePolicy, peclet::voro::Power>)
             mt.setWeights(weight_);
-          mt.alloc(N_, L_.data(), tolFrac_ * spacing, real_t(0.25) * spacing, 4, N_);
+          mt.alloc(N_, L_.data(), tolFrac_ * spacing, real_t(defaults::kSkin) * spacing,
+                   defaults::kSearchWindow, N_);
           mt.rebuild(pos_);
         },
         mt_);
@@ -472,7 +664,7 @@ class Tess : public peclet::core::python::Releasable {
           " buried power cell(s) (seed outside its own cell, emptied), " +
           std::to_string(r.reachExceeded) + " cell(s) with a search reach beyond half the box " +
           "(min-image invalid), " + std::to_string(r.overflow) +
-          " overflowed cell(s). See voro/docs/power_large_weights_plan.md.";
+          " overflowed cell(s). See diagnostics.build_report().";
       if (strict)
         throw std::runtime_error(msg);
       nb::module_::import_("warnings").attr("warn")(msg);
@@ -480,11 +672,16 @@ class Tess : public peclet::core::python::Releasable {
   }
 
   // Incremental repair: update the resident tessellation to new positions (same N) without a full
-  // rebuild. Returns the per-step work stats. Positions must be the same count as the last build().
+  // rebuild. Returns the per-step work stats.
   nb::dict step(nb::ndarray<real_t, nb::c_contig> a) {
+    if (N_ == 0)
+      throw std::runtime_error(
+          "voro: Tessellation.step() before build() — call build(positions) first.");
     std::vector<real_t> p = flatten3(a);
     if (static_cast<int>(p.size() / 3) != N_)
-      throw std::runtime_error("step(): particle count differs from build(); call build() first");
+      throw std::runtime_error("voro: step(positions) got " + std::to_string(p.size() / 3) +
+                               " points but build() had " + std::to_string(N_) +
+                               " — the count is fixed by build(); call build() again to change it.");
     pos_ = peclet::core::toDevice<real_t>(p, "pos");
     if (weighted_ && wDirty_) {  // weights changed since the last build/step: refresh in place
       if (static_cast<int>(wHost_.size()) != N_)
@@ -494,18 +691,7 @@ class Tess : public peclet::core::python::Releasable {
       wDirty_ = false;
     }
     auto st = std::visit([&](auto& mt) { return mt.step(pos_); }, mt_);
-    nb::dict d;
-    d["flagged"] = st.pass1Raw;  // cells the certificate flagged
-    d["pass1"] = st.pass1;       // cells gathered in Pass 1
-    d["pass2"] = st.pass2;       // cells gathered in Pass 2
-    d["rebuilt"] =
-        (st.route == peclet::voro::RepairStats::kRebuildGate);  // gate routed to a full rebuild
-    d["fell_back"] = st.fellBack;                               // verify failed -> cold rebuild
-    d["extra"] = st.extra;                 // cells gathered across the verify extra-passes
-    d["surgical"] = st.surgical;           // Pass-1 cells repaired surgically (no grid gather)
-    d["verify_passes"] = st.verifyPasses;  // number of verify iterations run
-    d["wall_flagged"] = st.wallFlagged;    // cells flagged by the SDF boundary watch
-    return d;
+    return repairStatsDict(st);
   }
 
   nb::ndarray<nb::numpy, real_t> get_volumes() {
@@ -517,7 +703,8 @@ class Tess : public peclet::core::python::Releasable {
 
   // Per-cell Voronoi neighbour (= face) count, recomputed from the resident topology store.
   nb::ndarray<nb::numpy, int> get_neighbor_counts() {
-    using Cell = peclet::voro::ConvexCell<real_t, 64, 112, false>;
+    using Cell =
+        peclet::voro::ConvexCell<real_t, defaults::kMaxPlanes, defaults::kMaxTriangles, false>;
     const int N = N_;
     Kokkos::View<int*, peclet::core::MemSpace> cnt("nbr", N);
     auto st = std::visit([](auto& mt) { return mt.store; }, mt_);
@@ -543,6 +730,9 @@ class Tess : public peclet::core::python::Releasable {
                          std::optional<nb::ndarray<real_t, nb::c_contig>> sigma_wall,
                          std::optional<nb::ndarray<real_t, nb::c_contig>> dEdV, real_t lloyd,
                          real_t facet_tension) {
+    if (N_ == 0)
+      throw std::runtime_error(
+          "voro: Tessellation.energy_forces() before build() — call build(positions) first.");
     const int N = N_;
     if ((int)types.shape(0) != N)
       throw std::runtime_error("energy_forces(): types must be (N,)");
@@ -581,7 +771,8 @@ class Tess : public peclet::core::python::Releasable {
         [&](auto& mt) {
           using T = std::decay_t<decltype(mt)>;
           using Policy = typename T::PlanePolicy;
-          auto view = peclet::voro::reevalPublish<real_t, 64, 112>(
+          auto view = peclet::voro::reevalPublish<real_t, defaults::kMaxPlanes,
+                                                  defaults::kMaxTriangles>(
               mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef, /*withAreaGrad=*/true,
               /*withMoments=*/lloyd != 0);
           if (lloyd != 0)
@@ -615,12 +806,16 @@ class Tess : public peclet::core::python::Releasable {
   // The face mesh of the resident tessellation (track C): reevalPublish over the store, then the
   // reciprocal map and the owner/neighbour face records (fv/mesh.hpp). Used by FlowSolver.
   peclet::voro::fv::FaceMesh<real_t> face_mesh() {
+    if (N_ == 0)
+      throw std::runtime_error(
+          "voro: FlowSolver needs a built Tessellation — call tessellation.build(positions) first.");
     const int N = N_;
     const real_t Larr[3] = {L_[0], L_[1], L_[2]};
     return std::visit(
         [&](auto& mt) {
-          auto view = peclet::voro::reevalPublish<real_t, 64, 112>(mt.store, pos_, mt.vol, N, Larr,
-                                                                   mt.wall, mt.xRef);
+          auto view =
+              peclet::voro::reevalPublish<real_t, defaults::kMaxPlanes, defaults::kMaxTriangles>(
+                  mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef);
           auto aux = peclet::voro::buildAuxMaps(view);
           return peclet::voro::fv::buildFaceMesh(view, aux);
         },
@@ -655,10 +850,10 @@ class Tess : public peclet::core::python::Releasable {
 
  private:
   std::array<real_t, 3> L_{1, 1, 1};
-  real_t tolFrac_ = 1e-4;  // certificate tolerance as a fraction of the mean spacing
+  real_t tolFrac_ = defaults::kCertificateTolerance;
   bool localCert_ = true, useGate_ = true;
   bool wallExact_ = true;
-  real_t wallSkinFrac_ = 0;
+  real_t wallSkinFrac_ = defaults::kWallSkin;
   bool weighted_ = false, wDirty_ = false;
   std::vector<real_t> wHost_;
   int N_ = 0;
@@ -667,22 +862,34 @@ class Tess : public peclet::core::python::Releasable {
   MtVariant mt_;
 };
 
-// Track C (rungs C2/C3/C5): the static Navier–Stokes solvers on the face mesh of a resident
-// Tessellation — the collocated solver (peclet.flow's approximate projection with the
-// skew-corrected adjoint constraint pair, the default) or the staggered covolume solver. The
-// mesh is frozen at construction (rebuild the FlowSolver after moving seeds).
+// The diagnostics tier of Tessellation: a view onto the owner (no state of its own).
+struct TessDiagnostics {
+  Tess* t;
+};
+
+// --------------------------------------------------------------------------------------------------
+// FlowSolver (track C, rungs C2/C3/C5): the static Navier–Stokes solvers on the face mesh of a
+// resident Tessellation — the collocated solver (peclet.flow's approximate projection with the
+// skew-corrected adjoint constraint pair, the default) or the staggered covolume solver. The mesh
+// is frozen at construction (rebuild the FlowSolver after moving seeds).
+// --------------------------------------------------------------------------------------------------
+constexpr const char* kLayoutList = "'collocated', 'covolume'";
+
 class Flow : public peclet::core::python::Releasable {
  public:
-  Flow(Tess& t, real_t nu, const std::string& layout, bool amg) : layout_(layout) {
+  Flow(Tess& t, real_t nu, const std::string& layout) : layout_(layout) {
+    if (layout != "collocated" && layout != "covolume")
+      throw std::invalid_argument("voro: FlowSolver(layout='" + layout +
+                                  "') is not a layout; accepted: " + kLayoutList + ".");
+    if (!(nu >= real_t(0)))
+      throw std::invalid_argument("voro: FlowSolver(viscosity=...) needs viscosity >= 0.");
     m_ = t.face_mesh();
     if (layout == "collocated") {
       co_ = std::make_unique<peclet::voro::fv::CollocatedNS<real_t>>();
-      co_->setup(m_, nu, amg);
-    } else if (layout == "covolume") {
-      cv_ = std::make_unique<peclet::voro::fv::CovolumeNS<real_t>>();
-      cv_->setup(m_, nu, amg);
+      co_->setup(m_, nu, /*amg=*/true);
     } else {
-      throw std::runtime_error("FlowSolver: layout must be 'collocated' or 'covolume'");
+      cv_ = std::make_unique<peclet::voro::fv::CovolumeNS<real_t>>();
+      cv_->setup(m_, nu, /*amg=*/true);
     }
   }
   // Drop the solvers and the face mesh (Kokkos Views) BEFORE Kokkos::finalize at shutdown.
@@ -694,14 +901,14 @@ class Flow : public peclet::core::python::Releasable {
   int num_cells() const { return m_.nCells; }
   int num_faces() const { return m_.nFaces; }
   int num_wall_faces() const { return m_.nFaces - m_.nInterior; }
-  void set_body_force(real_t fx, real_t fy, real_t fz) {
+  void set_body_force(std::array<real_t, 3> g) {
     const int N = m_.nCells;
     DView f("flow.force", 3 * (size_t)N);
     auto h = Kokkos::create_mirror_view(f);
     for (int i = 0; i < N; ++i) {
-      h(3 * i) = fx;
-      h(3 * i + 1) = fy;
-      h(3 * i + 2) = fz;
+      h(3 * i) = g[0];
+      h(3 * i + 1) = g[1];
+      h(3 * i + 2) = g[2];
     }
     Kokkos::deep_copy(f, h);
     if (co_)
@@ -715,16 +922,28 @@ class Flow : public peclet::core::python::Releasable {
     else
       cv_->convScale = on ? 0 : 1;
   }
-  void set_skew_corrected(bool on) {
-    if (co_)
-      co_->skewCorrected = on;
+  void set_pressure_tolerance(real_t tol) {
+    if (!(tol > real_t(0)))
+      throw std::invalid_argument("voro: set_pressure_tolerance(tol) needs tol > 0.");
+    (co_ ? co_->poisson : cv_->poisson).tol = tol;
   }
-  void set_pressure_tolerance(real_t tol) { (co_ ? co_->poisson : cv_->poisson).tol = tol; }
   void set_implicit_diffusion(bool on) {
     if (co_)
       co_->implicitDiffusion = on;
     else
-      throw std::runtime_error("set_implicit_diffusion(): collocated layout only");
+      throw std::runtime_error(
+          "voro: set_implicit_diffusion() is a collocated-layout step; this FlowSolver has "
+          "layout='covolume'.");
+  }
+  // diagnostics: the measured-worse alternatives (README: the plain constraint pair, the two-point
+  // wall flux) kept for ablation.
+  void set_skew_corrected(bool on) {
+    if (co_)
+      co_->skewCorrected = on;
+    else
+      throw std::runtime_error(
+          "voro: set_skew_corrected() is a collocated-layout switch; this FlowSolver has "
+          "layout='covolume'.");
   }
   void set_wall_gradient_quadratic(bool on) {
     if (co_)
@@ -735,7 +954,8 @@ class Flow : public peclet::core::python::Releasable {
   void set_wall_velocity(nb::ndarray<real_t, nb::c_contig> Uw) {
     const int nB = m_.nFaces - m_.nInterior;
     if (Uw.ndim() != 2 || (int)Uw.shape(0) != nB || Uw.shape(1) != 3)
-      throw std::runtime_error("set_wall_velocity(): expected (num_wall_faces, 3)");
+      throw std::runtime_error("set_wall_velocity(): expected (num_wall_faces, 3) = (" +
+                               std::to_string(nB) + ", 3)");
     DView d("flow.Uwall", 3 * (size_t)nB);
     Kokkos::deep_copy(d, Kokkos::View<const real_t*, Kokkos::HostSpace>(Uw.data(), 3 * (size_t)nB));
     if (co_)
@@ -748,7 +968,8 @@ class Flow : public peclet::core::python::Releasable {
   void set_velocity(nb::ndarray<real_t, nb::c_contig> U) {
     const int N = m_.nCells;
     if (U.ndim() != 2 || (int)U.shape(0) != N || U.shape(1) != 3)
-      throw std::runtime_error("set_velocity(): expected (num_cells, 3)");
+      throw std::runtime_error("set_velocity(): expected (num_cells, 3) = (" + std::to_string(N) +
+                               ", 3)");
     DView d("flow.U0", 3 * (size_t)N);
     Kokkos::deep_copy(d, Kokkos::View<const real_t*, Kokkos::HostSpace>(U.data(), 3 * (size_t)N));
     if (co_) {
@@ -769,6 +990,8 @@ class Flow : public peclet::core::python::Releasable {
   void step(int n) {
     if (!(dt_ > real_t(0)))
       throw std::invalid_argument("voro: step() has no time step — call set_dt(dt) first.");
+    if (n < 0)
+      throw std::invalid_argument("voro: step(num_steps) needs num_steps >= 0.");
     for (int i = 0; i < n; ++i) {
       if (co_)
         co_->step(dt_);
@@ -810,6 +1033,10 @@ class Flow : public peclet::core::python::Releasable {
   std::unique_ptr<peclet::voro::fv::CovolumeNS<real_t>> cv_;
 };
 
+struct FlowDiagnostics {
+  Flow* f;
+};
+
 // --------------------------------------------------------------------------------------------------
 // Simulation: device-native compressible-Euler / Navier-Stokes Voronoi fluid dynamics.
 // --------------------------------------------------------------------------------------------------
@@ -827,43 +1054,85 @@ class Sim : public peclet::core::python::Releasable {
     mass_.clear();
     visc_.clear();
     bulk_.clear();
+    inited_ = false;
   }
 
-  // The suite-wide domain setter (docs/NAMING.md 1.1). `extent` is the box SIZE; this engine's box
-  // always starts at the origin and is periodic on all three axes, so the other two arguments
-  // exist to be CHECKED rather than stored — a caller who writes what every other code in the
-  // suite writes gets an error naming the limitation instead of a silently ignored argument.
+  // The state setters configure init(); after init() the device state is resident and they would
+  // silently do nothing, so they raise with the order instead.
   void set_domain(std::array<real_t, 3> extent, std::array<real_t, 3> origin,
                   std::array<bool, 3> periodic) {
-    for (int a = 0; a < 3; ++a) {
-      if (origin[a] != real_t(0))
-        throw std::invalid_argument(
-            "voro: set_domain(origin=...) must be (0, 0, 0) — the tessellator's periodic box is "
-            "anchored at the origin. Shift your points instead.");
-      if (!periodic[a])
-        throw std::invalid_argument(
-            "voro: set_domain(periodic=...) must be (True, True, True) — this engine has no "
-            "non-periodic axis. Use a wall SDF (set_geometry) to bound the domain.");
-    }
+    beforeInit("set_domain");
+    checkDomain("Simulation", extent, origin, periodic);
     L_ = extent;
   }
   std::array<real_t, 3> extent() const { return L_; }
-  void set_positions(nb::ndarray<real_t, nb::c_contig> a) { pos_ = flatten3(a); }
-  void set_velocities(nb::ndarray<real_t, nb::c_contig> a) { vel_ = flatten3(a); }
-  void set_masses(nb::ndarray<real_t, nb::c_contig> a) { mass_ = flatten1(a); }
-  void set_pressure(real_t p) { pressEq_ = p; }
-  void set_viscosities(nb::ndarray<real_t, nb::c_contig> a) { visc_ = flatten1(a); }
-  void set_bulk_viscosities(nb::ndarray<real_t, nb::c_contig> a) { bulk_ = flatten1(a); }
-  // Opt-in incremental-repair path (E1 scaffolding, default off). Set before init().
-  void set_repair(bool on) { repair_ = on; }
+  void set_positions(nb::ndarray<real_t, nb::c_contig> a) {
+    beforeInit("set_positions");
+    pos_ = flatten3(a);
+  }
+  void set_velocities(nb::ndarray<real_t, nb::c_contig> a) {
+    beforeInit("set_velocities");
+    vel_ = flatten3(a);
+  }
+  void set_masses(nb::ndarray<real_t, nb::c_contig> a) {
+    beforeInit("set_masses");
+    if (a.ndim() != 1)
+      throw std::runtime_error("set_masses(): expected an (N,) array");
+    mass_ = flatten1(a);
+  }
+  void set_pressure(real_t p) {
+    beforeInit("set_pressure");
+    pressEq_ = p;
+  }
+  void set_viscosities(nb::ndarray<real_t, nb::c_contig> a) {
+    beforeInit("set_viscosities");
+    if (a.ndim() != 1)
+      throw std::runtime_error("set_viscosities(): expected an (N,) array");
+    visc_ = flatten1(a);
+  }
+  void set_bulk_viscosities(nb::ndarray<real_t, nb::c_contig> a) {
+    beforeInit("set_bulk_viscosities");
+    if (a.ndim() != 1)
+      throw std::runtime_error("set_bulk_viscosities(): expected an (N,) array");
+    bulk_ = flatten1(a);
+  }
+  // diagnostics: the opt-in incremental-repair path (a performance path, off by default).
+  void set_repair(bool on) {
+    beforeInit("diagnostics.set_repair");
+    repair_ = on;
+  }
   void set_geometry(nb::ndarray<int, nb::c_contig> node_ints,
                     nb::ndarray<real_t, nb::c_contig> node_reals, int root, real_t grad_h) {
+    beforeInit("set_geometry");
     scene_ = makeSceneHolder(node_ints, node_reals, root, grad_h);
   }
-  void clear_geometry() { scene_.clear(); }
+  void clear_geometry() {
+    beforeInit("clear_geometry");
+    scene_.clear();
+  }
 
   void init() {
     const int N = static_cast<int>(mass_.size());
+    if (N == 0)
+      throw std::runtime_error("voro: Simulation.init() needs set_masses(masses) first.");
+    if (static_cast<int>(pos_.size() / 3) != N)
+      throw std::runtime_error("voro: Simulation.init(): set_positions gave " +
+                               std::to_string(pos_.size() / 3) + " points but set_masses " +
+                               std::to_string(N) + " — every per-particle array must be (N,·).");
+    if (vel_.empty())
+      vel_.assign(3 * (size_t)N, real_t(0));  // no set_velocities: start at rest
+    if (static_cast<int>(vel_.size() / 3) != N)
+      throw std::runtime_error("voro: Simulation.init(): set_velocities gave " +
+                               std::to_string(vel_.size() / 3) + " rows for " +
+                               std::to_string(N) + " particles.");
+    if (!visc_.empty() && static_cast<int>(visc_.size()) != N)
+      throw std::runtime_error("voro: Simulation.init(): set_viscosities must be (N,).");
+    if (!bulk_.empty() && static_cast<int>(bulk_.size()) != N)
+      throw std::runtime_error("voro: Simulation.init(): set_bulk_viscosities must be (N,).");
+    for (int i = 0; i < N; ++i)
+      if (!(mass_[i] > real_t(0)))
+        throw std::invalid_argument("voro: Simulation.init(): every mass must be > 0 (particle " +
+                                    std::to_string(i) + ").");
     std::vector<real_t> invm(N);
     for (int i = 0; i < N; ++i)
       invm[i] = real_t(1) / mass_[i];
@@ -890,6 +1159,7 @@ class Sim : public peclet::core::python::Releasable {
           }
         },
         sim_);
+    inited_ = true;
   }
 
   // The time step is configured with `set_dt` and read back as `dt`, like every other stepper in
@@ -901,8 +1171,13 @@ class Sim : public peclet::core::python::Releasable {
   }
   real_t dt() const { return dt_; }
   void step(int nsteps) {
+    if (!inited_)
+      throw std::runtime_error("voro: Simulation.step() before init() — set the state, call "
+                               "init(), then set_dt(dt) and step(n).");
     if (!(dt_ > real_t(0)))
       throw std::invalid_argument("voro: step() has no time step — call set_dt(dt) first.");
+    if (nsteps < 0)
+      throw std::invalid_argument("voro: step(num_steps) needs num_steps >= 0.");
     std::visit([&](auto& s) { s.step(nsteps, dt_); }, sim_);
   }
 
@@ -950,6 +1225,14 @@ class Sim : public peclet::core::python::Releasable {
   using EE = peclet::voro::physics::ExplicitEuler<real_t, S>;
   using EeVariant = std::variant<EE<NoSdfT>, EE<SceneT>>;
 
+  void beforeInit(const char* what) const {
+    if (inited_)
+      throw std::runtime_error(std::string("voro: Simulation.") + what +
+                               "() after init() — the particle state is resident on the device "
+                               "once init() ran; set everything, then call init() (a new "
+                               "Simulation for a new state).");
+  }
+
   // Flat (3N,) host-or-device view -> (N,3) float64 numpy array (single D2H, no host loop — S2a).
   static nb::ndarray<nb::numpy, real_t> from3(const DView& d) {
     const std::size_t N = static_cast<std::size_t>(d.extent(0)) / 3;
@@ -961,13 +1244,48 @@ class Sim : public peclet::core::python::Releasable {
   std::array<real_t, 3> L_{1, 1, 1};
   real_t pressEq_ = 0;
   bool repair_ = false;
+  bool inited_ = false;
   std::vector<real_t> pos_, vel_, mass_, visc_, bulk_;
   DView dmass_;  // device-resident masses, uploaded once in init() (E4b)
   SceneHolder scene_;
   EeVariant sim_;
 };
 
+struct SimDiagnostics {
+  Sim* s;
+};
+
 #ifdef PECLET_VORO_MPI
+void ensureMpi() {
+  int inited = 0;
+  MPI_Initialized(&inited);
+  if (!inited) {
+    int argc = 0;
+    char** argv = nullptr;
+    MPI_Init(&argc, &argv);
+  }
+}
+using Vec3 = std::array<real_t, 3>;
+std::vector<Vec3> toVec3(nb::ndarray<real_t, nb::c_contig> a, const char* fn) {
+  if (a.ndim() != 2 || a.shape(1) != 3)
+    throw std::runtime_error(std::string(fn) + ": positions must be (N,3)");
+  const std::size_t N = a.shape(0);
+  const real_t* p = a.data();
+  std::vector<Vec3> v(N);
+  for (std::size_t i = 0; i < N; ++i)
+    v[i] = Vec3{p[3 * i], p[3 * i + 1], p[3 * i + 2]};
+  return v;
+}
+nb::ndarray<nb::numpy, real_t> fromVec3(const std::vector<Vec3>& v) {
+  std::vector<real_t> op(3 * v.size());
+  for (std::size_t i = 0; i < v.size(); ++i) {
+    op[3 * i] = v[i][0];
+    op[3 * i + 1] = v[i][1];
+    op[3 * i + 2] = v[i][2];
+  }
+  return toNumpy3(std::move(op));
+}
+
 // --------------------------------------------------------------------------------------------------
 // VoronoiHalo: distributed (MPI) ghost-gather for the multi-rank Voronoi tessellation.
 //
@@ -979,100 +1297,281 @@ class Sim : public peclet::core::python::Releasable {
 // --------------------------------------------------------------------------------------------------
 class VHalo {
  public:
-  using Vec3 = std::array<real_t, 3>;
-
-  VHalo(std::array<real_t, 3> origin, std::array<real_t, 3> size, std::array<long, 3> gsize,
+  VHalo(std::array<long, 3> cells, std::array<real_t, 3> extent, std::array<real_t, 3> origin,
         std::array<bool, 3> periodic) {
-    int inited = 0;
-    MPI_Initialized(&inited);
-    if (!inited) {
-      int argc = 0;
-      char** argv = nullptr;
-      MPI_Init(&argc, &argv);
+    for (int a = 0; a < 3; ++a) {
+      if (cells[a] < 1)
+        throw std::invalid_argument("voro: VoronoiHalo(cells=...) needs three counts >= 1.");
+      if (!(extent[a] > real_t(0)))
+        throw std::invalid_argument("voro: VoronoiHalo(extent=...) needs three positive lengths.");
     }
-    halo_.init(origin, size, gsize, periodic, MPI_COMM_WORLD);
+    ensureMpi();
+    halo_.init(origin, extent, cells, periodic, MPI_COMM_WORLD);
   }
 
   int rank() const { return halo_.rank(); }
-  int size() const { return halo_.size(); }
+  int num_ranks() const { return halo_.size(); }
 
   // Per-point mask (N,) int32: 1 if this rank owns the point, else 0.
   nb::ndarray<nb::numpy, int32_t> owned_mask(nb::ndarray<real_t, nb::c_contig> a) {
-    if (a.ndim() != 2 || a.shape(1) != 3)
-      throw std::runtime_error("owned_mask: expected an (N,3) array");
-    const std::size_t N = a.shape(0);
-    const real_t* p = a.data();
+    auto p = toVec3(a, "owned_mask");
     const int r = halo_.rank();
-    std::vector<int32_t> m(N);
-    for (std::size_t i = 0; i < N; ++i)
-      m[i] = (halo_.ownerOf(Vec3{p[3 * i], p[3 * i + 1], p[3 * i + 2]}) == r) ? 1 : 0;
-    return peclet::core::python::vector_to_ndarray(std::move(m), {N}, {1});
+    std::vector<int32_t> m(p.size());
+    for (std::size_t i = 0; i < p.size(); ++i)
+      m[i] = (halo_.ownerOf(p[i]) == r) ? 1 : 0;
+    return peclet::core::python::vector_to_ndarray(std::move(m), {p.size()}, {1});
   }
 
-  // Owning rank of a single point.
-  int owner_of(real_t x, real_t y, real_t z) { return halo_.ownerOf(Vec3{x, y, z}); }
+  int owner_of(Vec3 x) { return halo_.ownerOf(x); }
 
   // Gather ghost seeds within rcut. Returns (pos (M,3), gid (M,), weight (M,), n_owned); the first
   // n_owned rows are this rank's owned seeds, the rest are gathered ghosts (periodic images incl.).
   nb::tuple gather(nb::ndarray<real_t, nb::c_contig> pos, nb::ndarray<int64_t, nb::c_contig> gid,
-                   nb::ndarray<real_t, nb::c_contig> weight, double rcut) {
-    if (pos.ndim() != 2 || pos.shape(1) != 3)
-      throw std::runtime_error("gather: positions must be (N,3)");
-    const std::size_t N = pos.shape(0);
-    if (gid.shape(0) != N || weight.shape(0) != N)
-      throw std::runtime_error("gather: gid/weight length must match positions");
-    const real_t* pp = pos.data();
-    const int64_t* gp = gid.data();
-    const real_t* wp = weight.data();
-    std::vector<Vec3> ownedPos(N);
+                   std::optional<nb::ndarray<real_t, nb::c_contig>> weight, double rcut) {
+    auto ownedPos = toVec3(pos, "gather");
+    const std::size_t N = ownedPos.size();
+    if (gid.ndim() != 1 || gid.shape(0) != N)
+      throw std::runtime_error("gather: gids must be (N,) int64, one per position");
+    if (weight && (weight->ndim() != 1 || weight->shape(0) != N))
+      throw std::runtime_error("gather: weights must be (N,) float64, one per position");
+    if (!(rcut > 0))
+      throw std::invalid_argument("voro: gather(rcut=...) needs rcut > 0.");
     std::vector<long> ownedGid(N);
-    std::vector<real_t> ownedW(N);
+    std::vector<real_t> ownedW(N, real_t(0));
     for (std::size_t i = 0; i < N; ++i) {
-      ownedPos[i] = Vec3{pp[3 * i], pp[3 * i + 1], pp[3 * i + 2]};
-      ownedGid[i] = static_cast<long>(gp[i]);
-      ownedW[i] = wp[i];
+      ownedGid[i] = static_cast<long>(gid.data()[i]);
+      if (weight)
+        ownedW[i] = weight->data()[i];
     }
     auto g = halo_.gather(ownedPos, ownedGid, ownedW, rcut);
     const std::size_t M = g.pos.size();
-    std::vector<real_t> op(3 * M);
     std::vector<int64_t> og(M);
     std::vector<real_t> ow(M);
     for (std::size_t i = 0; i < M; ++i) {
-      op[3 * i] = g.pos[i][0];
-      op[3 * i + 1] = g.pos[i][1];
-      op[3 * i + 2] = g.pos[i][2];
       og[i] = static_cast<int64_t>(g.gid[i]);
       ow[i] = g.weight[i];
     }
-    return nb::make_tuple(
-        peclet::core::python::vector_to_ndarray(std::move(op), {M, std::size_t(3)}, {3, 1}),
-        peclet::core::python::vector_to_ndarray(std::move(og), {M}, {1}),
-        peclet::core::python::vector_to_ndarray(std::move(ow), {M}, {1}), g.nOwned);
+    return nb::make_tuple(fromVec3(g.pos),
+                          peclet::core::python::vector_to_ndarray(std::move(og), {M}, {1}),
+                          toNumpy1(std::move(ow)), g.nOwned);
   }
 
   // Position-only halo refresh (Verlet fast path): re-forward the CURRENT owned positions onto the
   // topology of the last gather(); returns the combined owned+ghost positions (M,3) in that order.
   nb::ndarray<nb::numpy, real_t> refresh_positions(nb::ndarray<real_t, nb::c_contig> pos) {
-    if (pos.ndim() != 2 || pos.shape(1) != 3)
-      throw std::runtime_error("refresh_positions: positions must be (N,3)");
-    const std::size_t N = pos.shape(0);
-    const real_t* pp = pos.data();
-    std::vector<Vec3> ownedPos(N), out;
-    for (std::size_t i = 0; i < N; ++i)
-      ownedPos[i] = Vec3{pp[3 * i], pp[3 * i + 1], pp[3 * i + 2]};
+    auto ownedPos = toVec3(pos, "refresh_positions");
+    std::vector<Vec3> out;
     halo_.refreshPositions(ownedPos, out);
-    const std::size_t M = out.size();
-    std::vector<real_t> op(3 * M);
-    for (std::size_t i = 0; i < M; ++i) {
-      op[3 * i] = out[i][0];
-      op[3 * i + 1] = out[i][1];
-      op[3 * i + 2] = out[i][2];
-    }
-    return peclet::core::python::vector_to_ndarray(std::move(op), {M, std::size_t(3)}, {3, 1});
+    return fromVec3(out);
   }
 
  private:
   peclet::voro::mpi::VoronoiHalo<real_t> halo_;
+};
+
+// --------------------------------------------------------------------------------------------------
+// DistributedTessellation: the library-level distributed repair driver
+// (peclet::voro::mpi::DistributedMovingTessellation): VoronoiHalo + the device MovingTessellation
+// under the distributed Verlet-skin invariant — the moving-point fast path under MPI, which the
+// VoronoiHalo recipe (cold build per step) does not give. Owned cells are [0, num_owned) of the
+// combined (owned + ghost) tessellation this rank holds.
+// --------------------------------------------------------------------------------------------------
+template <class S>
+using DMT = peclet::voro::mpi::DistributedMovingTessellation<real_t, defaults::kMaxPlanes,
+                                                             defaults::kMaxTriangles, S>;
+using DmtVariant = std::variant<DMT<NoSdfT>, DMT<SceneT>>;
+
+class DTess : public peclet::core::python::Releasable {
+ public:
+  DTess(std::array<long, 3> cells, std::array<real_t, 3> extent, std::array<real_t, 3> origin,
+        std::array<bool, 3> periodic, real_t rcut, real_t skin, real_t tolerance)
+      : cells_(cells), L_(extent), rcutFrac_(rcut), skinFrac_(skin), tolFrac_(tolerance) {
+    checkDomain("DistributedTessellation", extent, origin, periodic);
+    for (int a = 0; a < 3; ++a)
+      if (cells[a] < 1)
+        throw std::invalid_argument(
+            "voro: DistributedTessellation(cells=...) needs three counts >= 1.");
+    if (!(rcut > 0) || !(skin > 0) || !(tolerance > 0))
+      throw std::invalid_argument(
+          "voro: DistributedTessellation(rcut, skin, tolerance) need three positive fractions of "
+          "the mean spacing.");
+    ensureMpi();
+    halo_.init(origin, extent, cells, periodic, MPI_COMM_WORLD);
+  }
+
+  int rank() const { return halo_.rank(); }
+  int num_ranks() const { return halo_.size(); }
+
+  nb::ndarray<nb::numpy, int32_t> owned_mask(nb::ndarray<real_t, nb::c_contig> a) {
+    auto p = toVec3(a, "owned_mask");
+    const int r = halo_.rank();
+    std::vector<int32_t> m(p.size());
+    for (std::size_t i = 0; i < p.size(); ++i)
+      m[i] = (halo_.ownerOf(p[i]) == r) ? 1 : 0;
+    return peclet::core::python::vector_to_ndarray(std::move(m), {p.size()}, {1});
+  }
+
+  void set_geometry(nb::ndarray<int, nb::c_contig> node_ints,
+                    nb::ndarray<real_t, nb::c_contig> node_reals, int root, real_t grad_h) {
+    beforeEstablish("set_geometry");
+    scene_ = makeSceneHolder(node_ints, node_reals, root, grad_h);
+  }
+  void clear_geometry() {
+    beforeEstablish("clear_geometry");
+    scene_.clear();
+  }
+  void set_wall_mode(const std::string& mode, real_t skin_frac) {
+    beforeEstablish("set_wall_mode");
+    wallExact_ = parseWallMode(mode);
+    if (skin_frac < real_t(0))
+      throw std::invalid_argument("voro: set_wall_mode(skin_frac=...) needs skin_frac >= 0.");
+    wallSkinFrac_ = skin_frac;
+  }
+
+  // Collective: establish the tessellation from this rank's owned seeds (all ranks call it).
+  void establish(nb::ndarray<real_t, nb::c_contig> pos, nb::ndarray<int64_t, nb::c_contig> gid,
+                 std::optional<nb::ndarray<real_t, nb::c_contig>> weight) {
+    auto ownedPos = toVec3(pos, "establish");
+    const std::size_t N = ownedPos.size();
+    if (gid.ndim() != 1 || gid.shape(0) != N)
+      throw std::runtime_error("establish: gids must be (N,) int64, one per position");
+    if (weight && (weight->ndim() != 1 || weight->shape(0) != N))
+      throw std::runtime_error("establish: weights must be (N,) float64, one per position");
+    std::vector<long> ownedGid(N);
+    std::vector<real_t> ownedW(N, real_t(0));
+    for (std::size_t i = 0; i < N; ++i) {
+      ownedGid[i] = static_cast<long>(gid.data()[i]);
+      if (weight)
+        ownedW[i] = weight->data()[i];
+    }
+    long nLocal = static_cast<long>(N), nGlobal = 0;
+    MPI_Allreduce(&nLocal, &nGlobal, 1, MPI_LONG, MPI_SUM, MPI_COMM_WORLD);
+    if (nGlobal <= 0)
+      throw std::runtime_error("voro: establish() needs at least one point over all ranks");
+    const double boxVol = static_cast<double>(L_[0]) * L_[1] * L_[2];
+    const real_t spacing = static_cast<real_t>(std::cbrt(boxVol / nGlobal));
+    if (scene_.set)
+      dmt_.template emplace<DMT<SceneT>>();
+    else
+      dmt_.template emplace<DMT<NoSdfT>>();
+    std::visit(
+        [&](auto& d) {
+          using T = std::decay_t<decltype(d)>;
+          d.init({0, 0, 0}, L_, cells_, {true, true, true}, rcutFrac_ * spacing,
+                 skinFrac_ * spacing, tolFrac_ * spacing, MPI_COMM_WORLD, defaults::kSearchWindow,
+                 static_cast<int>(nGlobal));
+          if constexpr (std::is_same_v<T, DMT<SceneT>>)
+            d.setSdf(scene_.scene);
+          d.setWallMode(wallExact_, wallSkinFrac_ * spacing);
+          d.establish(ownedPos, ownedGid, ownedW);
+        },
+        dmt_);
+    established_ = true;
+  }
+
+  // Collective every step: advance to the new owned positions (same ownership as establish).
+  nb::dict step(nb::ndarray<real_t, nb::c_contig> pos) {
+    if (!established_)
+      throw std::runtime_error(
+          "voro: DistributedTessellation.step() before establish() — call "
+          "establish(positions, gids) first.");
+    auto ownedPos = toVec3(pos, "step");
+    if (static_cast<int>(ownedPos.size()) != num_owned())
+      throw std::runtime_error("voro: step(positions) got " + std::to_string(ownedPos.size()) +
+                               " points but establish() had " + std::to_string(num_owned()) +
+                               " — ownership is fixed by establish(); call it again to change it.");
+    auto st = std::visit([&](auto& d) { return d.step(ownedPos); }, dmt_);
+    nb::dict d = repairStatsDict(st.regathered ? peclet::voro::RepairStats{} : st.repair);
+    d["regathered"] = st.regathered;  // this step re-gathered the ghosts + cold-rebuilt
+    return d;
+  }
+
+  int num_owned() const {
+    return std::visit([](auto& d) { return d.nOwned(); }, dmt_);
+  }
+  int num_combined() const {
+    return std::visit([](auto& d) { return d.nCombined(); }, dmt_);
+  }
+  long num_regathers() const {
+    return std::visit([](auto& d) { return d.numRegathers(); }, dmt_);
+  }
+
+  nb::ndarray<nb::numpy, real_t> get_volumes() {
+    const std::size_t N = static_cast<std::size_t>(num_owned());
+    DView vol = std::visit([](auto& d) { return d.tess().vol; }, dmt_);
+    auto v = Kokkos::subview(vol, Kokkos::make_pair(std::size_t(0), N));
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(v), {N}, {1});
+  }
+  nb::ndarray<nb::numpy, int> get_neighbor_counts() {
+    using Cell =
+        peclet::voro::ConvexCell<real_t, defaults::kMaxPlanes, defaults::kMaxTriangles, false>;
+    const int N = num_owned();
+    Kokkos::View<int*, peclet::core::MemSpace> cnt("nbr", N);
+    auto st = std::visit([](auto& d) { return d.tess().store; }, dmt_);
+    auto C = cnt;
+    const real_t Lx = L_[0], Ly = L_[1], Lz = L_[2];
+    Kokkos::parallel_for(
+        "peclet.voro.dnbrcount", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N),
+        KOKKOS_LAMBDA(int i) {
+          Cell c;
+          st.load(i, c, Lx, Ly, Lz);
+          C(i) = c.countFaces();
+        });
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cnt),
+                                                   {static_cast<std::size_t>(N)}, {1});
+  }
+  nb::ndarray<nb::numpy, int> get_wall_counts() {
+    const std::size_t N = static_cast<std::size_t>(num_owned());
+    std::vector<int> v = std::visit(
+        [&](auto& d) {
+          using T = std::decay_t<decltype(d)>;
+          if constexpr (std::is_same_v<T, DMT<SceneT>>) {
+            auto all = peclet::core::toVector(d.tess().wall.cnt);
+            all.resize(N);
+            return all;
+          } else {
+            return std::vector<int>(N, 0);
+          }
+        },
+        dmt_);
+    return peclet::core::python::vector_to_ndarray(std::move(v), {N}, {1});
+  }
+  // Global ids of the combined (owned + ghost) seeds after the last (re)gather, (num_combined,).
+  nb::ndarray<nb::numpy, int64_t> get_combined_gids() {
+    const auto& g = std::visit([](auto& d) -> const std::vector<long>& { return d.combinedGid(); },
+                               dmt_);
+    std::vector<int64_t> v(g.begin(), g.end());
+    const std::size_t M = v.size();
+    return peclet::core::python::vector_to_ndarray(std::move(v), {M}, {1});
+  }
+
+  void release() noexcept override {
+    dmt_.template emplace<DMT<NoSdfT>>();
+    scene_.clear();
+    established_ = false;
+  }
+
+ private:
+  void beforeEstablish(const char* what) const {
+    if (established_)
+      throw std::runtime_error(std::string("voro: DistributedTessellation.") + what +
+                               "() after establish() — it configures the next establish(); call "
+                               "establish() again afterwards.");
+  }
+
+  std::array<long, 3> cells_;
+  std::array<real_t, 3> L_;
+  real_t rcutFrac_, skinFrac_, tolFrac_;
+  bool wallExact_ = true;
+  real_t wallSkinFrac_ = defaults::kWallSkin;
+  bool established_ = false;
+  SceneHolder scene_;
+  peclet::voro::mpi::VoronoiHalo<real_t> halo_;  // for owned_mask before establish()
+  DmtVariant dmt_;
+};
+
+struct DTessDiagnostics {
+  DTess* d;
 };
 #endif  // PECLET_VORO_MPI
 
@@ -1081,121 +1580,226 @@ class VHalo {
 using namespace peclet::voro::pybind;
 
 NB_MODULE(_voro, m) {
+  using namespace defaults;
   m.attr("__doc__") =
-      "peclet.voro (device/Kokkos): moving-particle Voronoi dynamics on the device path.\n\n"
-      "Classes: Tessellation (bare cold build + incremental repair, volumes, neighbour counts);\n"
-      "Simulation (compressible-Euler / Navier-Stokes Voronoi fluid). Arrays are NumPy: "
-      "positions/\n"
-      "velocities (N,3) float64, scalars (N,). The backend (Serial/OpenMP/CUDA) is fixed at build\n"
-      "time; see peclet.voro.execution_space.";
+      "peclet.voro (device/Kokkos): moving-particle Voronoi tessellation and dynamics.\n\n"
+      "Classes: Tessellation (cold build + incremental repair, volumes, neighbour counts, energy\n"
+      "forces), FlowSolver (static Navier-Stokes on the face mesh), Simulation (moving-cell\n"
+      "compressible-Euler / Navier-Stokes fluid); functions optimize_volume_mesh, minimize_interface;\n"
+      "the pore-space family under peclet.voro.pore_mesh; VoronoiHalo and DistributedTessellation\n"
+      "when built with MPI. Every instrument lives on the object's `diagnostics`. Arrays are NumPy:\n"
+      "positions/velocities (N,3) float64, scalars (N,). The backend (Serial/OpenMP/CUDA/HIP) is\n"
+      "fixed at build time; see peclet.voro.execution_space. peclet.voro.defaults lists the named\n"
+      "defaults the engine is driven with.";
   // Kokkos init + the release-then-finalize atexit hook + finalize() + execution_space: the
   // suite-wide teardown pattern (file comment; peclet/core/python/kokkos_teardown.hpp). Every
   // Tess/Flow/Sim is a Releasable, so the registry releases them in one sweep before finalize.
   peclet::core::python::install(m);
 
-  // ---- mesh optimiser ---------------------------------------------------------------------------
+  {
+    nb::dict d;
+    d["max_planes"] = kMaxPlanes;
+    d["max_triangles"] = kMaxTriangles;
+    d["pore_max_planes"] = kPoreMaxPlanes;
+    d["pore_max_triangles"] = kPoreMaxTriangles;
+    d["certificate_tolerance"] = kCertificateTolerance;
+    d["skin"] = kSkin;
+    d["search_window"] = kSearchWindow;
+    d["sdf_gradient_step"] = kSdfGradientStep;
+    d["wall_skin"] = kWallSkin;
+    d["optimizer_search_window"] = kOptimizerSearchWindow;
+    d["pore_search_window"] = kPoreSearchWindow;
+    d["optimizer_max_iter"] = kOptimizerMaxIter;
+    d["pore_max_iter"] = kPoreMaxIter;
+    d["optimizer_tolerance"] = kOptimizerTolerance;
+    d["optimizer_cg_iters"] = kOptimizerCgIters;
+    d["pore_cg_iters"] = kPoreCgIters;
+    d["barrier_decay"] = kBarrierDecay;
+    d["interface_sigma"] = kInterfaceSigma;
+    d["pore_neighbors"] = kPoreNeighbors;
+    d["pore_max_bins"] = kPoreMaxBins;
+    d["distributed_rcut"] = kDistributedRcut;
+    d["distributed_cells"] = kDistributedCells;
+    m.attr("defaults") = d;
+  }
+
+  // ---- typed results ---------------------------------------------------------------------------
+  nb::class_<OptimizeResult>(m, "OptimizeResult",
+                             "Result of optimize_volume_mesh / pore_mesh.optimize_pore_mesh.")
+      .def_ro("positions", &OptimizeResult::positions, "The optimised seeds (N,3) float64.")
+      .def_ro("weights", &OptimizeResult::weights,
+              "The optimised power weights (N,) float64, or None when use_weights=False.")
+      .def_ro("iters", &OptimizeResult::iters, "Gauss-Newton / descent iterations run.")
+      .def_ro("max_vol_err", &OptimizeResult::max_vol_err,
+              "max_i |V_i / V_ref,i - 1| at the returned seeds.")
+      .def_ro("mean_vol_err", &OptimizeResult::mean_vol_err,
+              "mean_i |V_i / V_ref,i - 1| at the returned seeds.")
+      .def_ro("converged", &OptimizeResult::converged, "True if the gradient fell below tol.")
+      .def_ro("num_empty", &OptimizeResult::num_empty,
+              "Seeds whose cell is empty at the returned seeds (0 for a valid mesh).")
+      .def("__repr__", [](const OptimizeResult& r) {
+        return "OptimizeResult(iters=" + std::to_string(r.iters) +
+               ", max_vol_err=" + fmt(r.max_vol_err) + ", mean_vol_err=" + fmt(r.mean_vol_err) +
+               ", converged=" + (r.converged ? "True" : "False") +
+               ", num_empty=" + std::to_string(r.num_empty) + ")";
+      });
+  nb::class_<InterfaceResult>(m, "InterfaceResult", "Result of minimize_interface.")
+      .def_ro("positions", &InterfaceResult::positions, "The minimised seeds (N,3) float64.")
+      .def_ro("energy", &InterfaceResult::energy,
+              "Final interfacial energy E = sum sigma A_ij over faces between different types.")
+      .def_ro("energy_ratio", &InterfaceResult::energy_ratio,
+              "energy / the energy of the input seeds.")
+      .def_ro("iters", &InterfaceResult::iters, "Descent iterations run.")
+      .def_ro("converged", &InterfaceResult::converged, "True if the gradient fell below tol.")
+      .def("__repr__", [](const InterfaceResult& r) {
+        return "InterfaceResult(energy=" + fmt(r.energy) + ", energy_ratio=" +
+               fmt(r.energy_ratio) + ", iters=" + std::to_string(r.iters) +
+               ", converged=" + (r.converged ? "True" : "False") + ")";
+      });
+
+  // ---- mesh optimisers on a periodic box ------------------------------------------------------
   m.def(
       "optimize_volume_mesh",
       [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> vset_in,
-         real_t L, int sw, int max_newton, real_t tol, int cg_iters, bool use_weights,
-         bool colored_gs) {
+         std::array<real_t, 3> extent, int search_window, int max_iter, real_t tol, int cg_iters,
+         bool use_weights, const std::string& method) {
         auto pos = flatten3(pos_in);
         auto vset = flatten1(vset_in);
         const int N = (int)vset.size();
-        const real_t Larr[3] = {L, L, L};
-        const auto prec =
-            colored_gs ? peclet::voro::Precond::ColoredGS : peclet::voro::Precond::Jacobi;
+        if ((int)(pos.size() / 3) != N)
+          throw std::runtime_error(
+              "optimize_volume_mesh: positions (N,3) and target_volumes (N,) must agree on N");
+        for (int a = 0; a < 3; ++a)
+          if (!(extent[a] > real_t(0)))
+            throw std::invalid_argument(
+                "voro: optimize_volume_mesh(extent=...) needs three positive lengths.");
+        const real_t Larr[3] = {extent[0], extent[1], extent[2]};
+        const auto prec = parseMethod(method, "optimize_volume_mesh");
         peclet::voro::OtResult R;
         std::vector<real_t> w;
         if (use_weights) {
           w.assign(N, 0.0);
-          R = peclet::voro::meshVolumeOptimize<real_t, true>(pos, w, vset, Larr, N, sw,
-                                                             peclet::voro::NoSdf{}, max_newton, tol,
+          R = peclet::voro::meshVolumeOptimize<real_t, true>(pos, w, vset, Larr, N, search_window,
+                                                             peclet::voro::NoSdf{}, max_iter, tol,
                                                              cg_iters, prec, false);
         } else {
           std::vector<real_t> noW;
-          R = peclet::voro::meshVolumeOptimize<real_t, false>(pos, noW, vset, Larr, N, sw,
-                                                              peclet::voro::NoSdf{}, max_newton,
-                                                              tol, cg_iters, prec, false);
+          R = peclet::voro::meshVolumeOptimize<real_t, false>(
+              pos, noW, vset, Larr, N, search_window, peclet::voro::NoSdf{}, max_iter, tol,
+              cg_iters, prec, false);
         }
-        nb::dict d;
-        d["positions"] = peclet::core::python::vector_to_ndarray(
-            std::move(pos), {static_cast<std::size_t>(N), 3}, {3, 1});
-        if (use_weights)
-          d["weights"] = peclet::core::python::vector_to_ndarray(
-              std::move(w), {static_cast<std::size_t>(N)}, {1});
-        d["iters"] = R.iters;
-        d["max_vol_err"] = R.maxVolErr;
-        d["mean_vol_err"] = R.meanVolErr;
-        d["converged"] = R.converged;
-        d["n_empty"] = R.nEmpty;
-        return d;
+        return makeOptimizeResult(std::move(pos),
+                                  use_weights ? std::optional(std::move(w)) : std::nullopt, R);
       },
-      nb::arg("positions"), nb::arg("vset"), nb::arg("L") = 1.0, nb::arg("sw") = 5,
-      nb::arg("max_newton") = 60, nb::arg("tol") = 1e-9, nb::arg("cg_iters") = 300,
-      nb::arg("use_weights") = false, nb::arg("colored_gs") = false,
-      "Move seeds (N,3) — and optionally the power weights — to minimise Σ(V_i − vset_i)² by "
-      "damped\n"
-      "Gauss-Newton (Newton–Raphson + CG with a Jacobi or colored-Gauss-Seidel preconditioner).\n"
-      "vset (N,) are the target cell volumes (renormalised to the box volume). Returns a dict "
-      "with\n"
-      "the updated 'positions' (and 'weights' if use_weights), plus iters/max_vol_err/converged.\n"
-      "Pure Voronoi (use_weights=False) reaches equal/graded volumes well; weights add fuller "
-      "volume\n"
-      "control but are limited by the periodic tessellation's ~1% min-image floor.");
+      nb::arg("positions"), nb::arg("target_volumes"), nb::arg("extent"), nb::kw_only(),
+      nb::arg("search_window") = kOptimizerSearchWindow, nb::arg("max_iter") = kOptimizerMaxIter,
+      nb::arg("tol") = kOptimizerTolerance, nb::arg("cg_iters") = kOptimizerCgIters,
+      nb::arg("use_weights") = false, nb::arg("method") = "jacobi",
+      doc("Move seeds (N,3) — and optionally the power weights — to minimise "
+          "sum (V_i / V_ref,i - 1)^2 by\n"
+          "damped Gauss-Newton (Newton-Raphson + CG) on the periodic box `extent` (Lx, Ly, Lz).\n"
+          "target_volumes (N,) are the per-cell reference volumes V_ref (renormalised to the box\n"
+          "volume). method: the CG preconditioner, one of " +
+          std::string(kMethodList) +
+          " (default 'jacobi'; 'graphamg'\n"
+          "is the O(N) choice at large N, 'steepest' is plain descent). search_window (default " +
+          fmt(kOptimizerSearchWindow) + "), max_iter (" + fmt(kOptimizerMaxIter) + "), tol (" +
+          fmt(kOptimizerTolerance) + ")\nand cg_iters (" + fmt(kOptimizerCgIters) +
+          ") are peclet.voro.defaults. Returns an OptimizeResult (positions, weights, iters,\n"
+          "max_vol_err, mean_vol_err, converged, num_empty). Pure Voronoi (use_weights=False)\n"
+          "reaches equal/graded volumes well; weights add fuller volume control but are limited "
+          "by\nthe periodic tessellation's ~1% min-image floor."));
 
-  // ---- pore-space (SDF-walled) mesh optimiser + geometry export ---------------------------------
+  m.def(
+      "minimize_interface",
+      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<int, nb::c_contig> type_in,
+         std::array<real_t, 3> extent, real_t sigma, int search_window, int max_iter, real_t tol) {
+        auto pos = flatten3(pos_in);
+        const int N = (int)type_in.shape(0);
+        if ((int)(pos.size() / 3) != N)
+          throw std::runtime_error(
+              "minimize_interface: positions (N,3) and types (N,) must agree on N");
+        for (int a = 0; a < 3; ++a)
+          if (!(extent[a] > real_t(0)))
+            throw std::invalid_argument(
+                "voro: minimize_interface(extent=...) needs three positive lengths.");
+        std::vector<int> type(type_in.data(), type_in.data() + N);
+        const real_t Larr[3] = {extent[0], extent[1], extent[2]};
+        auto R = peclet::voro::interfaceMinimize<real_t>(pos, type, sigma, Larr, N, search_window,
+                                                         peclet::voro::NoSdf{}, max_iter, tol,
+                                                         false);
+        InterfaceResult r;
+        r.positions = toNumpy3(std::move(pos));
+        r.energy = R.energy;
+        r.energy_ratio = R.energyRatio;
+        r.iters = R.iters;
+        r.converged = R.converged;
+        return r;
+      },
+      nb::arg("positions"), nb::arg("types"), nb::arg("extent"), nb::kw_only(),
+      nb::arg("sigma") = kInterfaceSigma, nb::arg("search_window") = kOptimizerSearchWindow,
+      nb::arg("max_iter") = kOptimizerMaxIter, nb::arg("tol") = kOptimizerTolerance,
+      doc("Surface-Evolver-style interfacial-tension minimiser: move seeds (N,3) on the periodic "
+          "box\n`extent` to minimise the total area of faces between cells of different integer "
+          "type (N,),\nE = sum sigma A_ij (sigma default " +
+          fmt(kInterfaceSigma) +
+          "). Steepest descent with a trust-region line search on\nthe (non-smooth) interfacial "
+          "energy; search_window / max_iter / tol default to " +
+          fmt(kOptimizerSearchWindow) + " / " + fmt(kOptimizerMaxIter) + " / " +
+          fmt(kOptimizerTolerance) +
+          ".\nReturns an InterfaceResult (positions, energy, energy_ratio = final/initial, iters, "
+          "converged)."));
+
+  // ---- pore-space (SDF-walled) family: bound here, exposed by peclet.voro.pore_mesh ------------
   m.def(
       "optimize_pore_mesh",
       [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> vref_in,
-         nb::ndarray<real_t, nb::c_contig> sph_c, nb::ndarray<real_t, nb::c_contig> sph_r, real_t L,
-         int sw, int max_iter, real_t tol, int cg_iters, const std::string& method,
-         real_t mu_barrier, bool free_energy) {
+         nb::ndarray<real_t, nb::c_contig> sph_c, nb::ndarray<real_t, nb::c_contig> sph_r,
+         std::array<real_t, 3> extent, int search_window, int max_iter, real_t tol, int cg_iters,
+         const std::string& method, real_t mu_barrier, bool free_energy) {
         auto pos = flatten3(pos_in);
         auto vref = flatten1(vref_in);
         const int N = (int)vref.size();
+        if ((int)(pos.size() / 3) != N)
+          throw std::runtime_error(
+              "optimize_pore_mesh: positions (N,3) and target_volumes (N,) must agree on N");
+        const real_t L = cubicExtent(extent, "optimize_pore_mesh");
         const real_t Larr[3] = {L, L, L};
         DView cenH, radH;
         auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
-        peclet::voro::Precond prec = peclet::voro::Precond::GraphAMG;
-        if (method == "steepest")
-          prec = peclet::voro::Precond::SteepestDescent;
-        else if (method == "jacobi")
-          prec = peclet::voro::Precond::Jacobi;
-        else if (method == "colored_gs")
-          prec = peclet::voro::Precond::ColoredGS;
+        const auto prec = parseMethod(method, "optimize_pore_mesh");
         std::vector<real_t> noW;
         auto R = peclet::voro::meshVolumeOptimize<real_t, false, peclet::voro::SdfSpheres<real_t>>(
-            pos, noW, vref, Larr, N, sw, sdf, max_iter, tol, cg_iters, prec, false, mu_barrier,
-            (real_t)0.7, free_energy);
-        nb::dict d;
-        d["positions"] = peclet::core::python::vector_to_ndarray(
-            std::move(pos), {static_cast<std::size_t>(N), 3}, {3, 1});
-        d["iters"] = R.iters;
-        d["max_vol_err"] = R.maxVolErr;
-        d["converged"] = R.converged;
-        d["n_empty"] = R.nEmpty;
-        return d;
+            pos, noW, vref, Larr, N, search_window, sdf, max_iter, tol, cg_iters, prec, false,
+            mu_barrier, (real_t)kBarrierDecay, free_energy);
+        return makeOptimizeResult(std::move(pos), std::nullopt, R);
       },
-      nb::arg("positions"), nb::arg("vref"), nb::arg("sphere_centers"), nb::arg("sphere_radii"),
-      nb::arg("L"), nb::arg("sw") = 6, nb::arg("max_iter") = 80, nb::arg("tol") = 1e-9,
-      nb::arg("cg_iters") = 400, nb::arg("method") = "graphamg", nb::arg("mu_barrier") = 0.0,
-      nb::arg("free_energy") = false,
-      "Relax interstitial seeds (N,3) so their SDF-clipped Voronoi cell volumes approach the "
-      "per-cell\n"
-      "targets vref (N,), with the sphere packing (sphere_centers (M,3), sphere_radii (M,)) as "
-      "periodic\n"
-      "walls. method: 'graphamg'|'jacobi'|'colored_gs' (Gauss-Newton CG) or 'steepest' (descent).\n"
-      "free_energy=True uses E=-Σ V_ref·log V (pressure V_ref/V, resists collapse); mu_barrier>0 "
-      "adds a\n"
-      "log-barrier. EXPERIMENTAL (pore-space meshing; see the pore-mesh-voronoi example).");
+      nb::arg("positions"), nb::arg("target_volumes"), nb::arg("sphere_centers"),
+      nb::arg("sphere_radii"), nb::arg("extent"), nb::kw_only(),
+      nb::arg("search_window") = kPoreSearchWindow, nb::arg("max_iter") = kPoreMaxIter,
+      nb::arg("tol") = kOptimizerTolerance, nb::arg("cg_iters") = kPoreCgIters,
+      nb::arg("method") = "graphamg", nb::arg("mu_barrier") = 0.0, nb::arg("free_energy") = false,
+      doc("Relax interstitial seeds (N,3) so their SDF-clipped Voronoi cell volumes approach the "
+          "per-cell\ntarget_volumes (N,), with the sphere packing (sphere_centers (M,3), "
+          "sphere_radii (M,)) as\nperiodic walls in the cubic box `extent` (Lx == Ly == Lz). "
+          "method: one of " +
+          std::string(kMethodList) +
+          " (default\n'graphamg'; 'steepest' is plain descent). free_energy=True uses "
+          "E = -sum V_ref log V (pressure\nV_ref/V, resists collapse); mu_barrier > 0 adds a "
+          "log-barrier that decays by " +
+          fmt(kBarrierDecay) + " per iteration.\nsearch_window / max_iter / tol / cg_iters default to " +
+          fmt(kPoreSearchWindow) + " / " + fmt(kPoreMaxIter) + " / " + fmt(kOptimizerTolerance) +
+          " / " + fmt(kPoreCgIters) +
+          ". Returns an\nOptimizeResult. Experimental (pore-space meshing; see the "
+          "pore-mesh-voronoi example)."));
 
   m.def(
       "sdf_voronoi_cells",
       [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
-         nb::ndarray<real_t, nb::c_contig> sph_r, real_t L) {
+         nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent) {
         auto seed = flatten3(pos_in);
         const int N = (int)(seed.size() / 3);
+        const real_t L = cubicExtent(extent, "sdf_voronoi_cells");
         DView cenH, radH;
         auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
         // Reconstruct each interstitial cell (periodic min-image neighbours + SDF clip) and pack
@@ -1270,23 +1874,23 @@ NB_MODULE(_voro, m) {
         d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nCells}, {1});
         return d;
       },
-      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("L"),
-      "Reconstruct the SDF-clipped interstitial Voronoi cells and return their polyhedra as flat\n"
-      "arrays (VTK_POLYHEDRON layout): 'points' (Np,3), 'faces' + 'face_offsets' (per-cell face "
-      "lists,\n"
-      "global point ids), 'volume' (Nc,), 'boundary' (Nc, 1 where the cell touches a sphere "
-      "wall).");
+      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"),
+      "Reconstruct the SDF-clipped interstitial Voronoi cells (cubic periodic box `extent`, the\n"
+      "spheres as walls) and return their polyhedra as flat arrays (VTK_POLYHEDRON layout):\n"
+      "'points' (Np,3), 'faces' + 'face_offsets' (per-cell face lists, global point ids),\n"
+      "'volume' (Nc,), 'boundary' (Nc, 1 where the cell touches a sphere wall), 'seed' (Nc,).");
 
   m.def(
       "sdf_voronoi_section",
       [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
-         nb::ndarray<real_t, nb::c_contig> sph_r, real_t L, std::array<real_t, 3> origin,
-         std::array<real_t, 3> normal) {
+         nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
+         std::array<real_t, 3> point, std::array<real_t, 3> normal) {
         auto seed = flatten3(pos_in);
+        const real_t L = cubicExtent(extent, "sdf_voronoi_section");
         DView cenH, radH;
         auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
         PoreReconstructor rec(seed, L, sdf);
-        // Cut every reconstructed cell by the plane {x : (x-origin)·normal = 0} and collect the
+        // Cut every reconstructed cell by the plane {x : (x-point)·normal = 0} and collect the
         // convex section polygons (robust: ConvexCell::sectionPolygon works from the dual edges, so
         // it tiles the cross-section exactly). Vertices returned in WORLD 3-D (all on the plane).
         std::vector<real_t> verts, vol;
@@ -1298,8 +1902,7 @@ NB_MODULE(_voro, m) {
           PoreCell c;
           if (!rec.build(i, c))
             continue;
-          const real_t p0[3] = {origin[0] - sx, origin[1] - sy,
-                                origin[2] - sz};  // plane in cell frame
+          const real_t p0[3] = {point[0] - sx, point[1] - sy, point[2] - sz};  // plane, cell frame
           const real_t u3[3] = {normal[0], normal[1], normal[2]};
           const int mm = c.sectionPolygon(p0, u3, spx, spy, spz);
           if (mm < 3)
@@ -1321,56 +1924,46 @@ NB_MODULE(_voro, m) {
         d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nP}, {1});
         return d;
       },
-      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("L"),
-      nb::arg("origin"), nb::arg("normal"),
-      "Cross-section of the SDF-clipped interstitial Voronoi mesh by the plane through `origin` "
-      "with\n"
-      "`normal`: cut every cell directly (ConvexCell::sectionPolygon, robust — works from the "
-      "dual\n"
-      "edges, so it tiles the plane exactly where a face-by-face slice drops facets). Returns "
-      "'verts'\n"
-      "(Nv,3, world coords, all on the plane) + 'offsets' (Npoly+1, per-polygon vertex ranges) +\n"
-      "'volume' (Npoly, the 3-D cell volume) + 'seed' (Npoly, the seed index). For a z=z0 slice "
-      "pass\n"
-      "origin=(0,0,z0), normal=(0,0,1) and plot verts[:, :2].");
-
-  m.def(
-      "minimize_interface",
-      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<int, nb::c_contig> type_in,
-         real_t sigma, real_t L, int sw, int max_iter, real_t tol) {
-        auto pos = flatten3(pos_in);
-        const int N = (int)type_in.shape(0);
-        std::vector<int> type(type_in.data(), type_in.data() + N);
-        const real_t Larr[3] = {L, L, L};
-        auto R = peclet::voro::interfaceMinimize<real_t>(
-            pos, type, sigma, Larr, N, sw, peclet::voro::NoSdf{}, max_iter, tol, false);
-        nb::dict d;
-        d["positions"] = peclet::core::python::vector_to_ndarray(
-            std::move(pos), {static_cast<std::size_t>(N), 3}, {3, 1});
-        d["energy"] = R.maxVolErr;         // final interfacial energy
-        d["energy_ratio"] = R.meanVolErr;  // E_final / E_initial
-        d["iters"] = R.iters;
-        d["converged"] = R.converged;
-        return d;
-      },
-      nb::arg("positions"), nb::arg("types"), nb::arg("sigma") = 1.0, nb::arg("L") = 1.0,
-      nb::arg("sw") = 5, nb::arg("max_iter") = 60, nb::arg("tol") = 1e-9,
-      "Surface-Evolver-style interfacial-tension minimiser: move seeds (N,3) to minimise the "
-      "total\n"
-      "area of faces between cells of different integer type (N,), E = Σ σ A_ij. Steepest descent\n"
-      "with a trust-region line search on the (non-smooth) interfacial energy. Returns a dict "
-      "with\n"
-      "the updated 'positions', final 'energy', 'energy_ratio' (final/initial), and iters.");
+      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"),
+      nb::arg("point"), nb::arg("normal"),
+      "Cross-section of the SDF-clipped interstitial Voronoi mesh (cubic periodic box `extent`) by\n"
+      "the plane through `point` with `normal`: cut every cell directly (ConvexCell::sectionPolygon,\n"
+      "robust — works from the dual edges, so it tiles the plane exactly where a face-by-face slice\n"
+      "drops facets). Returns 'verts' (Nv,3, world coords, all on the plane) + 'offsets' (Npoly+1,\n"
+      "per-polygon vertex ranges) + 'volume' (Npoly, the 3-D cell volume) + 'seed' (Npoly, the seed\n"
+      "index). For a z=z0 slice pass point=(0,0,z0), normal=(0,0,1) and plot verts[:, :2].");
 
   // ---- Tessellation -----------------------------------------------------------------------------
+  nb::class_<TessDiagnostics>(
+      m, "TessellationDiagnostics",
+      "Instruments and ablation switches of a Tessellation (reached as `t.diagnostics`).")
+      .def(
+          "build_report", [](TessDiagnostics& d) { return d.t->build_report(); },
+          "Validity counts of the last build: {'buried', 'reach_exceeded', 'empty', 'overflow',\n"
+          "'incomplete'} — all zero for a guaranteed-exact partition (build() already warns, or\n"
+          "raises with strict=True, when they are not).")
+      .def(
+          "set_local_certificate",
+          [](TessDiagnostics& d, bool on) { d.t->set_local_certificate(on); }, nb::arg("on"),
+          "Ablation: the cheap O(nt) Lawson local certificate (default True) vs the brute O(nt*np)\n"
+          "form for detecting which cells changed. Both are complete; local is faster. Takes "
+          "effect\nat the next build().")
+      .def(
+          "set_gate", [](TessDiagnostics& d, bool on) { d.t->set_gate(on); }, nb::arg("on"),
+          "Ablation: the adaptive gate (default True) that routes high-churn steps straight to a\n"
+          "full rebuild — the 'never much slower than a cold build' guard. Takes effect at the "
+          "next\nbuild().");
+
   nb::class_<Tess>(
       m, "Tessellation",
-      "Moving-particle Voronoi tessellator on the device path.\n\n"
-      "Build a tessellation once (`build`) then advance it cheaply as the points move\n"
-      "(`step`) — the incremental two-pass repair is several times faster than rebuilding\n"
-      "for the small per-step displacements typical of CFD/DEM, and falls back to a full\n"
-      "rebuild (via an adaptive gate) when displacements are large, so it is never much\n"
-      "slower than a cold build. Periodic cubic box. Single domain (one process).")
+      "Moving-particle (power-)Voronoi tessellator on the device path, optionally clipped by an\n"
+      "SDF solid.\n\n"
+      "Build a tessellation once (`build`) then advance it cheaply as the points move (`step`) —\n"
+      "the incremental two-pass repair is several times faster than rebuilding for the small\n"
+      "per-step displacements typical of CFD/DEM, and falls back to a full rebuild (via an\n"
+      "adaptive gate) when displacements are large, so it is never much slower than a cold\n"
+      "build. Periodic box anchored at the origin. Single domain (one process); see\n"
+      "DistributedTessellation for the MPI driver. Instruments: `diagnostics`.")
       .def(nb::init<>())
       .def("set_domain", &Tess::set_domain, nb::arg("extent"),
            nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
@@ -1384,42 +1977,38 @@ NB_MODULE(_voro, m) {
            "limitation.")
       .def_prop_ro("extent", &Tess::extent,
                    "The box size (Lx, Ly, Lz) — read-only; set it with `set_domain`.")
-      .def("set_tolerance", &Tess::set_tolerance, nb::arg("frac") = 1e-4,
-           "Certificate tolerance as a fraction of the mean inter-particle spacing (default 1e-4). "
-           "A\n"
-           "vertex poking past a stored plane by more than this flags the cell for repair; smaller "
-           "is\n"
-           "stricter (closer to machine-exact) at marginally higher cost.")
-      .def("set_local_certificate", &Tess::set_local_certificate, nb::arg("on") = true,
-           "Use the cheap O(nt) Lawson local certificate (default True) instead of the brute "
-           "O(nt*np)\n"
-           "form for detecting which cells changed. Both are complete; local is faster.")
-      .def("set_gate", &Tess::set_gate, nb::arg("on") = true,
-           "Enable the adaptive gate (default True) that routes high-churn steps straight to a "
-           "full\n"
-           "rebuild — the 'never much slower than a cold build' guard.")
+      .def("set_tolerance", &Tess::set_tolerance, nb::arg("frac"),
+           doc("Certificate tolerance of the repair as a fraction of the mean inter-particle "
+               "spacing\n(default " +
+               fmt(kCertificateTolerance) +
+               " = peclet.voro.defaults['certificate_tolerance']). A vertex poking past a "
+               "stored\nplane by more than this flags the cell for repair; smaller is stricter "
+               "(closer to\nmachine-exact) at marginally higher cost. Takes effect at the next "
+               "build()."))
       .def(
           "set_geometry", &Tess::set_geometry, nb::arg("node_ints"), nb::arg("node_reals"),
-          nb::arg("root") = 0, nb::arg("grad_h") = 1e-5,
-          "Clip the cells by an SDF solid given as a core shape scene in the flat node encoding\n"
-          "(node_ints int32 (3 per node), node_reals float64 (16 per node)) — exactly what\n"
-          "peclet.core.geom.Scene.encode() returns and dem.add_analytic_wall takes; `root` is the\n"
-          "tree root to evaluate. Suite sign convention: sdf < 0 inside the solid. Seeds inside "
-          "the\n"
-          "solid get no cell (volume 0); cells reaching into it gain wall facets. Applies to the\n"
-          "next `build` and is carried through every `step` (wall planes are resident; a boundary\n"
-          "watch re-clips cells at the wall). `grad_h` is the central-difference step for the\n"
-          "SDF gradient. Analytic vocabulary only (no sampled grids through this path yet).")
+          nb::arg("root") = 0, nb::arg("grad_h") = kSdfGradientStep,
+          doc("Clip the cells by an SDF solid given as a core shape scene in the flat node "
+              "encoding\n(node_ints int32 (3 per node), node_reals float64 (16 per node)) — exactly "
+              "what\npeclet.core.geom.Scene.encode() returns and dem.add_analytic_wall takes; "
+              "`root` is the\ntree root to evaluate. Suite sign convention: sdf < 0 inside the "
+              "solid. Seeds inside the\nsolid get no cell (volume 0); cells reaching into it gain "
+              "wall facets. Applies to the\nnext `build` and is carried through every `step` "
+              "(wall planes are resident; a boundary\nwatch re-clips cells at the wall). `grad_h` "
+              "(default " +
+              fmt(kSdfGradientStep) +
+              ") is the central-difference step for the\nSDF gradient. Analytic vocabulary only "
+              "(no sampled grids through this path yet)."))
       .def("clear_geometry", &Tess::clear_geometry,
            "Drop the SDF geometry (takes effect at the next `build`).")
-      .def(
-          "set_wall_mode", &Tess::set_wall_mode, nb::arg("exact") = true,
-          nb::arg("skin_frac") = 0.0,
-          "Wall re-gather policy for `step` (default exact=True): re-clip every wall-clipped cell\n"
-          "that moved, so the incremental result equals a cold rebuild. exact=False keeps a "
-          "cell's\n"
-          "stale tangent planes until it moved more than skin_frac × mean spacing (cheaper, not\n"
-          "exact by construction).")
+      .def("set_wall_mode", &Tess::set_wall_mode, nb::arg("mode"),
+           nb::arg("skin_frac") = kWallSkin,
+           doc("Wall re-gather policy for `step`. mode: one of " + std::string(kWallModeList) +
+               ". 'exact' (the default)\nre-clips every wall-clipped cell that moved, so the "
+               "incremental result equals a cold\nrebuild; 'skin' keeps a cell's stale tangent "
+               "planes until it moved more than skin_frac x\nthe mean spacing (default " +
+               fmt(kWallSkin) +
+               "; cheaper, not exact by construction). Takes effect at the\nnext build()."))
       .def(
           "set_weights", &Tess::set_weights, nb::arg("weights"),
           "Per-seed POWER (Laguerre) weights (N,) float64: the cells become the power diagram\n"
@@ -1436,14 +2025,11 @@ NB_MODULE(_voro, m) {
            "outside\n"
            "its own cell — never for w = r² of non-overlapping spheres), a search reach beyond "
            "half\n"
-           "the box, or overflowed cells; see `build_report()`.")
-      .def("build_report", &Tess::build_report,
-           "Validity counts of the last build: {'buried', 'reach_exceeded', 'empty', 'overflow',\n"
-           "'incomplete'} — all zero for a guaranteed-exact partition.")
+           "the box, or overflowed cells; see `diagnostics.build_report()`.")
       .def(
           "step", &Tess::step, nb::arg("positions"),
           "Incrementally repair the resident tessellation to new `positions` (N,3, same N as "
-          "`build`).\n"
+          "`build`;\nraises before `build`).\n"
           "Returns a dict of per-step work stats: 'flagged' (cells the certificate flagged), "
           "'pass1'\n"
           "and 'pass2' (cells re-gathered in each pass), 'extra' (cells gathered across verify "
@@ -1452,7 +2038,7 @@ NB_MODULE(_voro, m) {
           "'rebuilt'\n"
           "(True if the gate routed this step to a full rebuild), 'fell_back' (True if the verify "
           "failed and\n"
-          "a cold rebuild was forced).")
+          "a cold rebuild was forced), 'wall_flagged' (cells the SDF boundary watch re-clipped).")
       .def("get_volumes", &Tess::get_volumes,
            "Per-particle Voronoi cell volume (N,) float64 (a copy). Sums to the box volume "
            "(space-filling).")
@@ -1481,23 +2067,46 @@ NB_MODULE(_voro, m) {
           "               their centroids — the skewness the grid solver's two-point operators "
           "need gone);\n"
           "  roundness    `facet_tension` · Σ A_f over all interior faces.\n"
-          "Returns {'interface_energy', 'wall_energy', 'force' (N,3) = dE/dx, 'force_w' (N,) = "
-          "dE/dw\n"
-          "when weights are set}. Descend along −force to minimise.")
+          "Returns {'interface_energy', 'wall_energy', 'lloyd_energy', 'tension_energy', 'force' "
+          "(N,3) = dE/dx,\n'force_w' (N,) = dE/dw when weights are set}. Descend along −force to "
+          "minimise.")
       .def_prop_ro("num_particles", &Tess::num_particles,
-                   "Particle count N set by the last `build`.");
+                   "Particle count N set by the last `build` (0 before it).")
+      .def_prop_ro(
+          "diagnostics", [](Tess& t) { return TessDiagnostics{&t}; }, nb::keep_alive<0, 1>(),
+          "The diagnostics tier: build_report(), set_local_certificate(), set_gate().");
 
-  // ---- Simulation -------------------------------------------------------------------------------
+  // ---- FlowSolver -------------------------------------------------------------------------------
+  nb::class_<FlowDiagnostics>(
+      m, "FlowSolverDiagnostics",
+      "Ablation switches of a FlowSolver (reached as `f.diagnostics`): the measured-worse "
+      "alternatives kept for comparison.")
+      .def(
+          "set_skew_corrected", [](FlowDiagnostics& d, bool on) { d.f->set_skew_corrected(on); },
+          nb::arg("on"),
+          "Collocated only: the centroid-consistent constraint pair (default True; the plain pair "
+          "drops\nto first order on skewed meshes — README, rung C2b).")
+      .def(
+          "set_wall_gradient_quadratic",
+          [](FlowDiagnostics& d, bool on) { d.f->set_wall_gradient_quadratic(on); }, nb::arg("on"),
+          "Wall viscous flux from the wall-anchored least-squares quadratic (default True; exact "
+          "for\nPoiseuille) instead of the two-point (U_i - U_wall)/h_A (-13 % on the sphere "
+          "drag).");
+
   nb::class_<Flow>(
       m, "FlowSolver",
-      "Static Navier–Stokes solver on the face mesh of a resident Tessellation (Voronoi methods "
-      "plan, track C). layout='collocated' (default): peclet.flow's approximate projection with "
-      "the skew-corrected adjoint constraint pair — second order on unstructured Voronoi meshes; "
-      "layout='covolume': the staggered covolume scheme (exact energy conservation, first order "
-      "on unstructured meshes). Walls come from the tessellation's SDF geometry (no-slip unless "
-      "set_wall_velocity). SSP-RK3 with a projection per stage; GraphAMG-PCG pressure solve.")
-      .def(nb::init<Tess&, real_t, const std::string&, bool>(), nb::arg("tessellation"),
-           nb::arg("viscosity"), nb::arg("layout") = "collocated", nb::arg("amg") = true)
+      "Static Navier–Stokes solver on the face mesh of a resident (built) Tessellation (Voronoi "
+      "methods plan, track C). layout='collocated' (default): peclet.flow's approximate projection "
+      "with the skew-corrected adjoint constraint pair — second order on unstructured Voronoi "
+      "meshes; layout='covolume': the staggered covolume scheme (exact energy conservation, first "
+      "order on unstructured meshes). Walls come from the tessellation's SDF geometry (no-slip "
+      "unless set_wall_velocity). SSP-RK3 with a projection per stage; GraphAMG-PCG pressure "
+      "solve. The mesh is frozen at construction — build a new FlowSolver after moving the seeds. "
+      "Instruments: `diagnostics`.")
+      .def(nb::init<Tess&, real_t, const std::string&>(), nb::arg("tessellation"),
+           nb::arg("viscosity"), nb::arg("layout") = "collocated",
+           doc("FlowSolver(tessellation, viscosity, layout='collocated'): layout is one of " +
+               std::string(kLayoutList) + "."))
       .def_prop_ro("num_cells", &Flow::num_cells,
                    "Number of cells of the face mesh (= the tessellation's particle count).")
       .def_prop_ro("num_faces", &Flow::num_faces,
@@ -1507,21 +2116,17 @@ NB_MODULE(_voro, m) {
           "Number of SDF wall faces (the trailing block of the faces); 0 without geometry.")
       .def_prop_ro("layout", &Flow::layout,
                    "The solver layout this instance was built with: 'collocated' or 'covolume'.")
-      .def("set_body_force", &Flow::set_body_force, nb::arg("fx"), nb::arg("fy"), nb::arg("fz"),
+      .def("set_body_force", &Flow::set_body_force, nb::arg("force"),
            "Uniform body force per unit mass (fx, fy, fz) applied to every cell (a pressure "
            "gradient drive, gravity).")
       .def("set_stokes", &Flow::set_stokes, nb::arg("on"),
            "Drop the convective term (creeping flow).")
-      .def("set_skew_corrected", &Flow::set_skew_corrected, nb::arg("on"),
-           "Collocated only: the centroid-consistent constraint pair (default on).")
       .def("set_pressure_tolerance", &Flow::set_pressure_tolerance, nb::arg("tol"),
            "Relative residual at which the pressure PCG stops (default set by the solver).")
       .def("set_implicit_diffusion", &Flow::set_implicit_diffusion, nb::arg("on"),
-           "Collocated: flow's semi-implicit step (explicit convection, backward-Euler viscous "
-           "solve, approximate projection) — no diffusive dt limit, first order in time.")
-      .def("set_wall_gradient_quadratic", &Flow::set_wall_gradient_quadratic, nb::arg("on"),
-           "Wall viscous flux from the wall-anchored least-squares quadratic (default on; exact "
-           "for Poiseuille) instead of the two-point (U_i - U_wall)/h_A.")
+           "Collocated only (raises on covolume): flow's semi-implicit step (explicit convection, "
+           "backward-Euler viscous solve, approximate projection) — no diffusive dt limit, first "
+           "order in time.")
       .def("set_wall_velocity", &Flow::set_wall_velocity, nb::arg("U"),
            "Prescribed velocity on the wall faces, (num_wall_faces, 3).")
       .def("set_velocity", &Flow::set_velocity, nb::arg("U"),
@@ -1543,14 +2148,29 @@ NB_MODULE(_voro, m) {
            "Max over the cells of the discrete divergence of the transporting face flux — "
            "round-off after a projection.")
       .def_prop_ro("pressure_iterations", &Flow::pressure_iterations,
-                   "PCG iteration count of the last pressure solve.");
+                   "PCG iteration count of the last pressure solve.")
+      .def_prop_ro(
+          "diagnostics", [](Flow& f) { return FlowDiagnostics{&f}; }, nb::keep_alive<0, 1>(),
+          "The diagnostics tier: set_skew_corrected(), set_wall_gradient_quadratic().");
+
+  // ---- Simulation -------------------------------------------------------------------------------
+  nb::class_<SimDiagnostics>(m, "SimulationDiagnostics",
+                             "Performance-path switches of a Simulation (reached as "
+                             "`s.diagnostics`).")
+      .def(
+          "set_repair", [](SimDiagnostics& d, bool on) { d.s->set_repair(on); },
+          nb::arg("on") = true,
+          "Opt-in (default off): use the incremental moving-point repair + reeval-published force "
+          "geometry each step instead of a full rebuild. Before init().");
 
   nb::class_<Sim>(
       m, "Simulation",
       "Device-native compressible-Euler / Navier-Stokes Voronoi fluid simulation.\n\n"
       "Velocity-Verlet dynamics of a moving-particle Voronoi fluid: pressure forces from an\n"
       "EOS plus an optional per-particle viscous (Navier-Stokes) term, with the tessellation\n"
-      "repaired each step on the device. Set the particle state, `init`, then `step`.")
+      "repaired each step on the device. Set the particle state, `init`, `set_dt`, then `step`;\n"
+      "the state setters raise after `init` (the state is then resident on the device).\n"
+      "Instruments: `diagnostics`.")
       .def(nb::init<>())
       .def("set_domain", &Sim::set_domain, nb::arg("extent"),
            nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
@@ -1565,28 +2185,29 @@ NB_MODULE(_voro, m) {
       .def_prop_ro("extent", &Sim::extent,
                    "The box size (Lx, Ly, Lz) — read-only; set it with `set_domain`.")
       .def("set_positions", &Sim::set_positions, nb::arg("positions"),
-           "Initial particle positions (N,3) float64.")
+           "Initial particle positions (N,3) float64 (before init).")
       .def("set_velocities", &Sim::set_velocities, nb::arg("velocities"),
-           "Initial particle velocities (N,3) float64.")
-      .def("set_masses", &Sim::set_masses, nb::arg("masses"), "Particle masses (N,) float64.")
+           "Initial particle velocities (N,3) float64 (before init; at rest if not set).")
+      .def("set_masses", &Sim::set_masses, nb::arg("masses"),
+           "Particle masses (N,) float64, all > 0 (before init; sets N).")
       .def("set_pressure", &Sim::set_pressure, nb::arg("pressure"),
-           "Equation-of-state pressure constant (the stiffness of the barotropic EOS).")
+           "Equation-of-state pressure constant (the stiffness of the barotropic EOS; before "
+           "init).")
       .def("set_viscosities", &Sim::set_viscosities, nb::arg("viscosities"),
-           "Per-particle shear viscosity (N,) — enables the viscous Navier-Stokes term.")
-      .def("set_repair", &Sim::set_repair, nb::arg("on") = true,
-           "Opt-in (default off): use the incremental moving-point repair + reeval-published force "
-           "geometry each step instead of a full rebuild. Call before init().")
+           "Per-particle shear viscosity (N,) — enables the viscous Navier-Stokes term (before "
+           "init).")
       .def("set_bulk_viscosities", &Sim::set_bulk_viscosities, nb::arg("viscosities"),
-           "Per-particle bulk viscosity (N,) float64 (defaults to zero if unset).")
+           "Per-particle bulk viscosity (N,) float64 (defaults to zero if unset; before init).")
       .def(
           "set_geometry", &Sim::set_geometry, nb::arg("node_ints"), nb::arg("node_reals"),
-          nb::arg("root") = 0, nb::arg("grad_h") = 1e-5,
+          nb::arg("root") = 0, nb::arg("grad_h") = kSdfGradientStep,
           "SDF solid walls for the fluid (same flat node encoding as Tessellation.set_geometry).\n"
           "The cells are clipped by the solid; the EOS pressure acts on the wall facets (the wall\n"
-          "pushes back). Call before init().")
+          "pushes back). Before init().")
       .def("clear_geometry", &Sim::clear_geometry, "Drop the SDF geometry (before init()).")
       .def("init", &Sim::init,
-           "Build the first tessellation and forces from the particle state set above.")
+           "Build the first tessellation and forces from the particle state set above (checks "
+           "that every per-particle array has the N of set_masses).")
       .def("set_dt", &Sim::set_dt, nb::arg("dt"),
            "Set the time step. The suite-wide way to configure a stepper "
            "(suite/docs/NAMING.md 1.5) — `flow.Solver`, `dem.Simulation` and "
@@ -1595,7 +2216,7 @@ NB_MODULE(_voro, m) {
       .def_prop_ro("dt", &Sim::dt, "The stored time step (0 until `set_dt`).")
       .def("step", &Sim::step, nb::arg("num_steps"),
            "Advance the velocity-Verlet dynamics by `num_steps` steps of the stored time step "
-           "(`set_dt`); raises if none was set.")
+           "(`set_dt`); raises before init() and if no dt was set.")
       .def("get_positions", &Sim::get_positions, "Current particle positions (N,3) float64.")
       .def("get_velocities", &Sim::get_velocities, "Current particle velocities (N,3) float64.")
       .def("get_forces", &Sim::get_forces,
@@ -1610,7 +2231,10 @@ NB_MODULE(_voro, m) {
       .def("get_volumes", &Sim::get_volumes,
            "Per-particle Voronoi cell volume (N,) float64 (a copy).")
       .def("get_neighbor_counts", &Sim::get_neighbor_counts,
-           "Per-particle Voronoi neighbour (facet) count (N,) int32 (a copy).");
+           "Per-particle Voronoi neighbour (facet) count (N,) int32 (a copy).")
+      .def_prop_ro(
+          "diagnostics", [](Sim& s) { return SimDiagnostics{&s}; }, nb::keep_alive<0, 1>(),
+          "The diagnostics tier: set_repair().");
 
 #ifdef PECLET_VORO_MPI
   // ---- VoronoiHalo (distributed) ----------------------------------------------------------------
@@ -1628,31 +2252,112 @@ NB_MODULE(_voro, m) {
                     "its neighbours\n"
                     "present). `rcut` must exceed the largest owned-cell interaction distance (a "
                     "few mean spacings).\n"
+                    "For moving points use DistributedTessellation (the repair driver over this "
+                    "halo).\n"
                     "Auto-initialises MPI (MPI_COMM_WORLD). Drive it from mpi4py.")
-      .def(
-          nb::init<std::array<real_t, 3>, std::array<real_t, 3>, std::array<long, 3>,
-                   std::array<bool, 3>>(),
-          nb::arg("origin"), nb::arg("size"), nb::arg("gsize"), nb::arg("periodic"),
-          "Build the ORB decomposition of the box [origin, origin+size) on `gsize` ORB cells with\n"
-          "per-axis `periodic` flags, over MPI_COMM_WORLD.")
-      .def("rank", &VHalo::rank, "This rank's MPI index.")
-      .def("size", &VHalo::size, "Number of MPI ranks.")
+      .def(nb::init<std::array<long, 3>, std::array<real_t, 3>, std::array<real_t, 3>,
+                    std::array<bool, 3>>(),
+           nb::arg("cells"), nb::kw_only(), nb::arg("extent"),
+           nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
+           nb::arg("periodic") = std::array<bool, 3>{true, true, true},
+           "Build the ORB decomposition of the box [origin, origin+extent) on `cells` ORB cells "
+           "per axis\nwith per-axis `periodic` flags, over MPI_COMM_WORLD (the suite-wide domain "
+           "quartet, as\npeclet.core.mpi.ParticleHalo).")
+      .def_prop_ro("rank", &VHalo::rank, "This rank's MPI index.")
+      .def_prop_ro("num_ranks", &VHalo::num_ranks, "Number of MPI ranks.")
       .def("owned_mask", &VHalo::owned_mask, nb::arg("positions"),
            "Mask (N,) int32 over the given positions (N,3): 1 where this rank owns the point, else "
            "0.")
-      .def("owner_of", &VHalo::owner_of, nb::arg("x"), nb::arg("y"), nb::arg("z"),
+      .def("owner_of", &VHalo::owner_of, nb::arg("point"),
            "Owning rank of a single point (x, y, z).")
-      .def("gather", &VHalo::gather, nb::arg("owned_pos"), nb::arg("owned_gid"),
-           nb::arg("owned_weight"), nb::arg("rcut"),
-           "Gather ghost seeds within `rcut` of this rank's owned seeds. Inputs: owned_pos (N,3)\n"
-           "float64, owned_gid (N,) int64, owned_weight (N,) float64. Returns a tuple\n"
-           "(pos (M,3) float64, gid (M,) int64, weight (M,) float64, n_owned): rows [0,n_owned) "
-           "are the\n"
-           "owned seeds, [n_owned,M) the gathered ghosts (with their owners' global ids/weights).")
-      .def("refresh_positions", &VHalo::refresh_positions, nb::arg("owned_pos"),
+      .def("gather", &VHalo::gather, nb::arg("positions"), nb::arg("gids"),
+           nb::arg("weights") = nb::none(), nb::arg("rcut"),
+           "Gather ghost seeds within `rcut` of this rank's owned seeds. Inputs: the owned "
+           "positions\n(N,3) float64, their global ids (N,) int64, optional power weights (N,) "
+           "float64 (zeros if\nNone). Returns a tuple (pos (M,3) float64, gid (M,) int64, weight "
+           "(M,) float64, n_owned):\nrows [0,n_owned) are the owned seeds, [n_owned,M) the "
+           "gathered ghosts (with their owners'\nglobal ids/weights).")
+      .def("refresh_positions", &VHalo::refresh_positions, nb::arg("positions"),
            "Position-only halo refresh (Verlet fast path): re-forward the current owned positions\n"
            "(N,3) onto the topology of the last `gather`, returning the combined owned+ghost "
-           "positions\n"
-           "(M,3) in the same order as that gather (no re-decomposition / ghost re-selection).");
+           "positions\n(M,3) in the same order as that gather (no re-decomposition / ghost "
+           "re-selection).");
+
+  // ---- DistributedTessellation (distributed repair driver) ----------------------------------------
+  nb::class_<DTessDiagnostics>(m, "DistributedTessellationDiagnostics",
+                               "Instruments of a DistributedTessellation (reached as "
+                               "`d.diagnostics`).")
+      .def_prop_ro(
+          "num_regathers", [](DTessDiagnostics& d) { return d.d->num_regathers(); },
+          "Number of collective re-gather + cold-rebuild events since construction (establish "
+          "counts as one).");
+
+  nb::class_<DTess>(
+      m, "DistributedTessellation",
+      doc("Distributed (MPI) moving-point Voronoi tessellation: VoronoiHalo's ORB decomposition + "
+          "ghost\ngather composed with the device incremental repair under the distributed "
+          "Verlet-skin\ninvariant (peclet::voro::mpi::DistributedMovingTessellation, gated by "
+          "tests/kokkos_mpi at\nnp = 1, 2, 4). Each rank owns the seeds `owned_mask` selects; "
+          "`establish` gathers the ghosts\nwithin rcut and cold-builds; every `step` refreshes the "
+          "ghost positions on the established\ntopology and repairs locally — until any rank's "
+          "owned displacement since the last gather\nexceeds skin/2, when ALL ranks re-gather and "
+          "rebuild (a collective decision). The owned\ncells [0, num_owned) equal a cold rebuild "
+          "of the same combined positions to the certificate\ntolerance. rcut, skin and "
+          "tolerance are fractions of the mean spacing cbrt(V/N_global)\n(defaults " +
+          fmt(kDistributedRcut) + ", " + fmt(kSkin) + ", " + fmt(kCertificateTolerance) +
+          "). Collective calls: establish, step. Auto-initialises MPI\n(MPI_COMM_WORLD). "
+          "Instruments: `diagnostics`."))
+      .def(nb::init<std::array<long, 3>, std::array<real_t, 3>, std::array<real_t, 3>,
+                    std::array<bool, 3>, real_t, real_t, real_t>(),
+           nb::arg("cells") = std::array<long, 3>{kDistributedCells, kDistributedCells,
+                                                  kDistributedCells},
+           nb::kw_only(), nb::arg("extent"), nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
+           nb::arg("periodic") = std::array<bool, 3>{true, true, true},
+           nb::arg("rcut") = kDistributedRcut, nb::arg("skin") = kSkin,
+           nb::arg("tolerance") = kCertificateTolerance,
+           doc("DistributedTessellation(cells=(" + fmt((int)kDistributedCells) + ",)*3, *, extent, "
+               "origin=(0,0,0), periodic=(True,)*3,\nrcut=" +
+               fmt(kDistributedRcut) + ", skin=" + fmt(kSkin) + ", tolerance=" +
+               fmt(kCertificateTolerance) +
+               "): `cells` is the ORB granularity per axis; `extent`\nthe box size; origin and "
+               "periodic are checked as in Tessellation.set_domain."))
+      .def_prop_ro("rank", &DTess::rank, "This rank's MPI index.")
+      .def_prop_ro("num_ranks", &DTess::num_ranks, "Number of MPI ranks.")
+      .def("owned_mask", &DTess::owned_mask, nb::arg("positions"),
+           "Mask (N,) int32 over the given positions (N,3): 1 where this rank owns the point.")
+      .def("set_geometry", &DTess::set_geometry, nb::arg("node_ints"), nb::arg("node_reals"),
+           nb::arg("root") = 0, nb::arg("grad_h") = kSdfGradientStep,
+           "Replicated SDF solid (every rank passes the same scene), as Tessellation.set_geometry. "
+           "Before establish().")
+      .def("clear_geometry", &DTess::clear_geometry,
+           "Drop the SDF geometry (before establish()).")
+      .def("set_wall_mode", &DTess::set_wall_mode, nb::arg("mode"),
+           nb::arg("skin_frac") = kWallSkin,
+           doc("Wall re-gather policy, as Tessellation.set_wall_mode: mode one of " +
+               std::string(kWallModeList) + ". Before establish()."))
+      .def("establish", &DTess::establish, nb::arg("positions"), nb::arg("gids"),
+           nb::arg("weights") = nb::none(),
+           "Collective: gather the ghosts of this rank's owned seeds (positions (N,3), global ids "
+           "(N,)\nint64, optional weights (N,)) and cold-build the combined tessellation. Call "
+           "once, and\nagain whenever ownership changes.")
+      .def("step", &DTess::step, nb::arg("positions"),
+           "Collective: advance to the new owned positions (N,3, same N and ownership as "
+           "establish).\nReturns the Tessellation.step stats dict plus 'regathered' (True when "
+           "this step took the\nre-gather + cold-rebuild path; the repair stats are then zero).")
+      .def_prop_ro("num_owned", &DTess::num_owned, "This rank's owned cell count.")
+      .def_prop_ro("num_combined", &DTess::num_combined,
+                   "Owned + ghost seed count of this rank's tessellation after the last gather.")
+      .def("get_volumes", &DTess::get_volumes,
+           "Owned-cell volumes (num_owned,) float64 (a copy), in establish() order.")
+      .def("get_neighbor_counts", &DTess::get_neighbor_counts,
+           "Owned-cell neighbour counts (num_owned,) int32 (a copy).")
+      .def("get_wall_counts", &DTess::get_wall_counts,
+           "Owned-cell resident SDF wall plane counts (num_owned,) int32 (a copy).")
+      .def("get_combined_gids", &DTess::get_combined_gids,
+           "Global ids (num_combined,) int64 of the owned + ghost seeds after the last gather "
+           "(owned\nfirst, in establish() order).")
+      .def_prop_ro(
+          "diagnostics", [](DTess& d) { return DTessDiagnostics{&d}; }, nb::keep_alive<0, 1>(),
+          "The diagnostics tier: num_regathers.");
 #endif
 }

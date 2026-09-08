@@ -186,9 +186,8 @@ int main(int argc, char** argv) {
       }
       auto R = peclet::voro::interfaceMinimize<real_t>(pos, type, 1.0, boxL, N, sw,
                                                        peclet::voro::NoSdf{}, 120, 1e-9, true);
-      const double ratio = R.meanVolErr;        // E_final / E_initial
-      const bool pass = R.nEmpty == 0 || true;  // no degeneracy gate; require energy decrease
-      const bool ok = pass && ratio < 0.9;
+      const double ratio = R.energyRatio;  // E_final / E_initial: require an energy decrease
+      const bool ok = ratio < 0.9;
       std::printf("  (D) interface  E_final/E_0=%.3f  iters=%d  %s\n", ratio, R.iters,
                   ok ? "OK" : "FAIL");
       rc |= ok ? 0 : 1;
