@@ -544,6 +544,8 @@ struct ConvexCell {
   /// keep stale plane indices (never read). Returns the number of planes removed.
   KOKKOS_INLINE_FUNCTION int compactPlanes() {
     unsigned char used[MAXP];
+    if (np > MAXP)  // never true (clip caps np at MAXP); bounds the loops for the compiler
+      np = MAXP;
     for (int k = 0; k < np; ++k)
       used[k] = (k < 6) ? 1 : 0;
     for (int t = 0; t < nt; ++t)
@@ -681,7 +683,15 @@ struct ConvexCell {
   /// the commit test's own maximum, in distance units (== planeGap(pdir, d)); negative when the
   /// plane misses the cell. The near-miss recording reads it instead of re-scanning the vertices.
   KOKKOS_INLINE_FUNCTION bool clip(const Real pdir[3], Real d, int nbr, Real* gapOut = nullptr) {
-    if (np >= MAXP) {
+    // The plane list keeps every plane that cut when it was committed, including those a later
+    // plane made redundant (no live triangle any more) — typically 2–3× the face count. At the
+    // cap, drop those first (compactPlanes: geometry and topology unchanged, indices renumbered)
+    // and overflow only if the LIVE planes fill MAXP. Without this the overflow depended on the
+    // insertion order: a 29-face cell committed 59 planes in one gather order and 64 in another
+    // (thread-scheduling of the counting-sort scatter), and was silently published with zero
+    // volume in the latter. Callers holding plane indices across a clip must keep headroom
+    // (clipCellAgainstSdf compacts up front for exactly that reason).
+    if (np >= MAXP && compactPlanes() == 0) {
       overflow = true;
       if (gapOut)
         *gapOut = Real(-1e30);

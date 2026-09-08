@@ -64,7 +64,7 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
   // ---- 1. per-cell live-face count (topology only: the >=3-incident-live-triangle criterion) ----
   Kokkos::View<int*, Mem> facetCount("rp.facetCount", static_cast<std::size_t>(N));
   Kokkos::View<int*, Mem> edgeCount("rp.edgeCount", withAreaGrad ? static_cast<std::size_t>(N) : 0);
-  constexpr int kMaxF = 50;  // CellBuilder::MAXF_TMP
+  constexpr int kMaxF = MAXP;  // == CellBuilder::MAXF_TMP: what the cold build can publish
   const bool wag = withAreaGrad;
   Kokkos::parallel_for(
       "reevalPublish.count", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {

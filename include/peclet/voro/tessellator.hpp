@@ -768,45 +768,61 @@ TessellatorResult<Real> buildTessellation(
   // Global over-buffer capacity: the published CSR holds the *sum* of all cells'
   // facets ≈ N × mean-faces-per-cell (~15.5 for random Poisson–Voronoi). Sizing it at
   // N × MAXF_TMP over-allocated ~3× and OOM'd the GPU at large N (≈15 GB at N=4M). A
-  // mean-facet estimate with headroom (N×18, ~16% over the aggregate mean) is ample —
-  // the *sum* has negligible relative variance — and the atomic overflow guard below
-  // flags the rare cell whose reservation would exceed it instead of writing past the
-  // end. (The interleaved copy-and-free in the pack keeps peak memory near this size.)
+  // mean-facet estimate with headroom (N×18, ~16% over the aggregate mean) is the FIRST
+  // attempt. It is only an estimate: a wall-heavy tessellation (a concave SDF wall runs
+  // every wall cell to the 24-cut cap, ~40 faces per wall cell) exceeds it, and the cells
+  // that lose the race for the tail of the buffer are then published with NO facets — a
+  // thread-scheduling-dependent set (measured: 400–600 of 12000 cavity cells, wall-facet
+  // counts 19983 vs 20845 run to run). The cursor's final value is the EXACT demand (every
+  // cell reserves before it checks), so on overflow the over-buffers are re-allocated at
+  // that demand and the build is re-run — the rare case pays one more build; the result
+  // never depends on which cells finished last.
   constexpr size_t kMeanFacets = 18;
-  const size_t facetCap = (size_t)N * kMeanFacets;
+  size_t facetCap = (size_t)N * kMeanFacets;
   using Kokkos::view_alloc;
   using Kokkos::WithoutInitializing;
-  Kokkos::View<int*, MemSpace> oNbr(view_alloc(std::string("oNbr"), WithoutInitializing), facetCap);
-  Kokkos::View<Real*, MemSpace> oArea(view_alloc(std::string("oArea"), WithoutInitializing),
-                                      facetCap * 3);
-  Kokkos::View<Real*, MemSpace> oDV(view_alloc(std::string("oDV"), WithoutInitializing),
-                                    facetCap * 3);
-  Kokkos::View<Real*, MemSpace> oConn(view_alloc(std::string("oConn"), WithoutInitializing),
-                                      facetCap * 3);
+  Kokkos::View<int*, MemSpace> oNbr;
+  Kokkos::View<Real*, MemSpace> oArea, oDV, oConn;
   Kokkos::View<int*, MemSpace> facetCursor("facetCursor", 1);  // zero-initialised
   // Rung A3: facet-edge area-Jacobian over-buffer (opt-in). A face has ~5.2 edges on average
-  // (Poisson–Voronoi), so ~6.2 entries per facet incl. the self slot; cap at 8 per facet.
-  const size_t edgeCap = withAreaGrad ? facetCap * 8 : 0;
+  // (Poisson–Voronoi), so ~6.2 entries per facet incl. the self slot; cap at 8 per facet — the
+  // same estimate-then-exact rule as the facet cap (its cursor is the exact edge demand too).
+  size_t edgeCap = withAreaGrad ? facetCap * 8 : 0;
   Kokkos::View<int*, MemSpace> oEdgeOff, oEdgeCnt, oEdgeFacet, edgeCursor;
   Kokkos::View<Real*, MemSpace> oEdgeGrad, oEdgeLen;
-  if (withAreaGrad) {
-    oEdgeOff = Kokkos::View<int*, MemSpace>(
-        view_alloc(std::string("oEdgeOff"), WithoutInitializing), facetCap);
-    oEdgeCnt = Kokkos::View<int*, MemSpace>(
-        view_alloc(std::string("oEdgeCnt"), WithoutInitializing), facetCap);
-    oEdgeFacet = Kokkos::View<int*, MemSpace>(
-        view_alloc(std::string("oEdgeFacet"), WithoutInitializing), edgeCap);
-    oEdgeGrad = Kokkos::View<Real*, MemSpace>(
-        view_alloc(std::string("oEdgeGrad"), WithoutInitializing), edgeCap * 3);
-    oEdgeLen = Kokkos::View<Real*, MemSpace>(
-        view_alloc(std::string("oEdgeLen"), WithoutInitializing), edgeCap * 4);
+  if (withAreaGrad)
     edgeCursor = Kokkos::View<int*, MemSpace>("edgeCursor", 1);
-  }
   // Track B (B1): per-facet second moments (opt-in), over-buffered like the facet arrays.
   Kokkos::View<Real*, MemSpace> oMoment2;
-  if (withMoments)
-    oMoment2 = Kokkos::View<Real*, MemSpace>(
-        view_alloc(std::string("oMoment2"), WithoutInitializing), facetCap);
+  // (Re)allocate every over-buffer at the current caps and rewind the cursors.
+  auto allocOverBuffers = [&]() {
+    oNbr = Kokkos::View<int*, MemSpace>(view_alloc(std::string("oNbr"), WithoutInitializing),
+                                        facetCap);
+    oArea = Kokkos::View<Real*, MemSpace>(view_alloc(std::string("oArea"), WithoutInitializing),
+                                          facetCap * 3);
+    oDV = Kokkos::View<Real*, MemSpace>(view_alloc(std::string("oDV"), WithoutInitializing),
+                                        facetCap * 3);
+    oConn = Kokkos::View<Real*, MemSpace>(view_alloc(std::string("oConn"), WithoutInitializing),
+                                          facetCap * 3);
+    Kokkos::deep_copy(facetCursor, 0);
+    if (withAreaGrad) {
+      oEdgeOff = Kokkos::View<int*, MemSpace>(
+          view_alloc(std::string("oEdgeOff"), WithoutInitializing), facetCap);
+      oEdgeCnt = Kokkos::View<int*, MemSpace>(
+          view_alloc(std::string("oEdgeCnt"), WithoutInitializing), facetCap);
+      oEdgeFacet = Kokkos::View<int*, MemSpace>(
+          view_alloc(std::string("oEdgeFacet"), WithoutInitializing), edgeCap);
+      oEdgeGrad = Kokkos::View<Real*, MemSpace>(
+          view_alloc(std::string("oEdgeGrad"), WithoutInitializing), edgeCap * 3);
+      oEdgeLen = Kokkos::View<Real*, MemSpace>(
+          view_alloc(std::string("oEdgeLen"), WithoutInitializing), edgeCap * 4);
+      Kokkos::deep_copy(edgeCursor, 0);
+    }
+    if (withMoments)
+      oMoment2 = Kokkos::View<Real*, MemSpace>(
+          view_alloc(std::string("oMoment2"), WithoutInitializing), facetCap);
+  };
+  allocOverBuffers();
   // Rung A1 (force half): per-cell wall FD outputs (opt-in; SDF builds only).
   Kokkos::View<Real*, MemSpace> oWallDV, oWallDA;
   if (withWallFD && !std::is_same_v<Sdf, NoSdf>) {
@@ -896,12 +912,45 @@ TessellatorResult<Real> buildTessellation(
                                                          oMoment2};
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
-  Kokkos::parallel_for(
-      "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int pi) {
-        if (binnedV0(pi) >= nBuildL)
-          return;  // candidate-only seed: skip its cell
-        op.buildCell(pi);
-      });
+  int nFacetsRaw = 0, nEdgesRaw = 0;
+  for (int attempt = 0;; ++attempt) {
+    Kokkos::parallel_for(
+        "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int pi) {
+          if (binnedV0(pi) >= nBuildL)
+            return;  // candidate-only seed: skip its cell
+          op.buildCell(pi);
+        });
+    Kokkos::deep_copy(nFacetsRaw, Kokkos::subview(facetCursor, 0));
+    if (withAreaGrad)
+      Kokkos::deep_copy(nEdgesRaw, Kokkos::subview(edgeCursor, 0));
+    const bool facetOver = (size_t)nFacetsRaw > facetCap;
+    const bool edgeOver = withAreaGrad && (size_t)nEdgesRaw > edgeCap;
+    if (!(facetOver || edgeOver) || attempt >= 2)
+      break;
+    // The estimate was too small: the cursors hold the exact demand. Re-allocate at that size
+    // and rebuild; every per-cell output is rewritten by the second pass (the cell builder
+    // assigns, never accumulates, and the cursors are rewound), so nothing stale survives.
+    if (facetOver)
+      facetCap = (size_t)nFacetsRaw;
+    if (edgeOver)
+      edgeCap = (size_t)nEdgesRaw;
+    if (prof)
+      std::fprintf(stderr, "[tess.build] over-buffer exceeded (facets %d, edges %d): rebuilding\n",
+                   nFacetsRaw, nEdgesRaw);
+    allocOverBuffers();
+    op.oNbr = oNbr;
+    op.oArea = oArea;
+    op.oDV = oDV;
+    op.oConn = oConn;
+    op.facetCap = facetCap;
+    op.oEdgeOff = oEdgeOff;
+    op.oEdgeCnt = oEdgeCnt;
+    op.oEdgeFacet = oEdgeFacet;
+    op.oEdgeGrad = oEdgeGrad;
+    op.oEdgeLen = oEdgeLen;
+    op.edgeCap = edgeCap;
+    op.oMoment2 = oMoment2;
+  }
 
   if (prof) {
     Kokkos::fence();
@@ -914,8 +963,6 @@ TessellatorResult<Real> buildTessellation(
   // cell's facets contiguous at cellFacetBase(i)); we only copy its used prefix into a
   // right-sized view (a contiguous read+write — no exclusive scan, no strided gather,
   // no minimal-image recompute that the old temp->CSR compaction paid).
-  int nFacetsRaw = 0;
-  Kokkos::deep_copy(nFacetsRaw, Kokkos::subview(facetCursor, 0));
   // Clamp to capacity: if the over-buffer overflowed (rare; flagged per-cell above),
   // the cursor ran past the end and only [0,facetCap) holds valid, indexable facets.
   const int nFacets = (size_t)nFacetsRaw > facetCap ? (int)facetCap : nFacetsRaw;
@@ -1003,8 +1050,6 @@ TessellatorResult<Real> buildTessellation(
     Kokkos::deep_copy(view.facetMoment2, Kokkos::subview(oMoment2, std::make_pair(0, nFacets)));
   }
   if (withAreaGrad) {
-    int nEdgesRaw = 0;
-    Kokkos::deep_copy(nEdgesRaw, Kokkos::subview(edgeCursor, 0));
     const int nEdges = (size_t)nEdgesRaw > edgeCap ? (int)edgeCap : nEdgesRaw;
     view.facetEdgeOffset = Kokkos::View<int*, MemSpace>(
         view_alloc(std::string("facetEdgeOffset"), WithoutInitializing), nFacets);

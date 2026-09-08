@@ -12,11 +12,16 @@
  * would swamp the wall placement. MEASURED (host-openmp, 2026-09-03), relative fluid-volume
  * error |ΣV/V_exact − 1|:
  *     sphere  N=4k/12k/32k   tangent 2.0e-3 / 9.8e-4 / 5.5e-4   sagitta 2.3e-5 / 1.7e-5 / 3.2e-5
- *     cavity  N=4k/12k/32k   tangent 3.0e-5 / 2.0e-5 / 6.5e-5   sagitta 9.2e-7 / 1.1e-4 / 1.9e-5
+ *     cavity  N=4k/12k/32k   tangent 2.8e-4 / 1.3e-4 / 6.5e-5   sagitta 9.2e-7 / 4.3e-7 / 2.1e-7
+ * (cavity re-measured 2026-09-08: the earlier 1.1e-4 at N=12k was ONE 29-face cell published
+ * with zero volume — its gather committed 64 planes in one thread order and 59 in another; the
+ * plane list is now compacted at the cap, and the facet over-buffer rebuilds at its exact demand
+ * instead of dropping the last-finished cells' facets — so the wall-facet counts are identical
+ * at every thread count.)
  * Gates: convex sphere — the corrected error is 10x below the tangent error (or < 2e-5) and
- * < 1e-4 at every N; concave cavity — both methods sit at a non-monotone ~1e-5..1e-4 floor (the
- * multi-plane vertex cuts already circumscribe the wall), so the correction only has to stay
- * below 2e-4. The floor itself (the 24-cut cap, chord planes) is the remaining A1 item.
+ * < 1e-4 at every N; concave cavity — the tangent clip sits at a ~1e-4 floor (the 24-cut cap:
+ * every wall cell runs to it, the residual solid is the sagitta of each facet) and the
+ * correction must stay well below it, < 2e-4 (measured ~1e-6, second order in h).
  */
 #include <cmath>
 #include <cstdio>
