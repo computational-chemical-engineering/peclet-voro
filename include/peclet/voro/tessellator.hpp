@@ -937,6 +937,19 @@ TessellatorResult<Real> buildTessellation(
     if (prof)
       std::fprintf(stderr, "[tess.build] over-buffer exceeded (facets %d, edges %d): rebuilding\n",
                    nFacetsRaw, nEdgesRaw);
+    // Release the first attempt's buffers (both the locals and the builder's copies) BEFORE
+    // allocating the larger ones, so the peak stays at one over-buffer set, not two.
+    Kokkos::fence();
+    op.oNbr = oNbr = Kokkos::View<int*, MemSpace>();
+    op.oArea = oArea = Kokkos::View<Real*, MemSpace>();
+    op.oDV = oDV = Kokkos::View<Real*, MemSpace>();
+    op.oConn = oConn = Kokkos::View<Real*, MemSpace>();
+    op.oEdgeOff = oEdgeOff = Kokkos::View<int*, MemSpace>();
+    op.oEdgeCnt = oEdgeCnt = Kokkos::View<int*, MemSpace>();
+    op.oEdgeFacet = oEdgeFacet = Kokkos::View<int*, MemSpace>();
+    op.oEdgeGrad = oEdgeGrad = Kokkos::View<Real*, MemSpace>();
+    op.oEdgeLen = oEdgeLen = Kokkos::View<Real*, MemSpace>();
+    op.oMoment2 = oMoment2 = Kokkos::View<Real*, MemSpace>();
     allocOverBuffers();
     op.oNbr = oNbr;
     op.oArea = oArea;
