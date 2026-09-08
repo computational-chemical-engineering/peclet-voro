@@ -758,9 +758,9 @@ TessellatorResult<Real> buildTessellation(
   // fixed-stride temp slab, no exclusive scan, and the connecting vector is the cut's own
   // plane vector (no minimal-image recompute). The buffer is over-allocated to a tight
   // facet cap; the used prefix [0,nFacets) is copied to a compact view at the end.
-  // Per-cell facet cap: the most facets one Voronoi/Power cell may publish (a single
-  // cell rarely exceeds ~40 faces); bounds the per-cell `faces[]` stack array.
-  constexpr int MAXF_TMP = 50;
+  // Per-cell facet cap: MAXF_TMP (the class constant) is the most facets one Voronoi/Power
+  // cell may publish (a single cell rarely exceeds ~40 faces); bounds the per-cell `faces[]`
+  // stack array.
   // Global over-buffer capacity: the published CSR holds the *sum* of all cells'
   // facets ≈ N × mean-faces-per-cell (~15.5 for random Poisson–Voronoi). Sizing it at
   // N × MAXF_TMP over-allocated ~3× and OOM'd the GPU at large N (≈15 GB at N=4M). A

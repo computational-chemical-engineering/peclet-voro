@@ -110,7 +110,6 @@ DecEdges<Real> buildDecEdges(const TessellationView<Real>& view, const FaceMesh<
   int skipped = 0;
   {
     auto FF = m.faceFacet;
-    auto A = m.faceCellA;
     auto B = m.faceCellB;
     auto off = d.offset;
     auto W = d.weight;
@@ -122,7 +121,7 @@ DecEdges<Real> buildDecEdges(const TessellationView<Real>& view, const FaceMesh<
     Kokkos::parallel_reduce(
         "dec.fill", Kokkos::RangePolicy<Exec>(0, nI),
         KOKKOS_LAMBDA(const int f, int& sk) {
-          const int g = FF(f), a = A(f), b = B(f);
+          const int g = FF(f), b = B(f);
           const int eb = view.facetEdgeOffset(g), ec = view.facetEdgeCount(g);
           int out = off(f);
           // r_AB = connector of facet g

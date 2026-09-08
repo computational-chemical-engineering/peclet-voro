@@ -64,6 +64,19 @@ int main(int argc, char** argv) {
     int rank = 0, np = 1;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &np);
+    // Harness guard against the silent-singleton trap: a launcher from a DIFFERENT MPI than the one
+    // linked (e.g. a ParaView hydra on PATH vs the system OpenMPI) starts np independent singletons,
+    // each of which passes a multi-rank-vs-single-rank check trivially. ctest sets the expected size.
+    if (const char* e = std::getenv("PECLET_VORO_EXPECT_NP")) {
+      if (std::atoi(e) != np) {
+        if (rank == 0)
+          std::fprintf(stderr, "FAIL: MPI_COMM_WORLD size %d != expected %s (launcher/library mismatch?)\n",
+                       np, e);
+        Kokkos::finalize();
+        MPI_Finalize();
+        return 1;
+      }
+    }
     const int n = argc > 1 ? std::atoi(argv[1]) : 12;
     const int steps = argc > 2 ? std::atoi(argv[2]) : 20;
     const Real L = 1, h = L / n, nu = 0.01, dt = 0.2 * h;

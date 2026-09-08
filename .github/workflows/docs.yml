@@ -32,7 +32,6 @@ jobs:
           sudo apt-get install -y \
             cmake \
             ninja-build \
-            libboost-dev \
             doxygen \
             graphviz
 

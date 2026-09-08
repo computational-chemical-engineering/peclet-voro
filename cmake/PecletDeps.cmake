@@ -19,6 +19,9 @@ set(PECLET_ARBORX_TAG "v2.1"  CACHE STRING "Vendored ArborX git tag")
 set(PECLET_CORE_TAG    "v0.6.1"  CACHE STRING "Vendored core git tag (headers)")
 set(PECLET_MORTON_TAG "v0.2.1"  CACHE STRING "Vendored morton git tag (headers)")
 option(PECLET_VENDOR_DEPS "Force FetchContent-build of Kokkos/ArborX/siblings (self-contained wheel)" OFF)
+# Fetch ONLY the sibling headers (core, morton) at their pinned tags even when sibling checkouts exist,
+# keeping Kokkos from the prefix: what CI's configure-only step uses to prove the pinned tags resolve.
+option(PECLET_VENDOR_SIBLINGS "Force FetchContent of the core/morton headers at PECLET_*_TAG" OFF)
 
 # nanobind — found via the active interpreter (scikit-build-core supplies it as a build requirement),
 # identical to the umbrella SuiteNanobind helper but vendored so an isolated sdist build needs no ../cmake.
@@ -106,7 +109,7 @@ endmacro()
 # FetchContent-fetched source tree's include/ (header-only — declared but not built).
 function(peclet_sibling_include repo tag sibling_reldir outvar)
   set(_local "${CMAKE_CURRENT_SOURCE_DIR}/${sibling_reldir}/include")
-  if(EXISTS "${_local}" AND NOT PECLET_VENDOR_DEPS)
+  if(EXISTS "${_local}" AND NOT PECLET_VENDOR_DEPS AND NOT PECLET_VENDOR_SIBLINGS)
     set(${outvar} "${_local}" PARENT_SCOPE)
     return()
   endif()

@@ -1,0 +1,40 @@
+name: Quality
+
+# Code-quality gates. Python hard-fails on the critical ruff codes only (syntax errors, undefined
+# names, bad string formatting / comparisons). The C++ clang-format check is BLOCKING: the tree was
+# reformatted with clang-format 18.1.8 (the venv's), which is what is pinned here — the repo
+# .clang-format is the single source of style.
+
+on:
+  push:
+    branches: [main, "**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-lint:
+    name: ruff (critical errors)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - name: Ruff critical-error check
+        run: ruff check python tests tools examples --select E9,F63,F7,F82
+
+  cpp-format:
+    name: clang-format (blocking)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install "clang-format==18.1.8"
+      - name: clang-format dry-run over include/ src/ tests/ (uses the repo .clang-format)
+        run: CLANG_FORMAT_BIN=clang-format bash tools/clang_format_check.sh

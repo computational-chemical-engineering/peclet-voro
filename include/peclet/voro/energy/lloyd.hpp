@@ -66,7 +66,8 @@ void cellCentroids(const TessellationView<Real>& view,
 /// view carries facet second moments (`withMoments`), else −1 (gradient only).
 template <class Real>
 Real lloydEnergyForce(const TessellationView<Real>& view,
-                      const Kokkos::View<Real*, peclet::core::MemSpace>& pos, Real gamma,
+                      [[maybe_unused]] const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
+                      Real gamma,
                       const Kokkos::View<Real*, peclet::core::MemSpace>& force) {
   using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();

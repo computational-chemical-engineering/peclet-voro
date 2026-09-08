@@ -18,7 +18,7 @@ fi
 echo "Using clang-format: ${CLANG_FORMAT}"
 "${CLANG_FORMAT}" --version
 
-find include tests \
+find include src tests \
   \( -name '*.hpp' -o -name '*.cpp' \) \
   -print \
   | sort \

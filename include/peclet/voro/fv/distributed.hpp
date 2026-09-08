@@ -125,7 +125,7 @@ struct GhostExchange {
       Kokkos::deep_copy(Kokkos::subview(dRecvBuf, std::make_pair((std::size_t)0, rb)),
                         Kokkos::View<const Real*, Kokkos::HostSpace>(self->hRecvBuf.data(), rb));
       const auto buf = dRecvBuf;
-      const int ncl = nc, base = nc * nOwned;
+      const int base = nc * nOwned;
       Kokkos::parallel_for(
           "gx.unpack", Kokkos::RangePolicy<Exec>(0, (int)rb),
           KOKKOS_LAMBDA(const int i) { f(base + i) = buf(i); });

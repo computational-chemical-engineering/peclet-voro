@@ -47,16 +47,19 @@ target_include_directories(voro_headers
     $<INSTALL_INTERFACE:include>
 )
 
-# ── Tests ─────────────────────────────────────────────────────────────────────
-# Only the Kokkos device tests remain (tests/kokkos, configured below). The legacy CPU half-edge
-# test suite (tests/) was retired together with the half-edge engine.
-option(PECLET_VORO_BUILD_TESTS "Build the test programs" ON)
-if(PECLET_VORO_BUILD_TESTS)
+# ── Tests / benchmarks ────────────────────────────────────────────────────────
+# Only the Kokkos device tests exist (tests/kokkos + tests/kokkos_mpi, configured below under
+# PECLET_VORO_KOKKOS). OFF by default so a wheel build (`pip install .`) compiles nothing but the
+# module; ON in CI and in the CLAUDE.md dev recipe. The MPI suite (tests/kokkos_mpi) joins the same
+# tree when PECLET_VORO_MPI=ON, so one tree per backend carries everything.
+option(PECLET_VORO_BUILD_TESTS "Build the test programs (ctest)" OFF)
+# The bench_* timing instruments (incl. the *_f32 precision variants and the Voro++ throughput
+# reference) are NOT tests: opt in. The one bench binary that doubles as a gate
+# (bench_dynamic_update --gates) is always built with the tests.
+option(PECLET_VORO_BUILD_BENCHMARKS "Build the bench_* timing instruments (ctest label `bench`)" OFF)
+if(PECLET_VORO_BUILD_TESTS OR PECLET_VORO_BUILD_BENCHMARKS)
   enable_testing()
 endif()
-
-# ── Benchmarks ────────────────────────────────────────────────────────────────
-# Device benchmarks live under tests/kokkos (bench_*); the legacy CPU benchmark suite was retired.
 
 # ── Python bindings ───────────────────────────────────────────────────────────
 # The Python surface is the device-native nanobind module `peclet.voro` (src/voro_bindings.cpp),
@@ -114,8 +117,11 @@ if(PECLET_VORO_KOKKOS)
     message(STATUS "voro: distributed path ENABLED (MPI + core)")
   endif()
 
-  if(PECLET_VORO_BUILD_TESTS)
+  if(PECLET_VORO_BUILD_TESTS OR PECLET_VORO_BUILD_BENCHMARKS)
     add_subdirectory(tests/kokkos)
+  endif()
+  if(PECLET_VORO_BUILD_TESTS AND PECLET_VORO_MPI)
+    add_subdirectory(tests/kokkos_mpi)   # np = 1, 2, 4 ctests, label `mpi` (also a standalone project)
   endif()
 
   # Device-native Python module `peclet.voro` (the de-legacy surface over the device tessellator +
@@ -170,15 +176,13 @@ if(PECLET_VORO_KOKKOS)
       install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/packaging/voro_init.py"
               DESTINATION peclet/voro RENAME __init__.py COMPONENT python)
     endif()
-    # Python smoke test (Tessellation + Simulation) — needs numpy in the active interpreter.
+    # Python smoke test (Tessellation + Simulation) on the interpreter the module was built for
+    # (Python_EXECUTABLE, from peclet_require_nanobind); needs numpy there.
     if(PECLET_VORO_BUILD_TESTS AND NOT DEFINED SKBUILD)
-      find_package(Python3 COMPONENTS Interpreter QUIET)
-      if(Python3_Interpreter_FOUND)
-        add_test(NAME test_voro_python
-                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_voro.py)
-        set_tests_properties(test_voro_python PROPERTIES
-          ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};OMP_PROC_BIND=false")
-      endif()
+      add_test(NAME test_voro_python
+               COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/python/test_voro.py)
+      set_tests_properties(test_voro_python PROPERTIES
+        ENVIRONMENT "PYTHONPATH=${CMAKE_CURRENT_BINARY_DIR};OMP_PROC_BIND=false")
     endif()
   endif()
 endif()

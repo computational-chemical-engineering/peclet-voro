@@ -52,7 +52,7 @@ void volumeGradientForce(const TessellationView<Real>& view,
         const Real de = dEdV(i);
         if (de == Real(0))
           return;
-        Real gl[detail::kMaxLocalFacets * 3];
+        Real gl[detail::kMaxLocalFacets * 3] = {};  // value-init: -Wmaybe-uninitialized
         const int b = view.facetBegin(i), nf = view.facetEnd(i) - b;
         if (nf > detail::kMaxLocalFacets)
           return;

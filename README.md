@@ -69,8 +69,8 @@ voro/
 ├── src/voro_bindings.cpp     # nanobind Python module (`peclet.voro`)
 ├── packaging/voro_init.py    # the package __init__ (+ redistribute_pore_mesh, sphere_union_scene)
 ├── python/test_voro.py       # Python smoke test (Tessellation, Simulation, FlowSolver, optimisers)
-├── tests/kokkos/                # device unit tests + benchmarks (registered under PECLET_VORO_KOKKOS)
-├── tests/kokkos_mpi/            # the MPI tests (standalone CMake project, np = 1, 2, 4)
+├── tests/kokkos/                # device unit tests (+ opt-in benchmarks, label `bench`)
+├── tests/kokkos_mpi/            # the MPI tests (np = 1, 2, 4; same tree under PECLET_VORO_MPI)
 ├── docs/                        # design notes, performance_report.md, architecture.dox
 └── CMakeLists.txt               # build system (Kokkos device path)
 ```
@@ -102,13 +102,14 @@ The Kokkos/ArborX backend and target architecture come from the bootstrapped pre
 
 ```bash
 # Point at the bootstrapped Kokkos prefix; clone core and morton as siblings.
-cmake -B build -DPECLET_VORO_KOKKOS=ON \
+cmake -B build -DPECLET_VORO_KOKKOS=ON -DPECLET_VORO_BUILD_TESTS=ON \
       -DCMAKE_PREFIX_PATH="$PWD/../extern/install/nvidia-cuda"
 cmake --build build --parallel
-ctest --test-dir build --output-on-failure        # device tests under tests/kokkos
+ctest --test-dir build -LE bench --output-on-failure   # tests/kokkos (+ tests/kokkos_mpi with MPI=ON)
 ```
 
-Add `-DPECLET_VORO_MPI=ON` to link MPI + `core` for the distributed path.
+Add `-DPECLET_VORO_MPI=ON` to link MPI + `core` for the distributed path; the MPI test suite
+(np = 1, 2, 4, ctest label `mpi`) then joins the same tree.
 
 ### CMake options
 
@@ -117,7 +118,8 @@ Add `-DPECLET_VORO_MPI=ON` to link MPI + `core` for the distributed path.
 | `PECLET_VORO_KOKKOS` | `OFF` | Build the Kokkos device path (`find_package(Kokkos)`) |
 | `PECLET_VORO_MPI` | `OFF` | Build the distributed path against MPI + core |
 | `PECLET_VORO_BUILD_PYTHON` | `OFF` | Build the device-native nanobind module `peclet.voro` (under `PECLET_VORO_KOKKOS`) |
-| `PECLET_VORO_BUILD_TESTS` | `ON` | Build the test executables and the `bench_*` benchmarks (both live in `tests/kokkos`) |
+| `PECLET_VORO_BUILD_TESTS` | `OFF` | Build the test executables (`tests/kokkos`, + `tests/kokkos_mpi` under `PECLET_VORO_MPI`) |
+| `PECLET_VORO_BUILD_BENCHMARKS` | `OFF` | Build the `bench_*` timing instruments (ctest label `bench`; fetches Voro++) |
 | `PECLET_VORO_BUILD_DOCS` | `OFF` | Build Doxygen HTML documentation |
 
 ---
@@ -205,8 +207,8 @@ For the distributed (MPI) validation scripts see [`mpi/README.md`](https://githu
 
 ### Formatting
 
-The codebase follows the Google C++ Style Guide, checked by `clang-format` (informational in
-CI, not enforced — the tree carries pre-existing violations; keep new code clean):
+The codebase follows the Google C++ Style Guide (`.clang-format`), enforced in CI with clang-format
+18.1.8 over `include/`, `src/` and `tests/`:
 
 ```bash
 CLANG_FORMAT_BIN=clang-format-18 bash tools/clang_format_check.sh

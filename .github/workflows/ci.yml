@@ -1,37 +1,45 @@
 name: CI
 
+# Build the Kokkos (OpenMP + Serial) backend from source (cached), then build peclet.voro + EVERY test
+# under PECLET_VORO_BUILD_TESTS and run them all: the single-rank suite (24, `ctest -LE bench`) in one
+# job, the MPI suite (18, label `mpi`, np = 1, 2, 4 oversubscribed) in another. Timing instruments are
+# labelled `bench` and are the only things excluded — nothing is dropped from `ctest -N`. GPU (CUDA/HIP)
+# backends are not exercisable on free runners; the host build is backend-agnostic Kokkos source.
+#
+# Hosted runners have 4 cores / 16 GB: thread pools are BOUNDED (OMP_NUM_THREADS=2 single-rank, 1 for
+# MPI) — an unbounded pool starves the runner ("lost communication with the server").
+
 on:
   push:
     branches: [main, master, develop]
   pull_request:
     branches: [main, master, develop]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+env:
+  KOKKOS_TAG: "5.1.1"   # keep in lockstep with ../tools/bootstrap_deps.sh and cmake/PecletDeps.cmake
+
 jobs:
-  # ── Kokkos device build & test ───────────────────────────────────────────────
-  # The library is the Kokkos device path; it depends on the core and morton
-  # sibling repos (checked out next to voro) and a Kokkos install. This builds the
-  # OpenMP backend from source and runs the device test suite.
+  # ── Single-rank device tests ─────────────────────────────────────────────────
   kokkos-openmp:
-    name: Build & test (Kokkos OpenMP)
+    name: Build & test (Kokkos OpenMP, all single-rank tests)
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
     steps:
       - name: Checkout voro
         uses: actions/checkout@v7
         with:
           path: voro
 
-      - name: Checkout core (sibling)
+      - name: Checkout core (sibling, main)
         uses: actions/checkout@v7
         with:
           repository: computational-chemical-engineering/peclet-core
           path: core
 
-      - name: Checkout morton (sibling)
+      - name: Checkout morton (sibling, main)
         uses: actions/checkout@v7
         with:
           repository: computational-chemical-engineering/peclet-morton
@@ -40,66 +48,138 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y cmake ninja-build libomp-dev g++
+          sudo apt-get install -y cmake ninja-build libomp-dev g++ python3-dev python3-pip
+          python3 -m pip install "nanobind==2.13.0" numpy
+
+      - name: Cache Kokkos install
+        id: kokkos-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/kokkos-install
+          key: kokkos-${{ env.KOKKOS_TAG }}-openmp-${{ runner.os }}
 
       - name: Build & install Kokkos (OpenMP + Serial)
+        if: steps.kokkos-cache.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 --branch 5.1.1 https://github.com/kokkos/kokkos.git /tmp/kokkos   # lockstep with ../tools/bootstrap_deps.sh KOKKOS_TAG (flow/pnm/dem CI pin the same)
+          git clone --depth 1 --branch "$KOKKOS_TAG" https://github.com/kokkos/kokkos.git /tmp/kokkos
           cmake -S /tmp/kokkos -B /tmp/kokkos/build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_INSTALL_PREFIX=$HOME/kokkos-install \
-            -DKokkos_ENABLE_OPENMP=ON \
-            -DKokkos_ENABLE_SERIAL=ON
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=20 \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DKokkos_ENABLE_OPENMP=ON -DKokkos_ENABLE_SERIAL=ON \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/kokkos-install"
           cmake --build /tmp/kokkos/build --parallel
           cmake --install /tmp/kokkos/build
 
-      - name: Configure (PECLET_VORO_KOKKOS=ON)
+      - name: Configure (tests + Python module)
         working-directory: voro
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DPECLET_VORO_KOKKOS=ON \
             -DPECLET_VORO_BUILD_TESTS=ON \
-            -DCMAKE_PREFIX_PATH=$HOME/kokkos-install
+            -DPECLET_VORO_BUILD_PYTHON=ON \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"
 
       - name: Build
         working-directory: voro
         run: cmake --build build --parallel
 
-      - name: Run device tests
+      - name: List tests
+        working-directory: voro
+        run: ctest --test-dir build -N
+
+      - name: Run all single-rank tests
+        working-directory: voro
+        env:
+          OMP_NUM_THREADS: "2"
+          OMP_PROC_BIND: "false"
+        run: ctest --test-dir build -LE bench --timeout 1200 --output-on-failure -j1
+
+      # The wheel builds against the PINNED core / morton tags (PECLET_CORE_TAG / PECLET_MORTON_TAG in
+      # cmake/PecletDeps.cmake), not the sibling checkouts above: prove those tags still resolve and
+      # configure (headers only; nothing is compiled here).
+      - name: Configure-only against the pinned core / morton tags
         working-directory: voro
         run: |
-          export OMP_PROC_BIND=false
-          ctest --test-dir build \
-            -R "test_kokkos_smoke|test_tessellation_invariants|test_convexcell_unit|test_convexcell_adj|test_pervertex_geometry|test_include_graph|bench_dynamic_update_gates" \
-            --output-on-failure --timeout 600
+          cmake -B build_tag -G Ninja \
+            -DPECLET_VORO_KOKKOS=ON -DPECLET_VORO_BUILD_TESTS=ON -DPECLET_VENDOR_SIBLINGS=ON \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"
 
-  # ── Format Check ─────────────────────────────────────────────────────────────
-  clang-format:
-    name: clang-format (informational)
+  # ── MPI (distributed) tests ──────────────────────────────────────────────────
+  mpi:
+    name: MPI tests (OpenMPI, np = 1, 2, 4)
     runs-on: ubuntu-24.04
-    continue-on-error: true
-    permissions:
-      contents: read
     steps:
-      - name: Checkout
+      - name: Checkout voro
         uses: actions/checkout@v7
+        with:
+          path: voro
 
-      - name: Install clang-format
+      - name: Checkout core (sibling, main)
+        uses: actions/checkout@v7
+        with:
+          repository: computational-chemical-engineering/peclet-core
+          path: core
+
+      - name: Checkout morton (sibling, main)
+        uses: actions/checkout@v7
+        with:
+          repository: computational-chemical-engineering/peclet-morton
+          path: morton
+
+      - name: Install dependencies
         run: |
           sudo apt-get update -q
-          sudo apt-get install -y clang-format-18
+          sudo apt-get install -y cmake ninja-build libomp-dev g++ libopenmpi-dev openmpi-bin
 
-      - name: Check formatting
+      - name: Cache Kokkos install
+        id: kokkos-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/kokkos-install
+          key: kokkos-${{ env.KOKKOS_TAG }}-openmp-${{ runner.os }}
+
+      - name: Build & install Kokkos (OpenMP + Serial)
+        if: steps.kokkos-cache.outputs.cache-hit != 'true'
         run: |
-          CLANG_FORMAT_BIN=clang-format-18 bash tools/clang_format_check.sh
+          git clone --depth 1 --branch "$KOKKOS_TAG" https://github.com/kokkos/kokkos.git /tmp/kokkos
+          cmake -S /tmp/kokkos -B /tmp/kokkos/build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_STANDARD=20 \
+            -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+            -DKokkos_ENABLE_OPENMP=ON -DKokkos_ENABLE_SERIAL=ON \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/kokkos-install"
+          cmake --build /tmp/kokkos/build --parallel
+          cmake --install /tmp/kokkos/build
+
+      # One tree carries both suites; this job builds only the three MPI binaries (the single-rank
+      # suite runs in the job above) and runs the `mpi` label. np=4 on a 4-vCPU runner needs
+      # --oversubscribe (OpenMPI counts physical cores as slots).
+      - name: Configure (MPI + tests)
+        working-directory: voro
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPECLET_VORO_KOKKOS=ON \
+            -DPECLET_VORO_MPI=ON \
+            -DPECLET_VORO_BUILD_TESTS=ON \
+            -DMPIEXEC_PREFLAGS=--oversubscribe \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"
+
+      - name: Build the MPI test binaries
+        working-directory: voro
+        run: cmake --build build --parallel --target bench_voronoi_mpi bench_repair_mpi test_flow_mpi
+
+      - name: Run the MPI suite
+        working-directory: voro
+        env:
+          OMP_NUM_THREADS: "1"
+          OMP_PROC_BIND: "false"
+        run: ctest --test-dir build -L mpi --timeout 1200 --output-on-failure -j1
 
   # ── Doxygen ──────────────────────────────────────────────────────────────────
   documentation:
     name: Doxygen documentation
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v7

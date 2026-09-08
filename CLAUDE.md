@@ -10,16 +10,21 @@ all-periodic are CHECKED), `set_dt` + `dt` + `step(n)`, scalars/counts bare, cop
 ```bash
 source ../.venv/bin/activate                         # the one suite venv (nanobind, numpy)
 cmake -B build_dev -DPECLET_VORO_KOKKOS=ON -DPECLET_VORO_BUILD_PYTHON=ON \
+      -DPECLET_VORO_MPI=ON -DPECLET_VORO_BUILD_TESTS=ON \
       -DCMAKE_PREFIX_PATH="$PWD/../extern/install/host-openmp"    # or nvidia-cuda (nvcc on PATH)
 cmake --build build_dev -j8                          # -> build_dev/peclet/voro/_voro.*.so
-OMP_NUM_THREADS=4 OMP_PROC_BIND=false ctest --test-dir build_dev --output-on-failure   # 24 tests
+ctest --test-dir build_dev -N                        # 42 = 24 single-rank + 18 MPI (label `mpi`)
+OMP_NUM_THREADS=4 OMP_PROC_BIND=false ctest --test-dir build_dev -LE bench --output-on-failure
 PYTHONPATH=build_dev python python/test_voro.py      # the Python smoke test on its own
 ```
 
+ONE tree per backend carries everything: `PECLET_VORO_BUILD_TESTS` (default OFF, so `pip install .`
+builds only the module) registers the single-rank suite, and with `PECLET_VORO_MPI=ON` the MPI suite
+(`tests/kokkos_mpi`, np = 1, 2, 4, `OMP_NUM_THREADS=1` set per test) joins the same tree.
 A plain `cmake -B build` (no Kokkos) configures zero tests — "No tests were found!!!" is not a
-failure signal. `-DPECLET_VORO_MPI=ON` adds `VoronoiHalo` to the module; the MPI tests are a separate
-project (below). `core` and `morton` are found as sibling checkouts (`../core`, `../morton`) through
-`cmake/PecletDeps.cmake`. The version is read from `pyproject.toml` (do not edit `project(VERSION)`).
+failure signal. `core` and `morton` are found as sibling checkouts (`../core`, `../morton`) through
+`cmake/PecletDeps.cmake` (`-DPECLET_VENDOR_SIBLINGS=ON` fetches them at the pinned tags instead — CI's
+configure-only check). The version is read from `pyproject.toml` (do not edit `project(VERSION)`).
 
 ## Header map (one-way layering, enforced by `tools/check_include_graph.sh` = ctest `test_include_graph`)
 
@@ -36,25 +41,27 @@ assigning it a layer in the script, or the test fails.
 
 ## Tests vs benchmarks
 
-`tests/kokkos/` holds both: `test_*.cpp` are ctests (22, via `add_voro_kokkos_test`); `bench_*.cpp` are
-always built but not run, except `bench_dynamic_update --gates` (ctest `bench_dynamic_update_gates`).
-Plus `test_include_graph` (script) and `test_voro_python` (`python/test_voro.py`, needs
-`PECLET_VORO_BUILD_PYTHON=ON`) = 24. Voro++ is fetched only as `bench_convexcell`'s throughput reference.
+`tests/kokkos/test_*.cpp` are the 22 device ctests (`add_voro_kokkos_test`); plus `test_include_graph`
+(script) and `test_voro_python` (`python/test_voro.py`, needs `PECLET_VORO_BUILD_PYTHON=ON`) = 24.
+`bench_dynamic_update --gates` (ctest `bench_dynamic_update_gates`) is a real gate — its FP64 binary is
+always built with the tests. Every other `bench_*` (incl. the `_f32` precision variants and Voro++, the
+`bench_convexcell` throughput reference, pinned by commit) is opt-in via `PECLET_VORO_BUILD_BENCHMARKS=ON`
+and registered with the ctest label `bench` (`ctest -L bench` runs them at test sizes; CI runs
+`-LE bench`). `bench_mesh_optimizer` needs a `packing.txt` and is built but not registered.
 
-## MPI tests (`tests/kokkos_mpi/`, project `peclet_voro_mpi_tests`)
+## MPI tests (`tests/kokkos_mpi/`)
 
-```bash
-cmake -S tests/kokkos_mpi -B build_kmpi -DCMAKE_PREFIX_PATH="$PWD/../extern/install/host-openmp" \
-      -DMPIEXEC_EXECUTABLE=/usr/bin/mpirun && cmake --build build_kmpi -j8
-OMP_NUM_THREADS=1 OMP_PROC_BIND=false ctest --test-dir build_kmpi --output-on-failure   # 18 tests, np = 1,2,4
-```
-
-`bench_voronoi_mpi` / `bench_repair_mpi` (+ `--sdf`) self-check owned-cell exactness vs single rank;
-`test_flow_mpi` gates the distributed collocated / covolume / implicit solvers (np=1 bit-exact on host).
+Part of the main tree (above). `bench_voronoi_mpi` / `bench_repair_mpi` (+ `--sdf`) self-check owned-cell
+exactness vs single rank; `test_flow_mpi` gates the distributed collocated / covolume / implicit
+solvers (np=1 bit-exact on host). The directory is also a standalone project for a lean MPI-only
+tree: `cmake -S tests/kokkos_mpi -B build_kmpi -DCMAKE_PREFIX_PATH=… [-DPECLET_VORO_MPIEXEC=…]`;
+`-DMPIEXEC_PREFLAGS=--oversubscribe` for np=4 on a small box (what CI does).
 
 ## Style
 
-Google style via `.clang-format`; `CLANG_FORMAT_BIN=clang-format-18 bash tools/clang_format_check.sh` is
-what CI runs, **informational only** (~570 pre-existing violations, mostly unicode-in-comment lines in
-`repair.hpp`, `sdf.hpp`, `tessellator.hpp` + tests). Keep new code clean; a repo-wide reformat is a
-separate deliberate commit. Design notes live in `docs/*.md`; `docs/architecture.dox` is the Doxygen page.
+Google style via `.clang-format` (+ `.clang-tidy`), checked BLOCKING in CI (`quality.yml`, clang-format
+18.1.8 = the venv's) over `include/ src/ tests/`: `CLANG_FORMAT_BIN=../.venv/bin/clang-format bash
+tools/clang_format_check.sh`. The tree was reformatted in one commit (2026-09-08); run
+`clang-format -i` on what you touch. `-Wall -Wextra -Wpedantic` with no blanket `-Wno-*`: keep
+`include/` warning-free (it hits every consumer's build). Design notes live in `docs/*.md`;
+`docs/architecture.dox` is the Doxygen page.
