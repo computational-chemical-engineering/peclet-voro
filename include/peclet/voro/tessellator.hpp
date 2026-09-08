@@ -232,9 +232,9 @@ struct CellBuilder {
   // Cell capacities: 64 planes / 112 dual triangles is the production layout (the topology
   // store's strides). A static build may ask for more (wall-adapted seed shells around curved
   // walls need ~100 planes per wall cell — rung C4/B follow-up): buildTessellation<…, MAXP, MAXT>.
-  static constexpr int kMaxP = MAXP;      // plane cap (overflow -> kOverflow)
-  static constexpr int kMaxT = MAXT;      // dual-triangle (vertex) cap
-  static constexpr int MAXF_TMP = MAXP;   // max facets one cell may publish
+  static constexpr int kMaxP = MAXP;     // plane cap (overflow -> kOverflow)
+  static constexpr int kMaxT = MAXT;     // dual-triangle (vertex) cap
+  static constexpr int MAXF_TMP = MAXP;  // max facets one cell may publish
   using Cell = ConvexCell<Real, kMaxP, kMaxT, TrackAdj>;
   using PlanePolicy = std::conditional_t<Weighted, Power, Voronoi>;  // radical vs bisector planes
 
@@ -542,7 +542,8 @@ struct CellBuilder {
     Cell c;
     c.initBox(Lx, Ly, Lz);
     Real wSelf = Real(0);
-    if constexpr (Weighted) wSelf = wSorted(pi);
+    if constexpr (Weighted)
+      wSelf = wSorted(pi);
     bool buried = false;  // Power: some neighbour dominates the seed at its own location (d≤0)
     // Early wall clip (rung C4/B follow-up): the tangent plane at the SEED'S OWN FOOT on the wall
     // bounds the cell toward the solid before any neighbour is gathered. Without it a cell next
@@ -567,12 +568,14 @@ struct CellBuilder {
       }
     }
 
-    // The worklist is sorted by nearest-corner dist², so once wlRmin exceeds the reachability radius
-    // every remaining block is too far to cut — break. Voronoi keeps the exact bisector certificate
-    // (secR2 = 2·rSqMax, break at wlRmin > 2·secR2 = 4·rSqMax) so the unweighted path stays
-    // byte-identical. Power uses the weight-aware reach (blockReachSq) with the global max weight.
-    Real secR2 = Real(2) * c.maxVertexRsq();                                              // Voronoi
-    Real reachSq = PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll);  // Pow
+    // The worklist is sorted by nearest-corner dist², so once wlRmin exceeds the reachability
+    // radius every remaining block is too far to cut — break. Voronoi keeps the exact bisector
+    // certificate (secR2 = 2·rSqMax, break at wlRmin > 2·secR2 = 4·rSqMax) so the unweighted path
+    // stays byte-identical. Power uses the weight-aware reach (blockReachSq) with the global max
+    // weight.
+    Real secR2 = Real(2) * c.maxVertexRsq();  // Voronoi
+    Real reachSq =
+        PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll);  // Pow
     int ncRec = 0;  // Part-II: count of recorded candidate (skin) ids for this cell
     const bool emitNear = oNear.extent(0) > 0 && nearCap > 0;
     int nnRec = 0;  // near-miss candidates recorded for this cell
@@ -617,7 +620,8 @@ struct CellBuilder {
         Real pv[3];
         relVec(q, pix, piy, piz, pv);
         Real wNbr = Real(0);
-        if constexpr (Weighted) wNbr = wSorted(q);
+        if constexpr (Weighted)
+          wNbr = wSorted(q);
         const Real off = PlanePolicy::template offsetFromRel<Real>(pv, wSelf, wNbr);
         if constexpr (Weighted) {
           // Power: d = ½(|r|²+w_i−w_j) ≤ 0 means neighbour j has lower power than i at the seed's
@@ -830,66 +834,66 @@ TessellatorResult<Real> buildTessellation(
   }
 
   CellBuilder<Real, Weighted, Sdf, false, MAXP, MAXT> op{grid.binned,
-                                      grid.posSorted,
-                                      grid.wSorted,
-                                      grid.gidSorted,
-                                      grid.cellStart,
-                                      grid.wlOff,
-                                      grid.wlRmin,
-                                      status,
-                                      cellVol,
-                                      facetCount,
-                                      cellFacetBase,
-                                      oNbr,
-                                      oArea,
-                                      oDV,
-                                      oConn,
-                                      facetCursor,
-                                      icx,
-                                      icy,
-                                      icz,
-                                      Lx,
-                                      Ly,
-                                      Lz,
-                                      minCsz,
-                                      wMaxAll,
-                                      dimx,
-                                      dimy,
-                                      dimz,
-                                      sw,
-                                      nOff,
-                                      wlS,
-                                      useMorton,
-                                      haveGid,
-                                      withForceGeom,
-                                      facetCap,
-                                      sdf,
-                                      outNp,
-                                      outNt,
-                                      outPnbr,
-                                      outTri,
-                                      noPoke4,
-                                      outCand,
-                                      outCandCnt,
-                                      emitTopo,
-                                      emitCand,
-                                      candCap,
-                                      outWall,
-                                      oEdgeOff,
-                                      oEdgeCnt,
-                                      oEdgeFacet,
-                                      oEdgeGrad,
-                                      oEdgeLen,
-                                      edgeCursor,
-                                      edgeCap,
-                                      withAreaGrad,
-                                      outNear,
-                                      outNearCnt,
-                                      nearCap,
-                                      nearMargin,
-                                      oWallDV,
-                                      oWallDA,
-                                      oMoment2};
+                                                         grid.posSorted,
+                                                         grid.wSorted,
+                                                         grid.gidSorted,
+                                                         grid.cellStart,
+                                                         grid.wlOff,
+                                                         grid.wlRmin,
+                                                         status,
+                                                         cellVol,
+                                                         facetCount,
+                                                         cellFacetBase,
+                                                         oNbr,
+                                                         oArea,
+                                                         oDV,
+                                                         oConn,
+                                                         facetCursor,
+                                                         icx,
+                                                         icy,
+                                                         icz,
+                                                         Lx,
+                                                         Ly,
+                                                         Lz,
+                                                         minCsz,
+                                                         wMaxAll,
+                                                         dimx,
+                                                         dimy,
+                                                         dimz,
+                                                         sw,
+                                                         nOff,
+                                                         wlS,
+                                                         useMorton,
+                                                         haveGid,
+                                                         withForceGeom,
+                                                         facetCap,
+                                                         sdf,
+                                                         outNp,
+                                                         outNt,
+                                                         outPnbr,
+                                                         outTri,
+                                                         noPoke4,
+                                                         outCand,
+                                                         outCandCnt,
+                                                         emitTopo,
+                                                         emitCand,
+                                                         candCap,
+                                                         outWall,
+                                                         oEdgeOff,
+                                                         oEdgeCnt,
+                                                         oEdgeFacet,
+                                                         oEdgeGrad,
+                                                         oEdgeLen,
+                                                         edgeCursor,
+                                                         edgeCap,
+                                                         withAreaGrad,
+                                                         outNear,
+                                                         outNearCnt,
+                                                         nearCap,
+                                                         nearMargin,
+                                                         oWallDV,
+                                                         oWallDA,
+                                                         oMoment2};
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
   Kokkos::parallel_for(

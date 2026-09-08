@@ -67,8 +67,7 @@ void cellCentroids(const TessellationView<Real>& view,
 template <class Real>
 Real lloydEnergyForce(const TessellationView<Real>& view,
                       [[maybe_unused]] const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
-                      Real gamma,
-                      const Kokkos::View<Real*, peclet::core::MemSpace>& force) {
+                      Real gamma, const Kokkos::View<Real*, peclet::core::MemSpace>& force) {
   using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();
   const bool haveM2 = view.hasMoments();

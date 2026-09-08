@@ -223,8 +223,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
     view.facetEdgeCount = eCnt;
     view.edgeFacet = eFacet;
     view.edgeAreaGrad = eGrad;
-    view.edgeLength = Kokkos::View<Real*, Mem>(
-        view_alloc(std::string("rp.edgeLength"), WithoutInitializing), nE);
+    view.edgeLength =
+        Kokkos::View<Real*, Mem>(view_alloc(std::string("rp.edgeLength"), WithoutInitializing), nE);
     {
       auto el = view.edgeLength;
       Kokkos::parallel_for(

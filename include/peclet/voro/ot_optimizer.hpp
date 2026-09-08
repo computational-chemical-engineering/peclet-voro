@@ -21,11 +21,11 @@
  * solve); the solve itself runs on the Kokkos device. Depends on Effort 1 (power cells).
  *
  * LIMITATION (deferred): the PERIODIC min-image power diagram is not an exact partition (Effort 1:
- * volumes off the box by ~1% at non-trivial weights), so the OT system V=V_set is inconsistent below
- * that floor and the Newton residual plateaus at ~1% of the box volume. The Hessian is FD-validated
- * correct and the solve/line-search are sound; a clean converging OT needs an exact-partition power
- * tessellation (a non-periodic / walled domain, or the multi-image gather). For pure-Voronoi
- * position-based volume control that has no such floor, use mesh_optimizer.hpp.
+ * volumes off the box by ~1% at non-trivial weights), so the OT system V=V_set is inconsistent
+ * below that floor and the Newton residual plateaus at ~1% of the box volume. The Hessian is
+ * FD-validated correct and the solve/line-search are sound; a clean converging OT needs an
+ * exact-partition power tessellation (a non-periodic / walled domain, or the multi-image gather).
+ * For pure-Voronoi position-based volume control that has no such floor, use mesh_optimizer.hpp.
  */
 #ifndef PECLET_VORO_OT_OPTIMIZER_HPP
 #define PECLET_VORO_OT_OPTIMIZER_HPP
@@ -96,7 +96,8 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
   solver.setJacobi(2, 0.7);  // damped-Jacobi preconditioner (no AMG on the irregular graph yet)
 
   double sumVset = 0;
-  for (int i = 0; i < N; ++i) sumVset += vsetIn[i];
+  for (int i = 0; i < N; ++i)
+    sumVset += vsetIn[i];
 
   // Build the power tessellation at weights `wv`; return its result and the volume error statistics
   // (targets renormalised so Σ V_set = Σ V — L's constant nullspace requires Σ residual = 0).
@@ -110,7 +111,8 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
     nEmpty = 0;
     for (int i = 0; i < N; ++i) {
       sumV += vol[i];
-      if (vol[i] <= 0.0) ++nEmpty;
+      if (vol[i] <= 0.0)
+        ++nEmpty;
     }
     scale = (sumVset > 0) ? sumV / sumVset : 1.0;
     maxErr = 0;
@@ -139,8 +141,8 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
     R.meanVolErr = meanErr;
     R.nEmpty = nEmpty;
     if (verbose)
-      std::printf("  [ot] iter %2d  maxVolErr=%.3e meanVolErr=%.3e nEmpty=%ld\n", it, maxErr, meanErr,
-                  nEmpty);
+      std::printf("  [ot] iter %2d  maxVolErr=%.3e meanVolErr=%.3e nEmpty=%ld\n", it, maxErr,
+                  meanErr, nEmpty);
     if (maxErr < tol) {
       R.converged = true;
       break;
@@ -163,12 +165,14 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
       const int fend = off[i] + cnt[i];
       for (int f = off[i]; f < fend && f < nFacets; ++f) {
         const long j = (long)nbr[f];
-        if (j < 0 || j >= N) continue;  // boundary / SDF wall facet: no DOF coupling
+        if (j < 0 || j >= N)
+          continue;  // boundary / SDF wall facet: no DOF coupling
         const double Aij = std::sqrt(area[3 * f] * area[3 * f] + area[3 * f + 1] * area[3 * f + 1] +
                                      area[3 * f + 2] * area[3 * f + 2]);
         const double dij = std::sqrt(conn[3 * f] * conn[3 * f] + conn[3 * f + 1] * conn[3 * f + 1] +
                                      conn[3 * f + 2] * conn[3 * f + 2]);
-        if (dij <= 0.0 || Aij <= 0.0) continue;
+        if (dij <= 0.0 || Aij <= 0.0)
+          continue;
         const double w = Aij / (2.0 * dij);
         diag[i] += w;
         coef.push_back(-w);
@@ -184,7 +188,8 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
       double Acf = 0;
       for (int f = off[c]; f < off[c] + cnt[c] && f < nFacets; ++f) {
         const long j = (long)nbr[f];
-        if (j < 0 || j >= N) continue;
+        if (j < 0 || j >= N)
+          continue;
         const double Aij = std::sqrt(area[3 * f] * area[3 * f] + area[3 * f + 1] * area[3 * f + 1] +
                                      area[3 * f + 2] * area[3 * f + 2]);
         const double dij = std::sqrt(conn[3 * f] * conn[3 * f] + conn[3 * f + 1] * conn[3 * f + 1] +
@@ -215,7 +220,8 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
     // Pin node 0 (Dirichlet gauge): the Laplacian is singular (constant-weight nullspace — a global
     // weight shift is a null move for the power diagram), so fix δw_0 = 0 by making row 0 the
     // identity. This makes L SPD/nonsingular for the Krylov solve, without changing the diagram.
-    for (Index f = start[0]; f < start[1]; ++f) coef[f] = 0.0;
+    for (Index f = start[0]; f < start[1]; ++f)
+      coef[f] = 0.0;
     diag[0] = 1.0;
     r[0] = 0.0;
 
@@ -232,26 +238,30 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
     auto dwv = detail::toHostVec<double>(ddw);
     if (verbose) {
       double dwnorm = 0;
-      for (int i = 0; i < N; ++i) dwnorm = std::max(dwnorm, std::fabs(dwv[i]));
+      for (int i = 0; i < N; ++i)
+        dwnorm = std::max(dwnorm, std::fabs(dwv[i]));
       std::printf("      solve: %d iters res0=%.2e res=%.2e |dw|inf=%.3e\n", sr.iters, sr.res0,
                   sr.res, dwnorm);
     }
 
     // Exact line minimisation of the convex OT energy g(w) along the Newton direction: g is convex,
     // so g'(α) = (V(w+αδw) − V_set)·δw is increasing with g'(0) < 0. Bisect for the α where g' = 0
-    // (the energy minimum along δw), capping α to keep every cell non-empty. Using g' (not ‖V−Vset‖)
-    // is the fix for the stall — the gradient NORM need not decrease along a valid energy-descent
-    // step, but the directional derivative crossing zero exactly locates the line minimum.
+    // (the energy minimum along δw), capping α to keep every cell non-empty. Using g' (not
+    // ‖V−Vset‖) is the fix for the stall — the gradient NORM need not decrease along a valid
+    // energy-descent step, but the directional derivative crossing zero exactly locates the line
+    // minimum.
     std::vector<Real> wtry(N);
     std::vector<double> volT;
     double maxErrT, meanErrT, resL2T, scaleT;
     long nEmptyT;
     peclet::voro::TessellatorResult<Real> resT;
     auto probe = [&](double alpha, double& dd) -> bool {  // returns feasible; sets dd = g'(α)
-      for (int i = 0; i < N; ++i) wtry[i] = weight[i] + (Real)(alpha * dwv[i]);
+      for (int i = 0; i < N; ++i)
+        wtry[i] = weight[i] + (Real)(alpha * dwv[i]);
       resT = evaluate(wtry, volT, maxErrT, meanErrT, resL2T, nEmptyT, scaleT);
       dd = 0;
-      for (int i = 0; i < N; ++i) dd += (volT[i] - vsetIn[i] * scaleT) * dwv[i];
+      for (int i = 0; i < N; ++i)
+        dd += (volT[i] - vsetIn[i] * scaleT) * dwv[i];
       return nEmptyT == 0;
     };
     // cap α at the Newton point `damp` and shrink until feasible (no empty cells).
@@ -261,9 +271,10 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
       aHi *= 0.5;
       feasHi = probe(aHi, ddHi);
     }
-    if (!feasHi) break;  // cannot take any feasible step
-    double aAcc = aHi;   // still descending at the cap ⇒ take the full feasible step
-    if (ddHi >= 0.0) {   // g' changed sign inside [0, aHi] ⇒ bisect for the line minimum g' = 0
+    if (!feasHi)
+      break;            // cannot take any feasible step
+    double aAcc = aHi;  // still descending at the cap ⇒ take the full feasible step
+    if (ddHi >= 0.0) {  // g' changed sign inside [0, aHi] ⇒ bisect for the line minimum g' = 0
       double aLo = 0.0;
       for (int b = 0; b < 24; ++b) {
         const double aMid = 0.5 * (aLo + aHi);
@@ -276,7 +287,8 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
       }
       aAcc = aLo;
     }
-    if (aAcc <= 0.0) break;  // at the minimum (or stuck)
+    if (aAcc <= 0.0)
+      break;  // at the minimum (or stuck)
     double ddAcc;
     probe(aAcc, ddAcc);  // re-evaluate at the accepted α to capture the state
     weight = wtry;
@@ -287,7 +299,8 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
     resL2 = resL2T;
     nEmpty = nEmptyT;
     scale = scaleT;
-    if (verbose) std::printf("      accepted alpha=%.4f resL2=%.4e\n", aAcc, resL2);
+    if (verbose)
+      std::printf("      accepted alpha=%.4f resL2=%.4e\n", aAcc, resL2);
   }
   return R;
 }

@@ -10,8 +10,8 @@
  *       ordinary Voronoi cells bit-for-bit. Compares per-cell volumes of buildTessellation<true>
  *       (const w) against buildTessellation<false>.
  *
- *   (B) Oracle-free invariants (varying weights): a valid power diagram still PARTITIONS the box and
- *       its radical facets are reciprocal, so the same space-filling / area-reciprocity / closure
+ *   (B) Oracle-free invariants (varying weights): a valid power diagram still PARTITIONS the box
+ * and its radical facets are reciprocal, so the same space-filling / area-reciprocity / closure
  *       invariants used for Voronoi (checkInvariants) must hold.
  *
  *   (C) Independent brute-force oracle (varying weights): each cell's published volume vs a host
@@ -46,7 +46,8 @@ int buildPowerCell(int i, const std::vector<real_t>& x, const std::vector<real_t
   std::vector<std::pair<real_t, int>> ord;
   ord.reserve(N - 1);
   for (int j = 0; j < N; ++j) {
-    if (j == i) continue;
+    if (j == i)
+      continue;
     real_t rho = 0;
     for (int d = 0; d < 3; ++d) {
       real_t rr = x[3 * j + d] - x[3 * i + d];
@@ -67,9 +68,11 @@ int buildPowerCell(int i, const std::vector<real_t>& x, const std::vector<real_t
       r[d] = rr;
     }
     const real_t off = real_t(0.5) * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + w[i] - w[j]);
-    if (off <= real_t(0)) return 1;  // buried
+    if (off <= real_t(0))
+      return 1;  // buried
     c.clip(r, off, j);
-    if (c.overflow) return -1;
+    if (c.overflow)
+      return -1;
   }
   return 0;
 }
@@ -79,12 +82,15 @@ double bruteVol(int i, const std::vector<real_t>& x, const std::vector<real_t>& 
                 std::vector<int>* nbrOut = nullptr) {
   OracleCell c;
   const int rc = buildPowerCell(i, x, w, N, L, c);
-  if (rc == 1) return 0.0;
-  if (rc < 0) return -1.0;
+  if (rc == 1)
+    return 0.0;
+  if (rc < 0)
+    return -1.0;
   if (nbrOut) {
     nbrOut->clear();
     for (int k = 0; k < c.np; ++k)
-      if (c.pnbr[k] >= 0) nbrOut->push_back(c.pnbr[k]);
+      if (c.pnbr[k] >= 0)
+        nbrOut->push_back(c.pnbr[k]);
     std::sort(nbrOut->begin(), nbrOut->end());
   }
   return c.volumePerVertex();
@@ -101,7 +107,8 @@ int caseEqualWeights(int N, real_t L, unsigned seed) {
   std::mt19937 rng(seed);
   std::uniform_real_distribution<real_t> U(0.0, 1.0);
   std::vector<real_t> xh(3 * N);
-  for (auto& v : xh) v = L * U(rng);
+  for (auto& v : xh)
+    v = L * U(rng);
 
   Kokkos::View<real_t*, peclet::core::MemSpace> pos("pos", 3 * N);
   Kokkos::deep_copy(pos, Kokkos::View<const real_t*, Kokkos::HostSpace>(xh.data(), 3 * N));
@@ -137,8 +144,10 @@ int caseVarWeights(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   std::mt19937 rng(seed);
   std::uniform_real_distribution<real_t> U(0.0, 1.0);
   std::vector<real_t> xh(3 * N), wh(N);
-  for (auto& v : xh) v = L * U(rng);
-  for (auto& v : wh) v = wMax * U(rng);
+  for (auto& v : xh)
+    v = L * U(rng);
+  for (auto& v : wh)
+    v = wMax * U(rng);
 
   Kokkos::View<real_t*, peclet::core::MemSpace> pos("pos", 3 * N), wd("w", N);
   Kokkos::deep_copy(pos, Kokkos::View<const real_t*, Kokkos::HostSpace>(xh.data(), 3 * N));
@@ -162,7 +171,8 @@ int caseVarWeights(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
         KOKKOS_LAMBDA(int i, long& c) { c += (S(i) & peclet::voro::kEmpty) ? 1 : 0; }, nEmpty);
     Kokkos::parallel_reduce(
         "novf", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N),
-        KOKKOS_LAMBDA(int i, long& c) { c += (S(i) & peclet::voro::kOverflow) ? 1 : 0; }, nOverflow);
+        KOKKOS_LAMBDA(int i, long& c) { c += (S(i) & peclet::voro::kOverflow) ? 1 : 0; },
+        nOverflow);
   }
 
   // (C) brute-force full-N radical-plane oracle on host. Check ALL cells when N is small enough.
@@ -172,39 +182,44 @@ int caseVarWeights(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   long nVolMismatch = 0, nOracleChecked = 0, nBuriedMismatch = 0;
   for (int i = 0; i < nCheck; ++i) {
     const double vb = bruteVol(i, xh, wh, N, L, nullptr);
-    if (vb < 0) continue;  // oracle overflow (shouldn't happen); skip
+    if (vb < 0)
+      continue;  // oracle overflow (shouldn't happen); skip
     ++nOracleChecked;
     sumOracle += vb;
     sumDevChecked += Vh[i];
     // buried agreement: device-empty ⟺ oracle-empty (both detect the seed-outside-own-cell case).
-    if ((Vh[i] <= 0.0) != (vb <= 0.0)) ++nBuriedMismatch;
-    if (Vh[i] <= 0.0 || vb <= 0.0) continue;  // buried on either side: no volume comparison
+    if ((Vh[i] <= 0.0) != (vb <= 0.0))
+      ++nBuriedMismatch;
+    if (Vh[i] <= 0.0 || vb <= 0.0)
+      continue;  // buried on either side: no volume comparison
     const double rel = std::abs(vb - Vh[i]) / std::max(vb, 1e-30);
     maxRelVol = std::max(maxRelVol, rel);
-    if (rel > 1e-9) ++nVolMismatch;
+    if (rel > 1e-9)
+      ++nVolMismatch;
   }
-  const double oracleFill = (nCheck == N) ? sumOracle / boxVol : -1.0;    // oracle space-filling
+  const double oracleFill = (nCheck == N) ? sumOracle / boxVol : -1.0;  // oracle space-filling
   const double devVsOracleSum = std::abs(sumDevChecked - sumOracle) / std::max(sumOracle, 1e-30);
 
   // P2 CORRECTNESS GATE: the device radical-plane build (weight-aware security cull + reach break +
-  // buried-cell detection) must reproduce an INDEPENDENT full-N brute-force power diagram — per-cell
-  // volume (maxRelVol machine-tiny, no mismatch), buried/empty membership (nBuriedMismatch==0), and
-  // reciprocal recorded facets (sumAreaMag≈0) — with no overflow. This proves the cull is
-  // conservative (drops no real face) and buried cells are handled.
+  // buried-cell detection) must reproduce an INDEPENDENT full-N brute-force power diagram —
+  // per-cell volume (maxRelVol machine-tiny, no mismatch), buried/empty membership
+  // (nBuriedMismatch==0), and reciprocal recorded facets (sumAreaMag≈0) — with no overflow. This
+  // proves the cull is conservative (drops no real face) and buried cells are handled.
   //
   // NOT gated (diagnostics only): `volRelErr` (space-filling). The device matches the brute-force
   // oracle EXACTLY (devVsOracleSum≈0), yet the oracle ITSELF is not a perfect partition (oracleFill
   // ≈0.97–0.99): the min-image, sw-limited candidate model is not exactly space-filling for power
-  // cells — a face can require a non-nearest periodic image. Closing that needs a multi-image gather
-  // (future; the near-incompressible solver runs at small weights where the error is negligible).
+  // cells — a face can require a non-nearest periodic image. Closing that needs a multi-image
+  // gather (future; the near-incompressible solver runs at small weights where the error is
+  // negligible).
   const bool pass = maxRelVol < 1e-9 && nVolMismatch == 0 && nBuriedMismatch == 0 &&
                     inv.sumAreaMag < 1e-9 && nOverflow == 0;
   std::printf(
       "  (B/C) var-w N=%-6d seed=%u wSpread=%.2f | oracle: n=%ld maxRelVol=%.2e nVolMism=%ld "
       "buriedMism=%ld devVsOracle=%.2e areaClosure=%.2e | diag: nOk=%ld nEmpty=%ld volRelErr=%.2e "
       "oracleFill=%.6f  %s\n",
-      N, seed, wSpreadFrac, nOracleChecked, maxRelVol, nVolMismatch, nBuriedMismatch, devVsOracleSum,
-      inv.sumAreaMag, nOk, nEmpty, inv.volRelErr, oracleFill, pass ? "OK" : "FAIL");
+      N, seed, wSpreadFrac, nOracleChecked, maxRelVol, nVolMismatch, nBuriedMismatch,
+      devVsOracleSum, inv.sumAreaMag, nOk, nEmpty, inv.volRelErr, oracleFill, pass ? "OK" : "FAIL");
   return pass ? 0 : 1;
 }
 
@@ -218,8 +233,10 @@ int caseGradients(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   std::mt19937 rng(seed);
   std::uniform_real_distribution<real_t> U(0.0, 1.0);
   std::vector<real_t> xh(3 * N), wh(N);
-  for (auto& v : xh) v = L * U(rng);
-  for (auto& v : wh) v = wMax * U(rng);
+  for (auto& v : xh)
+    v = L * U(rng);
+  for (auto& v : wh)
+    v = wMax * U(rng);
 
   auto volAt = [&](int i, const std::vector<real_t>& x, const std::vector<real_t>& w) -> double {
     OracleCell cc;
@@ -227,36 +244,41 @@ int caseGradients(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   };
 
   const real_t eps = 1e-6;
-  const double relTol = 3e-3;               // FD-limited
+  const double relTol = 3e-3;                   // FD-limited
   const double sig = 5e-3 * spacing * spacing;  // significant-gradient floor (dV/dx ~ face area)
   double maxRel = 0.0;
   long nTot = 0, nPass = 0, nCellsChecked = 0;
   const int nCheck = std::min(N, 300);
   for (int i = 0; i < nCheck; ++i) {
     OracleCell c;
-    if (buildPowerCell(i, xh, wh, N, L, c) != 0) continue;  // buried/overflow
+    if (buildPowerCell(i, xh, wh, N, L, c) != 0)
+      continue;  // buried/overflow
     // interior filter: skip cells with any nonzero-area box-wall face (pnbr<0).
     double area[200];
-    for (int k = 0; k < c.np; ++k) area[k] = 0.0;
+    for (int k = 0; k < c.np; ++k)
+      area[k] = 0.0;
     c.facetAreasPerVertex(area);
     bool wall = false;
     double cellArea = 0.0;
     for (int k = 0; k < c.np; ++k) {
       cellArea = std::max(cellArea, area[k]);
-      if (c.pnbr[k] < 0 && area[k] > 1e-12) wall = true;
+      if (c.pnbr[k] < 0 && area[k] > 1e-12)
+        wall = true;
     }
-    if (wall) continue;
+    if (wall)
+      continue;
     ++nCellsChecked;
 
     // analytic: dV/dn_k then chain to DOFs.
     double vg = 0, dgx[200], dgy[200], dgz[200];
-    for (int k = 0; k < c.np; ++k) dgx[k] = dgy[k] = dgz[k] = 0.0;
+    for (int k = 0; k < c.np; ++k)
+      dgx[k] = dgy[k] = dgz[k] = 0.0;
     c.geomVolumeGrad(vg, dgx, dgy, dgz);
     double fSelf[3], fwSelf, fnx[200], fny[200], fnz[200], fwn[200];
     const double seed3[3] = {xh[3 * i], xh[3 * i + 1], xh[3 * i + 2]};
     peclet::voro::chainToDofs<peclet::voro::Power>(c, seed3, xh.data(), (double)wh[i], wh.data(),
-                                                   (double)L, dgx, dgy, dgz, fSelf, fwSelf, fnx, fny,
-                                                   fnz, fwn);
+                                                   (double)L, dgx, dgy, dgz, fSelf, fwSelf, fnx,
+                                                   fny, fnz, fwn);
 
     auto check = [&](double analytic, int idx, double eps2, bool weightDof) {
       // central-difference the volume of cell i w.r.t. DOF (perturbing xh/wh entry `idx`).
@@ -267,33 +289,38 @@ int caseGradients(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
       arr[idx] = save - (real_t)eps2;
       const double vm = volAt(i, xh, wh);
       arr[idx] = save;
-      if (vp < 0 || vm < 0) return;  // topology changed under perturbation: skip
+      if (vp < 0 || vm < 0)
+        return;  // topology changed under perturbation: skip
       const double fd = (vp - vm) / (2 * eps2);
-      if (std::abs(fd) < sig) return;  // not FD-resolvable
+      if (std::abs(fd) < sig)
+        return;  // not FD-resolvable
       ++nTot;
       const double rel = std::abs(fd - analytic) / std::max(std::abs(fd), 1e-30);
       maxRel = std::max(maxRel, rel);
-      if (rel < relTol) ++nPass;
+      if (rel < relTol)
+        ++nPass;
     };
 
     // self position (3) + self weight (1)
-    for (int cc = 0; cc < 3; ++cc) check(fSelf[cc], 3 * i + cc, eps, false);
+    for (int cc = 0; cc < 3; ++cc)
+      check(fSelf[cc], 3 * i + cc, eps, false);
     check(fwSelf, i, eps, true);
     // one significant real-neighbour face: its position (3) + weight (1)
     for (int k = 0; k < c.np; ++k) {
       const int j = c.pnbr[k];
-      if (j < 0 || area[k] < 0.1 * cellArea) continue;
-      for (int cc = 0; cc < 3; ++cc) check(fnx[k] * (cc == 0) + fny[k] * (cc == 1) + fnz[k] * (cc == 2),
-                                           3 * j + cc, eps, false);
+      if (j < 0 || area[k] < 0.1 * cellArea)
+        continue;
+      for (int cc = 0; cc < 3; ++cc)
+        check(fnx[k] * (cc == 0) + fny[k] * (cc == 1) + fnz[k] * (cc == 2), 3 * j + cc, eps, false);
       check(fwn[k], j, eps, true);
       break;
     }
   }
   const bool pass = nTot > 0 && (double)nPass / nTot > 0.98 && maxRel < 5e-2;
-  std::printf("  (D) grad  N=%-6d seed=%u wSpread=%.2f | cells=%ld comps=%ld pass=%ld/%ld "
-              "maxRel=%.2e  %s\n",
-              N, seed, wSpreadFrac, nCellsChecked, nTot, nPass, nTot, maxRel,
-              pass ? "OK" : "FAIL");
+  std::printf(
+      "  (D) grad  N=%-6d seed=%u wSpread=%.2f | cells=%ld comps=%ld pass=%ld/%ld "
+      "maxRel=%.2e  %s\n",
+      N, seed, wSpreadFrac, nCellsChecked, nTot, nPass, nTot, maxRel, pass ? "OK" : "FAIL");
   return pass ? 0 : 1;
 }
 
@@ -308,8 +335,10 @@ int caseDynamic(int N, real_t L, unsigned seed, real_t wSpreadFrac, real_t dispF
   std::mt19937 rng(seed);
   std::uniform_real_distribution<real_t> U(0.0, 1.0);
   std::vector<real_t> x0(3 * N), x1(3 * N), wh(N);
-  for (auto& v : x0) v = L * U(rng);
-  for (auto& v : wh) v = wMax * U(rng);
+  for (auto& v : x0)
+    v = L * U(rng);
+  for (auto& v : wh)
+    v = wMax * U(rng);
   const real_t disp = dispFrac * spacing;
   for (int k = 0; k < 3 * N; ++k) {
     real_t p = x0[k] + disp * (2 * U(rng) - 1);
@@ -338,21 +367,25 @@ int caseDynamic(int N, real_t L, unsigned seed, real_t wSpreadFrac, real_t dispF
   double maxRel = 0.0;
   long nMism = 0, nBuriedMism = 0, nEmpty = 0;
   for (int i = 0; i < N; ++i) {
-    if ((volCold[i] <= 0.0) != (volRepair[i] <= 0.0)) ++nBuriedMism;
+    if ((volCold[i] <= 0.0) != (volRepair[i] <= 0.0))
+      ++nBuriedMism;
     if (volCold[i] <= 0.0) {
       ++nEmpty;
       continue;
     }
-    if (volRepair[i] <= 0.0) continue;
+    if (volRepair[i] <= 0.0)
+      continue;
     const double rel = std::abs(volCold[i] - volRepair[i]) / std::max(volCold[i], 1e-30);
     maxRel = std::max(maxRel, rel);
-    if (rel > 1e-9) ++nMism;
+    if (rel > 1e-9)
+      ++nMism;
   }
   const bool pass = maxRel < 1e-9 && nMism == 0 && nBuriedMism == 0;
-  std::printf("  (E) dyn   N=%-6d seed=%u wSpread=%.2f disp=%.2f | step vs cold: maxRelVol=%.2e "
-              "nMism=%ld buriedMism=%ld nEmpty=%ld fellBack=%d  %s\n",
-              N, seed, wSpreadFrac, dispFrac, maxRel, nMism, nBuriedMism, nEmpty,
-              (int)stats.fellBack, pass ? "OK" : "FAIL");
+  std::printf(
+      "  (E) dyn   N=%-6d seed=%u wSpread=%.2f disp=%.2f | step vs cold: maxRelVol=%.2e "
+      "nMism=%ld buriedMism=%ld nEmpty=%ld fellBack=%d  %s\n",
+      N, seed, wSpreadFrac, dispFrac, maxRel, nMism, nBuriedMism, nEmpty, (int)stats.fellBack,
+      pass ? "OK" : "FAIL");
   return pass ? 0 : 1;
 }
 

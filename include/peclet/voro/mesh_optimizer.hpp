@@ -4,9 +4,9 @@
  * power WEIGHTS (Laguerre) — moves the DOFs so the cells minimise a geometry energy. A
  * Surface-Evolver-style tool on the differentiable (power-)Voronoi geometry.
  *
- * Energy (this file): E = Σ_i γ (V_i − V_set,i)², driving cells to target volumes (V_set from an SDF
- * ⇒ refinement near solids). DOFs = seed positions x (3N) and, when Weighted, the power weights w
- * (N more). Pure Voronoi (Weighted=false) partitions space exactly ⇒ Σ V = box, so the energy is
+ * Energy (this file): E = Σ_i γ (V_i − V_set,i)², driving cells to target volumes (V_set from an
+ * SDF ⇒ refinement near solids). DOFs = seed positions x (3N) and, when Weighted, the power weights
+ * w (N more). Pure Voronoi (Weighted=false) partitions space exactly ⇒ Σ V = box, so the energy is
  * well-posed with no floor; adding weights gives FULLER volume control (positions alone can only
  * partially reach a target).
  *
@@ -31,7 +31,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "peclet/core/amr/momentum.hpp"     // greedyColoring
+#include "peclet/core/amr/momentum.hpp"      // greedyColoring
 #include "peclet/core/solver/graph_amg.hpp"  // smoothed-aggregation AMG (O(N) CG preconditioner)
 #include "peclet/voro/energy/interface.hpp"  // rung A3: interfacial energy on the published view
 #include "peclet/voro/ot_optimizer.hpp"      // OtResult + detail::toHostVec/toHostVecT
@@ -48,14 +48,15 @@ enum class Precond { Jacobi, ColoredGS, GraphAMG, SteepestDescent };
 
 /**
  * Minimise the DIMENSIONLESS relative volume energy E = Σ (V_i/V_ref,i − 1)² by damped Gauss-Newton
- * over positions (and weights when Weighted). `vsetIn` is the per-cell reference volume V_ref (may be
- * non-uniform — spatially-graded refinement); it is renormalised to the actual total cell volume so
- * the residual has zero mean and E → 0 is achievable. `pos` (3N) and `weight` (N; used only when
+ * over positions (and weights when Weighted). `vsetIn` is the per-cell reference volume V_ref (may
+ * be non-uniform — spatially-graded refinement); it is renormalised to the actual total cell volume
+ * so the residual has zero mean and E → 0 is achievable. `pos` (3N) and `weight` (N; used only when
  * Weighted) are updated in place.
  *
- * NOTE: with an SDF the per-cell volume gradient still uses only the published seed-seed facetConnect
- * (it omits the SDF wall-facet term), so pore-space meshing does not yet fully equalise — the wall
- * gradient needs to be produced inside the tessellator (see the study in tests/kokkos/bench_mesh_optimizer).
+ * NOTE: with an SDF the per-cell volume gradient still uses only the published seed-seed
+ * facetConnect (it omits the SDF wall-facet term), so pore-space meshing does not yet fully
+ * equalise — the wall gradient needs to be produced inside the tessellator (see the study in
+ * tests/kokkos/bench_mesh_optimizer).
  *
  * @param prec     Jacobi / ColoredGS / GraphAMG CG preconditioner.
  * @param cgIters  inner CG iterations per Newton step; @param tol on the gradient ∞-norm.
@@ -76,9 +77,11 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
   Kokkos::View<long*, MemSpace> gd;
   const double boxVol = (double)L[0] * L[1] * L[2];
   double sumVset = 0;
-  for (int i = 0; i < N; ++i) sumVset += vsetIn[i];
+  for (int i = 0; i < N; ++i)
+    sumVset += vsetIn[i];
   std::vector<double> vset(N);
-  for (int i = 0; i < N; ++i) vset[i] = vsetIn[i] * (boxVol / sumVset);
+  for (int i = 0; i < N; ++i)
+    vset[i] = vsetIn[i] * (boxVol / sumVset);
 
   // Per-cell objective pieces {energy, dE/dV, d²E/dV²}. Two modes (chosen by `freeEnergy`):
   //  • default: relative energy (V/V_ref−1)² (barCell = the collapse barrier, added with weight μ).
@@ -87,8 +90,11 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
   //    infeasible start (V≤0 from tessellation flicker) stays finite and is driven feasible.
   const double barEps = 0.1;
   auto barCell = [&](double V, double vref, double mu) {
-    struct { double e, d1, d2; } r{0.0, 0.0, 0.0};
-    if (mu <= 0.0) return r;
+    struct {
+      double e, d1, d2;
+    } r{0.0, 0.0, 0.0};
+    if (mu <= 0.0)
+      return r;
     const double t = V / vref;
     if (t > barEps) {
       r.e = -mu * std::log(t);
@@ -104,7 +110,9 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
   };
   const double feMin = 0.1;
   auto freeCell = [&](double V, double vref) {
-    struct { double e, d1, d2; } r{0.0, 0.0, 0.0};
+    struct {
+      double e, d1, d2;
+    } r{0.0, 0.0, 0.0};
     const double Vmin = feMin * vref, iv = 1.0 / Vmin;
     if (V > Vmin) {
       r.e = -vref * std::log(V);
@@ -148,7 +156,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       G.E += freeEnergy ? freeCell(G.vol[i], vset[i]).e : e * e;
       G.maxErr = std::max(G.maxErr, std::fabs(e));
       G.meanErr += std::fabs(e);
-      if (G.vol[i] <= 0.0) ++G.nBad;
+      if (G.vol[i] <= 0.0)
+        ++G.nBad;
     }
     G.meanErr /= N;
   };
@@ -161,7 +170,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     double sx = 0, sy = 0, sz = 0, sw2 = 0;
     for (int f = G.off[c]; f < G.off[c] + G.cnt[c] && f < nF; ++f) {
       const long j = (long)G.nbr[f];
-      if (j < 0 || j >= N) continue;
+      if (j < 0 || j >= N)
+        continue;
       const double dx = G.dvr[3 * f], dy = G.dvr[3 * f + 1], dz = G.dvr[3 * f + 2];
       st.emplace_back(3 * (int)j, dx);
       st.emplace_back(3 * (int)j + 1, dy);
@@ -170,24 +180,24 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       sy -= dy;
       sz -= dz;
       if constexpr (Weighted) {
-        const double A = std::sqrt(G.area[3 * f] * G.area[3 * f] +
-                                   G.area[3 * f + 1] * G.area[3 * f + 1] +
-                                   G.area[3 * f + 2] * G.area[3 * f + 2]);
-        const double d = std::sqrt(G.conn[3 * f] * G.conn[3 * f] +
-                                   G.conn[3 * f + 1] * G.conn[3 * f + 1] +
-                                   G.conn[3 * f + 2] * G.conn[3 * f + 2]);
+        const double A =
+            std::sqrt(G.area[3 * f] * G.area[3 * f] + G.area[3 * f + 1] * G.area[3 * f + 1] +
+                      G.area[3 * f + 2] * G.area[3 * f + 2]);
+        const double d =
+            std::sqrt(G.conn[3 * f] * G.conn[3 * f] + G.conn[3 * f + 1] * G.conn[3 * f + 1] +
+                      G.conn[3 * f + 2] * G.conn[3 * f + 2]);
         const double wgt = (d > 0) ? A / (2 * d) : 0;
         st.emplace_back(wdof((int)j), -wgt);
         sw2 += wgt;
       }
     }
     // SDF WALL-FACET term of ∂V_c/∂x_c (pore-space meshing). dV/dn for a facet is its outward area
-    // vector, which the tessellator already publishes (facetArea) for the wall facets of its own EXACT
-    // clipped cell — no cell rebuild. Sum those into gw = Σ_wall A_k û_k, then chain through the
-    // seed-foot wall model n_wall(x) = −φ(x)·û, û = ∇φ/|∇φ|: dn = −∇φ (dx·∇φ)/|∇φ|² (+ a curvature
-    // term ∝ ∇²φ for a curved wall). This is exactly addSdfWallForce's Jacobian J_wallᵀ evaluated at
-    // the seed. Added into the own-seed force (sx,sy,sz) so the Gauss-Newton outer product stays
-    // consistent. Guarded to the SDF case (NoSdf has no eval / no wall facets).
+    // vector, which the tessellator already publishes (facetArea) for the wall facets of its own
+    // EXACT clipped cell — no cell rebuild. Sum those into gw = Σ_wall A_k û_k, then chain through
+    // the seed-foot wall model n_wall(x) = −φ(x)·û, û = ∇φ/|∇φ|: dn = −∇φ (dx·∇φ)/|∇φ|² (+ a
+    // curvature term ∝ ∇²φ for a curved wall). This is exactly addSdfWallForce's Jacobian J_wallᵀ
+    // evaluated at the seed. Added into the own-seed force (sx,sy,sz) so the Gauss-Newton outer
+    // product stays consistent. Guarded to the SDF case (NoSdf has no eval / no wall facets).
     if constexpr (kHasSdf) {
       // gw = Σ_wall (dV/dn_k) = Σ of the published wall-facet outward area vectors (facetArea).
       double gw[3] = {0, 0, 0};
@@ -210,16 +220,18 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     st.emplace_back(3 * c, sx);
     st.emplace_back(3 * c + 1, sy);
     st.emplace_back(3 * c + 2, sz);
-    if constexpr (Weighted) st.emplace_back(wdof(c), sw2);
+    if constexpr (Weighted)
+      st.emplace_back(wdof(c), sw2);
   };
 
   Geo G;
   build(pos, weight, G);
-  // Renormalise the targets to the ACTUAL total cell volume from the first build — the box volume for
-  // a pure/periodic Voronoi partition, but the FLUID volume when an SDF clips the cells against a
-  // solid (seeds meshing a pore space). Targeting the box volume there makes every target ~1/porosity
-  // too large, so the gradient is dominated by an unachievable uniform-growth mode and the line search
-  // rejects every step. For NoSdf the total is the box volume ⇒ this is an exact no-op (sc == 1).
+  // Renormalise the targets to the ACTUAL total cell volume from the first build — the box volume
+  // for a pure/periodic Voronoi partition, but the FLUID volume when an SDF clips the cells against
+  // a solid (seeds meshing a pore space). Targeting the box volume there makes every target
+  // ~1/porosity too large, so the gradient is dominated by an unachievable uniform-growth mode and
+  // the line search rejects every step. For NoSdf the total is the box volume ⇒ this is an exact
+  // no-op (sc == 1).
   {
     double totVol = 0.0, sVset = 0.0;
     for (int i = 0; i < N; ++i) {
@@ -227,7 +239,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       sVset += vset[i];
     }
     const double sc = (sVset > 0.0) ? totVol / sVset : 1.0;
-    for (int i = 0; i < N; ++i) vset[i] *= sc;
+    for (int i = 0; i < N; ++i)
+      vset[i] *= sc;
     G.E = G.maxErr = G.meanErr = 0;
     G.nBad = 0;
     for (int i = 0; i < N; ++i) {
@@ -235,23 +248,28 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       G.E += freeEnergy ? freeCell(G.vol[i], vset[i]).e : e * e;
       G.maxErr = std::max(G.maxErr, std::fabs(e));
       G.meanErr += std::fabs(e);
-      if (G.vol[i] <= 0.0) ++G.nBad;
+      if (G.vol[i] <= 0.0)
+        ++G.nBad;
     }
     G.meanErr /= N;
   }
   auto pack = [&](const std::vector<Real>& x, const std::vector<Real>& w, std::vector<Real>& q) {
     q.assign(x.begin(), x.end());
-    if constexpr (Weighted) q.insert(q.end(), w.begin(), w.end());
+    if constexpr (Weighted)
+      q.insert(q.end(), w.begin(), w.end());
   };
   auto unpack = [&](const std::vector<Real>& q, std::vector<Real>& x, std::vector<Real>& w) {
     x.assign(q.begin(), q.begin() + 3 * N);
-    if constexpr (Weighted) w.assign(q.begin() + 3 * N, q.end());
+    if constexpr (Weighted)
+      w.assign(q.begin() + 3 * N, q.end());
   };
 
   auto barrierE = [&](const Geo& G, double mu) -> double {
-    if (freeEnergy || mu <= 0.0) return 0.0;  // free-energy mode carries its own collapse resistance
+    if (freeEnergy || mu <= 0.0)
+      return 0.0;  // free-energy mode carries its own collapse resistance
     double b = 0.0;
-    for (int i = 0; i < N; ++i) b += barCell(G.vol[i], vset[i], mu).e;
+    for (int i = 0; i < N; ++i)
+      b += barCell(G.vol[i], vset[i], mu).e;
     return b;
   };
 
@@ -291,12 +309,14 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
         g[a] += Rc * va;
         if (useHessian) {
           auto& ra = row[a];
-          for (auto& [b, vb] : st) ra[b] += Hw * va * vb;
+          for (auto& [b, vb] : st)
+            ra[b] += Hw * va * vb;
         }
       }
     }
     double gnorm = 0;
-    for (int i = 0; i < nD; ++i) gnorm = std::max(gnorm, std::fabs(g[i]));
+    for (int i = 0; i < nD; ++i)
+      gnorm = std::max(gnorm, std::fabs(g[i]));
 
     if (verbose && it == 0) {  // FD-validate the objective gradient (one DOF)
       const int d = 3 * (N / 2);
@@ -327,8 +347,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     R.meanVolErr = G.meanErr;
     R.nEmpty = G.nBad;
     if (verbose)
-      std::printf("  [vmesh] iter %2d  E=%.4e maxVolErr=%.3e gnorm=%.3e nBad=%ld mu=%.2e\n", it, G.E,
-                  G.maxErr, gnorm, G.nBad, muCur);
+      std::printf("  [vmesh] iter %2d  E=%.4e maxVolErr=%.3e gnorm=%.3e nBad=%ld mu=%.2e\n", it,
+                  G.E, G.maxErr, gnorm, G.nBad, muCur);
     if (gnorm < tol) {
       R.converged = true;
       break;
@@ -340,122 +360,135 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     // H dq = −g by preconditioned CG.
     double rz0 = 0, rz = 0;  // (reported in the verbose line below; set on the CG path)
     if (!useHessian) {
-      for (int i = 0; i < nD; ++i) dq[i] = -g[i];
+      for (int i = 0; i < nD; ++i)
+        dq[i] = -g[i];
     } else {
-    // flatten to CSR (Hcol/Hval incl. diagonal; Hdiag separate; off-diagonal CSR for colouring).
-    std::vector<Index> Hstart(nD + 1, 0), Hcol, ostart(nD + 1, 0), onbr;
-    std::vector<double> Hval, Hdiag(nD, 0.0);
-    for (int i = 0; i < nD; ++i) {
-      Hstart[i] = (Index)Hcol.size();
-      ostart[i] = (Index)onbr.size();
-      for (auto& [j, v] : row[i]) {
-        Hcol.push_back(j);
-        Hval.push_back(v);
-        if (j == i)
-          Hdiag[i] = v;
-        else
-          onbr.push_back(j);
-      }
-    }
-    Hstart[nD] = (Index)Hcol.size();
-    ostart[nD] = (Index)onbr.size();
-
-    auto matvec = [&](const std::vector<double>& v, std::vector<double>& out) {
+      // flatten to CSR (Hcol/Hval incl. diagonal; Hdiag separate; off-diagonal CSR for colouring).
+      std::vector<Index> Hstart(nD + 1, 0), Hcol, ostart(nD + 1, 0), onbr;
+      std::vector<double> Hval, Hdiag(nD, 0.0);
       for (int i = 0; i < nD; ++i) {
-        double s = 0;
-        for (Index k = Hstart[i]; k < Hstart[i + 1]; ++k) s += Hval[k] * v[Hcol[k]];
-        out[i] = s;
+        Hstart[i] = (Index)Hcol.size();
+        ostart[i] = (Index)onbr.size();
+        for (auto& [j, v] : row[i]) {
+          Hcol.push_back(j);
+          Hval.push_back(v);
+          if (j == i)
+            Hdiag[i] = v;
+          else
+            onbr.push_back(j);
+        }
       }
-    };
+      Hstart[nD] = (Index)Hcol.size();
+      ostart[nD] = (Index)onbr.size();
 
-    // preconditioner z ≈ H⁻¹ r.
-    peclet::core::amr::Coloring col;
-    std::vector<Index> colIdxHost;
-    if (prec == Precond::ColoredGS) {
-      col = peclet::core::amr::greedyColoring(ostart, onbr, (Index)nD);
-      colIdxHost = detail::toHostVecT<Index>(col.idx);
-    }
-    // Smoothed-aggregation AMG: rebuilt each Newton step (H moves with the geometry) from the same
-    // assembled Hessian CSR. Nodal aggregation over the 3-DOF-per-seed position blocks (the weighted
-    // path segregates the N weight DOFs after the 3N positions, so it falls back to scalar
-    // aggregation, s=1 — correct, just not block-aware; a block-aware weighted variant is a later
-    // refinement). One V-cycle per CG iteration keeps the iteration count flat as N grows.
-    peclet::core::solver::GraphAMG amg;
-    if (prec == Precond::GraphAMG) {
-      peclet::core::solver::HostCsrOp Aop;
-      Aop.n = nD;
-      Aop.diag = Hdiag;
-      Aop.start.assign((std::size_t)nD + 1, 0);
-      for (int i = 0; i < nD; ++i) {
-        for (Index k = Hstart[i]; k < Hstart[i + 1]; ++k)
-          if (Hcol[k] != i) {
-            Aop.nbr.push_back(Hcol[k]);
-            Aop.coef.push_back(Hval[k]);
-          }
-        Aop.start[(std::size_t)i + 1] = (Index)Aop.nbr.size();
-      }
-      peclet::core::solver::AmgParams ap;
-      ap.ndofPerNode = Weighted ? 1 : 3;
-      amg.build(Aop, ap);
-    }
-    auto precond = [&](const std::vector<double>& r, std::vector<double>& z) {
-      if (prec == Precond::Jacobi) {
-        for (int i = 0; i < nD; ++i) z[i] = std::fabs(Hdiag[i]) > 1e-30 ? r[i] / Hdiag[i] : r[i];
-        return;
-      }
-      if (prec == Precond::GraphAMG) {
-        amg.apply(r, z);
-        return;
-      }
-      // symmetric multicolour Gauss–Seidel (forward + backward sweep), z = 0 start.
-      std::fill(z.begin(), z.end(), 0.0);
-      auto sweep = [&](bool forward) {
-        for (int ci = 0; ci < col.nColors; ++ci) {
-          const int cc = forward ? ci : col.nColors - 1 - ci;
-          for (Index t = col.hStart[cc]; t < col.hStart[cc + 1]; ++t) {
-            const Index i = colIdxHost[t];
-            double s = r[i];
-            for (Index k = Hstart[i]; k < Hstart[i + 1]; ++k)
-              if (Hcol[k] != i) s -= Hval[k] * z[Hcol[k]];
-            if (std::fabs(Hdiag[i]) > 1e-30) z[i] = s / Hdiag[i];
-          }
+      auto matvec = [&](const std::vector<double>& v, std::vector<double>& out) {
+        for (int i = 0; i < nD; ++i) {
+          double s = 0;
+          for (Index k = Hstart[i]; k < Hstart[i + 1]; ++k)
+            s += Hval[k] * v[Hcol[k]];
+          out[i] = s;
         }
       };
-      sweep(true);
-      sweep(false);
-    };
 
-    // Jacobi-/GS-preconditioned CG for H dq = −g.
-    std::fill(dq.begin(), dq.end(), 0.0);
-    std::vector<double> rr(nD), z(nD), p(nD), Ap(nD);
-    for (int i = 0; i < nD; ++i) rr[i] = -g[i];
-    precond(rr, z);
-    p = z;
-    rz = 0;
-    for (int i = 0; i < nD; ++i) rz += rr[i] * z[i];
-    rz0 = rz;
-    for (int k = 0; k < cgIters && rz > 1e-18 * rz0; ++k) {
-      matvec(p, Ap);
-      double pAp = 0;
-      for (int i = 0; i < nD; ++i) pAp += p[i] * Ap[i];
-      if (pAp <= 0) break;
-      const double a = rz / pAp;
-      for (int i = 0; i < nD; ++i) {
-        dq[i] += a * p[i];
-        rr[i] -= a * Ap[i];
+      // preconditioner z ≈ H⁻¹ r.
+      peclet::core::amr::Coloring col;
+      std::vector<Index> colIdxHost;
+      if (prec == Precond::ColoredGS) {
+        col = peclet::core::amr::greedyColoring(ostart, onbr, (Index)nD);
+        colIdxHost = detail::toHostVecT<Index>(col.idx);
       }
+      // Smoothed-aggregation AMG: rebuilt each Newton step (H moves with the geometry) from the
+      // same assembled Hessian CSR. Nodal aggregation over the 3-DOF-per-seed position blocks (the
+      // weighted path segregates the N weight DOFs after the 3N positions, so it falls back to
+      // scalar aggregation, s=1 — correct, just not block-aware; a block-aware weighted variant is
+      // a later refinement). One V-cycle per CG iteration keeps the iteration count flat as N
+      // grows.
+      peclet::core::solver::GraphAMG amg;
+      if (prec == Precond::GraphAMG) {
+        peclet::core::solver::HostCsrOp Aop;
+        Aop.n = nD;
+        Aop.diag = Hdiag;
+        Aop.start.assign((std::size_t)nD + 1, 0);
+        for (int i = 0; i < nD; ++i) {
+          for (Index k = Hstart[i]; k < Hstart[i + 1]; ++k)
+            if (Hcol[k] != i) {
+              Aop.nbr.push_back(Hcol[k]);
+              Aop.coef.push_back(Hval[k]);
+            }
+          Aop.start[(std::size_t)i + 1] = (Index)Aop.nbr.size();
+        }
+        peclet::core::solver::AmgParams ap;
+        ap.ndofPerNode = Weighted ? 1 : 3;
+        amg.build(Aop, ap);
+      }
+      auto precond = [&](const std::vector<double>& r, std::vector<double>& z) {
+        if (prec == Precond::Jacobi) {
+          for (int i = 0; i < nD; ++i)
+            z[i] = std::fabs(Hdiag[i]) > 1e-30 ? r[i] / Hdiag[i] : r[i];
+          return;
+        }
+        if (prec == Precond::GraphAMG) {
+          amg.apply(r, z);
+          return;
+        }
+        // symmetric multicolour Gauss–Seidel (forward + backward sweep), z = 0 start.
+        std::fill(z.begin(), z.end(), 0.0);
+        auto sweep = [&](bool forward) {
+          for (int ci = 0; ci < col.nColors; ++ci) {
+            const int cc = forward ? ci : col.nColors - 1 - ci;
+            for (Index t = col.hStart[cc]; t < col.hStart[cc + 1]; ++t) {
+              const Index i = colIdxHost[t];
+              double s = r[i];
+              for (Index k = Hstart[i]; k < Hstart[i + 1]; ++k)
+                if (Hcol[k] != i)
+                  s -= Hval[k] * z[Hcol[k]];
+              if (std::fabs(Hdiag[i]) > 1e-30)
+                z[i] = s / Hdiag[i];
+            }
+          }
+        };
+        sweep(true);
+        sweep(false);
+      };
+
+      // Jacobi-/GS-preconditioned CG for H dq = −g.
+      std::fill(dq.begin(), dq.end(), 0.0);
+      std::vector<double> rr(nD), z(nD), p(nD), Ap(nD);
+      for (int i = 0; i < nD; ++i)
+        rr[i] = -g[i];
       precond(rr, z);
-      double rzn = 0;
-      for (int i = 0; i < nD; ++i) rzn += rr[i] * z[i];
-      const double beta = rzn / rz;
-      for (int i = 0; i < nD; ++i) p[i] = z[i] + beta * p[i];
-      rz = rzn;
-    }
+      p = z;
+      rz = 0;
+      for (int i = 0; i < nD; ++i)
+        rz += rr[i] * z[i];
+      rz0 = rz;
+      for (int k = 0; k < cgIters && rz > 1e-18 * rz0; ++k) {
+        matvec(p, Ap);
+        double pAp = 0;
+        for (int i = 0; i < nD; ++i)
+          pAp += p[i] * Ap[i];
+        if (pAp <= 0)
+          break;
+        const double a = rz / pAp;
+        for (int i = 0; i < nD; ++i) {
+          dq[i] += a * p[i];
+          rr[i] -= a * Ap[i];
+        }
+        precond(rr, z);
+        double rzn = 0;
+        for (int i = 0; i < nD; ++i)
+          rzn += rr[i] * z[i];
+        const double beta = rzn / rz;
+        for (int i = 0; i < nD; ++i)
+          p[i] = z[i] + beta * p[i];
+        rz = rzn;
+      }
     }  // else (Gauss-Newton CG path)
 
     // Armijo backtracking on the TOTAL energy E + barrier along dq.
     double gdq = 0;
-    for (int i = 0; i < nD; ++i) gdq += g[i] * dq[i];
+    for (int i = 0; i < nD; ++i)
+      gdq += g[i] * dq[i];
     const double Ecur = G.E + barrierE(G, muCur);
     std::vector<Real> q, qtry, xt, wt;
     pack(pos, weight, q);
@@ -464,19 +497,20 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     Geo Gt;
     for (int bt = 0; bt < 24; ++bt) {
       qtry.resize(nD);
-      for (int i = 0; i < nD; ++i) qtry[i] = q[i] + (Real)(alpha * dq[i]);
+      for (int i = 0; i < nD; ++i)
+        qtry[i] = q[i] + (Real)(alpha * dq[i]);
       unpack(qtry, xt, wt);
       build(xt, wt, Gt);
       const double Etry = Gt.E + barrierE(Gt, muCur);
-      // Validity gate. With the barrier on (μ>0) a collapsed trial has Etry=+∞ ⇒ rejected by isfinite,
-      // so feasibility (all V>0) is enforced automatically. With no barrier: NoSdf requires nBad==0;
-      // the SDF-without-barrier case accepts on the energy decrease alone.
-      const bool cellsValid = (muCur > 0.0)
-                                  ? std::isfinite(Etry)
-                                  : (kHasSdf ? std::isfinite(Gt.E) : (Gt.nBad == 0));
+      // Validity gate. With the barrier on (μ>0) a collapsed trial has Etry=+∞ ⇒ rejected by
+      // isfinite, so feasibility (all V>0) is enforced automatically. With no barrier: NoSdf
+      // requires nBad==0; the SDF-without-barrier case accepts on the energy decrease alone.
+      const bool cellsValid =
+          (muCur > 0.0) ? std::isfinite(Etry) : (kHasSdf ? std::isfinite(Gt.E) : (Gt.nBad == 0));
       if (cellsValid && Etry <= Ecur + 1e-4 * alpha * gdq) {
         pos = xt;
-        if constexpr (Weighted) weight = wt;
+        if constexpr (Weighted)
+          weight = wt;
         G = Gt;
         accepted = true;
         break;
@@ -486,7 +520,8 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
     if (verbose)
       std::printf("      prec=%s cg rz %.2e->%.2e  alpha=%.4f\n",
                   prec == Precond::Jacobi ? "jac" : "cgs", rz0, rz, alpha);
-    if (!accepted) break;
+    if (!accepted)
+      break;
   }
   return R;
 }
@@ -532,7 +567,8 @@ void interfaceGradReconstruct(const std::vector<Real>& x, const std::vector<int>
       std::vector<int> ids;
       for (int f = off[c]; f < off[c] + cnt[c] && f < nF; ++f) {
         const long j = (long)nbr[f];
-        if (j < 0 || j >= N) continue;
+        if (j < 0 || j >= N)
+          continue;
         Real r[3];
         for (int d = 0; d < 3; ++d) {
           Real rr = x[3 * j + d] - x[3 * c + d];
@@ -544,7 +580,8 @@ void interfaceGradReconstruct(const std::vector<Real>& x, const std::vector<int>
       }
       const int M = (int)ids.size();
       std::vector<int> ord(M);
-      for (int i = 0; i < M; ++i) ord[i] = i;
+      for (int i = 0; i < M; ++i)
+        ord[i] = i;
       std::sort(ord.begin(), ord.end(), [&](int a, int b) { return nb[a][0] < nb[b][0]; });
       std::vector<Real> rx(M), ry(M), rz(M);
       std::vector<int> id2(M);
@@ -556,13 +593,15 @@ void interfaceGradReconstruct(const std::vector<Real>& x, const std::vector<int>
       }
       RCell cell;
       buildConvexCell(cell, Larr, rx.data(), ry.data(), rz.data(), id2.data(), M);
-      if (cell.empty() || cell.overflow) continue;
+      if (cell.empty() || cell.overflow)
+        continue;
 
       // gather per-face area magnitudes Ag[k] and the area Jacobian dA[k][l][cc] = ∂A_k/∂n_l.
       const int np = cell.np;
       std::vector<double> Ag(np, 0.0), dA((size_t)np * np * 3, 0.0);
       for (int t = 0; t < cell.nt; ++t) {
-        if (!cell.alive[t]) continue;
+        if (!cell.alive[t])
+          continue;
         int pl[3];
         double cb[3], gr[3][3][3];
         cell.geomVolumeAreaGrad(t, pl, cb, gr);
@@ -578,7 +617,8 @@ void interfaceGradReconstruct(const std::vector<Real>& x, const std::vector<int>
       std::vector<double> gn(3 * np, 0.0);
       for (int k = 0; k < np; ++k) {
         const int j = cell.pnbr[k];
-        if (j < 0 || j >= N || type[j] == type[c]) continue;  // only different-type faces
+        if (j < 0 || j >= N || type[j] == type[c])
+          continue;  // only different-type faces
         E += 0.5 * sigma * Ag[k];
         for (int l = 0; l < np; ++l)
           for (int cc = 0; cc < 3; ++cc)
@@ -600,7 +640,8 @@ void interfaceGradReconstruct(const std::vector<Real>& x, const std::vector<int>
       g[3 * c + 2] += fSelf[2];
       for (int l = 0; l < np; ++l) {
         const int j = cell.pnbr[l];
-        if (j < 0 || j >= N) continue;
+        if (j < 0 || j >= N)
+          continue;
         g[3 * j] += fnx[l];
         g[3 * j + 1] += fny[l];
         g[3 * j + 2] += fnz[l];
@@ -667,10 +708,12 @@ OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type,
   }
   for (int it = 0; it < maxIter; ++it) {
     double gnorm = 0;
-    for (double v : g) gnorm = std::max(gnorm, std::fabs(v));
+    for (double v : g)
+      gnorm = std::max(gnorm, std::fabs(v));
     R.iters = it;
     R.maxVolErr = E;  // report energy in maxVolErr slot
-    if (verbose) std::printf("  [iface] iter %2d  E=%.6e gnorm=%.3e\n", it, E, gnorm);
+    if (verbose)
+      std::printf("  [iface] iter %2d  E=%.6e gnorm=%.3e\n", it, E, gnorm);
     if (gnorm < tol) {
       R.converged = true;
       break;
@@ -686,7 +729,8 @@ OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type,
     std::vector<double> gt;
     double Et;
     for (int bt = 0; bt < 30; ++bt) {
-      for (int i = 0; i < 3 * N; ++i) xtry[i] = pos[i] - (Real)(alpha * g[i]);
+      for (int i = 0; i < 3 * N; ++i)
+        xtry[i] = pos[i] - (Real)(alpha * g[i]);
       energyGrad(xtry, gt, Et);
       if (Et <= E + 1e-4 * alpha * gdq) {
         pos = xtry;
@@ -697,7 +741,8 @@ OtResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>& type,
       }
       alpha *= 0.5;
     }
-    if (!accepted) break;
+    if (!accepted)
+      break;
   }
   R.meanVolErr = E / std::max(E0, 1e-30);  // final/initial energy ratio
   return R;
@@ -723,11 +768,13 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
   const int nD = 3 * N;
 
   double sumVset = 0;
-  for (int i = 0; i < N; ++i) sumVset += vsetIn[i];
+  for (int i = 0; i < N; ++i)
+    sumVset += vsetIn[i];
   DV vset("mo.vset", N);
   {
     auto h = Kokkos::create_mirror_view(vset);
-    for (int i = 0; i < N; ++i) h(i) = vsetIn[i] * (boxVol / sumVset);
+    for (int i = 0; i < N; ++i)
+      h(i) = vsetIn[i] * (boxVol / sumVset);
     Kokkos::deep_copy(vset, h);
   }
   Kokkos::View<Real*, MemSpace> dpos("mo.pos", 3 * N), dw;
@@ -753,7 +800,8 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
           le += gamma * d * d;
           lmx = Kokkos::max(lmx, Kokkos::fabs(d));
           lmn += Kokkos::fabs(d);
-          if (vol(i) <= 0.0) ++lnb;
+          if (vol(i) <= 0.0)
+            ++lnb;
         },
         e, Kokkos::Max<double>(mx), mn, nb);
     E = e;
@@ -836,7 +884,8 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
           double sx = wGc(3 * c), sy = wGc(3 * c + 1), sz = wGc(3 * c + 2);
           for (int f = off(c); f < off(c) + cnt(c); ++f) {
             const int j = (int)nbr(f);
-            if (j < 0 || j >= N) continue;
+            if (j < 0 || j >= N)
+              continue;
             const double dx = dvr(3 * f), dy = dvr(3 * f + 1), dz = dvr(3 * f + 2);
             Kokkos::atomic_add(&g(3 * j), Rc * dx);
             Kokkos::atomic_add(&g(3 * j + 1), Rc * dy);
@@ -882,10 +931,13 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
             double yc = 0;
             for (int f = off(c); f < off(c) + cnt(c); ++f) {
               const int j = (int)nbr(f);
-              if (j < 0 || j >= N) continue;
-              for (int d = 0; d < 3; ++d) yc += dvr(3 * f + d) * (v(3 * j + d) - v(3 * c + d));
+              if (j < 0 || j >= N)
+                continue;
+              for (int d = 0; d < 3; ++d)
+                yc += dvr(3 * f + d) * (v(3 * j + d) - v(3 * c + d));
             }
-            for (int d = 0; d < 3; ++d) yc += wGv(3 * c + d) * v(3 * c + d);  // wall own-seed term
+            for (int d = 0; d < 3; ++d)
+              yc += wGv(3 * c + d) * v(3 * c + d);  // wall own-seed term
             y(c) = yc;
           });
       Kokkos::deep_copy(out, 0.0);
@@ -894,7 +946,8 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
             const double s = 2.0 * gamma * y(c);
             for (int f = off(c); f < off(c) + cnt(c); ++f) {
               const int j = (int)nbr(f);
-              if (j < 0 || j >= N) continue;
+              if (j < 0 || j >= N)
+                continue;
               for (int d = 0; d < 3; ++d) {
                 Kokkos::atomic_add(&out(3 * j + d), s * dvr(3 * f + d));
                 Kokkos::atomic_add(&out(3 * c + d), -s * dvr(3 * f + d));
@@ -927,7 +980,8 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
     for (int k = 0; k < cgIters && rz > 1e-18 * rz0; ++k) {
       Hmul(pp, Ap);
       const double pAp = dot(pp, Ap);
-      if (pAp <= 0) break;
+      if (pAp <= 0)
+        break;
       const double a = rz / pAp;
       {
         auto D = diag;
@@ -985,12 +1039,14 @@ OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<
           "mo.sd", Kokkos::RangePolicy<Exec>(0, nD), KOKKOS_LAMBDA(int i) { DQ(i) = -G(i); });
       accepted = lineSearch(dq, -dot(g, g));
     }
-    if (!accepted) break;
+    if (!accepted)
+      break;
   }
   // download the optimised positions.
   auto h = Kokkos::create_mirror_view(dpos);
   Kokkos::deep_copy(h, dpos);
-  for (int i = 0; i < 3 * N; ++i) posHost[i] = h(i);
+  for (int i = 0; i < 3 * N; ++i)
+    posHost[i] = h(i);
   return R;
 }
 

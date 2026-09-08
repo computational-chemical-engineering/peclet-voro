@@ -1003,13 +1003,14 @@ struct ConvexCell {
   static constexpr int MAXSV = 2 * MAXFV;  ///< max vertices on a cross-section polygon
 
   /// Cross-section of the cell by the plane {x : (x - p0)·u = 0}: the convex polygon the plane cuts
-  /// out. Enumerates the cell's primal EDGES straight from the dual triangles — an edge is a pair of
-  /// alive triangles sharing exactly two planes (each edge is then their two endpoints, found exactly
-  /// once) — and collects the point where each edge crosses the plane, then orders the crossings CCW
-  /// in the plane (same in-plane basis + diamond pseudo-angle as faceOrdered). This never relies on
-  /// face watertightness, so it tiles a cross-section exactly where a face-by-face slice drops facets.
-  /// Coordinates are in the cell's own frame (dual-vertex frame, i.e. seed-relative). Returns the
-  /// vertex count m (0 or <3 if the plane misses/grazes the cell; -1 on MAXSV overflow — caller skips).
+  /// out. Enumerates the cell's primal EDGES straight from the dual triangles — an edge is a pair
+  /// of alive triangles sharing exactly two planes (each edge is then their two endpoints, found
+  /// exactly once) — and collects the point where each edge crosses the plane, then orders the
+  /// crossings CCW in the plane (same in-plane basis + diamond pseudo-angle as faceOrdered). This
+  /// never relies on face watertightness, so it tiles a cross-section exactly where a face-by-face
+  /// slice drops facets. Coordinates are in the cell's own frame (dual-vertex frame, i.e.
+  /// seed-relative). Returns the vertex count m (0 or <3 if the plane misses/grazes the cell; -1 on
+  /// MAXSV overflow — caller skips).
   KOKKOS_INLINE_FUNCTION int sectionPolygon(const Real p0[3], const Real u[3], Real px[MAXSV],
                                             Real py[MAXSV], Real pz[MAXSV]) const {
     int m = 0;
@@ -1049,19 +1050,33 @@ struct ConvexCell {
     const Real un[3] = {u[0] / ulen, u[1] / ulen, u[2] / ulen};
     Real e1[3];
     if (Kokkos::fabs(un[0]) <= Kokkos::fabs(un[1]) && Kokkos::fabs(un[0]) <= Kokkos::fabs(un[2])) {
-      e1[0] = 0; e1[1] = -un[2]; e1[2] = un[1];
+      e1[0] = 0;
+      e1[1] = -un[2];
+      e1[2] = un[1];
     } else if (Kokkos::fabs(un[1]) <= Kokkos::fabs(un[2])) {
-      e1[0] = -un[2]; e1[1] = 0; e1[2] = un[0];
+      e1[0] = -un[2];
+      e1[1] = 0;
+      e1[2] = un[0];
     } else {
-      e1[0] = -un[1]; e1[1] = un[0]; e1[2] = 0;
+      e1[0] = -un[1];
+      e1[1] = un[0];
+      e1[2] = 0;
     }
     const Real e1l = Kokkos::sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
-    e1[0] /= e1l; e1[1] /= e1l; e1[2] /= e1l;
+    e1[0] /= e1l;
+    e1[1] /= e1l;
+    e1[2] /= e1l;
     const Real e2[3] = {un[1] * e1[2] - un[2] * e1[1], un[2] * e1[0] - un[0] * e1[2],
                         un[0] * e1[1] - un[1] * e1[0]};
     Real cx = 0, cy = 0, cz = 0;
-    for (int i = 0; i < m; ++i) { cx += px[i]; cy += py[i]; cz += pz[i]; }
-    cx /= m; cy /= m; cz /= m;
+    for (int i = 0; i < m; ++i) {
+      cx += px[i];
+      cy += py[i];
+      cz += pz[i];
+    }
+    cx /= m;
+    cy /= m;
+    cz /= m;
     Real ang[MAXSV];
     for (int i = 0; i < m; ++i) {
       const Real dx = px[i] - cx, dy = py[i] - cy, dz = pz[i] - cz;
@@ -1076,10 +1091,15 @@ struct ConvexCell {
       int j = i - 1;
       while (j >= 0 && ang[j] > ka) {
         ang[j + 1] = ang[j];
-        px[j + 1] = px[j]; py[j + 1] = py[j]; pz[j + 1] = pz[j];
+        px[j + 1] = px[j];
+        py[j + 1] = py[j];
+        pz[j + 1] = pz[j];
         --j;
       }
-      ang[j + 1] = ka; px[j + 1] = kx; py[j + 1] = ky; pz[j + 1] = kz;
+      ang[j + 1] = ka;
+      px[j + 1] = kx;
+      py[j + 1] = ky;
+      pz[j + 1] = kz;
     }
     return m;
   }
@@ -1800,7 +1820,8 @@ KOKKOS_INLINE_FUNCTION void buildConvexCell(ConvexCell<Real, MAXP, MAXT, TrackAd
   for (int i = 0; i < nNbr; ++i) {
     const Real n[3] = {relx[i], rely[i], relz[i]};
     Real wNbr = Real(0);
-    if constexpr (Policy::kHasWeightDof) wNbr = weights[i];
+    if constexpr (Policy::kHasWeightDof)
+      wNbr = weights[i];
     const Real off = Policy::template offsetFromRel<Real>(n, wSelf, wNbr);
     if constexpr (!Policy::kHasWeightDof) {
       if (!(off < Real(2) * c.maxVertexRsq()))

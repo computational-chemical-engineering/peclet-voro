@@ -44,17 +44,20 @@ void volumesSdf(const std::vector<real_t>& x, int N, real_t L, int sw, const Sdf
   Kokkos::deep_copy(dpos, Kokkos::View<const real_t*, Kokkos::HostSpace>(x.data(), 3 * N));
   Kokkos::View<long*, peclet::core::MemSpace> gd;
   const real_t Larr[3] = {L, L, L};
-  auto res = peclet::voro::buildTessellation<real_t, false>(dpos, dw, N, Larr, sw, N, gd, sdf, true);
+  auto res =
+      peclet::voro::buildTessellation<real_t, false>(dpos, dw, N, Larr, sw, N, gd, sdf, true);
   auto m = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), res.view.cellVolume);
   vol.assign(m.data(), m.data() + N);
 }
 
 double spread(const std::vector<real_t>& v) {
   double mean = 0;
-  for (double x : v) mean += x;
+  for (double x : v)
+    mean += x;
   mean /= v.size();
   double var = 0;
-  for (double x : v) var += (x - mean) * (x - mean);
+  for (double x : v)
+    var += (x - mean) * (x - mean);
   return std::sqrt(var / v.size()) / mean;
 }
 
@@ -87,7 +90,8 @@ int main(int argc, char** argv) {
     std::mt19937 rng(3);
     std::uniform_real_distribution<real_t> U(0.0, 1.0);
     std::vector<real_t> pos0(3 * N);
-    for (auto& v : pos0) v = L * U(rng);
+    for (auto& v : pos0)
+      v = L * U(rng);
     std::vector<real_t> noW;
 
     // (A) uniform target — Jacobi vs colored-GS vs smoothed-aggregation AMG, all Voronoi positions.
@@ -99,9 +103,9 @@ int main(int argc, char** argv) {
     for (int mode = 0; mode < 3; ++mode) {
       std::vector<real_t> pos = pos0, vol1;
       std::vector<real_t> vset(N, boxVol / N);
-      auto R = peclet::voro::meshVolumeOptimize<real_t, false>(
-          pos, noW, vset, boxL, N, sw, peclet::voro::NoSdf{}, 60, 1e-10, 300,
-          precs[mode], mode == 0);
+      auto R = peclet::voro::meshVolumeOptimize<real_t, false>(pos, noW, vset, boxL, N, sw,
+                                                               peclet::voro::NoSdf{}, 60, 1e-10,
+                                                               300, precs[mode], mode == 0);
       volumes<false>(pos, noW, N, L, sw, vol1);
       sp[mode] = spread(vol1);
       itn[mode] = R.iters;
@@ -118,7 +122,8 @@ int main(int argc, char** argv) {
     // (B) graded target: positions only vs positions+power-weights.
     std::vector<real_t> vset(N);
     for (int i = 0; i < N; ++i)
-      vset[i] = std::fabs(pos0[3 * i] - 0.5) < 0.15 ? (real_t)(boxVol / N / 3.0) : (real_t)(boxVol / N);
+      vset[i] =
+          std::fabs(pos0[3 * i] - 0.5) < 0.15 ? (real_t)(boxVol / N / 3.0) : (real_t)(boxVol / N);
     double ratioPos = 0, ratioPw = 0;
     long nBadPw = 0;
     {
@@ -130,13 +135,13 @@ int main(int argc, char** argv) {
       ratioPos = slabRatio(pos, vol1, N);
     }
     {  // power weights: the gradient machinery is FD-exact (verbose above); it runs cleanly. The
-       // weighted result does NOT beat positions here because the PERIODIC power tessellation is not
-       // an exact partition (Effort-1 min-image floor ~1%), so its volume energy is inconsistent —
-       // weights help only on a non-periodic/exact-partition domain (deferred).
+       // weighted result does NOT beat positions here because the PERIODIC power tessellation is
+       // not an exact partition (Effort-1 min-image floor ~1%), so its volume energy is
+       // inconsistent — weights help only on a non-periodic/exact-partition domain (deferred).
       std::vector<real_t> pos = pos0, w(N, 0.0), vol1;
-      auto R = peclet::voro::meshVolumeOptimize<real_t, true>(
-          pos, w, vset, boxL, N, sw, peclet::voro::NoSdf{}, 40, 1e-10, 300,
-          peclet::voro::Precond::Jacobi, true);
+      auto R = peclet::voro::meshVolumeOptimize<real_t, true>(pos, w, vset, boxL, N, sw,
+                                                              peclet::voro::NoSdf{}, 40, 1e-10, 300,
+                                                              peclet::voro::Precond::Jacobi, true);
       volumes<true>(pos, w, N, L, sw, vol1);
       ratioPw = slabRatio(pos, vol1, N);
       nBadPw = R.nEmpty;
@@ -144,9 +149,10 @@ int main(int argc, char** argv) {
     {
       // gate: position meshing refines the slab; the weighted run completes without degeneracy.
       const bool pass = ratioPos > 1.5 && nBadPw == 0;
-      std::printf("  (B) graded   positions ratio=%.2f   +power-weights ratio=%.2f nBad=%ld "
-                  "(weights min-image-limited)  %s\n",
-                  ratioPos, ratioPw, nBadPw, pass ? "OK" : "FAIL");
+      std::printf(
+          "  (B) graded   positions ratio=%.2f   +power-weights ratio=%.2f nBad=%ld "
+          "(weights min-image-limited)  %s\n",
+          ratioPos, ratioPw, nBadPw, pass ? "OK" : "FAIL");
       rc |= pass ? 0 : 1;
     }
     // (C) device-resident optimiser (all assembly/matvec/CG/precond/line-search/update on device):
@@ -180,7 +186,7 @@ int main(int argc, char** argv) {
       }
       auto R = peclet::voro::interfaceMinimize<real_t>(pos, type, 1.0, boxL, N, sw,
                                                        peclet::voro::NoSdf{}, 120, 1e-9, true);
-      const double ratio = R.meanVolErr;  // E_final / E_initial
+      const double ratio = R.meanVolErr;        // E_final / E_initial
       const bool pass = R.nEmpty == 0 || true;  // no degeneracy gate; require energy decrease
       const bool ok = pass && ratio < 0.9;
       std::printf("  (D) interface  E_final/E_0=%.3f  iters=%d  %s\n", ratio, R.iters,
@@ -214,8 +220,9 @@ int main(int argc, char** argv) {
       const double s0 = spread(volS0);
       std::vector<real_t> posH = posS, posD = posS, volH, volD;
       std::vector<real_t> vsetU(N, boxVol / N), noW2;
-      const real_t Lbox[3] = {L, L, L};  // a named array: the compound literal is a GNU extension
-                                         // that g++ 13 rejects ("taking address of temporary array")
+      const real_t Lbox[3] = {L, L,
+                              L};  // a named array: the compound literal is a GNU extension
+                                   // that g++ 13 rejects ("taking address of temporary array")
       peclet::voro::meshVolumeOptimize<real_t, false>(posH, noW2, vsetU, Lbox, N, sw, ball, 60,
                                                       1e-10, 300, peclet::voro::Precond::Jacobi,
                                                       false);

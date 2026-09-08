@@ -72,8 +72,8 @@ SubsetGatherResult<Real> subsetGather(
   using Kokkos::view_alloc;
   using Kokkos::WithoutInitializing;
 
-  // Power reach needs the global max weight (see CellBuilder::blockReachSq); 0 for Voronoi. The grid
-  // carries the per-slot weights (wSorted), so reduce over those.
+  // Power reach needs the global max weight (see CellBuilder::blockReachSq); 0 for Voronoi. The
+  // grid carries the per-slot weights (wSorted), so reduce over those.
   Real wMaxAll = Real(0);
   if constexpr (Weighted) {
     if (grid.wSorted.extent(0) == static_cast<size_t>(N)) {

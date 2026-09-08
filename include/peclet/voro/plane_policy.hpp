@@ -79,13 +79,14 @@ struct Voronoi {
   /// Foot-point normal of the bisector to a neighbour at pNbr (periodic min-image, box length L).
   /// n = (off/|pdir|²) pdir = ½ r. Weights are ignored.
   template <class Real>
-  KOKKOS_INLINE_FUNCTION static void buildNormal(const Real pSelf[3], const Real pNbr[3], Real wSelf,
-                                                 Real wNbr, Real L, Real nOut[3]) {
+  KOKKOS_INLINE_FUNCTION static void buildNormal(const Real pSelf[3], const Real pNbr[3],
+                                                 Real wSelf, Real wNbr, Real L, Real nOut[3]) {
     Real pdir[3], off;
     planeFromNeighbour(pSelf, pNbr, wSelf, wNbr, L, pdir, off);
     const Real l2 = pdir[0] * pdir[0] + pdir[1] * pdir[1] + pdir[2] * pdir[2];
     const Real a = l2 > Real(0) ? off / l2 : Real(0);
-    for (int d = 0; d < 3; ++d) nOut[d] = a * pdir[d];
+    for (int d = 0; d < 3; ++d)
+      nOut[d] = a * pdir[d];
   }
 
   /// Chain one plane's geometry gradient g = dGeom/dn_k to the seed DOFs. The Voronoi Jacobians are
@@ -109,7 +110,8 @@ struct Voronoi {
 /// Power / Laguerre plane policy: the radical plane between weighted seeds. With r = p_j − p_i,
 /// ρ = |r|², c = w_i − w_j, α = (ρ+c)/(2ρ), the foot-point normal is n = α r and the half-space
 /// offset is d = ½(ρ+c). Unlike the bisector, d can be negative (the seed can lie OUTSIDE its own
-/// cell) — the generic ConvexCell::clip already tolerates that. Both positions and weights are DOFs.
+/// cell) — the generic ConvexCell::clip already tolerates that. Both positions and weights are
+/// DOFs.
 struct Power {
   static constexpr bool kHasWeightDof = true;
 
@@ -150,13 +152,14 @@ struct Power {
 
   /// Foot-point normal n = (off/|pdir|²) pdir = α r.
   template <class Real>
-  KOKKOS_INLINE_FUNCTION static void buildNormal(const Real pSelf[3], const Real pNbr[3], Real wSelf,
-                                                 Real wNbr, Real L, Real nOut[3]) {
+  KOKKOS_INLINE_FUNCTION static void buildNormal(const Real pSelf[3], const Real pNbr[3],
+                                                 Real wSelf, Real wNbr, Real L, Real nOut[3]) {
     Real pdir[3], off;
     planeFromNeighbour(pSelf, pNbr, wSelf, wNbr, L, pdir, off);
     const Real l2 = pdir[0] * pdir[0] + pdir[1] * pdir[1] + pdir[2] * pdir[2];
     const Real a = l2 > Real(0) ? off / l2 : Real(0);
-    for (int d = 0; d < 3; ++d) nOut[d] = a * pdir[d];
+    for (int d = 0; d < 3; ++d)
+      nOut[d] = a * pdir[d];
   }
 
   /// Chain g = dGeom/dn_k to the seed DOFs. n = α r, α = ½ + c/(2ρ), c = w_self − w_nbr.

@@ -175,10 +175,10 @@ struct MovingTessellation {
   }
 
   Store store;
-  Kokkos::View<Real*, Mem> vol;   // N : cell volumes (the published geometry scalar)
-  Kokkos::View<Real*, Mem> xRef;  // 3N : positions at the last (re)build (Verlet reference)
-  Kokkos::View<Real*, Mem> weight;  // N : per-seed power weights (empty for Voronoi); DOFs alongside
-                                    // positions. Set via setWeights before rebuild/step.
+  Kokkos::View<Real*, Mem> vol;     // N : cell volumes (the published geometry scalar)
+  Kokkos::View<Real*, Mem> xRef;    // 3N : positions at the last (re)build (Verlet reference)
+  Kokkos::View<Real*, Mem> weight;  // N : per-seed power weights (empty for Voronoi); DOFs
+                                    // alongside positions. Set via setWeights before rebuild/step.
 
   /// Set the per-seed power weights (Weighted only). Held by reference; the caller keeps it alive.
   void setWeights(const Kokkos::View<Real*, Mem>& w) { weight = w; }
@@ -364,7 +364,8 @@ struct MovingTessellation {
     const Real tolL = tol, half2 = Real(0.25) * skin * skin;
     const bool skinOn = useSkin;
     const int nP_ = nProc;
-    auto Wt = weight;  // power weights (empty for Voronoi; captured for reevalGeometry<PlanePolicy>)
+    auto Wt =
+        weight;  // power weights (empty for Voronoi; captured for reevalGeometry<PlanePolicy>)
     // near-miss (face-gain) check captures
     auto NR = near;
     auto NC = nearCnt;
@@ -395,7 +396,8 @@ struct MovingTessellation {
           const Real wallSkin2C = wallSkin2;
           const Real* wPtr = Wt.data();  // force-capture Wt OUTSIDE the constexpr-if (nvcc rule)
           Real wSelfI = Real(0);
-          if constexpr (Weighted) wSelfI = Wt(i);
+          if constexpr (Weighted)
+            wSelfI = Wt(i);
           c.template reevalGeometry<PlanePolicy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
                                                  wSelfI, wPtr);
           Vv(i) = c.volumePerVertex();
@@ -542,7 +544,8 @@ struct MovingTessellation {
           }
           const Real* wPtr = Wt.data();  // force-capture Wt OUTSIDE the constexpr-if (nvcc rule)
           Real wSelfI = Real(0);
-          if constexpr (Weighted) wSelfI = Wt(i);
+          if constexpr (Weighted)
+            wSelfI = Wt(i);
           c.template reevalGeometry<PlanePolicy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
                                                  wSelfI, wPtr);
           Vv(i) = c.volumePerVertex();
@@ -593,7 +596,8 @@ struct MovingTessellation {
           }
           const Real* wPtr = Wt.data();  // force-capture Wt OUTSIDE the constexpr-if (nvcc rule)
           Real wSelfI = Real(0);
-          if constexpr (Weighted) wSelfI = Wt(i);
+          if constexpr (Weighted)
+            wSelfI = Wt(i);
           c.template reevalGeometry<PlanePolicy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
                                                  wSelfI, wPtr);  // computePoke4 needs vertices
           c.rebuildAdjacency();

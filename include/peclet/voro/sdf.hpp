@@ -181,10 +181,10 @@ struct SdfScene {
   KOKKOS_INLINE_FUNCTION Real gradH() const { return h; }
 };
 
-/// Periodic UNION of solid balls: sdf(x) = min_i(|x−c_i|_minimage − r_i) (<0 inside a ball, >0 in the
-/// fluid). Device-callable; holds Views of the centres (3M, x-fastest c_{ix},c_{iy},c_{iz}) and radii
-/// (M). L > 0 ⇒ periodic min-image (L = box edge); L ≤ 0 ⇒ non-periodic. The packed-bed / pore-space
-/// wall geometry for the volume mesh optimiser.
+/// Periodic UNION of solid balls: sdf(x) = min_i(|x−c_i|_minimage − r_i) (<0 inside a ball, >0 in
+/// the fluid). Device-callable; holds Views of the centres (3M, x-fastest c_{ix},c_{iy},c_{iz}) and
+/// radii (M). L > 0 ⇒ periodic min-image (L = box edge); L ≤ 0 ⇒ non-periodic. The packed-bed /
+/// pore-space wall geometry for the volume mesh optimiser.
 template <class Real>
 struct SdfSpheres {
   Kokkos::View<const Real*, peclet::core::MemSpace> cen;  // 3*M
@@ -201,7 +201,8 @@ struct SdfSpheres {
         dz -= L * Kokkos::round(dz / L);
       }
       const Real d = Kokkos::sqrt(dx * dx + dy * dy + dz * dz) - rad(i);
-      if (d < m) m = d;
+      if (d < m)
+        m = d;
     }
     return m;
   }
@@ -225,13 +226,16 @@ KOKKOS_INLINE_FUNCTION void sdfHessian(const Sdf& s, Real x, Real y, Real z, Rea
   Real gp[3], gm[3];
   sdfGradient<Real>(s, x + h, y, z, gp);
   sdfGradient<Real>(s, x - h, y, z, gm);
-  for (int r = 0; r < 3; ++r) H[r][0] = (gp[r] - gm[r]) / (2 * h);
+  for (int r = 0; r < 3; ++r)
+    H[r][0] = (gp[r] - gm[r]) / (2 * h);
   sdfGradient<Real>(s, x, y + h, z, gp);
   sdfGradient<Real>(s, x, y - h, z, gm);
-  for (int r = 0; r < 3; ++r) H[r][1] = (gp[r] - gm[r]) / (2 * h);
+  for (int r = 0; r < 3; ++r)
+    H[r][1] = (gp[r] - gm[r]) / (2 * h);
   sdfGradient<Real>(s, x, y, z + h, gp);
   sdfGradient<Real>(s, x, y, z - h, gm);
-  for (int r = 0; r < 3; ++r) H[r][2] = (gp[r] - gm[r]) / (2 * h);
+  for (int r = 0; r < 3; ++r)
+    H[r][2] = (gp[r] - gm[r]) / (2 * h);
   for (int a = 0; a < 3; ++a)
     for (int b = a + 1; b < 3; ++b) {
       const Real m = Real(0.5) * (H[a][b] + H[b][a]);
@@ -284,9 +288,9 @@ KOKKOS_INLINE_FUNCTION void sdfWallChain(const Sdf& sdf, Real x, Real y, Real z,
 ///   J_wall = ∂n_wall/∂s = −|∇φ| û ûᵀ − (φ/|∇φ|)(I − û ûᵀ) H,   H = ∇²φ,
 /// so the wall's contribution to dGeom/dseed is J_wallᵀ g summed over the cell's wall facets
 /// (g = dGeom/dn_k from geomVolumeGrad). EXACT for a flat wall (φ linear ⇒ H=0, one facet);
-/// first-order for a curved wall (the clip approximates the curve by several vertex-anchored tangent
-/// facets, modelled here as one effective seed-foot plane). Call AFTER chainToDofs<Policy> (which
-/// zeroes pnbr<0 planes); this adds the wall self-force into fSelf. No-op for NoSdf.
+/// first-order for a curved wall (the clip approximates the curve by several vertex-anchored
+/// tangent facets, modelled here as one effective seed-foot plane). Call AFTER chainToDofs<Policy>
+/// (which zeroes pnbr<0 planes); this adds the wall self-force into fSelf. No-op for NoSdf.
 template <class Real, int MAXP, int MAXT, bool TrackAdj, class Sdf>
 KOKKOS_INLINE_FUNCTION void addSdfWallForce(const ConvexCell<Real, MAXP, MAXT, TrackAdj>& c,
                                             const Real seed[3], const Sdf& sdf, const Real* gx,
@@ -311,7 +315,8 @@ KOKKOS_INLINE_FUNCTION void addSdfWallForce(const ConvexCell<Real, MAXP, MAXT, T
         gw[2] += gz[k];
         any = true;
       }
-    if (!any) return;
+    if (!any)
+      return;
     // Rung A3: the shared |∇φ|-independent seed-foot chain (foot vector n = −φ∇φ/|∇φ|²). The
     // earlier body carried an extra |∇φ| factor from the n = −φû shortcut (identical for a true
     // SDF, |∇φ| = 1; wrong for a general level set).

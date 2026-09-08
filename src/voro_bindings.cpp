@@ -5,23 +5,24 @@
  * Drives the production device path — multicore CPU (OpenMP), or GPU (CUDA/HIP), selected by the
  * Kokkos backend the extension was built against — from Python. Two surfaces:
  *
- *  - @ref Tess "peclet.voro.Tessellation" — the bare moving-particle Voronoi tessellator: a cold build
- *    plus the incremental two-pass *repair* update (the fast per-step path for moving points),
+ *  - @ref Tess "peclet.voro.Tessellation" — the bare moving-particle Voronoi tessellator: a cold
+ * build plus the incremental two-pass *repair* update (the fast per-step path for moving points),
  * exposing per-cell volumes and neighbour counts. This is the core primitive all the geometry work
  * builds on.
  *  - @ref Sim "peclet.voro.Simulation" — a device-native compressible-Euler / Navier–Stokes Voronoi
  * fluid simulation (velocity-Verlet over the tessellation) on top of that primitive.
  *
  * Particle data crosses the boundary as NumPy arrays: positions/velocities are `(N,3)` float64,
- * scalars (masses, viscosities, volumes) are `(N,)`. Arrays move through the shared `peclet::core::python`
- * bridge (core): returned arrays are backed by host buffers (no extra device copy).
+ * scalars (masses, viscosities, volumes) are `(N,)`. Arrays move through the shared
+ * `peclet::core::python` bridge (core): returned arrays are backed by host buffers (no extra device
+ * copy).
  *
  * Kokkos teardown follows the suite-wide pattern of peclet/core/python/kokkos_teardown.hpp: Kokkos
  * is initialized at import; every bound Tessellation / FlowSolver / Simulation is a `Releasable`
  * (registered on construction, release() drops its Views) and every zero-copy capsule of the shared
  * bridge is one too; the module's single `atexit` hook (also `peclet.voro.finalize()`) releases all
- * of them and THEN calls Kokkos::finalize, so an object still referenced at interpreter exit (script
- * globals, a Jupyter/Quarto kernel) can no longer be destroyed after finalize -- which is a
+ * of them and THEN calls Kokkos::finalize, so an object still referenced at interpreter exit
+ * (script globals, a Jupyter/Quarto kernel) can no longer be destroyed after finalize -- which is a
  * Kokkos::abort (SIGABRT / exit 134, on OpenMP as on CUDA). Nothing needs `del` before exit.
  *
  * Example
@@ -66,18 +67,17 @@
 #include "peclet/voro/energy/tension.hpp"
 #include "peclet/voro/energy/volume.hpp"
 #include "peclet/voro/energy/wall.hpp"
-#include "peclet/voro/mesh_optimizer.hpp"
-#include "peclet/voro/physics/simulation.hpp"
-#include "peclet/voro/reeval_tessellation.hpp"
 #include "peclet/voro/fv/collocated.hpp"
 #include "peclet/voro/fv/covolume.hpp"
 #include "peclet/voro/fv/mesh.hpp"
+#include "peclet/voro/mesh_optimizer.hpp"
+#include "peclet/voro/physics/simulation.hpp"
+#include "peclet/voro/reeval_tessellation.hpp"
 #include "peclet/voro/repair.hpp"
 #include "peclet/voro/topology_store.hpp"
 
 #ifdef PECLET_VORO_MPI
 #include <mpi.h>
-
 #include <nanobind/stl/tuple.h>
 
 #include "peclet/voro/mpi/voronoi_halo.hpp"
@@ -106,10 +106,12 @@ std::vector<real_t> flatten1(nb::ndarray<real_t, nb::c_contig> a) {
   return peclet::core::python::ndarray_to_vector<real_t>(nb::ndarray<>(a));
 }
 
-// ---- pore-space meshing helpers (SDF-walled interstitial Voronoi + geometry export) --------------
+// ---- pore-space meshing helpers (SDF-walled interstitial Voronoi + geometry export)
+// --------------
 using PoreCell = peclet::voro::ConvexCell<real_t, 128, 256>;
 
-// Build a periodic union-of-balls SDF from (M,3) centres + (M,) radii; the Views must outlive its use.
+// Build a periodic union-of-balls SDF from (M,3) centres + (M,) radii; the Views must outlive its
+// use.
 peclet::voro::SdfSpheres<real_t> makeSpheresSdf(nb::ndarray<real_t, nb::c_contig> centres,
                                                 nb::ndarray<real_t, nb::c_contig> radii, real_t L,
                                                 DView& cenHold, DView& radHold) {
@@ -128,8 +130,10 @@ int faceOrderedIdx(const PoreCell& c, int k, int out[PoreCell::MAXFV]) {
   int m = 0;
   real_t fx[PoreCell::MAXFV], fy[PoreCell::MAXFV], fz[PoreCell::MAXFV];
   for (int t = 0; t < c.nt; ++t) {
-    if (!c.alive[t]) continue;
-    if (c.t0[t] != k && c.t1[t] != k && c.t2[t] != k) continue;
+    if (!c.alive[t])
+      continue;
+    if (c.t0[t] != k && c.t1[t] != k && c.t2[t] != k)
+      continue;
     if (m < PoreCell::MAXFV) {
       out[m] = t;
       fx[m] = c.vx[t];
@@ -138,26 +142,42 @@ int faceOrderedIdx(const PoreCell& c, int k, int out[PoreCell::MAXFV]) {
       ++m;
     }
   }
-  if (m < 3) return m;
+  if (m < 3)
+    return m;
   const real_t nx = c.n[k][0], ny = c.n[k][1], nz = c.n[k][2];
   const real_t nlen = std::sqrt(nx * nx + ny * ny + nz * nz);
-  if (nlen == real_t(0)) return 0;
+  if (nlen == real_t(0))
+    return 0;
   const real_t un[3] = {nx / nlen, ny / nlen, nz / nlen};
   real_t e1[3];
   if (std::fabs(un[0]) <= std::fabs(un[1]) && std::fabs(un[0]) <= std::fabs(un[2])) {
-    e1[0] = 0; e1[1] = -un[2]; e1[2] = un[1];
+    e1[0] = 0;
+    e1[1] = -un[2];
+    e1[2] = un[1];
   } else if (std::fabs(un[1]) <= std::fabs(un[2])) {
-    e1[0] = -un[2]; e1[1] = 0; e1[2] = un[0];
+    e1[0] = -un[2];
+    e1[1] = 0;
+    e1[2] = un[0];
   } else {
-    e1[0] = -un[1]; e1[1] = un[0]; e1[2] = 0;
+    e1[0] = -un[1];
+    e1[1] = un[0];
+    e1[2] = 0;
   }
   const real_t e1l = std::sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
-  e1[0] /= e1l; e1[1] /= e1l; e1[2] /= e1l;
+  e1[0] /= e1l;
+  e1[1] /= e1l;
+  e1[2] /= e1l;
   const real_t e2[3] = {un[1] * e1[2] - un[2] * e1[1], un[2] * e1[0] - un[0] * e1[2],
                         un[0] * e1[1] - un[1] * e1[0]};
   real_t cx = 0, cy = 0, cz = 0;
-  for (int i = 0; i < m; ++i) { cx += fx[i]; cy += fy[i]; cz += fz[i]; }
-  cx /= m; cy /= m; cz /= m;
+  for (int i = 0; i < m; ++i) {
+    cx += fx[i];
+    cy += fy[i];
+    cz += fz[i];
+  }
+  cx /= m;
+  cy /= m;
+  cz /= m;
   real_t ang[PoreCell::MAXFV];
   for (int i = 0; i < m; ++i) {
     const real_t dx = fx[i] - cx, dy = fy[i] - cy, dz = fz[i] - cz;
@@ -171,16 +191,22 @@ int faceOrderedIdx(const PoreCell& c, int k, int out[PoreCell::MAXFV]) {
     const real_t ka = ang[i];
     const int ki = out[i];
     int j = i - 1;
-    while (j >= 0 && ang[j] > ka) { ang[j + 1] = ang[j]; out[j + 1] = out[j]; --j; }
-    ang[j + 1] = ka; out[j + 1] = ki;
+    while (j >= 0 && ang[j] > ka) {
+      ang[j + 1] = ang[j];
+      out[j + 1] = out[j];
+      --j;
+    }
+    ang[j + 1] = ka;
+    out[j + 1] = ki;
   }
   return m;
 }
 
-// Reconstructs the SDF-clipped interstitial Voronoi cell of any seed. Builds a periodic counting-sort
-// grid once; each build() gathers the ~80 nearest seeds via an O(1) Chebyshev shell walk (stop once the
-// 80th nearest is provably found), builds the ConvexCell against a far box, and clips it to the SDF.
-// Shared by sdf_voronoi_cells (polyhedra) and sdf_voronoi_section (plane cross-section).
+// Reconstructs the SDF-clipped interstitial Voronoi cell of any seed. Builds a periodic
+// counting-sort grid once; each build() gathers the ~80 nearest seeds via an O(1) Chebyshev shell
+// walk (stop once the 80th nearest is provably found), builds the ConvexCell against a far box, and
+// clips it to the SDF. Shared by sdf_voronoi_cells (polyhedra) and sdf_voronoi_section (plane
+// cross-section).
 struct PoreReconstructor {
   const real_t* seed;
   int N;
@@ -203,11 +229,14 @@ struct PoreReconstructor {
     hbin = L / nb;
     const int nbin = nb * nb * nb;
     binStart.assign(nbin + 1, 0);
-    for (int i = 0; i < N; ++i) ++binStart[cellOf(i) + 1];
-    for (int b = 0; b < nbin; ++b) binStart[b + 1] += binStart[b];
+    for (int i = 0; i < N; ++i)
+      ++binStart[cellOf(i) + 1];
+    for (int b = 0; b < nbin; ++b)
+      binStart[b + 1] += binStart[b];
     binItem.resize(N);
     std::vector<int> cur(binStart.begin(), binStart.end());
-    for (int i = 0; i < N; ++i) binItem[cur[cellOf(i)]++] = i;
+    for (int i = 0; i < N; ++i)
+      binItem[cur[cellOf(i)]++] = i;
   }
   bool build(int i, PoreCell& c) const {
     const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
@@ -220,13 +249,15 @@ struct PoreReconstructor {
             int cheb = std::abs(dx2);
             cheb = std::max(cheb, std::abs(dy2));
             cheb = std::max(cheb, std::abs(dz2));
-            if (cheb != R) continue;
+            if (cheb != R)
+              continue;
             const int gx = ((bx + dx2) % nb + nb) % nb, gy = ((by + dy2) % nb + nb) % nb,
                       gz = ((bz + dz2) % nb + nb) % nb;
             const int b = gx + nb * (gy + nb * gz);
             for (int t = binStart[b]; t < binStart[b + 1]; ++t) {
               const int j = binItem[t];
-              if (j == i) continue;
+              if (j == i)
+                continue;
               real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
               dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
               dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
@@ -237,7 +268,8 @@ struct PoreReconstructor {
       if ((int)ord.size() >= Kwant) {
         std::nth_element(ord.begin(), ord.begin() + (Kwant - 1), ord.end());
         const real_t rh = (real_t)R * hbin;
-        if (rh * rh >= ord[Kwant - 1].first) break;
+        if (rh * rh >= ord[Kwant - 1].first)
+          break;
       }
     }
     std::sort(ord.begin(), ord.end());
@@ -250,7 +282,10 @@ struct PoreReconstructor {
       dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
       dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
       dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
-      rx[k] = dx; ry[k] = dy; rz[k] = dz; ids[k] = j;
+      rx[k] = dx;
+      ry[k] = dy;
+      rz[k] = dz;
+      ids[k] = j;
     }
     const real_t Lbig[3] = {big, big, big};
     peclet::voro::buildConvexCell(c, Lbig, rx, ry, rz, ids, M);
@@ -465,11 +500,11 @@ class Tess : public peclet::core::python::Releasable {
     d["pass2"] = st.pass2;       // cells gathered in Pass 2
     d["rebuilt"] =
         (st.route == peclet::voro::RepairStats::kRebuildGate);  // gate routed to a full rebuild
-    d["fell_back"] = st.fellBack;                              // verify failed -> cold rebuild
-    d["extra"] = st.extra;                  // cells gathered across the verify extra-passes
-    d["surgical"] = st.surgical;            // Pass-1 cells repaired surgically (no grid gather)
-    d["verify_passes"] = st.verifyPasses;   // number of verify iterations run
-    d["wall_flagged"] = st.wallFlagged;     // cells flagged by the SDF boundary watch
+    d["fell_back"] = st.fellBack;                               // verify failed -> cold rebuild
+    d["extra"] = st.extra;                 // cells gathered across the verify extra-passes
+    d["surgical"] = st.surgical;           // Pass-1 cells repaired surgically (no grid gather)
+    d["verify_passes"] = st.verifyPasses;  // number of verify iterations run
+    d["wall_flagged"] = st.wallFlagged;    // cells flagged by the SDF boundary watch
     return d;
   }
 
@@ -489,12 +524,14 @@ class Tess : public peclet::core::python::Releasable {
     auto C = cnt;
     const real_t Lx = L_[0], Ly = L_[1], Lz = L_[2];
     Kokkos::parallel_for(
-        "peclet.voro.nbrcount", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N), KOKKOS_LAMBDA(int i) {
+        "peclet.voro.nbrcount", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N),
+        KOKKOS_LAMBDA(int i) {
           Cell c;
           st.load(i, c, Lx, Ly, Lz);
           C(i) = c.countFaces();
         });
-    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cnt), {static_cast<std::size_t>(N)}, {1});
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cnt),
+                                                   {static_cast<std::size_t>(N)}, {1});
   }
 
   // Rung A3: energies + forces of the RESIDENT tessellation (after build/step) on the published
@@ -724,7 +761,8 @@ class Flow : public peclet::core::python::Releasable {
   // docs/NAMING.md 1.5: the time step is configured with set_dt and read back as dt; step(n)
   // advances n steps of it and raises if none was set.
   void set_dt(real_t dt) {
-    if (!(dt > real_t(0))) throw std::invalid_argument("voro: set_dt(dt) needs dt > 0.");
+    if (!(dt > real_t(0)))
+      throw std::invalid_argument("voro: set_dt(dt) needs dt > 0.");
     dt_ = dt;
   }
   real_t dt() const { return dt_; }
@@ -833,8 +871,8 @@ class Sim : public peclet::core::python::Releasable {
       sim_.template emplace<EE<SceneT>>();
     else
       sim_.template emplace<EE<NoSdfT>>();
-    dmass_ =
-        peclet::core::toDevice<real_t>(mass_, "mass");  // resident; kinetic-energy reads it each call (E4b)
+    dmass_ = peclet::core::toDevice<real_t>(
+        mass_, "mass");  // resident; kinetic-energy reads it each call (E4b)
     std::visit(
         [&](auto& s) {
           using T = std::decay_t<decltype(s)>;
@@ -915,7 +953,8 @@ class Sim : public peclet::core::python::Releasable {
   // Flat (3N,) host-or-device view -> (N,3) float64 numpy array (single D2H, no host loop — S2a).
   static nb::ndarray<nb::numpy, real_t> from3(const DView& d) {
     const std::size_t N = static_cast<std::size_t>(d.extent(0)) / 3;
-    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(d), {N, std::size_t(3)}, {3, 1});
+    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(d), {N, std::size_t(3)},
+                                                   {3, 1});
   }
 
   real_t dt_{0};
@@ -1076,8 +1115,8 @@ NB_MODULE(_voro, m) {
         } else {
           std::vector<real_t> noW;
           R = peclet::voro::meshVolumeOptimize<real_t, false>(pos, noW, vset, Larr, N, sw,
-                                                              peclet::voro::NoSdf{}, max_newton, tol,
-                                                              cg_iters, prec, false);
+                                                              peclet::voro::NoSdf{}, max_newton,
+                                                              tol, cg_iters, prec, false);
         }
         nb::dict d;
         d["positions"] = peclet::core::python::vector_to_ndarray(
@@ -1095,11 +1134,14 @@ NB_MODULE(_voro, m) {
       nb::arg("positions"), nb::arg("vset"), nb::arg("L") = 1.0, nb::arg("sw") = 5,
       nb::arg("max_newton") = 60, nb::arg("tol") = 1e-9, nb::arg("cg_iters") = 300,
       nb::arg("use_weights") = false, nb::arg("colored_gs") = false,
-      "Move seeds (N,3) — and optionally the power weights — to minimise Σ(V_i − vset_i)² by damped\n"
+      "Move seeds (N,3) — and optionally the power weights — to minimise Σ(V_i − vset_i)² by "
+      "damped\n"
       "Gauss-Newton (Newton–Raphson + CG with a Jacobi or colored-Gauss-Seidel preconditioner).\n"
-      "vset (N,) are the target cell volumes (renormalised to the box volume). Returns a dict with\n"
+      "vset (N,) are the target cell volumes (renormalised to the box volume). Returns a dict "
+      "with\n"
       "the updated 'positions' (and 'weights' if use_weights), plus iters/max_vol_err/converged.\n"
-      "Pure Voronoi (use_weights=False) reaches equal/graded volumes well; weights add fuller volume\n"
+      "Pure Voronoi (use_weights=False) reaches equal/graded volumes well; weights add fuller "
+      "volume\n"
       "control but are limited by the periodic tessellation's ~1% min-image floor.");
 
   // ---- pore-space (SDF-walled) mesh optimiser + geometry export ---------------------------------
@@ -1107,8 +1149,8 @@ NB_MODULE(_voro, m) {
       "optimize_pore_mesh",
       [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> vref_in,
          nb::ndarray<real_t, nb::c_contig> sph_c, nb::ndarray<real_t, nb::c_contig> sph_r, real_t L,
-         int sw, int max_iter, real_t tol, int cg_iters, const std::string& method, real_t mu_barrier,
-         bool free_energy) {
+         int sw, int max_iter, real_t tol, int cg_iters, const std::string& method,
+         real_t mu_barrier, bool free_energy) {
         auto pos = flatten3(pos_in);
         auto vref = flatten1(vref_in);
         const int N = (int)vref.size();
@@ -1116,9 +1158,12 @@ NB_MODULE(_voro, m) {
         DView cenH, radH;
         auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
         peclet::voro::Precond prec = peclet::voro::Precond::GraphAMG;
-        if (method == "steepest") prec = peclet::voro::Precond::SteepestDescent;
-        else if (method == "jacobi") prec = peclet::voro::Precond::Jacobi;
-        else if (method == "colored_gs") prec = peclet::voro::Precond::ColoredGS;
+        if (method == "steepest")
+          prec = peclet::voro::Precond::SteepestDescent;
+        else if (method == "jacobi")
+          prec = peclet::voro::Precond::Jacobi;
+        else if (method == "colored_gs")
+          prec = peclet::voro::Precond::ColoredGS;
         std::vector<real_t> noW;
         auto R = peclet::voro::meshVolumeOptimize<real_t, false, peclet::voro::SdfSpheres<real_t>>(
             pos, noW, vref, Larr, N, sw, sdf, max_iter, tol, cg_iters, prec, false, mu_barrier,
@@ -1136,10 +1181,13 @@ NB_MODULE(_voro, m) {
       nb::arg("L"), nb::arg("sw") = 6, nb::arg("max_iter") = 80, nb::arg("tol") = 1e-9,
       nb::arg("cg_iters") = 400, nb::arg("method") = "graphamg", nb::arg("mu_barrier") = 0.0,
       nb::arg("free_energy") = false,
-      "Relax interstitial seeds (N,3) so their SDF-clipped Voronoi cell volumes approach the per-cell\n"
-      "targets vref (N,), with the sphere packing (sphere_centers (M,3), sphere_radii (M,)) as periodic\n"
+      "Relax interstitial seeds (N,3) so their SDF-clipped Voronoi cell volumes approach the "
+      "per-cell\n"
+      "targets vref (N,), with the sphere packing (sphere_centers (M,3), sphere_radii (M,)) as "
+      "periodic\n"
       "walls. method: 'graphamg'|'jacobi'|'colored_gs' (Gauss-Newton CG) or 'steepest' (descent).\n"
-      "free_energy=True uses E=-Σ V_ref·log V (pressure V_ref/V, resists collapse); mu_barrier>0 adds a\n"
+      "free_energy=True uses E=-Σ V_ref·log V (pressure V_ref/V, resists collapse); mu_barrier>0 "
+      "adds a\n"
       "log-barrier. EXPERIMENTAL (pore-space meshing; see the pore-mesh-voronoi example).");
 
   m.def(
@@ -1150,8 +1198,9 @@ NB_MODULE(_voro, m) {
         const int N = (int)(seed.size() / 3);
         DView cenH, radH;
         auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
-        // Reconstruct each interstitial cell (periodic min-image neighbours + SDF clip) and pack the
-        // clipped polyhedra as flat arrays (VTK_POLYHEDRON layout) for host-side slicing/plotting.
+        // Reconstruct each interstitial cell (periodic min-image neighbours + SDF clip) and pack
+        // the clipped polyhedra as flat arrays (VTK_POLYHEDRON layout) for host-side
+        // slicing/plotting.
         std::vector<real_t> px, py, pz, vol;
         std::vector<int64_t> faces, faceOff(1, 0);
         std::vector<int32_t> boundary, cellSeed;
@@ -1159,35 +1208,45 @@ NB_MODULE(_voro, m) {
         for (int i = 0; i < N; ++i) {
           const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
           PoreCell c;
-          if (!rec.build(i, c)) continue;
+          if (!rec.build(i, c))
+            continue;
           const int64_t base = (int64_t)px.size();
           std::vector<int> triToPt(c.nt, -1);
           int np = 0;
           for (int t = 0; t < c.nt; ++t) {
-            if (!c.alive[t]) continue;
+            if (!c.alive[t])
+              continue;
             triToPt[t] = np++;
-            px.push_back(sx + c.vx[t]); py.push_back(sy + c.vy[t]); pz.push_back(sz + c.vz[t]);
+            px.push_back(sx + c.vx[t]);
+            py.push_back(sy + c.vy[t]);
+            pz.push_back(sz + c.vz[t]);
           }
-          if (np < 4) continue;
+          if (np < 4)
+            continue;
           std::vector<std::vector<int64_t>> cellFaces;
           bool wall = false;
           for (int k = 0; k < c.np; ++k) {
             int fidx[PoreCell::MAXFV];
             const int m = faceOrderedIdx(c, k, fidx);
-            if (m < 3) continue;
+            if (m < 3)
+              continue;
             std::vector<int64_t> face;
             for (int q = 0; q < m; ++q)
-              if (triToPt[fidx[q]] >= 0) face.push_back(base + triToPt[fidx[q]]);
+              if (triToPt[fidx[q]] >= 0)
+                face.push_back(base + triToPt[fidx[q]]);
             if ((int)face.size() >= 3) {
               cellFaces.push_back(std::move(face));
-              if (c.pnbr[k] == peclet::voro::kBoundaryFacet) wall = true;
+              if (c.pnbr[k] == peclet::voro::kBoundaryFacet)
+                wall = true;
             }
           }
-          if (cellFaces.size() < 4) continue;
+          if (cellFaces.size() < 4)
+            continue;
           faces.push_back((int64_t)cellFaces.size());
           for (auto& f : cellFaces) {
             faces.push_back((int64_t)f.size());
-            for (int64_t id : f) faces.push_back(id);
+            for (int64_t id : f)
+              faces.push_back(id);
           }
           faceOff.push_back((int64_t)faces.size());
           vol.push_back(c.volumePerVertex());
@@ -1196,7 +1255,11 @@ NB_MODULE(_voro, m) {
         }
         const std::size_t nPts = px.size(), nCells = vol.size();
         std::vector<real_t> pts(3 * nPts);
-        for (std::size_t p = 0; p < nPts; ++p) { pts[3 * p] = px[p]; pts[3 * p + 1] = py[p]; pts[3 * p + 2] = pz[p]; }
+        for (std::size_t p = 0; p < nPts; ++p) {
+          pts[3 * p] = px[p];
+          pts[3 * p + 1] = py[p];
+          pts[3 * p + 2] = pz[p];
+        }
         nb::dict d;
         d["points"] = peclet::core::python::vector_to_ndarray(std::move(pts), {nPts, 3}, {3, 1});
         d["faces"] = peclet::core::python::vector_to_ndarray(std::move(faces), {faces.size()}, {1});
@@ -1209,21 +1272,23 @@ NB_MODULE(_voro, m) {
       },
       nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("L"),
       "Reconstruct the SDF-clipped interstitial Voronoi cells and return their polyhedra as flat\n"
-      "arrays (VTK_POLYHEDRON layout): 'points' (Np,3), 'faces' + 'face_offsets' (per-cell face lists,\n"
-      "global point ids), 'volume' (Nc,), 'boundary' (Nc, 1 where the cell touches a sphere wall).");
+      "arrays (VTK_POLYHEDRON layout): 'points' (Np,3), 'faces' + 'face_offsets' (per-cell face "
+      "lists,\n"
+      "global point ids), 'volume' (Nc,), 'boundary' (Nc, 1 where the cell touches a sphere "
+      "wall).");
 
   m.def(
       "sdf_voronoi_section",
       [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
-         nb::ndarray<real_t, nb::c_contig> sph_r, real_t L,
-         std::array<real_t, 3> origin, std::array<real_t, 3> normal) {
+         nb::ndarray<real_t, nb::c_contig> sph_r, real_t L, std::array<real_t, 3> origin,
+         std::array<real_t, 3> normal) {
         auto seed = flatten3(pos_in);
         DView cenH, radH;
         auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
         PoreReconstructor rec(seed, L, sdf);
         // Cut every reconstructed cell by the plane {x : (x-origin)·normal = 0} and collect the
-        // convex section polygons (robust: ConvexCell::sectionPolygon works from the dual edges, so it
-        // tiles the cross-section exactly). Vertices returned in WORLD 3-D (all on the plane).
+        // convex section polygons (robust: ConvexCell::sectionPolygon works from the dual edges, so
+        // it tiles the cross-section exactly). Vertices returned in WORLD 3-D (all on the plane).
         std::vector<real_t> verts, vol;
         std::vector<int64_t> off(1, 0);
         std::vector<int32_t> cellSeed;
@@ -1231,11 +1296,14 @@ NB_MODULE(_voro, m) {
         for (int i = 0; i < rec.N; ++i) {
           const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
           PoreCell c;
-          if (!rec.build(i, c)) continue;
-          const real_t p0[3] = {origin[0] - sx, origin[1] - sy, origin[2] - sz};  // plane in cell frame
+          if (!rec.build(i, c))
+            continue;
+          const real_t p0[3] = {origin[0] - sx, origin[1] - sy,
+                                origin[2] - sz};  // plane in cell frame
           const real_t u3[3] = {normal[0], normal[1], normal[2]};
           const int mm = c.sectionPolygon(p0, u3, spx, spy, spz);
-          if (mm < 3) continue;
+          if (mm < 3)
+            continue;
           for (int k = 0; k < mm; ++k) {
             verts.push_back(sx + spx[k]);
             verts.push_back(sy + spy[k]);
@@ -1255,11 +1323,15 @@ NB_MODULE(_voro, m) {
       },
       nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("L"),
       nb::arg("origin"), nb::arg("normal"),
-      "Cross-section of the SDF-clipped interstitial Voronoi mesh by the plane through `origin` with\n"
-      "`normal`: cut every cell directly (ConvexCell::sectionPolygon, robust — works from the dual\n"
-      "edges, so it tiles the plane exactly where a face-by-face slice drops facets). Returns 'verts'\n"
+      "Cross-section of the SDF-clipped interstitial Voronoi mesh by the plane through `origin` "
+      "with\n"
+      "`normal`: cut every cell directly (ConvexCell::sectionPolygon, robust — works from the "
+      "dual\n"
+      "edges, so it tiles the plane exactly where a face-by-face slice drops facets). Returns "
+      "'verts'\n"
       "(Nv,3, world coords, all on the plane) + 'offsets' (Npoly+1, per-polygon vertex ranges) +\n"
-      "'volume' (Npoly, the 3-D cell volume) + 'seed' (Npoly, the seed index). For a z=z0 slice pass\n"
+      "'volume' (Npoly, the 3-D cell volume) + 'seed' (Npoly, the seed index). For a z=z0 slice "
+      "pass\n"
       "origin=(0,0,z0), normal=(0,0,1) and plot verts[:, :2].");
 
   m.def(
@@ -1270,8 +1342,8 @@ NB_MODULE(_voro, m) {
         const int N = (int)type_in.shape(0);
         std::vector<int> type(type_in.data(), type_in.data() + N);
         const real_t Larr[3] = {L, L, L};
-        auto R = peclet::voro::interfaceMinimize<real_t>(pos, type, sigma, Larr, N, sw,
-                                                         peclet::voro::NoSdf{}, max_iter, tol, false);
+        auto R = peclet::voro::interfaceMinimize<real_t>(
+            pos, type, sigma, Larr, N, sw, peclet::voro::NoSdf{}, max_iter, tol, false);
         nb::dict d;
         d["positions"] = peclet::core::python::vector_to_ndarray(
             std::move(pos), {static_cast<std::size_t>(N), 3}, {3, 1});
@@ -1283,9 +1355,11 @@ NB_MODULE(_voro, m) {
       },
       nb::arg("positions"), nb::arg("types"), nb::arg("sigma") = 1.0, nb::arg("L") = 1.0,
       nb::arg("sw") = 5, nb::arg("max_iter") = 60, nb::arg("tol") = 1e-9,
-      "Surface-Evolver-style interfacial-tension minimiser: move seeds (N,3) to minimise the total\n"
+      "Surface-Evolver-style interfacial-tension minimiser: move seeds (N,3) to minimise the "
+      "total\n"
       "area of faces between cells of different integer type (N,), E = Σ σ A_ij. Steepest descent\n"
-      "with a trust-region line search on the (non-smooth) interfacial energy. Returns a dict with\n"
+      "with a trust-region line search on the (non-smooth) interfacial energy. Returns a dict "
+      "with\n"
       "the updated 'positions', final 'energy', 'energy_ratio' (final/initial), and iters.");
 
   // ---- Tessellation -----------------------------------------------------------------------------
@@ -1302,7 +1376,8 @@ NB_MODULE(_voro, m) {
            nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
            nb::arg("periodic") = std::array<bool, 3>{true, true, true},
            "Set the periodic box before `build`: `extent` is the box SIZE (Lx, Ly, Lz). The "
-           "suite-wide spelling (suite/docs/NAMING.md 1.1), the same call `dem.Simulation.set_domain` takes. "
+           "suite-wide spelling (suite/docs/NAMING.md 1.1), the same call "
+           "`dem.Simulation.set_domain` takes. "
            "`origin` must be (0, 0, 0) and `periodic` (True, True, True) — this engine's box is "
            "anchored at the origin and periodic on every axis; both are checked rather than "
            "ignored, so a caller who writes the suite-wide form gets an error naming the "
@@ -1427,8 +1502,9 @@ NB_MODULE(_voro, m) {
                    "Number of cells of the face mesh (= the tessellation's particle count).")
       .def_prop_ro("num_faces", &Flow::num_faces,
                    "Number of faces of the face mesh: interior faces first, then the wall faces.")
-      .def_prop_ro("num_wall_faces", &Flow::num_wall_faces,
-                   "Number of SDF wall faces (the trailing block of the faces); 0 without geometry.")
+      .def_prop_ro(
+          "num_wall_faces", &Flow::num_wall_faces,
+          "Number of SDF wall faces (the trailing block of the faces); 0 without geometry.")
       .def_prop_ro("layout", &Flow::layout,
                    "The solver layout this instance was built with: 'collocated' or 'covolume'.")
       .def("set_body_force", &Flow::set_body_force, nb::arg("fx"), nb::arg("fy"), nb::arg("fz"),
@@ -1480,7 +1556,8 @@ NB_MODULE(_voro, m) {
            nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
            nb::arg("periodic") = std::array<bool, 3>{true, true, true},
            "Set the periodic box before `init`: `extent` is the box SIZE (Lx, Ly, Lz). The "
-           "suite-wide spelling (suite/docs/NAMING.md 1.1), the same call `dem.Simulation.set_domain` takes. "
+           "suite-wide spelling (suite/docs/NAMING.md 1.1), the same call "
+           "`dem.Simulation.set_domain` takes. "
            "`origin` must be (0, 0, 0) and `periodic` (True, True, True) — this engine's box is "
            "anchored at the origin and periodic on every axis; both are checked rather than "
            "ignored, so a caller who writes the suite-wide form gets an error naming the "
@@ -1512,7 +1589,8 @@ NB_MODULE(_voro, m) {
            "Build the first tessellation and forces from the particle state set above.")
       .def("set_dt", &Sim::set_dt, nb::arg("dt"),
            "Set the time step. The suite-wide way to configure a stepper "
-           "(suite/docs/NAMING.md 1.5) — `flow.Solver`, `dem.Simulation` and `peclet.core.amr.Flow` all "
+           "(suite/docs/NAMING.md 1.5) — `flow.Solver`, `dem.Simulation` and "
+           "`peclet.core.amr.Flow` all "
            "take `set_dt`.")
       .def_prop_ro("dt", &Sim::dt, "The stored time step (0 until `set_dt`).")
       .def("step", &Sim::step, nb::arg("num_steps"),
@@ -1536,36 +1614,45 @@ NB_MODULE(_voro, m) {
 
 #ifdef PECLET_VORO_MPI
   // ---- VoronoiHalo (distributed) ----------------------------------------------------------------
-  nb::class_<VHalo>(
-      m, "VoronoiHalo",
-      "Distributed (MPI) ghost-gather for the multi-rank Voronoi tessellation.\n\n"
-      "ORB block-decomposes a periodic box across MPI ranks and gathers, for each rank, every seed\n"
-      "within a cutoff `rcut` of its owned block (periodic images included). The recipe: select this\n"
-      "rank's owned seeds with `owned_mask`, `gather(...)` the owned+ghost set, tessellate it with the\n"
-      "single-rank `Tessellation` building only the first `n_owned` cells, and keep those cells — they\n"
-      "are bit-identical to a serial full-box tessellation (each owned cell has all its neighbours\n"
-      "present). `rcut` must exceed the largest owned-cell interaction distance (a few mean spacings).\n"
-      "Auto-initialises MPI (MPI_COMM_WORLD). Drive it from mpi4py.")
-      .def(nb::init<std::array<real_t, 3>, std::array<real_t, 3>, std::array<long, 3>,
-                    std::array<bool, 3>>(),
-           nb::arg("origin"), nb::arg("size"), nb::arg("gsize"), nb::arg("periodic"),
-           "Build the ORB decomposition of the box [origin, origin+size) on `gsize` ORB cells with\n"
-           "per-axis `periodic` flags, over MPI_COMM_WORLD.")
+  nb::class_<VHalo>(m, "VoronoiHalo",
+                    "Distributed (MPI) ghost-gather for the multi-rank Voronoi tessellation.\n\n"
+                    "ORB block-decomposes a periodic box across MPI ranks and gathers, for each "
+                    "rank, every seed\n"
+                    "within a cutoff `rcut` of its owned block (periodic images included). The "
+                    "recipe: select this\n"
+                    "rank's owned seeds with `owned_mask`, `gather(...)` the owned+ghost set, "
+                    "tessellate it with the\n"
+                    "single-rank `Tessellation` building only the first `n_owned` cells, and keep "
+                    "those cells — they\n"
+                    "are bit-identical to a serial full-box tessellation (each owned cell has all "
+                    "its neighbours\n"
+                    "present). `rcut` must exceed the largest owned-cell interaction distance (a "
+                    "few mean spacings).\n"
+                    "Auto-initialises MPI (MPI_COMM_WORLD). Drive it from mpi4py.")
+      .def(
+          nb::init<std::array<real_t, 3>, std::array<real_t, 3>, std::array<long, 3>,
+                   std::array<bool, 3>>(),
+          nb::arg("origin"), nb::arg("size"), nb::arg("gsize"), nb::arg("periodic"),
+          "Build the ORB decomposition of the box [origin, origin+size) on `gsize` ORB cells with\n"
+          "per-axis `periodic` flags, over MPI_COMM_WORLD.")
       .def("rank", &VHalo::rank, "This rank's MPI index.")
       .def("size", &VHalo::size, "Number of MPI ranks.")
       .def("owned_mask", &VHalo::owned_mask, nb::arg("positions"),
-           "Mask (N,) int32 over the given positions (N,3): 1 where this rank owns the point, else 0.")
+           "Mask (N,) int32 over the given positions (N,3): 1 where this rank owns the point, else "
+           "0.")
       .def("owner_of", &VHalo::owner_of, nb::arg("x"), nb::arg("y"), nb::arg("z"),
            "Owning rank of a single point (x, y, z).")
       .def("gather", &VHalo::gather, nb::arg("owned_pos"), nb::arg("owned_gid"),
            nb::arg("owned_weight"), nb::arg("rcut"),
            "Gather ghost seeds within `rcut` of this rank's owned seeds. Inputs: owned_pos (N,3)\n"
            "float64, owned_gid (N,) int64, owned_weight (N,) float64. Returns a tuple\n"
-           "(pos (M,3) float64, gid (M,) int64, weight (M,) float64, n_owned): rows [0,n_owned) are the\n"
+           "(pos (M,3) float64, gid (M,) int64, weight (M,) float64, n_owned): rows [0,n_owned) "
+           "are the\n"
            "owned seeds, [n_owned,M) the gathered ghosts (with their owners' global ids/weights).")
       .def("refresh_positions", &VHalo::refresh_positions, nb::arg("owned_pos"),
            "Position-only halo refresh (Verlet fast path): re-forward the current owned positions\n"
-           "(N,3) onto the topology of the last `gather`, returning the combined owned+ghost positions\n"
+           "(N,3) onto the topology of the last `gather`, returning the combined owned+ghost "
+           "positions\n"
            "(M,3) in the same order as that gather (no re-decomposition / ghost re-selection).");
 #endif
 }

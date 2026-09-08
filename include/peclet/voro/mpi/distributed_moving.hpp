@@ -164,7 +164,7 @@ struct DistributedMovingTessellation {
   bool wallExact_ = true;
   Real wallSkin_ = 0;
   Kokkos::View<Real*, Mem> dPos_;
-  std::vector<Vec3> refPos_;   // owned positions at the last (re)gather (Verlet reference)
+  std::vector<Vec3> refPos_;  // owned positions at the last (re)gather (Verlet reference)
   std::vector<long> gid_, combGid_;
   std::vector<Real> w_;
   Real L_[3] = {1, 1, 1};

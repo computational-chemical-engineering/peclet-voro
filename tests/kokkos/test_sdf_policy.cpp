@@ -8,8 +8,8 @@
  * cell (neighbour bisectors + SDF wall) w.r.t. the seed and compare to the analytic force:
  *
  *   (A) tilted FLAT wall  — φ linear ⇒ H=0, one facet ⇒ the model is EXACT (match ~1e-6);
- *   (B) SPHERE            — curved ⇒ the seed-foot model is FIRST-ORDER; reported, and required only
- *                           to be "close" (the clip approximates the curve by several facets).
+ *   (B) SPHERE            — curved ⇒ the seed-foot model is FIRST-ORDER; reported, and required
+ * only to be "close" (the clip approximates the curve by several facets).
  *
  * Interior cells only: the cell must be fully bounded by neighbour planes + the wall (no seed-box
  * face, which would move with the seed and contaminate the FD).
@@ -40,9 +40,9 @@ struct FlatWall {
   KOKKOS_INLINE_FUNCTION real_t gradH() const { return real_t(1e-4); }
 };
 
-// Build a cell for `seed` from the given absolute neighbour positions (Voronoi bisectors), then clip
-// by the SDF. Returns false if the cell is empty, overflowed, has no wall facet, or is not fully
-// enclosed (a nonzero-area seed-box face remains).
+// Build a cell for `seed` from the given absolute neighbour positions (Voronoi bisectors), then
+// clip by the SDF. Returns false if the cell is empty, overflowed, has no wall facet, or is not
+// fully enclosed (a nonzero-area seed-box face remains).
 template <class Sdf>
 bool buildWallCell(const real_t seed[3], const std::vector<real_t>& nbr, const Sdf& sdf, Cell& c) {
   c.initBox(100.0, 100.0, 100.0);  // large box: its faces must not survive on an interior cell
@@ -51,17 +51,22 @@ bool buildWallCell(const real_t seed[3], const std::vector<real_t>& nbr, const S
     real_t r[3] = {nbr[3 * j] - seed[0], nbr[3 * j + 1] - seed[1], nbr[3 * j + 2] - seed[2]};
     const real_t off = real_t(0.5) * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2]);
     c.clip(r, off, j);
-    if (c.overflow) return false;
+    if (c.overflow)
+      return false;
   }
   peclet::voro::clipCellAgainstSdf<real_t, 128, 256, false>(c, seed, sdf);
-  if (c.empty() || c.overflow) return false;
+  if (c.empty() || c.overflow)
+    return false;
   double area[128];
-  for (int k = 0; k < c.np; ++k) area[k] = 0.0;
+  for (int k = 0; k < c.np; ++k)
+    area[k] = 0.0;
   c.facetAreasPerVertex(area);
   bool hasWall = false;
   for (int k = 0; k < c.np; ++k) {
-    if (c.pnbr[k] == -1 && area[k] > 1e-12) return false;  // seed-box face: not interior
-    if (c.pnbr[k] == peclet::voro::kBoundaryFacet && area[k] > 1e-12) hasWall = true;
+    if (c.pnbr[k] == -1 && area[k] > 1e-12)
+      return false;  // seed-box face: not interior
+    if (c.pnbr[k] == peclet::voro::kBoundaryFacet && area[k] > 1e-12)
+      hasWall = true;
   }
   return hasWall;
 }
@@ -84,11 +89,13 @@ bool buildRawCell(const real_t seed[3], const std::vector<real_t>& nbr, Cell& c)
 // gain/loss between two nearby seeds is detectable (an FD across it must be skipped).
 std::vector<int> topoSig(const Cell& c) {
   double area[128];
-  for (int k = 0; k < c.np; ++k) area[k] = 0.0;
+  for (int k = 0; k < c.np; ++k)
+    area[k] = 0.0;
   const_cast<Cell&>(c).facetAreasPerVertex(area);
   std::vector<int> sig;
   for (int k = 0; k < c.np; ++k)
-    if (area[k] > 1e-10) sig.push_back(c.pnbr[k]);
+    if (area[k] > 1e-10)
+      sig.push_back(c.pnbr[k]);
   std::sort(sig.begin(), sig.end());
   return sig;
 }
@@ -114,9 +121,11 @@ double sweep(const Sdf& sdf, real_t seedPhiTarget, unsigned seed, int trials, do
       real_t g[3];
       peclet::voro::sdfGradient<real_t>(sdf, s[0], s[1], s[2], g);
       const real_t gn = std::sqrt(g[0] * g[0] + g[1] * g[1] + g[2] * g[2]);
-      if (gn < 1e-9) break;
+      if (gn < 1e-9)
+        break;
       const real_t phi = sdf.eval(s[0], s[1], s[2]);
-      for (int d = 0; d < 3; ++d) s[d] += (seedPhiTarget - phi) * g[d] / (gn * gn);
+      for (int d = 0; d < 3; ++d)
+        s[d] += (seedPhiTarget - phi) * g[d] / (gn * gn);
     }
     // random neighbours in a ball around the seed, kept in the fluid (φ>0.1).
     std::vector<real_t> nbr;
@@ -133,12 +142,14 @@ double sweep(const Sdf& sdf, real_t seedPhiTarget, unsigned seed, int trials, do
       }
     }
     Cell c;
-    if (!buildWallCell(s, nbr, sdf, c)) continue;
+    if (!buildWallCell(s, nbr, sdf, c))
+      continue;
     ++nCells;
 
     // analytic: dV/dn_k -> particle self-force (Voronoi chain) + SDF wall self-force.
     double vg = 0, dgx[128], dgy[128], dgz[128];
-    for (int k = 0; k < c.np; ++k) dgx[k] = dgy[k] = dgz[k] = 0.0;
+    for (int k = 0; k < c.np; ++k)
+      dgx[k] = dgy[k] = dgz[k] = 0.0;
     c.geomVolumeGrad(vg, dgx, dgy, dgz);
     double fSelf[3], fwSelf, fnx[128], fny[128], fnz[128], fwn[128];
     peclet::voro::chainToDofs<peclet::voro::Voronoi>(c, s, (const double*)nullptr, 0.0,
@@ -165,16 +176,21 @@ double sweep(const Sdf& sdf, real_t seedPhiTarget, unsigned seed, int trials, do
       real_t sp[3] = {s[0], s[1], s[2]};
       Cell cp, cm;
       sp[cc] = s[cc] + eps;
-      if (!buildWallCell(sp, nbr, sdf, cp)) continue;
+      if (!buildWallCell(sp, nbr, sdf, cp))
+        continue;
       sp[cc] = s[cc] - eps;
-      if (!buildWallCell(sp, nbr, sdf, cm)) continue;
-      if (topoSig(cp) != sig0 || topoSig(cm) != sig0) continue;  // face gain/loss: FD invalid, skip
+      if (!buildWallCell(sp, nbr, sdf, cm))
+        continue;
+      if (topoSig(cp) != sig0 || topoSig(cm) != sig0)
+        continue;  // face gain/loss: FD invalid, skip
       const double fd = (cp.volumePerVertex() - cm.volumePerVertex()) / (2 * eps);
-      if (std::abs(fd) < sigFloor) continue;
+      if (std::abs(fd) < sigFloor)
+        continue;
       ++nComp;
       const double rel = std::abs(fd - fSelf[cc]) / std::max(std::abs(fd), relFloor);
       maxRel = std::max(maxRel, rel);
-      if (rel < tolPass) ++nPass;
+      if (rel < tolPass)
+        ++nPass;
     }
   }
   return maxRel;
