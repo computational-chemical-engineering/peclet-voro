@@ -67,8 +67,11 @@ voro/
 │       │   └── distributed_moving.hpp #  distributed MovingTessellation (repair under MPI)
 │       └── tessellation_view.hpp    # published read-only CSR device view (engine<->consumer seam)
 ├── src/voro_bindings.cpp     # nanobind Python module (`peclet.voro`)
-├── packaging/voro_init.py    # the package __init__ (+ redistribute_pore_mesh, sphere_union_scene)
+├── packaging/voro_init.py    # the package __init__ (staged/installed as peclet/voro/__init__.py)
+├── packaging/voro_pore_mesh.py  # peclet.voro.pore_mesh (redistribute_pore_mesh + the bound pore family)
+├── packaging/voro_scenes.py     # peclet.voro.scenes (sphere_union_scene, sphere_union_sdf)
 ├── python/test_voro.py       # Python smoke test (Tessellation, Simulation, FlowSolver, optimisers)
+├── python/state_hash.py      # SHA-256 of every public entry path's final state (the numerics gate)
 ├── tests/kokkos/                # device unit tests (+ opt-in benchmarks, label `bench`)
 ├── tests/kokkos_mpi/            # the MPI tests (np = 1, 2, 4; same tree under PECLET_VORO_MPI)
 ├── mpi/                         # standalone MPI validation scripts (see mpi/README.md)
@@ -146,9 +149,21 @@ cmake --build build --target voro -j
 PYTHONPATH=build python3 -c "import peclet.voro; print(peclet.voro.execution_space)"
 ```
 
-The module exposes three classes — the bare **`Tessellation`** (cold build + incremental repair of a
-moving point set), the moving-cell **`Simulation`** fluid solver, and the static **`FlowSolver`** on
-the face mesh of a resident tessellation — plus the mesh-optimiser functions:
+The module has two tiers (`../docs/QUALITY_PLAN.md` D2). The **public** tier is what a user needs to set
+up, run and read out a computation: three classes — the bare **`Tessellation`** (cold build +
+incremental repair of a moving point set), the moving-cell **`Simulation`** fluid solver, and the
+static **`FlowSolver`** on the face mesh of a resident tessellation — the mesh optimisers
+`optimize_volume_mesh` / `minimize_interface` (typed `OptimizeResult` / `InterfaceResult`), the
+lazily imported submodules **`peclet.voro.pore_mesh`** (`optimize_pore_mesh`,
+`redistribute_pore_mesh`, `sdf_voronoi_cells`, `sdf_voronoi_section`) and **`peclet.voro.scenes`**
+(`sphere_union_scene`, `sphere_union_sdf`), and — in an MPI build — **`VoronoiHalo`** (the ghost
+gather) and **`DistributedTessellation`** (the distributed repair driver). Every instrument and
+ablation switch is the **diagnostics** tier, reached as `obj.diagnostics.<name>` on each class
+(`t.diagnostics.build_report()`, `t.diagnostics.set_gate(False)`, `f.diagnostics.set_skew_corrected(False)`,
+`s.diagnostics.set_repair(True)`, `d.diagnostics.num_regathers`). Modes are validated strings
+(`set_wall_mode('exact'|'skin')`, `layout='collocated'|'covolume'`, `method='jacobi'|'colored_gs'|
+'graphamg'|'steepest'`) — a bad value raises listing the accepted set; triples are 3-sequences;
+`peclet.voro.defaults` holds the named defaults the engine is driven with:
 
 ```python
 import numpy as np
@@ -188,10 +203,18 @@ t.set_weights(w)                     # (N,) power (Laguerre) weights — optiona
 t.build(pos)                         # cells clipped by the solid; in-solid seeds get volume 0
 stats = t.step(pos_moved)            # wall planes are resident; stats['wall_flagged'] = re-clips
 walls = t.get_wall_counts()          # (N,) wall planes per cell
+rep = t.diagnostics.build_report()   # validity counts of the last build (diagnostics tier)
 s.set_geometry(node_ints, node_reals)  # the same walls for the fluid (pressure acts on them)
+
+# a packed bed of spheres as the walls, without importing peclet.core
+from peclet.voro import scenes, pore_mesh
+t.set_geometry(*scenes.sphere_union_scene(centers, radii))
+res = pore_mesh.redistribute_pore_mesh(seeds, centers, radii, (L, L, L), s_lo=0.1, s_hi=0.1)
+print(res.max_rel, res.num_dead)     # RedistributeResult; positions / volumes / vref / history
 
 # static Navier–Stokes on the face mesh of the resident cells (track C)
 f = voro.FlowSolver(t, viscosity=0.01, layout="collocated")   # or "covolume"
+f.set_body_force((fx, 0.0, 0.0))     # triples are 3-sequences everywhere
 f.set_velocity(U0)                   # (num_cells, 3)
 f.set_dt(1e-3)
 f.step(100)
@@ -203,6 +226,11 @@ Array shapes follow the suite convention (`../docs/CONVENTIONS.md` §6): positio
 `(N,3)` float64, masses/viscosities/volumes `(N,)`. Call `peclet.voro.finalize()` for
 deterministic Kokkos teardown (also run from an `atexit` hook).
 
+Under MPI (`-DPECLET_VORO_MPI=ON`) the same module carries `VoronoiHalo(cells, extent=…)` — the ORB
+decomposition + ghost gather (`owned_mask`, `gather`, `refresh_positions`) — and
+`DistributedTessellation(cells, extent=…, rcut=…, skin=…, tolerance=…)`, the distributed repair driver
+(`establish(positions, gids)` once, then `step(positions)` every step; both collective). Run
+`mpirun -np 2 python python/state_hash.py --mpi` or `mpi/validate_voronoi_halo.py` for a check.
 For the distributed (MPI) validation scripts see [`mpi/README.md`](https://github.com/computational-chemical-engineering/peclet-voro/blob/main/mpi/README.md) and
 [`docs/distributed_voronoi.md`](https://github.com/computational-chemical-engineering/peclet-voro/blob/main/docs/distributed_voronoi.md).
 
@@ -264,7 +292,7 @@ early-out.
 if strict) when the result is not a guaranteed-exact partition — buried power cells (a seed
 outside its own cell, which the engine empties; never for w = r² of non-overlapping spheres),
 a search reach beyond half the box (min-image invalid), overflowed cells — and
-`build_report()` returns the counts (`StatusBit` kBuried / kReachExceeded).
+`diagnostics.build_report()` returns the counts (`StatusBit` kBuried / kReachExceeded).
 
 **Certificate completeness (engine hardening, 2026-09-03).** The seed-local certificate of the
 repair cannot see a face GAINED from a seed outside the stored topology (its bisector drifts into
@@ -389,8 +417,8 @@ deflation. The covolume solver carries the same hooks (`flow_mpi_covolume_np{1,2
 exchange packs on the device (only the send/receive buffers cross to the host for MPI, bitwise
 equal to the host path).
 
-**Pore-mesh redistribution (rung B2).** `peclet.voro.redistribute_pore_mesh(positions, centres,
-radii, L, s_lo, s_hi, slope=…)` drives interstitial seeds to the graded target `V_ref = s(φ)³` by
+**Pore-mesh redistribution (rung B2).** `peclet.voro.pore_mesh.redistribute_pore_mesh(positions,
+sphere_centers, sphere_radii, extent, s_lo, s_hi, slope=…)` drives interstitial seeds to the graded target `V_ref = s(φ)³` by
 the topological moves a position-only optimiser cannot make — split oversized cells (along the
 wall for wall cells), remove undersized and dead ones, relax with a Lloyd blend plus the graded
 volume descent, re-seed the wall layers by the graded-shell heuristic, keep the best state.

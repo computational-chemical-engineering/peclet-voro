@@ -4,6 +4,14 @@ Dynamic 3-D Voronoi tessellation of moving particles on Kokkos (CUDA/HIP/OpenMP)
 under `include/peclet/voro/`, driven from Python as `peclet.voro` (`src/voro_bindings.cpp`, nanobind on
 core's zero-copy bridge). Names follow `../docs/NAMING.md`: `set_domain(extent=)` (origin (0,0,0) and
 all-periodic are CHECKED), `set_dt` + `dt` + `step(n)`, scalars/counts bare, copied-out arrays `get_*`.
+Two API tiers (QUALITY_PLAN D2, package F done 2026-09-10): the public surface is `Tessellation`,
+`FlowSolver`, `Simulation`, `optimize_volume_mesh`, `minimize_interface`, the lazily imported
+`peclet.voro.pore_mesh` / `peclet.voro.scenes` submodules (`packaging/voro_pore_mesh.py`,
+`voro_scenes.py` — staged + installed by the `PECLET_VORO_PY_FILES` loop in CMakeLists.txt) and,
+under MPI, `VoronoiHalo` + `DistributedTessellation`; every instrument/ablation is
+`obj.diagnostics.<name>`. Modes are validated strings, results are typed objects, triples are
+3-sequences. `python/state_hash.py` prints the SHA-256 of every public path's final state — run it
+before and after any API change (at `OMP_NUM_THREADS=1`); the hashes must not move.
 
 ## Build + test (the tests exist ONLY under `PECLET_VORO_KOKKOS=ON`)
 

@@ -3,7 +3,8 @@
 
 Exercises the three surfaces — the bare Tessellation (cold build + incremental repair, SDF
 geometry, power weights, energy forces), the compressible-Euler Simulation, and the static
-FlowSolver on the face mesh — plus the pore-mesh redistribution helper, on small point sets, and
+FlowSolver on the face mesh — plus the pore_mesh / scenes submodules and the API contract
+(diagnostics tier, typed optimiser results, validated string modes), on small point sets, and
 checks the basic invariants (space-filling volume, plausible neighbour counts, finite energies,
 face divergence). Run with the built module on PYTHONPATH, e.g.:
 
@@ -79,7 +80,44 @@ def test_api_contract():
     s.set_dt(1e-4)
     s.step(1)
     assert s.dt == 1e-4 and abs(s.time - 1e-4) < 1e-18
-    print("  API contract: set_domain checks, set_dt/dt/step OK")
+    # the state setters raise after init() with the order in the message
+    try:
+        s.set_pressure(2.0)
+        raise AssertionError("set_pressure after init must raise")
+    except RuntimeError as e:
+        assert "after init()" in str(e)
+    # the diagnostics tier: one nested object per class, a view onto its owner
+    t.set_tolerance()                                   # the numeric default stays
+    t.diagnostics.set_gate(True)
+    t.build(np.random.default_rng(1).random((3000, 3)))
+    rep = t.diagnostics.build_report()
+    assert set(rep) == {"buried", "reach_exceeded", "empty", "overflow", "incomplete"}
+    assert hasattr(s.diagnostics, "set_repair")
+    # string modes: a bad value raises and the message lists the accepted set
+    for call, expect in ((lambda: t.set_wall_mode("bogus"), "'exact', 'skin'"),
+                         (lambda: voro.FlowSolver(t, 0.01, layout="staggered"), "'collocated', 'covolume'"),
+                         (lambda: voro.optimize_volume_mesh(np.random.default_rng(2).random((50, 3)),
+                                                            np.ones(50), (1.0, 1.0, 1.0), method="cg"),
+                          "'jacobi', 'colored_gs', 'graphamg', 'steepest'")):
+        try:
+            call()
+            raise AssertionError(f"expected a ValueError listing {expect}")
+        except ValueError as e:
+            assert expect in str(e), str(e)
+    # typed results; triples as 3-sequences; the submodules
+    r = voro.optimize_volume_mesh(np.random.default_rng(3).random((200, 3)), np.ones(200),
+                                  (1.0, 1.0, 1.0), max_iter=2)
+    assert isinstance(r, voro.OptimizeResult) and r.positions.shape == (200, 3) and r.weights is None
+    f = voro.FlowSolver(t, 0.01)
+    f.set_body_force([0.0, 0.0, 1e-3])
+    assert f.diagnostics is not None and f.dt == 0.0
+    assert "certificate_tolerance" in voro.defaults
+    assert callable(voro.pore_mesh.redistribute_pore_mesh) and callable(voro.scenes.sphere_union_sdf)
+    for gone in ("build_report", "set_gate", "set_local_certificate"):
+        assert not hasattr(t, gone), gone
+    for gone in ("_union_sdf", "redistribute_pore_mesh", "sphere_union_scene", "optimize_pore_mesh"):
+        assert not hasattr(voro, gone), gone
+    print("  API contract: set_domain checks, set_dt/dt/step, diagnostics tier, string modes OK")
 
 
 def test_simulation():
@@ -209,7 +247,7 @@ def test_weights():
     assert abs(t1.get_volumes().sum() / L**3 - 1.0) < 1e-2
     # A2a diagnostics: large-spread weights on overlapping (random) balls bury cells — reported,
     # warned, and raised under strict=True; the small weights above bury none.
-    rep = t1.build_report()
+    rep = t1.diagnostics.build_report()
     import warnings
     wbig = (rng.random(N) * 2.0 * spacing) ** 2
     t1.set_weights(wbig)
@@ -217,7 +255,7 @@ def test_weights():
         warnings.simplefilter("always")
         t1.build(pos)
         assert any("buried" in str(x.message) for x in w)
-    big = t1.build_report()
+    big = t1.diagnostics.build_report()
     assert big["buried"] > 0
     try:
         t1.build(pos, strict=True)
@@ -345,19 +383,19 @@ def test_redistribute():
     centers, radii = np.array(centers), np.array(radii)
     phi_solid = (4 / 3 * np.pi * radii**3).sum()
     pos = rng.uniform(0, L, (2500, 3))
-    pos = pos[voro._union_sdf(pos, centers, radii, L) > 0.03]  # a uniform (mismatched) start
+    pos = pos[voro.scenes.sphere_union_sdf(pos, centers, radii, (L, L, L)) > 0.03]  # a mismatched start
     out = {}
     for name, kw in (("uniform", dict(s_lo=0.10, s_hi=0.10)),
                      ("graded", dict(s_lo=0.08, s_hi=0.25, slope=0.3))):
-        res = voro.redistribute_pore_mesh(pos, centers, radii, L, **kw)
-        n0, mx0 = res["history"][0][0], res["history"][0][1]
+        res = voro.pore_mesh.redistribute_pore_mesh(pos, centers, radii, (L, L, L), **kw)
+        n0, mx0 = res.history[0][0], res.history[0][1]
         print(f"  Redistribute[{name}]: solid fraction {phi_solid:.3f}; start N={n0} max|r|={mx0:.2f} "
-              f"-> N={len(res['positions'])} max|r|={res['max_rel']:.3f} rms|r|={res['rms_rel']:.3f} "
-              f"dead={res['n_dead']} in {res['rounds']} rounds (+{res['n_added']} -{res['n_removed']})")
-        assert res["n_dead"] == 0, name
+              f"-> N={len(res.positions)} max|r|={res.max_rel:.3f} rms|r|={res.rms_rel:.3f} "
+              f"dead={res.num_dead} in {res.rounds} rounds (+{res.num_added} -{res.num_removed})")
+        assert res.num_dead == 0, name
         out[name] = res
-    assert out["uniform"]["max_rel"] < 0.2 and out["uniform"]["rms_rel"] < 0.07
-    assert out["graded"]["rms_rel"] < 0.16  # 0.07-0.13 measured (thread-order variation)
+    assert out["uniform"].max_rel < 0.2 and out["uniform"].rms_rel < 0.07
+    assert out["graded"].rms_rel < 0.16  # 0.07-0.13 measured (thread-order variation)
     return out
 
 

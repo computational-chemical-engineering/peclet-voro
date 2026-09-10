@@ -11,6 +11,10 @@ This page documents the **Python validation path** under `mpi/` (the scripts nam
 distributed engine itself lives in C++ — `include/peclet/voro/mpi/` (`VoronoiHalo`,
 `DistributedMovingTessellation`) and `fv/distributed.hpp` (the collocated solver over the halo) —
 and is gated by `tests/kokkos_mpi` at np = 1, 2, 4; see the README's "Distributed (MPI)" section.
+Both drivers are bound in an MPI build of `peclet.voro`: `VoronoiHalo(cells, extent=…)` (the
+gather; `mpi/validate_voronoi_halo.py`) and `DistributedTessellation(cells, extent=…)` (the
+repair driver: `establish`, `step`, owned `get_volumes` / `get_neighbor_counts` / `get_wall_counts`,
+`diagnostics.num_regathers`; `python/state_hash.py --mpi`).
 
 **Status: implemented and validated.**
 - *Tessellation* (`mpi/validate_voronoi.py`): owned-cell **volumes and neighbour counts** match the

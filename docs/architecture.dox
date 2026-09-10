@@ -100,8 +100,10 @@
  *
  * The nanobind module `peclet.voro` (`src/voro_bindings.cpp`) exposes `Tessellation` (cold
  * build, incremental repair, volumes, neighbour counts), `Simulation` (the fluid solver),
- * `FlowSolver` and `VoronoiHalo`. Build with `-DPECLET_VORO_BUILD_PYTHON=ON`, or
- * `pip install .`. See `python/test_voro.py` for usage.
+ * `FlowSolver`, the mesh optimisers, the `pore_mesh` / `scenes` submodules and, under MPI,
+ * `VoronoiHalo` + `DistributedTessellation`; instruments live on each object's `diagnostics`.
+ * Build with `-DPECLET_VORO_BUILD_PYTHON=ON`, or `pip install .`. See `python/test_voro.py`
+ * for usage and `python/state_hash.py` for the numerics gate.
  *
  * \section arch_perf Performance
  *

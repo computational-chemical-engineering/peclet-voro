@@ -42,15 +42,13 @@ g_gid = np.arange(N, dtype=np.int64)
 vref = tessellate(g_pos) if rank == 0 else None
 
 # Distributed: own a block, gather ghosts within rcut, tessellate owned+ghost, keep owned cells.
-halo = voro.VoronoiHalo(origin=(0.0, 0.0, 0.0), size=(L, L, L), gsize=gs,
-                        periodic=(True, True, True))
+halo = voro.VoronoiHalo(gs, extent=(L, L, L))    # origin (0,0,0), periodic on every axis
 mask = np.asarray(halo.owned_mask(g_pos))
 mine = np.where(mask == 1)[0]
 owned_pos = np.ascontiguousarray(g_pos[mine])
 owned_gid = np.ascontiguousarray(g_gid[mine])
-owned_w = np.zeros(mine.size, dtype=np.float64)
 
-pos, gid, weight, n_owned = halo.gather(owned_pos, owned_gid, owned_w, rcut)
+pos, gid, weight, n_owned = halo.gather(owned_pos, owned_gid, rcut)   # weights=None: Voronoi
 pos = np.asarray(pos)
 gid = np.asarray(gid)
 assert n_owned == mine.size, f"n_owned {n_owned} != owned count {mine.size}"
