@@ -767,6 +767,10 @@ TessellatorResult<Real> buildTessellation(
   // both this cold build and the moving-point subset gather (device/subset_gather.hpp); pure code
   // motion, so the cold-build output is byte-for-byte unchanged.
   auto grid = buildTessGrid<Real, Weighted>(posFlat, weight, N, L, sw, densityCount, gid, wlc);
+  // The window the grid was actually built with: buildTessGrid clamps sw to (minDim-1)/2-1 on a
+  // coarse grid (N ≲ 1300 at sw = 4), and the completeness flag below must judge against the
+  // walked window, not the requested one.
+  sw = grid.sw;
   const Real Lx = grid.Lx, Ly = grid.Ly, Lz = grid.Lz;
   const Real icx = grid.icx, icy = grid.icy, icz = grid.icz, minCsz = grid.minCsz;
   const int dimx = grid.dimx, dimy = grid.dimy, dimz = grid.dimz;
