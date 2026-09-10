@@ -212,7 +212,6 @@ int main(int argc, char** argv) {
           resP[r] = std::sqrt(rP / nn) * h * h;
           // TGV, both viscous terms
           const int steps = (int)std::ceil(T / (0.2 * h));
-          const Real dt = T / steps;
           auto exF = tgvFlux(m, pos, T, nu);
           for (int dec = 0; dec < 2; ++dec) {
             fv::CovolumeNS<Real> cv;

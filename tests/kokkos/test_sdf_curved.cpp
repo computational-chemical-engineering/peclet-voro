@@ -110,7 +110,7 @@ static void replay(const std::vector<Real>& pos, int N, const Real L[3], const S
     const Real p0[3] = {surf[0] - seed[0], surf[1] - seed[1], surf[2] - seed[2]};
     Real px[Cell::MAXSV], py[Cell::MAXSV], pz[Cell::MAXSV];
     const int m = c.sectionPolygon(p0, normal, px, py, pz);
-    Real pv[3], off, sh0[3];
+    Real pv[3], off = 0, sh0[3];
     peclet::voro::sdfCutPlane(c, seed, sdf, seed, std::sqrt(c.maxVertexRsq()), pv, off, sh0);
     const Real offT = -(normal[0] * p0[0] + normal[1] * p0[1] + normal[2] * p0[2]);
     Real H[3][3];

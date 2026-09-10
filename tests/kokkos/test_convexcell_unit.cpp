@@ -94,7 +94,6 @@ int main(int argc, char** argv) {
       // directions on a sphere, neighbour at 2*dir so bisector at dir (distance 1)
       const int M = 60;
       R dir[256][3];
-      R key[256];
       int idx[256];
       for (int k = 0; k < M; ++k) {
         // random direction
@@ -109,7 +108,6 @@ int main(int argc, char** argv) {
         dir[k][0] = x * inv;
         dir[k][1] = y * inv;
         dir[k][2] = z * inv;
-        key[k] = 0.5;  // all at distance 1 -> bisector offset 0.5*|2dir|^2... use rel=2dir
         idx[k] = k;
       }
       for (int k = 0; k < M; ++k) {

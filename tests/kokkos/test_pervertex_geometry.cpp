@@ -23,7 +23,7 @@ using real_t = double;
 using Cell = peclet::voro::ConvexCell<real_t, 64, 128>;
 
 // build one cell at site `i` from its K nearest neighbours (periodic min-image, security break)
-static bool buildCell(Cell& c, int i, const std::vector<real_t>& pos, int N, real_t L,
+static bool buildCell(Cell& c, int i, const std::vector<real_t>& pos, real_t L,
                       const std::vector<int>& nbr) {
   const real_t sx = pos[3 * i], sy = pos[3 * i + 1], sz = pos[3 * i + 2], Lh = 0.5 * L;
   c.initBox(L, L, L);
@@ -116,7 +116,7 @@ int main(int argc, char** argv) {
           nbr.push_back((int)tmp[t][1]);
 
         Cell c;
-        if (!buildCell(c, i, pos, N, L, nbr))
+        if (!buildCell(c, i, pos, L, nbr))
           continue;
         const double Vref = c.volume();
         if (Vref <= 0)
@@ -304,10 +304,10 @@ int main(int argc, char** argv) {
             std::vector<real_t> pp = pos;
             pp[3 * i + cc] += eps;
             Cell cpp;
-            const bool okp = buildCell(cpp, i, pp, N, L, nbr);
+            const bool okp = buildCell(cpp, i, pp, L, nbr);
             pp[3 * i + cc] -= 2 * eps;
             Cell cpm;
-            const bool okm = buildCell(cpm, i, pp, N, L, nbr);
+            const bool okm = buildCell(cpm, i, pp, L, nbr);
             if (!okp || !okm)
               continue;
             const double fd = (cpp.volumePerVertex() - cpm.volumePerVertex()) / (2 * eps);

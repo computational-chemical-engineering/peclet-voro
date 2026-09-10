@@ -507,10 +507,10 @@ int main(int argc, char** argv) {
           "max|U| = %.3e (gate %.0e), E/E_ref - 1 = %.3e (gate %.0e), max face div %.1e, flagged "
           "cells %d, PCG iters %d  %s\n",
           covol ? "covolume RK3" : (impl ? "implicit diffusion" : "RK3"), np, n, steps, ghostsG,
-          rel, tolU, eRel, tolE, divMax, flaggedG, co.poisson.lastIters, ok ? "OK" : "FAIL");
-    if (rank == 0)
+          rel, tolU, eRel, tolE, divMax, flaggedG, pcgIters, ok ? "OK" : "FAIL");
+    if (rank == 0)  // pcgIters: the solver that ran (cvd for covolume, co otherwise)
       std::printf("    (last pressure solve: %d iterations, relative residual %.2e, amg %d)\n",
-                  co.poisson.lastIters, co.poisson.lastRes, (int)useAmg);
+                  pcgIters, covol ? cvd.poisson.lastRes : co.poisson.lastRes, (int)useAmg);
     if (!ok)
       bad = 1;
   }

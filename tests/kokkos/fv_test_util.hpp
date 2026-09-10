@@ -23,16 +23,16 @@ using DV = Kokkos::View<Real*, Mem>;
 namespace fv = peclet::voro::fv;
 
 template <class T>
-static std::vector<T> down(const Kokkos::View<T*, Mem>& v) {
+inline std::vector<T> down(const Kokkos::View<T*, Mem>& v) {
   auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, v);
   return std::vector<T>(h.data(), h.data() + h.extent(0));
 }
-static DV up(const std::vector<Real>& h, const char* name) {
+inline DV up(const std::vector<Real>& h, const char* name) {
   DV d(name, h.size());
   Kokkos::deep_copy(d, Kokkos::View<const Real*, Kokkos::HostSpace>(h.data(), h.size()));
   return d;
 }
-static fv::FaceMesh<Real> meshOf(const std::vector<Real>& pos, int N, const Real L[3]) {
+inline fv::FaceMesh<Real> meshOf(const std::vector<Real>& pos, int N, const Real L[3]) {
   DV dpos = up(pos, "pos"), dw;
   Kokkos::View<long*, Mem> gd;
   auto res = peclet::voro::buildTessellation<Real, false, peclet::voro::NoSdf>(dpos, dw, N, L, 4, N,
@@ -40,7 +40,7 @@ static fv::FaceMesh<Real> meshOf(const std::vector<Real>& pos, int N, const Real
   auto aux = peclet::voro::buildAuxMaps(res.view);
   return fv::buildFaceMesh(res.view, aux);
 }
-static std::vector<Real> lattice(int n, Real jitter, std::mt19937& rng) {
+inline std::vector<Real> lattice(int n, Real jitter, std::mt19937& rng) {
   std::vector<Real> pos(3 * n * n * n);
   std::uniform_real_distribution<Real> J(-jitter, jitter);
   const Real h = Real(1) / n;
@@ -55,7 +55,7 @@ static std::vector<Real> lattice(int n, Real jitter, std::mt19937& rng) {
   return pos;
 }
 // Lloyd relaxation x <- centroid (the B1 descent), `steps` sweeps.
-static void lloydRelax(std::vector<Real>& pos, int N, const Real L[3], int steps) {
+inline void lloydRelax(std::vector<Real>& pos, int N, const Real L[3], int steps) {
   for (int it = 0; it < steps; ++it) {
     DV dpos = up(pos, "pos"), dw, cent("cent", 3 * N);
     Kokkos::View<long*, Mem> gd;
@@ -69,13 +69,13 @@ static void lloydRelax(std::vector<Real>& pos, int N, const Real L[3], int steps
   }
 }
 // Taylor–Green (2D vortex, z-independent): exact 3D NS solution, decay exp(−2 ν k² t), k = 2π.
-static void tgv(Real x, Real y, Real t, Real nu, Real& u, Real& v) {
+inline void tgv(Real x, Real y, Real t, Real nu, Real& u, Real& v) {
   const Real k = 2 * M_PI, e = std::exp(-2 * nu * k * k * t);
   u = std::sin(k * x) * std::cos(k * y) * e;
   v = -std::cos(k * x) * std::sin(k * y) * e;
 }
 // exact face-normal flux at the face centroids (absolute position x_A + c_f)
-static std::vector<Real> tgvFlux(const fv::FaceMesh<Real>& m, const std::vector<Real>& pos, Real t,
+inline std::vector<Real> tgvFlux(const fv::FaceMesh<Real>& m, const std::vector<Real>& pos, Real t,
                                  Real nu) {
   auto A = down(m.faceCellA);
   auto C = down(m.faceCentroid), Nn = down(m.faceNormal);
@@ -89,7 +89,7 @@ static std::vector<Real> tgvFlux(const fv::FaceMesh<Real>& m, const std::vector<
   }
   return uf;
 }
-static Real relErrF(const fv::FaceMesh<Real>& m, const DV& u, const std::vector<Real>& ex) {
+inline Real relErrF(const fv::FaceMesh<Real>& m, const DV& u, const std::vector<Real>& ex) {
   auto uh = down(u), A = down(m.faceArea), d = down(m.faceDist);
   double e = 0, n = 0;
   for (int f = 0; f < m.nInterior; ++f) {
@@ -99,13 +99,13 @@ static Real relErrF(const fv::FaceMesh<Real>& m, const DV& u, const std::vector<
   return std::sqrt(e / n);
 }
 // exact cell velocity at the seeds (3N)
-static std::vector<Real> tgvCell(const std::vector<Real>& pos, int N, Real t, Real nu) {
+inline std::vector<Real> tgvCell(const std::vector<Real>& pos, int N, Real t, Real nu) {
   std::vector<Real> U(3 * N, Real(0));
   for (int i = 0; i < N; ++i)
     tgv(pos[3 * i], pos[3 * i + 1], t, nu, U[3 * i], U[3 * i + 1]);
   return U;
 }
-static Real relErrV(const fv::FaceMesh<Real>& m, const DV& U, const std::vector<Real>& ex) {
+inline Real relErrV(const fv::FaceMesh<Real>& m, const DV& U, const std::vector<Real>& ex) {
   auto Uh = down(U), V = down(m.cellVolume);
   double e = 0, n = 0;
   for (int i = 0; i < m.nCells; ++i)
@@ -116,7 +116,7 @@ static Real relErrV(const fv::FaceMesh<Real>& m, const DV& U, const std::vector<
   return std::sqrt(e / n);
 }
 // area-weighted face skewness |c_f - h_A n_f| / d_f
-static Real faceSkewness(const fv::FaceMesh<Real>& m) {
+inline Real faceSkewness(const fv::FaceMesh<Real>& m) {
   auto C = down(m.faceCentroid), Nn = down(m.faceNormal), ha = down(m.faceHa), d = down(m.faceDist),
        Af = down(m.faceArea);
   double sk = 0, at = 0;
