@@ -32,6 +32,7 @@ voro/
 │       ├── params.hpp               #   the named defaults: cell capacities, gather window, tolerance / skin
 │       ├── convex_cell.hpp          #   compact dual-triangle ConvexCell + per-vertex geometry
 │       ├── tessellator.hpp          #   cold build: grid + worklist gather + clip + CSR publish
+│       ├── pore_cells.hpp           #   SDF-walled pore cells as polyhedra / a plane section (device, seed order)
 │       ├── repair.hpp               #   MovingTessellation: incremental two-pass repair update
 │       ├── topology_store.hpp       #   resident compact topology (+ poke4 cert planes) between steps
 │       ├── tess_grid.hpp            #   counting-sort grid + presorted worklist
@@ -156,7 +157,9 @@ incremental repair of a moving point set), the moving-cell **`Simulation`** flui
 static **`FlowSolver`** on the face mesh of a resident tessellation — the mesh optimisers
 `optimize_volume_mesh` / `minimize_interface` (typed `OptimizeResult` / `InterfaceResult`), the
 lazily imported submodules **`peclet.voro.pore_mesh`** (`optimize_pore_mesh`,
-`redistribute_pore_mesh`, `sdf_voronoi_cells`, `sdf_voronoi_section`) and **`peclet.voro.scenes`**
+`redistribute_pore_mesh`, `sdf_voronoi_cells`, `sdf_voronoi_section` — the last two run on the device,
+`include/peclet/voro/pore_cells.hpp`, with the host-serial reconstruction kept only as their test
+oracle under `_voro._sdf_voronoi_*_host`) and **`peclet.voro.scenes`**
 (`sphere_union_scene`, `sphere_union_sdf`), and — in an MPI build — **`VoronoiHalo`** (the ghost
 gather) and **`DistributedTessellation`** (the distributed repair driver). Every instrument and
 ablation switch is the **diagnostics** tier, reached as `obj.diagnostics.<name>` on each class

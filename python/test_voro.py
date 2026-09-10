@@ -512,11 +512,22 @@ def test_pore_cells():
     ext = (L, L, L)
     pore_volume = L**3 - (4.0 / 3.0 * np.pi * radii**3).sum()
     cells = voro.pore_mesh.sdf_voronoi_cells(pos, centers, radii, ext)
+    # 'num_incomplete' is the conservative inscribed-sphere coverage criterion of the gather
+    # window; at this small N the grid clamps the window to 3 blocks and flags a few tens of
+    # cells whose volumes are nonetheless exact (the oracle comparison below). At 5k+ seeds the
+    # window is not clamped and nothing is flagged.
+    assert cells["num_overflow"] == 0 and cells["num_incomplete"] < 0.1 * len(pos), cells["num_incomplete"]
+    big = np.random.default_rng(3).uniform(0, L, (6000, 3))
+    big = np.ascontiguousarray(big[voro.scenes.sphere_union_sdf(big, centers, radii, ext) > 0.03])
+    cb = voro.pore_mesh.sdf_voronoi_cells(big, centers, radii, ext)
+    assert cb["num_overflow"] == 0 and cb["num_incomplete"] == 0, cb["num_incomplete"]
+    assert len(cb["volume"]) == len(big) and abs(cb["volume"].sum() / pore_volume - 1.0) < 2e-2
     verr = _check_pore_cells(cells, pos, L, pore_volume, "device")
     point, normal = (0.0, 0.0, 0.3), (0.0, 0.0, 1.0)
     dz = np.abs(((centers[:, 2] - point[2]) + L / 2) % L - L / 2)
     area_ref = L * L - np.pi * np.clip(radii**2 - dz**2, 0.0, None).sum()
     sec = voro.pore_mesh.sdf_voronoi_section(pos, centers, radii, ext, point, normal)
+    assert sec["num_overflow"] == 0 and sec["num_incomplete"] == cells["num_incomplete"]
     _check_pore_section(sec, cells, point, normal, L, area_ref, "device")
     # the host oracle (the pre-G.7 serial reconstruction, retained as `_voro._*_host`)
     from peclet.voro import _voro
@@ -546,7 +557,8 @@ def test_pore_cells():
         a, b = hoff[int(s)]
         assert _same_point_sets(sec["verts"][sec["offsets"][p]:sec["offsets"][p + 1]],
                                 hs["verts"][a:b], 1e-9 * L), s
-    print(f"  Pore cells:   N={len(pos)} cells={len(cells['volume'])} (wall {int(cells['boundary'].sum())}) "
+    print(f"  Pore cells:   N={len(pos)} cells={len(cells['volume'])} (wall {int(cells['boundary'].sum())}, "
+          f"{cells['num_incomplete']} flagged by the clamped window; N={len(big)}: 0) "
           f"vol err={abs(cells['volume'].sum() / pore_volume - 1):.1e} face-vol err={verr:.1e}; "
           f"section polys={len(sec['volume'])}; host oracle: volumes 1e-12, vertex sets 1e-9 L OK")
 

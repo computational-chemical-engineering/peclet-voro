@@ -528,23 +528,27 @@ struct CellBuilder {
     }
   }
 
-  /// Build the cell owning grid-sorted slot pi, writing the published outputs at the original
-  /// seed index binned(pi). Worklist gather, ConvexCell clip on the fly (no candidate buffer).
-  KOKKOS_INLINE_FUNCTION void buildCell(int pi) const {
+  /// The gather half of buildCell: the worklist walk that clips the cell of grid-sorted slot pi
+  /// on the fly (early wall clip, neighbour planes; candidate + near-miss recording when those
+  /// outputs are sized), leaving the neighbour-clipped cell in `c` — the SDF clip, status and
+  /// publish are finishCell's. Returns false for a buried power cell. Shared by buildCell and
+  /// the pore-space export (pore_cells.hpp), which keeps the cell instead of publishing it.
+  KOKKOS_INLINE_FUNCTION bool gatherCell(int pi, Cell& c, Real& pix, Real& piy, Real& piz,
+                                         Real& wSelf, int& ncRec, int& nnRec) const {
     // Voronoi (Weighted=false) uses the bisector plane + security-radius early-out. Power
     // (Weighted=true) uses the radical plane offset ½(|r|²+w_self−w_nbr) — which can be negative
     // (the seed can lie OUTSIDE its own cell) so the bisector security certificate is invalid.
     // P1 keeps the trivially-correct APPLY-ALL path for Power (every worklist candidate, no
     // early-out); the weight-aware security gate is P2.
     const int i = binned(pi);
-    const Real pix = posSorted(3 * pi + 0), piy = posSorted(3 * pi + 1),
-               piz = posSorted(3 * pi + 2);
+    pix = posSorted(3 * pi + 0);
+    piy = posSorted(3 * pi + 1);
+    piz = posSorted(3 * pi + 2);
     int cx, cy, cz;
     homeCell(pix, piy, piz, cx, cy, cz);
     const int base = subBase(pix, piy, piz);
-    Cell c;
     c.initBox(Lx, Ly, Lz);
-    Real wSelf = Real(0);
+    wSelf = Real(0);
     if constexpr (Weighted)
       wSelf = wSorted(pi);
     bool buried = false;  // Power: some neighbour dominates the seed at its own location (d≤0)
@@ -579,9 +583,9 @@ struct CellBuilder {
     Real secR2 = Real(2) * c.maxVertexRsq();  // Voronoi
     Real reachSq =
         PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll);  // Pow
-    int ncRec = 0;  // Part-II: count of recorded candidate (skin) ids for this cell
+    ncRec = 0;  // Part-II: count of recorded candidate (skin) ids for this cell
     const bool emitNear = oNear.extent(0) > 0 && nearCap > 0;
-    int nnRec = 0;  // near-miss candidates recorded for this cell
+    nnRec = 0;  // near-miss candidates recorded for this cell
     // With near-miss emission the worklist reach grows by the margin: a plane can miss the cell
     // by less than the margin while its seed sits beyond the security radius.
     const Real nm = emitNear ? nearMargin : Real(0);
@@ -660,8 +664,21 @@ struct CellBuilder {
         }
       }
     }
+    return !buried;
+  }
+
+  /// Build the cell owning grid-sorted slot pi, writing the published outputs at the original
+  /// seed index binned(pi). Worklist gather (gatherCell), then finishCell: SDF clip, status,
+  /// volume and the per-facet CSR.
+  KOKKOS_INLINE_FUNCTION void buildCell(int pi) const {
+    const int i = binned(pi);
+    Cell c;
+    Real pix, piy, piz, wSelf;
+    int ncRec, nnRec;
+    const bool notBuried = gatherCell(pi, c, pix, piy, piz, wSelf, ncRec, nnRec);
+    (void)notBuried;  // only a power cell can be buried
     if constexpr (Weighted) {
-      if (buried) {  // buried power cell: emit as empty (kEmpty), like an in-solid SDF seed
+      if (!notBuried) {  // buried power cell: emit as empty (kEmpty), like an in-solid SDF seed
         status(i) = kEmpty | kBuried;
         facetCount(i) = 0;
         cellFacetBase(i) = 0;
@@ -673,6 +690,7 @@ struct CellBuilder {
     }
     if (emitCand)
       oCandCnt(i) = ncRec;
+    const bool emitNear = oNear.extent(0) > 0 && nearCap > 0;
     if (emitNear)
       oNearCnt(i) = nnRec > nearCap ? nearCap + 1 : nnRec;  // nearCap+1 = overflow marker
     // Completeness uses the conservative inscribed-sphere coverage (sw·minCsz)², the same

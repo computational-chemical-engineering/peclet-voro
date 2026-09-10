@@ -44,7 +44,7 @@ configure-only check). The version is read from `pyproject.toml` (do not edit `p
 |---|---|---|
 | 0 | `params`, `convex_cell`, `plane_policy`, `tessellation_view`, `topology_store`, `transpose`, `verlet_skin`, `tess_grid` | the named defaults (capacities, window, tolerance/skin — every template default names one), the dual-triangle cell, plane policies, the published CSR view, leaves |
 | 1 | `sdf` | SDF half-space clipping (tangent + sagitta), wall store |
-| 2 | `tessellator`, `subset_gather` | cold build: grid + worklist gather + clip + publish |
+| 2 | `tessellator`, `subset_gather`, `pore_cells` | cold build: grid + worklist gather + clip + publish; the pore-space polyhedra / section export on the same gather |
 | 3 | `repair`, `reeval_tessellation`, `dynamic_validate` | `MovingTessellation` two-pass repair, geometry re-publish, validators |
 | 4 | `physics/`, `energy/`, `fv/`, `mpi/`, `mesh_optimizer`, `ot_optimizer` | moving-cell Euler/NS, energies + gradients, face-mesh FV solvers (covolume, collocated, distributed), halo, optimisers |
 

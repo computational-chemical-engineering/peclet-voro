@@ -139,6 +139,8 @@ KOKKOS_INLINE_FUNCTION void dedgeFoot(const Dual<Real, K> v[3], const Dual<Real,
 template <class Real, int MAXP = kMaxPlanes, int MAXT = kMaxTriangles, bool TrackAdj = false>
 struct ConvexCell {
   static_assert(MAXP <= 255, "plane index must fit in unsigned char");
+  static constexpr int kMaxP = MAXP;  ///< plane capacity (consumers size scratch by these)
+  static constexpr int kMaxT = MAXT;  ///< dual-triangle (vertex) capacity
   static constexpr bool kTrackAdj =
       TrackAdj;  ///< lets templated consumers (store save/load) branch at compile time
   Real n[MAXP]
@@ -913,19 +915,21 @@ struct ConvexCell {
 
   static constexpr int MAXFV = 28;  // max vertices on one face polygon
 
-  /// Gather face k's vertices (the alive dual triangles containing plane k) and order them
-  /// CCW around the face normal (insertion sort by in-plane angle). Returns the count, or
-  /// <3 if k is not a (≥triangle) face. Shared by volume() and facetGeometry() — the G0/G1/G2
-  /// geometry tiers all start here.
-  KOKKOS_INLINE_FUNCTION int faceOrdered(int k, Real fx[MAXFV], Real fy[MAXFV],
-                                         Real fz[MAXFV]) const {
+  /// Face k's vertices as TRIANGLE INDICES (the alive dual triangles containing plane k), ordered
+  /// CCW around the face normal (insertion sort by the diamond pseudo-angle about the face
+  /// centroid — monotonic in the true angle, no atan2). Returns the count, or <3 if k is not a
+  /// (≥triangle) face. The index form is what a watertight polyhedron export needs (a vertex is
+  /// shared by its faces by triangle index); faceOrdered gathers the coordinates from it.
+  KOKKOS_INLINE_FUNCTION int faceOrderedIdx(int k, int out[MAXFV]) const {
     int m = 0;
+    Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
     for (int t = 0; t < nt; ++t) {
       if (!alive[t])
         continue;
       if (t0[t] != k && t1[t] != k && t2[t] != k)
         continue;
       if (m < MAXFV) {
+        out[m] = t;
         fx[m] = vx[t];
         fy[m] = vy[t];
         fz[m] = vz[t];
@@ -979,19 +983,32 @@ struct ConvexCell {
       ang[i] = (px < Real(0)) ? (Real(2) - t) : (py < Real(0) ? Real(4) + t : t);
     }
     for (int i = 1; i < m; ++i) {
-      Real ka = ang[i], kx = fx[i], ky = fy[i], kz = fz[i];
+      const Real ka = ang[i];
+      const int ki = out[i];
       int j = i - 1;
       while (j >= 0 && ang[j] > ka) {
         ang[j + 1] = ang[j];
-        fx[j + 1] = fx[j];
-        fy[j + 1] = fy[j];
-        fz[j + 1] = fz[j];
+        out[j + 1] = out[j];
         --j;
       }
       ang[j + 1] = ka;
-      fx[j + 1] = kx;
-      fy[j + 1] = ky;
-      fz[j + 1] = kz;
+      out[j + 1] = ki;
+    }
+    return m;
+  }
+
+  /// Gather face k's vertices (the alive dual triangles containing plane k) and order them
+  /// CCW around the face normal — faceOrderedIdx's order, as coordinates. Returns the count, or
+  /// <3 if k is not a (≥triangle) face. Shared by volume() and facetGeometry() — the G0/G1/G2
+  /// geometry tiers all start here.
+  KOKKOS_INLINE_FUNCTION int faceOrdered(int k, Real fx[MAXFV], Real fy[MAXFV],
+                                         Real fz[MAXFV]) const {
+    int idx[MAXFV];
+    const int m = faceOrderedIdx(k, idx);
+    for (int i = 0; i < m; ++i) {
+      fx[i] = vx[idx[i]];
+      fy[i] = vy[idx[i]];
+      fz[i] = vz[idx[i]];
     }
     return m;
   }

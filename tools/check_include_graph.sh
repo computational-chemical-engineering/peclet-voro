@@ -4,7 +4,7 @@
 #   L0  params, convex_cell +     params.hpp convex_cell.hpp plane_policy.hpp tessellation_view.hpp
 #       leaves                    topology_store.hpp transpose.hpp verlet_skin.hpp tess_grid.hpp
 #   L1  sdf                       sdf.hpp
-#   L2  tessellator               tessellator.hpp subset_gather.hpp
+#   L2  tessellator               tessellator.hpp subset_gather.hpp pore_cells.hpp
 #   L3  repair / reeval           repair.hpp reeval_tessellation.hpp dynamic_validate.hpp
 #   L4  consumers                 physics/ energy/ fv/ mpi/ mesh_optimizer.hpp ot_optimizer.hpp
 #
@@ -22,7 +22,7 @@ layer_of() {  # header path relative to INC_DIR -> layer number
   case "$1" in
     params.hpp|convex_cell.hpp|plane_policy.hpp|tessellation_view.hpp|topology_store.hpp|transpose.hpp|verlet_skin.hpp|tess_grid.hpp) echo 0 ;;
     sdf.hpp) echo 1 ;;
-    tessellator.hpp|subset_gather.hpp) echo 2 ;;
+    tessellator.hpp|subset_gather.hpp|pore_cells.hpp) echo 2 ;;
     repair.hpp|reeval_tessellation.hpp|dynamic_validate.hpp) echo 3 ;;
     physics/*|energy/*|fv/*|mpi/*|mesh_optimizer.hpp|ot_optimizer.hpp) echo 4 ;;
     *) echo "" ;;

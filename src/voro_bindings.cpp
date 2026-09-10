@@ -91,6 +91,7 @@
 #include "peclet/voro/mesh_optimizer.hpp"
 #include "peclet/voro/params.hpp"
 #include "peclet/voro/physics/simulation.hpp"
+#include "peclet/voro/pore_cells.hpp"
 #include "peclet/voro/reeval_tessellation.hpp"
 #include "peclet/voro/repair.hpp"
 #include "peclet/voro/topology_store.hpp"
@@ -147,9 +148,7 @@ constexpr int kPoreMaxIter = 80;
 constexpr double kOptimizerTolerance = 1e-9;
 constexpr int kPoreCgIters = 400;
 constexpr double kInterfaceSigma = 1.0;
-// Pore-space cell reconstruction: nearest seeds gathered per cell, and the cap on the counting-sort
-// grid resolution.
-constexpr int kPoreNeighbors = 80;
+// The host pore-cell oracle's cap on its counting-sort grid resolution (bins per axis).
 constexpr int kPoreMaxBins = 96;
 // Distributed repair driver (validated by tests/kokkos_mpi/bench_repair_mpi at np = 1, 2, 4): the
 // ghost cutoff, in mean spacings, and the ORB granularity per axis.
@@ -231,89 +230,16 @@ peclet::voro::SdfSpheres<real_t> makeSpheresSdf(nb::ndarray<real_t, nb::c_contig
   return peclet::voro::SdfSpheres<real_t>{cenHold, radHold, M, L};
 }
 
-// Ordered alive-triangle indices for face k (watertight by triangle index). Port of the one in
-// examples/packed_bed_voronoi/pore_mesh_stages.cpp.
-int faceOrderedIdx(const PoreCell& c, int k, int out[PoreCell::MAXFV]) {
-  int m = 0;
-  real_t fx[PoreCell::MAXFV], fy[PoreCell::MAXFV], fz[PoreCell::MAXFV];
-  for (int t = 0; t < c.nt; ++t) {
-    if (!c.alive[t])
-      continue;
-    if (c.t0[t] != k && c.t1[t] != k && c.t2[t] != k)
-      continue;
-    if (m < PoreCell::MAXFV) {
-      out[m] = t;
-      fx[m] = c.vx[t];
-      fy[m] = c.vy[t];
-      fz[m] = c.vz[t];
-      ++m;
-    }
-  }
-  if (m < 3)
-    return m;
-  const real_t nx = c.n[k][0], ny = c.n[k][1], nz = c.n[k][2];
-  const real_t nlen = std::sqrt(nx * nx + ny * ny + nz * nz);
-  if (nlen == real_t(0))
-    return 0;
-  const real_t un[3] = {nx / nlen, ny / nlen, nz / nlen};
-  real_t e1[3];
-  if (std::fabs(un[0]) <= std::fabs(un[1]) && std::fabs(un[0]) <= std::fabs(un[2])) {
-    e1[0] = 0;
-    e1[1] = -un[2];
-    e1[2] = un[1];
-  } else if (std::fabs(un[1]) <= std::fabs(un[2])) {
-    e1[0] = -un[2];
-    e1[1] = 0;
-    e1[2] = un[0];
-  } else {
-    e1[0] = -un[1];
-    e1[1] = un[0];
-    e1[2] = 0;
-  }
-  const real_t e1l = std::sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
-  e1[0] /= e1l;
-  e1[1] /= e1l;
-  e1[2] /= e1l;
-  const real_t e2[3] = {un[1] * e1[2] - un[2] * e1[1], un[2] * e1[0] - un[0] * e1[2],
-                        un[0] * e1[1] - un[1] * e1[0]};
-  real_t cx = 0, cy = 0, cz = 0;
-  for (int i = 0; i < m; ++i) {
-    cx += fx[i];
-    cy += fy[i];
-    cz += fz[i];
-  }
-  cx /= m;
-  cy /= m;
-  cz /= m;
-  real_t ang[PoreCell::MAXFV];
-  for (int i = 0; i < m; ++i) {
-    const real_t dx = fx[i] - cx, dy = fy[i] - cy, dz = fz[i] - cz;
-    const real_t pu = dx * e1[0] + dy * e1[1] + dz * e1[2];
-    const real_t pv = dx * e2[0] + dy * e2[1] + dz * e2[2];
-    const real_t s = std::fabs(pu) + std::fabs(pv);
-    const real_t tt = (s > real_t(0)) ? pv / s : real_t(0);
-    ang[i] = (pu < real_t(0)) ? (real_t(2) - tt) : (pv < real_t(0) ? real_t(4) + tt : tt);
-  }
-  for (int i = 1; i < m; ++i) {
-    const real_t ka = ang[i];
-    const int ki = out[i];
-    int j = i - 1;
-    while (j >= 0 && ang[j] > ka) {
-      ang[j + 1] = ang[j];
-      out[j + 1] = out[j];
-      --j;
-    }
-    ang[j + 1] = ka;
-    out[j + 1] = ki;
-  }
-  return m;
-}
-
-// Reconstructs the SDF-clipped interstitial Voronoi cell of any seed. Builds a periodic
-// counting-sort grid once; each build() gathers the kPoreNeighbors nearest seeds via an O(1)
-// Chebyshev shell walk (stop once the last wanted neighbour is provably found), builds the
-// ConvexCell against a far box, and clips it to the SDF. Shared by sdf_voronoi_cells (polyhedra)
-// and sdf_voronoi_section (plane cross-section). Host-serial; the device version is G.7's.
+// The host-serial reconstruction of the SDF-clipped interstitial Voronoi cell of any seed — the
+// TEST ORACLE of the device path (pore_cells.hpp; python/test_voro.py test_pore_cells). Builds a
+// periodic counting-sort grid once; each build() walks Chebyshev shells of bins outward, after
+// each shell rebuilding the ConvexCell (far box, min-image neighbours closest-first) from
+// everything gathered so far, until the shell radius certifies the cell: every seed within R·hbin
+// has been gathered and a seed cuts only if it is closer than twice the cell's reach, so
+// (R·hbin)² ≥ 4·rSqMax closes it (the same bisector certificate the tessellator's worklist
+// uses). If the walk reaches the min-image half box uncertified, every seed is gathered. Then the
+// SDF clip. (Its predecessor gathered a fixed 80 nearest seeds — the device port's gate showed
+// that truncation missing planes on 8 of 805 cells, up to 2.5e-3 in volume.)
 struct PoreReconstructor {
   const real_t* seed;
   int N;
@@ -322,6 +248,8 @@ struct PoreReconstructor {
   peclet::voro::SdfSpheres<real_t> sdf;
   std::vector<int> binStart, binItem;
   mutable std::vector<std::pair<real_t, int>> ord;
+  mutable std::vector<real_t> rx, ry, rz;
+  mutable std::vector<int> ids;
 
   int binOf(real_t x) const {
     int b = (int)std::floor(x / hbin) % nb;
@@ -345,45 +273,31 @@ struct PoreReconstructor {
     for (int i = 0; i < N; ++i)
       binItem[cur[cellOf(i)]++] = i;
   }
-  bool build(int i, PoreCell& c) const {
-    constexpr int Kwant = defaults::kPoreNeighbors;
-    const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
-    ord.clear();
-    const int bx = binOf(sx), by = binOf(sy), bz = binOf(sz);
-    for (int R = 0; R <= nb; ++R) {
-      for (int dz2 = -R; dz2 <= R; ++dz2)
-        for (int dy2 = -R; dy2 <= R; ++dy2)
-          for (int dx2 = -R; dx2 <= R; ++dx2) {
-            int cheb = std::abs(dx2);
-            cheb = std::max(cheb, std::abs(dy2));
-            cheb = std::max(cheb, std::abs(dz2));
-            if (cheb != R)
-              continue;
-            const int gx = ((bx + dx2) % nb + nb) % nb, gy = ((by + dy2) % nb + nb) % nb,
-                      gz = ((bz + dz2) % nb + nb) % nb;
-            const int b = gx + nb * (gy + nb * gz);
-            for (int t = binStart[b]; t < binStart[b + 1]; ++t) {
-              const int j = binItem[t];
-              if (j == i)
-                continue;
-              real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
-              dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
-              dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
-              dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
-              ord.emplace_back(dx * dx + dy * dy + dz * dz, j);
-            }
-          }
-      if ((int)ord.size() >= Kwant) {
-        std::nth_element(ord.begin(), ord.begin() + (Kwant - 1), ord.end());
-        const real_t rh = (real_t)R * hbin;
-        if (rh * rh >= ord[Kwant - 1].first)
-          break;
-      }
+  // Gather bin (gx,gy,gz) (raw, wrapped here) into `ord` as (dist², j), min-image, j != i.
+  void gatherBin(int i, real_t sx, real_t sy, real_t sz, int gx, int gy, int gz) const {
+    gx = ((gx % nb) + nb) % nb;
+    gy = ((gy % nb) + nb) % nb;
+    gz = ((gz % nb) + nb) % nb;
+    const int b = gx + nb * (gy + nb * gz);
+    for (int t = binStart[b]; t < binStart[b + 1]; ++t) {
+      const int j = binItem[t];
+      if (j == i)
+        continue;
+      real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
+      dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
+      dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
+      dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
+      ord.emplace_back(dx * dx + dy * dy + dz * dz, j);
     }
+  }
+  // Rebuild `c` from everything in `ord`, closest-first against the far box.
+  void rebuild(real_t sx, real_t sy, real_t sz, PoreCell& c) const {
     std::sort(ord.begin(), ord.end());
-    const int M = std::min((int)ord.size(), Kwant);
-    real_t rx[Kwant], ry[Kwant], rz[Kwant];
-    int ids[Kwant];
+    const int M = (int)ord.size();
+    rx.resize(M);
+    ry.resize(M);
+    rz.resize(M);
+    ids.resize(M);
     for (int k = 0; k < M; ++k) {
       const int j = ord[k].second;
       real_t dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
@@ -396,7 +310,40 @@ struct PoreReconstructor {
       ids[k] = j;
     }
     const real_t Lbig[3] = {big, big, big};
-    peclet::voro::buildConvexCell(c, Lbig, rx, ry, rz, ids, M);
+    peclet::voro::buildConvexCell(c, Lbig, rx.data(), ry.data(), rz.data(), ids.data(), M);
+  }
+  bool build(int i, PoreCell& c) const {
+    const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
+    ord.clear();
+    const int bx = binOf(sx), by = binOf(sy), bz = binOf(sz);
+    const int Rmax = (nb - 1) / 2;  // beyond it a bin would be visited twice (periodic wrap)
+    for (int R = 0;; ++R) {
+      if (R > Rmax) {  // uncertified at the min-image half box: take every seed
+        ord.clear();
+        for (int gz = 0; gz < nb; ++gz)
+          for (int gy = 0; gy < nb; ++gy)
+            for (int gx = 0; gx < nb; ++gx)
+              gatherBin(i, sx, sy, sz, gx, gy, gz);
+        rebuild(sx, sy, sz, c);
+        break;
+      }
+      for (int dz2 = -R; dz2 <= R; ++dz2)
+        for (int dy2 = -R; dy2 <= R; ++dy2)
+          for (int dx2 = -R; dx2 <= R; ++dx2) {
+            int cheb = std::abs(dx2);
+            cheb = std::max(cheb, std::abs(dy2));
+            cheb = std::max(cheb, std::abs(dz2));
+            if (cheb != R)
+              continue;
+            gatherBin(i, sx, sy, sz, bx + dx2, by + dy2, bz + dz2);
+          }
+      rebuild(sx, sy, sz, c);
+      if (c.overflow)
+        return false;
+      const real_t rh = (real_t)R * hbin;  // every seed within rh is in `ord`
+      if (rh * rh >= real_t(4) * c.maxVertexRsq())
+        break;
+    }
     const real_t seedW[3] = {sx, sy, sz};
     peclet::voro::clipCellAgainstSdf<real_t, defaults::kPoreMaxPlanes, defaults::kPoreMaxTriangles,
                                      false>(c, seedW, sdf);
@@ -1644,7 +1591,6 @@ NB_MODULE(_voro, m) {
     d["pore_cg_iters"] = kPoreCgIters;
     d["barrier_decay"] = kBarrierDecay;
     d["interface_sigma"] = kInterfaceSigma;
-    d["pore_neighbors"] = kPoreNeighbors;
     d["pore_max_bins"] = kPoreMaxBins;
     d["distributed_rcut"] = kDistributedRcut;
     d["distributed_cells"] = kDistributedCells;
@@ -1821,121 +1767,184 @@ NB_MODULE(_voro, m) {
           ". Returns an\nOptimizeResult. Experimental (pore-space meshing; see the "
           "pore-mesh-voronoi example)."));
 
-  auto sdfVoronoiCellsHost =
-      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
-         nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent) {
+  // The pore-space export: the device path (pore_cells.hpp — the tessellator's own gather at the
+  // pore capacity, count -> scan -> fill in seed order) under the public names, and the host-serial
+  // PoreReconstructor under the `_host` names as its test oracle (python/test_voro.py
+  // test_pore_cells compares them). Both share the per-cell export rule + layout
+  // (peclet::voro::detail::poreCellCount / poreCellFill).
+  auto poreCellsDict = [](std::vector<real_t>&& pts, std::vector<int64_t>&& faces,
+                          std::vector<int64_t>&& faceOff, std::vector<real_t>&& vol,
+                          std::vector<int32_t>&& boundary, std::vector<int32_t>&& cellSeed,
+                          long numOverflow, long numIncomplete) {
+    const std::size_t nPts = pts.size() / 3, nCells = vol.size();
+    nb::dict d;
+    d["points"] = peclet::core::python::vector_to_ndarray(std::move(pts), {nPts, 3}, {3, 1});
+    d["faces"] = peclet::core::python::vector_to_ndarray(std::move(faces), {faces.size()}, {1});
+    d["face_offsets"] =
+        peclet::core::python::vector_to_ndarray(std::move(faceOff), {faceOff.size()}, {1});
+    d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nCells}, {1});
+    d["boundary"] = peclet::core::python::vector_to_ndarray(std::move(boundary), {nCells}, {1});
+    d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nCells}, {1});
+    d["num_overflow"] = numOverflow;
+    d["num_incomplete"] = numIncomplete;
+    return d;
+  };
+  auto poreSectionDict = [](std::vector<real_t>&& verts, std::vector<int64_t>&& off,
+                            std::vector<real_t>&& vol, std::vector<int32_t>&& cellSeed,
+                            long numOverflow, long numIncomplete) {
+    const std::size_t nV = verts.size() / 3, nP = vol.size();
+    nb::dict d;
+    d["verts"] = peclet::core::python::vector_to_ndarray(std::move(verts), {nV, 3}, {3, 1});
+    d["offsets"] = peclet::core::python::vector_to_ndarray(std::move(off), {off.size()}, {1});
+    d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nP}, {1});
+    d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nP}, {1});
+    d["num_overflow"] = numOverflow;
+    d["num_incomplete"] = numIncomplete;
+    return d;
+  };
+  m.def(
+      "sdf_voronoi_cells",
+      [poreCellsDict](nb::ndarray<real_t, nb::c_contig> pos_in,
+                      nb::ndarray<real_t, nb::c_contig> sph_c,
+                      nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
+                      int search_window) {
         auto seed = flatten3(pos_in);
         const int N = (int)(seed.size() / 3);
         const real_t L = cubicExtent(extent, "sdf_voronoi_cells");
+        if (N <= 0)
+          throw std::invalid_argument(
+              "voro: sdf_voronoi_cells(positions) needs at least one seed.");
+        if (search_window < 1)
+          throw std::invalid_argument("voro: sdf_voronoi_cells(search_window=...) needs >= 1.");
         DView cenH, radH;
         auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
-        // Reconstruct each interstitial cell (periodic min-image neighbours + SDF clip) and pack
-        // the clipped polyhedra as flat arrays (VTK_POLYHEDRON layout) for host-side
-        // slicing/plotting.
-        std::vector<real_t> px, py, pz, vol;
+        auto pos = peclet::core::toDevice<real_t>(seed, "pore.pos");
+        const real_t Larr[3] = {L, L, L};
+        auto r = peclet::voro::buildPoreCells<real_t, peclet::voro::SdfSpheres<real_t>>(
+            pos, N, Larr, sdf, search_window);
+        using peclet::voro::detail::toHostVecT;
+        return poreCellsDict(toHostVecT<real_t>(r.points), toHostVecT<int64_t>(r.faces),
+                             toHostVecT<int64_t>(r.faceOffset), toHostVecT<real_t>(r.volume),
+                             toHostVecT<int32_t>(r.boundary), toHostVecT<int32_t>(r.seed),
+                             r.numOverflow, r.numIncomplete);
+      },
+      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"),
+      nb::kw_only(), nb::arg("search_window") = kPoreSearchWindow,
+      doc("Reconstruct the SDF-clipped interstitial Voronoi cells (cubic periodic box `extent`, "
+          "the\nspheres as walls) on the device — the tessellator's own gather, one thread per "
+          "cell — and\nreturn their polyhedra as flat arrays (VTK_POLYHEDRON layout) in seed "
+          "order: 'points' (Np,3),\n'faces' + 'face_offsets' (per-cell face lists, global point "
+          "ids, each face CCW about its\noutward normal), 'volume' (Nc,), 'boundary' (Nc, 1 "
+          "where the cell touches a sphere wall),\n'seed' (Nc,). Seeds inside a sphere have no "
+          "cell; 'num_overflow' counts cells skipped for\nexceeding the pore cell capacity ("
+          "peclet.voro.defaults) and 'num_incomplete' the cells whose\ngather window "
+          "(search_window grid blocks per axis, default " +
+          fmt(kPoreSearchWindow) + ") did not close — raise\nsearch_window if it is not 0."));
+  m.def(
+      "sdf_voronoi_section",
+      [poreSectionDict](
+          nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
+          nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
+          std::array<real_t, 3> point, std::array<real_t, 3> normal, int search_window) {
+        auto seed = flatten3(pos_in);
+        const int N = (int)(seed.size() / 3);
+        const real_t L = cubicExtent(extent, "sdf_voronoi_section");
+        if (N <= 0)
+          throw std::invalid_argument(
+              "voro: sdf_voronoi_section(positions) needs at least one seed.");
+        if (search_window < 1)
+          throw std::invalid_argument("voro: sdf_voronoi_section(search_window=...) needs >= 1.");
+        DView cenH, radH;
+        auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
+        auto pos = peclet::core::toDevice<real_t>(seed, "pore.pos");
+        const real_t Larr[3] = {L, L, L};
+        auto r = peclet::voro::buildPoreSection<real_t, peclet::voro::SdfSpheres<real_t>>(
+            pos, N, Larr, sdf, point.data(), normal.data(), search_window);
+        using peclet::voro::detail::toHostVecT;
+        return poreSectionDict(toHostVecT<real_t>(r.verts), toHostVecT<int64_t>(r.offset),
+                               toHostVecT<real_t>(r.volume), toHostVecT<int32_t>(r.seed),
+                               r.numOverflow, r.numIncomplete);
+      },
+      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"),
+      nb::arg("point"), nb::arg("normal"), nb::kw_only(),
+      nb::arg("search_window") = kPoreSearchWindow,
+      doc("Cross-section of the SDF-clipped interstitial Voronoi mesh (cubic periodic box "
+          "`extent`) by\nthe plane through `point` with `normal`, on the device: every cell cut "
+          "directly\n(ConvexCell::sectionPolygon, from the dual edges, so it tiles the plane "
+          "exactly where a\nface-by-face slice drops facets). Returns 'verts' (Nv,3, world "
+          "coords, all on the plane, CCW\nabout the normal) + 'offsets' (Npoly+1, per-polygon "
+          "vertex ranges) + 'volume' (Npoly, the 3-D\ncell volume) + 'seed' (Npoly, the seed "
+          "index), in seed order, plus 'num_overflow' /\n'num_incomplete' as in "
+          "sdf_voronoi_cells (search_window default " +
+          fmt(kPoreSearchWindow) +
+          "). For a z=z0 slice pass\npoint=(0,0,z0), normal=(0,0,1) "
+          "and plot verts[:, :2]."));
+  m.def(
+      "_sdf_voronoi_cells_host",
+      [poreCellsDict](nb::ndarray<real_t, nb::c_contig> pos_in,
+                      nb::ndarray<real_t, nb::c_contig> sph_c,
+                      nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent) {
+        auto seed = flatten3(pos_in);
+        const int N = (int)(seed.size() / 3);
+        const real_t L = cubicExtent(extent, "_sdf_voronoi_cells_host");
+        DView cenH, radH;
+        auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
+        std::vector<real_t> pts, vol;
         std::vector<int64_t> faces, faceOff(1, 0);
         std::vector<int32_t> boundary, cellSeed;
         PoreReconstructor rec(seed, L, sdf);
+        long numOverflow = 0;
         for (int i = 0; i < N; ++i) {
-          const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
           PoreCell c;
-          if (!rec.build(i, c))
+          if (!rec.build(i, c)) {
+            numOverflow += c.overflow ? 1 : 0;
             continue;
-          const int64_t base = (int64_t)px.size();
-          std::vector<int> triToPt(c.nt, -1);
-          int np = 0;
-          for (int t = 0; t < c.nt; ++t) {
-            if (!c.alive[t])
-              continue;
-            triToPt[t] = np++;
-            px.push_back(sx + c.vx[t]);
-            py.push_back(sy + c.vy[t]);
-            pz.push_back(sz + c.vz[t]);
           }
-          if (np < 4)
-            continue;
-          std::vector<std::vector<int64_t>> cellFaces;
+          int np = 0, ne = 0;
           bool wall = false;
-          for (int k = 0; k < c.np; ++k) {
-            int fidx[PoreCell::MAXFV];
-            const int m = faceOrderedIdx(c, k, fidx);
-            if (m < 3)
-              continue;
-            std::vector<int64_t> face;
-            for (int q = 0; q < m; ++q)
-              if (triToPt[fidx[q]] >= 0)
-                face.push_back(base + triToPt[fidx[q]]);
-            if ((int)face.size() >= 3) {
-              cellFaces.push_back(std::move(face));
-              if (c.pnbr[k] == peclet::voro::kBoundaryFacet)
-                wall = true;
-            }
-          }
-          if (cellFaces.size() < 4)
+          if (!peclet::voro::detail::poreCellCount(c, np, ne, wall))
             continue;
-          faces.push_back((int64_t)cellFaces.size());
-          for (auto& f : cellFaces) {
-            faces.push_back((int64_t)f.size());
-            for (int64_t id : f)
-              faces.push_back(id);
-          }
+          const int64_t ptBase = (int64_t)(pts.size() / 3), fBase = (int64_t)faces.size();
+          pts.resize(pts.size() + 3 * (std::size_t)np);
+          faces.resize(faces.size() + (std::size_t)ne);
+          const real_t s[3] = {seed[3 * i], seed[3 * i + 1], seed[3 * i + 2]};
+          peclet::voro::detail::poreCellFill(c, s, ptBase, fBase, pts.data(), faces.data());
           faceOff.push_back((int64_t)faces.size());
           vol.push_back(c.volumePerVertex());
           boundary.push_back(wall ? 1 : 0);
           cellSeed.push_back(i);
         }
-        const std::size_t nPts = px.size(), nCells = vol.size();
-        std::vector<real_t> pts(3 * nPts);
-        for (std::size_t p = 0; p < nPts; ++p) {
-          pts[3 * p] = px[p];
-          pts[3 * p + 1] = py[p];
-          pts[3 * p + 2] = pz[p];
-        }
-        nb::dict d;
-        d["points"] = peclet::core::python::vector_to_ndarray(std::move(pts), {nPts, 3}, {3, 1});
-        d["faces"] = peclet::core::python::vector_to_ndarray(std::move(faces), {faces.size()}, {1});
-        d["face_offsets"] =
-            peclet::core::python::vector_to_ndarray(std::move(faceOff), {faceOff.size()}, {1});
-        d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nCells}, {1});
-        d["boundary"] = peclet::core::python::vector_to_ndarray(std::move(boundary), {nCells}, {1});
-        d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nCells}, {1});
-        return d;
-      };
-  m.def("sdf_voronoi_cells", sdfVoronoiCellsHost, nb::arg("positions"), nb::arg("sphere_centers"),
-        nb::arg("sphere_radii"), nb::arg("extent"),
-        "Reconstruct the SDF-clipped interstitial Voronoi cells (cubic periodic box `extent`, the\n"
-        "spheres as walls) and return their polyhedra as flat arrays (VTK_POLYHEDRON layout):\n"
-        "'points' (Np,3), 'faces' + 'face_offsets' (per-cell face lists, global point ids),\n"
-        "'volume' (Nc,), 'boundary' (Nc, 1 where the cell touches a sphere wall), 'seed' (Nc,).");
-  m.def("_sdf_voronoi_cells_host", sdfVoronoiCellsHost, nb::arg("positions"),
-        nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"),
-        "The host-serial reconstruction of sdf_voronoi_cells (PoreReconstructor: the 80 nearest "
-        "seeds\n"
-        "by a Chebyshev shell walk, closest-first clip against a far box, then the SDF clip), kept "
-        "as\n"
-        "the TEST ORACLE of the device path; same arguments and result. Not part of the API.");
-
-  auto sdfVoronoiSectionHost =
-      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
-         nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
-         std::array<real_t, 3> point, std::array<real_t, 3> normal) {
+        return poreCellsDict(std::move(pts), std::move(faces), std::move(faceOff), std::move(vol),
+                             std::move(boundary), std::move(cellSeed), numOverflow, 0);
+      },
+      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"),
+      "The host-serial reconstruction of sdf_voronoi_cells (PoreReconstructor: the 80 nearest "
+      "seeds\nby a Chebyshev shell walk, closest-first clip against a far box, then the SDF "
+      "clip), kept as\nthe TEST ORACLE of the device path; same result layout. Not part of the "
+      "API.");
+  m.def(
+      "_sdf_voronoi_section_host",
+      [poreSectionDict](nb::ndarray<real_t, nb::c_contig> pos_in,
+                        nb::ndarray<real_t, nb::c_contig> sph_c,
+                        nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
+                        std::array<real_t, 3> point, std::array<real_t, 3> normal) {
         auto seed = flatten3(pos_in);
-        const real_t L = cubicExtent(extent, "sdf_voronoi_section");
+        const real_t L = cubicExtent(extent, "_sdf_voronoi_section_host");
         DView cenH, radH;
         auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
         PoreReconstructor rec(seed, L, sdf);
-        // Cut every reconstructed cell by the plane {x : (x-point)·normal = 0} and collect the
-        // convex section polygons (robust: ConvexCell::sectionPolygon works from the dual edges, so
-        // it tiles the cross-section exactly). Vertices returned in WORLD 3-D (all on the plane).
         std::vector<real_t> verts, vol;
         std::vector<int64_t> off(1, 0);
         std::vector<int32_t> cellSeed;
         real_t spx[PoreCell::MAXSV], spy[PoreCell::MAXSV], spz[PoreCell::MAXSV];
+        long numOverflow = 0;
         for (int i = 0; i < rec.N; ++i) {
           const real_t sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
           PoreCell c;
-          if (!rec.build(i, c))
+          if (!rec.build(i, c)) {
+            numOverflow += c.overflow ? 1 : 0;
             continue;
+          }
           const real_t p0[3] = {point[0] - sx, point[1] - sy, point[2] - sz};  // plane, cell frame
           const real_t u3[3] = {normal[0], normal[1], normal[2]};
           const int mm = c.sectionPolygon(p0, u3, spx, spy, spz);
@@ -1950,34 +1959,13 @@ NB_MODULE(_voro, m) {
           vol.push_back(c.volumePerVertex());
           cellSeed.push_back(i);
         }
-        const std::size_t nV = verts.size() / 3, nP = vol.size();
-        nb::dict d;
-        d["verts"] = peclet::core::python::vector_to_ndarray(std::move(verts), {nV, 3}, {3, 1});
-        d["offsets"] = peclet::core::python::vector_to_ndarray(std::move(off), {off.size()}, {1});
-        d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nP}, {1});
-        d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nP}, {1});
-        return d;
-      };
-  m.def("sdf_voronoi_section", sdfVoronoiSectionHost, nb::arg("positions"),
-        nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"), nb::arg("point"),
-        nb::arg("normal"),
-        "Cross-section of the SDF-clipped interstitial Voronoi mesh (cubic periodic box `extent`) "
-        "by\n"
-        "the plane through `point` with `normal`: cut every cell directly "
-        "(ConvexCell::sectionPolygon,\n"
-        "robust — works from the dual edges, so it tiles the plane exactly where a face-by-face "
-        "slice\n"
-        "drops facets). Returns 'verts' (Nv,3, world coords, all on the plane) + 'offsets' "
-        "(Npoly+1,\n"
-        "per-polygon vertex ranges) + 'volume' (Npoly, the 3-D cell volume) + 'seed' (Npoly, the "
-        "seed\n"
-        "index). For a z=z0 slice pass point=(0,0,z0), normal=(0,0,1) and plot verts[:, :2].");
-  m.def("_sdf_voronoi_section_host", sdfVoronoiSectionHost, nb::arg("positions"),
-        nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"), nb::arg("point"),
-        nb::arg("normal"),
-        "The host-serial reconstruction of sdf_voronoi_section, kept as the TEST ORACLE of the "
-        "device\n"
-        "path; same arguments and result. Not part of the API.");
+        return poreSectionDict(std::move(verts), std::move(off), std::move(vol),
+                               std::move(cellSeed), numOverflow, 0);
+      },
+      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"),
+      nb::arg("point"), nb::arg("normal"),
+      "The host-serial reconstruction of sdf_voronoi_section, kept as the TEST ORACLE of the "
+      "device\npath; same result layout. Not part of the API.");
 
   // ---- Tessellation -----------------------------------------------------------------------------
   nb::class_<TessDiagnostics>(
