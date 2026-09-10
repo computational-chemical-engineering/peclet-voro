@@ -1821,8 +1821,7 @@ NB_MODULE(_voro, m) {
           ". Returns an\nOptimizeResult. Experimental (pore-space meshing; see the "
           "pore-mesh-voronoi example)."));
 
-  m.def(
-      "sdf_voronoi_cells",
+  auto sdfVoronoiCellsHost =
       [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
          nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent) {
         auto seed = flatten3(pos_in);
@@ -1901,15 +1900,22 @@ NB_MODULE(_voro, m) {
         d["boundary"] = peclet::core::python::vector_to_ndarray(std::move(boundary), {nCells}, {1});
         d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nCells}, {1});
         return d;
-      },
-      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"),
-      "Reconstruct the SDF-clipped interstitial Voronoi cells (cubic periodic box `extent`, the\n"
-      "spheres as walls) and return their polyhedra as flat arrays (VTK_POLYHEDRON layout):\n"
-      "'points' (Np,3), 'faces' + 'face_offsets' (per-cell face lists, global point ids),\n"
-      "'volume' (Nc,), 'boundary' (Nc, 1 where the cell touches a sphere wall), 'seed' (Nc,).");
+      };
+  m.def("sdf_voronoi_cells", sdfVoronoiCellsHost, nb::arg("positions"), nb::arg("sphere_centers"),
+        nb::arg("sphere_radii"), nb::arg("extent"),
+        "Reconstruct the SDF-clipped interstitial Voronoi cells (cubic periodic box `extent`, the\n"
+        "spheres as walls) and return their polyhedra as flat arrays (VTK_POLYHEDRON layout):\n"
+        "'points' (Np,3), 'faces' + 'face_offsets' (per-cell face lists, global point ids),\n"
+        "'volume' (Nc,), 'boundary' (Nc, 1 where the cell touches a sphere wall), 'seed' (Nc,).");
+  m.def("_sdf_voronoi_cells_host", sdfVoronoiCellsHost, nb::arg("positions"),
+        nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"),
+        "The host-serial reconstruction of sdf_voronoi_cells (PoreReconstructor: the 80 nearest "
+        "seeds\n"
+        "by a Chebyshev shell walk, closest-first clip against a far box, then the SDF clip), kept "
+        "as\n"
+        "the TEST ORACLE of the device path; same arguments and result. Not part of the API.");
 
-  m.def(
-      "sdf_voronoi_section",
+  auto sdfVoronoiSectionHost =
       [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
          nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
          std::array<real_t, 3> point, std::array<real_t, 3> normal) {
@@ -1951,20 +1957,27 @@ NB_MODULE(_voro, m) {
         d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nP}, {1});
         d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nP}, {1});
         return d;
-      },
-      nb::arg("positions"), nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"),
-      nb::arg("point"), nb::arg("normal"),
-      "Cross-section of the SDF-clipped interstitial Voronoi mesh (cubic periodic box `extent`) "
-      "by\n"
-      "the plane through `point` with `normal`: cut every cell directly "
-      "(ConvexCell::sectionPolygon,\n"
-      "robust — works from the dual edges, so it tiles the plane exactly where a face-by-face "
-      "slice\n"
-      "drops facets). Returns 'verts' (Nv,3, world coords, all on the plane) + 'offsets' "
-      "(Npoly+1,\n"
-      "per-polygon vertex ranges) + 'volume' (Npoly, the 3-D cell volume) + 'seed' (Npoly, the "
-      "seed\n"
-      "index). For a z=z0 slice pass point=(0,0,z0), normal=(0,0,1) and plot verts[:, :2].");
+      };
+  m.def("sdf_voronoi_section", sdfVoronoiSectionHost, nb::arg("positions"),
+        nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"), nb::arg("point"),
+        nb::arg("normal"),
+        "Cross-section of the SDF-clipped interstitial Voronoi mesh (cubic periodic box `extent`) "
+        "by\n"
+        "the plane through `point` with `normal`: cut every cell directly "
+        "(ConvexCell::sectionPolygon,\n"
+        "robust — works from the dual edges, so it tiles the plane exactly where a face-by-face "
+        "slice\n"
+        "drops facets). Returns 'verts' (Nv,3, world coords, all on the plane) + 'offsets' "
+        "(Npoly+1,\n"
+        "per-polygon vertex ranges) + 'volume' (Npoly, the 3-D cell volume) + 'seed' (Npoly, the "
+        "seed\n"
+        "index). For a z=z0 slice pass point=(0,0,z0), normal=(0,0,1) and plot verts[:, :2].");
+  m.def("_sdf_voronoi_section_host", sdfVoronoiSectionHost, nb::arg("positions"),
+        nb::arg("sphere_centers"), nb::arg("sphere_radii"), nb::arg("extent"), nb::arg("point"),
+        nb::arg("normal"),
+        "The host-serial reconstruction of sdf_voronoi_section, kept as the TEST ORACLE of the "
+        "device\n"
+        "path; same arguments and result. Not part of the API.");
 
   // ---- Tessellation -----------------------------------------------------------------------------
   nb::class_<TessDiagnostics>(

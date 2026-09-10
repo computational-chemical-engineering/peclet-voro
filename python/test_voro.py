@@ -405,6 +405,152 @@ def test_redistribute():
     return out
 
 
+def _pore_scene():
+    """Two non-overlapping spheres in the periodic unit box and a fluid seeding with a clear
+    wall gap (a seed closer than 0.03 to a wall would carry a wall-hugging sliver cell)."""
+    rng = np.random.default_rng(11)
+    L = 1.0
+    centers = np.array([[0.3, 0.3, 0.3], [0.7, 0.7, 0.6]])
+    radii = np.array([0.18, 0.2])
+    pos = rng.uniform(0, L, (900, 3))
+    pos = np.ascontiguousarray(pos[voro.scenes.sphere_union_sdf(pos, centers, radii, (L, L, L)) > 0.03])
+    return pos, centers, radii, L
+
+
+def _check_pore_cells(cells, pos, L, pore_volume, tag):
+    """The invariants of a VTK_POLYHEDRON cell list: every face a closed CCW polygon, the faces
+    a closed manifold (each edge used exactly twice, once per direction), the seed strictly
+    inside, the 'volume' equal to the divergence-theorem volume of the faces, and the cells
+    tiling the pore space (to the tangent-plane wall clip's recession, < 2 % as in
+    test_geometry)."""
+    pts, faces, off = cells["points"], cells["faces"], cells["face_offsets"]
+    vol, seed, boundary = cells["volume"], cells["seed"], cells["boundary"]
+    nc = len(vol)
+    assert nc > 0 and len(off) == nc + 1 and len(seed) == nc and len(boundary) == nc
+    assert pts.shape[1] == 3 and (vol > 0).all() and len(set(seed)) == nc
+    assert abs(vol.sum() / pore_volume - 1.0) < 2e-2, vol.sum() / pore_volume
+    max_vol_err = 0.0
+    for c in range(nc):
+        blk = faces[off[c]:off[c + 1]]
+        nf, k = int(blk[0]), 1
+        assert nf >= 4
+        edges, vsum, s = {}, 0.0, pos[seed[c]]
+        for _ in range(nf):
+            m = int(blk[k])
+            ids = blk[k + 1:k + 1 + m]
+            k += 1 + m
+            assert m >= 3 and len(set(ids)) == m
+            v = pts[ids]
+            area = 0.5 * np.cross(v, np.roll(v, -1, axis=0)).sum(axis=0)   # outward for CCW faces
+            assert np.linalg.norm(area) > 0
+            n = area / np.linalg.norm(area)
+            # planar, convex and CCW about the outward normal; the seed strictly inside. Sliver
+            # faces (three vertices ~1e-6 apart) have an ill-conditioned normal, hence 1e-8 L.
+            assert np.abs((v - v[0]) @ n).max() < 1e-8 * L
+            for i in range(m):
+                e = np.cross(v[(i + 1) % m] - v[i], v[(i + 2) % m] - v[(i + 1) % m]) @ n
+                assert e > -1e-9 * L * L
+                edges[(int(ids[i]), int(ids[(i + 1) % m]))] = edges.get((int(ids[i]), int(ids[(i + 1) % m])), 0) + 1
+            assert (s - v[0]) @ n < -1e-9 * L, "seed outside its cell"
+            vsum += (v[0] @ area) / 3.0
+        assert k == len(blk)
+        assert all(cnt == 1 and (b, a) in edges for (a, b), cnt in edges.items()), "faces not closed"
+        max_vol_err = max(max_vol_err, abs(vsum / vol[c] - 1.0))
+    assert max_vol_err < 1e-10, max_vol_err
+    assert boundary.sum() > 0 and (boundary[np.isin(seed, seed)] <= 1).all()
+    return max_vol_err
+
+
+def _check_pore_section(sec, cells, point, normal, L, area_ref, tag):
+    """Section polygons lie in the plane, are convex and CCW, carry their 3-D cell's volume, and
+    tile the plane's pore cross-section (same recession tolerance as the volumes)."""
+    verts, off, vol, seed = sec["verts"], sec["offsets"], sec["volume"], sec["seed"]
+    n = np.asarray(normal, float) / np.linalg.norm(normal)
+    npoly = len(vol)
+    assert npoly > 0 and len(off) == npoly + 1 and len(seed) == npoly
+    assert np.abs((verts - np.asarray(point, float)) @ n).max() < 1e-12 * L
+    e1 = np.cross(n, [1.0, 0.0, 0.0] if abs(n[0]) < 0.9 else [0.0, 1.0, 0.0])
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(n, e1)
+    area = 0.0
+    cvol = dict(zip(cells["seed"].tolist(), cells["volume"].tolist()))
+    for p in range(npoly):
+        v = verts[off[p]:off[p + 1]]
+        m = len(v)
+        assert m >= 3
+        q = np.stack([v @ e1, v @ e2], axis=1)
+        a = 0.5 * (q[:, 0] * np.roll(q[:, 1], -1) - np.roll(q[:, 0], -1) * q[:, 1]).sum()
+        assert a > 0, "section polygon not CCW"
+        for i in range(m):
+            d = q[(i + 1) % m] - q[i]
+            d2 = q[(i + 2) % m] - q[(i + 1) % m]
+            assert d[0] * d2[1] - d[1] * d2[0] > -1e-9 * L * L, "section polygon not convex"
+        area += a
+        assert seed[p] in cvol and abs(vol[p] / cvol[seed[p]] - 1.0) < 1e-12
+    assert abs(area / area_ref - 1.0) < 2e-2, (tag, area, area_ref)
+    return area
+
+
+def _same_point_sets(a, b, tol):
+    """Two (n,3) point sets are equal as sets: every point of `a` has a match in `b` within tol
+    and the counts agree (the reconstruction orders vertices by its own triangle list)."""
+    if len(a) != len(b):
+        return False
+    d = np.linalg.norm(a[:, None, :] - b[None, :, :], axis=2)
+    return bool((d.min(axis=1) < tol).all() and (d.min(axis=0) < tol).all())
+
+
+def test_pore_cells():
+    """peclet.voro.pore_mesh.sdf_voronoi_cells / sdf_voronoi_section (the SDF-walled interstitial
+    cells and a plane section of them) on a two-sphere scene: the geometric invariants of both
+    outputs, and — the device port's gate (QUALITY_PLAN G.7) — the device result against the
+    host-serial reconstruction kept as the test oracle (`_voro._sdf_voronoi_cells_host`,
+    `_sdf_voronoi_section_host`): the same cells, volumes to 1e-12 relative, vertices equal as
+    sets to 1e-9 L (the two gather the same planes in a different order, so the vertex ORDER and
+    the last bits differ)."""
+    pos, centers, radii, L = _pore_scene()
+    ext = (L, L, L)
+    pore_volume = L**3 - (4.0 / 3.0 * np.pi * radii**3).sum()
+    cells = voro.pore_mesh.sdf_voronoi_cells(pos, centers, radii, ext)
+    verr = _check_pore_cells(cells, pos, L, pore_volume, "device")
+    point, normal = (0.0, 0.0, 0.3), (0.0, 0.0, 1.0)
+    dz = np.abs(((centers[:, 2] - point[2]) + L / 2) % L - L / 2)
+    area_ref = L * L - np.pi * np.clip(radii**2 - dz**2, 0.0, None).sum()
+    sec = voro.pore_mesh.sdf_voronoi_section(pos, centers, radii, ext, point, normal)
+    _check_pore_section(sec, cells, point, normal, L, area_ref, "device")
+    # the host oracle (the pre-G.7 serial reconstruction, retained as `_voro._*_host`)
+    from peclet.voro import _voro
+    hc = _voro._sdf_voronoi_cells_host(pos, centers, radii, ext)
+    _check_pore_cells(hc, pos, L, pore_volume, "host")
+    assert set(cells["seed"].tolist()) == set(hc["seed"].tolist())
+    order_d, order_h = np.argsort(cells["seed"]), np.argsort(hc["seed"])
+    assert np.allclose(cells["volume"][order_d], hc["volume"][order_h], rtol=1e-12, atol=0)
+    assert np.array_equal(cells["boundary"][order_d], hc["boundary"][order_h])
+
+    def cell_points(c, i):
+        blk = c["faces"][c["face_offsets"][i]:c["face_offsets"][i + 1]]
+        ids, k = set(), 1
+        for _ in range(int(blk[0])):
+            m = int(blk[k])
+            ids.update(blk[k + 1:k + 1 + m].tolist())
+            k += 1 + m
+        return c["points"][sorted(ids)]
+
+    for i, j in zip(order_d, order_h):
+        assert _same_point_sets(cell_points(cells, i), cell_points(hc, j), 1e-9 * L), cells["seed"][i]
+    hs = _voro._sdf_voronoi_section_host(pos, centers, radii, ext, point, normal)
+    _check_pore_section(hs, hc, point, normal, L, area_ref, "host")
+    assert set(sec["seed"].tolist()) == set(hs["seed"].tolist())
+    hoff = {int(s): (hs["offsets"][p], hs["offsets"][p + 1]) for p, s in enumerate(hs["seed"])}
+    for p, s in enumerate(sec["seed"]):
+        a, b = hoff[int(s)]
+        assert _same_point_sets(sec["verts"][sec["offsets"][p]:sec["offsets"][p + 1]],
+                                hs["verts"][a:b], 1e-9 * L), s
+    print(f"  Pore cells:   N={len(pos)} cells={len(cells['volume'])} (wall {int(cells['boundary'].sum())}) "
+          f"vol err={abs(cells['volume'].sum() / pore_volume - 1):.1e} face-vol err={verr:.1e}; "
+          f"section polys={len(sec['volume'])}; host oracle: volumes 1e-12, vertex sets 1e-9 L OK")
+
+
 if __name__ == "__main__":
     print(f"peclet.voro execution_space = {voro.execution_space}")
     test_tessellation()
@@ -415,4 +561,5 @@ if __name__ == "__main__":
     test_energy_forces()
     test_flow_solver()
     test_redistribute()
+    test_pore_cells()
     print("peclet.voro python smoke test: PASS")
