@@ -185,10 +185,12 @@ struct SdfScene {
 /// the fluid). Device-callable; holds Views of the centres (3M, x-fastest c_{ix},c_{iy},c_{iz}) and
 /// radii (M). L > 0 ⇒ periodic min-image (L = box edge); L ≤ 0 ⇒ non-periodic. The packed-bed /
 /// pore-space wall geometry for the volume mesh optimiser.
-template <class Real>
+/// `Mem` is the memory space the centre / radius views live in: the device space (default) for
+/// the tessellator's kernels, Kokkos::HostSpace for a host-side caller (the pore-cell oracle).
+template <class Real, class Mem = peclet::core::MemSpace>
 struct SdfSpheres {
-  Kokkos::View<const Real*, peclet::core::MemSpace> cen;  // 3*M
-  Kokkos::View<const Real*, peclet::core::MemSpace> rad;  // M
+  Kokkos::View<const Real*, Mem> cen;  // 3*M
+  Kokkos::View<const Real*, Mem> rad;  // M
   int n = 0;
   Real L = 0;
   KOKKOS_INLINE_FUNCTION Real eval(Real x, Real y, Real z) const {

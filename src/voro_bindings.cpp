@@ -62,6 +62,7 @@
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
@@ -229,6 +230,23 @@ peclet::voro::SdfSpheres<real_t> makeSpheresSdf(nb::ndarray<real_t, nb::c_contig
   Kokkos::deep_copy(radHold, Kokkos::View<const real_t*, Kokkos::HostSpace>(radii.data(), M));
   return peclet::voro::SdfSpheres<real_t>{cenHold, radHold, M, L};
 }
+// The same union-of-balls SDF with HOST views, for the host-serial pore-cell oracle (its clip runs
+// on the host, so on a CUDA build the device-view variant would abort on the first eval).
+using HView = Kokkos::View<real_t*, Kokkos::HostSpace>;
+using HostSpheresSdf = peclet::voro::SdfSpheres<real_t, Kokkos::HostSpace>;
+HostSpheresSdf makeSpheresSdfHost(nb::ndarray<real_t, nb::c_contig> centers,
+                                  nb::ndarray<real_t, nb::c_contig> radii, real_t L, HView& cenHold,
+                                  HView& radHold) {
+  const int M = (int)radii.shape(0);
+  auto cflat = flatten3(centers);
+  if ((int)(cflat.size() / 3) != M)
+    throw std::runtime_error("sphere_centers (M,3) and sphere_radii (M,) must agree on M");
+  cenHold = HView("sph.cen.host", 3 * M);
+  radHold = HView("sph.rad.host", M);
+  std::copy(cflat.begin(), cflat.end(), cenHold.data());
+  std::copy(radii.data(), radii.data() + M, radHold.data());
+  return HostSpheresSdf{cenHold, radHold, M, L};
+}
 
 // The host-serial reconstruction of the SDF-clipped interstitial Voronoi cell of any seed — the
 // TEST ORACLE of the device path (pore_cells.hpp; python/test_voro.py test_pore_cells). Builds a
@@ -245,7 +263,7 @@ struct PoreReconstructor {
   int N;
   real_t L, Lh, big, hbin;
   int nb;
-  peclet::voro::SdfSpheres<real_t> sdf;
+  HostSpheresSdf sdf;
   std::vector<int> binStart, binItem;
   mutable std::vector<std::pair<real_t, int>> ord;
   mutable std::vector<real_t> rx, ry, rz;
@@ -258,7 +276,7 @@ struct PoreReconstructor {
   int cellOf(int i) const {
     return binOf(seed[3 * i]) + nb * (binOf(seed[3 * i + 1]) + nb * binOf(seed[3 * i + 2]));
   }
-  PoreReconstructor(const std::vector<real_t>& s, real_t L_, peclet::voro::SdfSpheres<real_t> sdf_)
+  PoreReconstructor(const std::vector<real_t>& s, real_t L_, HostSpheresSdf sdf_)
       : seed(s.data()), N((int)(s.size() / 3)), L(L_), Lh(0.5 * L_), big(4 * L_), sdf(sdf_) {
     nb = std::max(1, std::min((int)std::cbrt((double)N / 2.0 + 1.0), defaults::kPoreMaxBins));
     hbin = L / nb;
@@ -1836,8 +1854,9 @@ NB_MODULE(_voro, m) {
           "order: 'points' (Np,3),\n'faces' + 'face_offsets' (per-cell face lists, global point "
           "ids, each face CCW about its\noutward normal), 'volume' (Nc,), 'boundary' (Nc, 1 "
           "where the cell touches a sphere wall),\n'seed' (Nc,). Seeds inside a sphere have no "
-          "cell; 'num_overflow' counts cells skipped for\nexceeding the pore cell capacity ("
-          "peclet.voro.defaults) and 'num_incomplete' the cells whose\ngather window "
+          "cell; 'num_overflow' counts cells skipped for\nexceeding the cell capacity ("
+          "peclet.voro.defaults max_planes / max_triangles) and 'num_incomplete' the cells "
+          "whose\ngather window "
           "(search_window grid blocks per axis, default " +
           fmt(kPoreSearchWindow) + ") did not close — raise\nsearch_window if it is not 0."));
   m.def(
@@ -1887,8 +1906,8 @@ NB_MODULE(_voro, m) {
         auto seed = flatten3(pos_in);
         const int N = (int)(seed.size() / 3);
         const real_t L = cubicExtent(extent, "_sdf_voronoi_cells_host");
-        DView cenH, radH;
-        auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
+        HView cenH, radH;
+        auto sdf = makeSpheresSdfHost(sph_c, sph_r, L, cenH, radH);
         std::vector<real_t> pts, vol;
         std::vector<int64_t> faces, faceOff(1, 0);
         std::vector<int32_t> boundary, cellSeed;
@@ -1930,8 +1949,8 @@ NB_MODULE(_voro, m) {
                         std::array<real_t, 3> point, std::array<real_t, 3> normal) {
         auto seed = flatten3(pos_in);
         const real_t L = cubicExtent(extent, "_sdf_voronoi_section_host");
-        DView cenH, radH;
-        auto sdf = makeSpheresSdf(sph_c, sph_r, L, cenH, radH);
+        HView cenH, radH;
+        auto sdf = makeSpheresSdfHost(sph_c, sph_r, L, cenH, radH);
         PoreReconstructor rec(seed, L, sdf);
         std::vector<real_t> verts, vol;
         std::vector<int64_t> off(1, 0);

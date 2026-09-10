@@ -486,7 +486,7 @@ def _check_pore_section(sec, cells, point, normal, L, area_ref, tag):
             d2 = q[(i + 2) % m] - q[(i + 1) % m]
             assert d[0] * d2[1] - d[1] * d2[0] > -1e-9 * L * L, "section polygon not convex"
         area += a
-        assert seed[p] in cvol and abs(vol[p] / cvol[seed[p]] - 1.0) < 1e-12
+        assert seed[p] in cvol and abs(vol[p] / cvol[seed[p]] - 1.0) < 1e-12  # same cell, same code
     assert abs(area / area_ref - 1.0) < 2e-2, (tag, area, area_ref)
     return area
 
@@ -507,7 +507,10 @@ def test_pore_cells():
     host-serial reconstruction kept as the test oracle (`_voro._sdf_voronoi_cells_host`,
     `_sdf_voronoi_section_host`): the same cells, volumes to 1e-12 relative, vertices equal as
     sets to 1e-9 L (the two gather the same planes in a different order, so the vertex ORDER and
-    the last bits differ)."""
+    the last bits differ). Suite policy for a DEVICE backend (CUDA/HIP: FMA contraction, no
+    bit-exactness): 1e-9 relative / 1e-7 L (measured 6e-11 on an RTX 5080)."""
+    host_backend = voro.execution_space in ("OpenMP", "Serial")
+    vtol, ptol = (1e-12, 1e-9) if host_backend else (1e-9, 1e-7)
     pos, centers, radii, L = _pore_scene()
     ext = (L, L, L)
     pore_volume = L**3 - (4.0 / 3.0 * np.pi * radii**3).sum()
@@ -535,7 +538,7 @@ def test_pore_cells():
     _check_pore_cells(hc, pos, L, pore_volume, "host")
     assert set(cells["seed"].tolist()) == set(hc["seed"].tolist())
     order_d, order_h = np.argsort(cells["seed"]), np.argsort(hc["seed"])
-    assert np.allclose(cells["volume"][order_d], hc["volume"][order_h], rtol=1e-12, atol=0)
+    assert np.allclose(cells["volume"][order_d], hc["volume"][order_h], rtol=vtol, atol=0)
     assert np.array_equal(cells["boundary"][order_d], hc["boundary"][order_h])
 
     def cell_points(c, i):
@@ -548,7 +551,7 @@ def test_pore_cells():
         return c["points"][sorted(ids)]
 
     for i, j in zip(order_d, order_h):
-        assert _same_point_sets(cell_points(cells, i), cell_points(hc, j), 1e-9 * L), cells["seed"][i]
+        assert _same_point_sets(cell_points(cells, i), cell_points(hc, j), ptol * L), cells["seed"][i]
     hs = _voro._sdf_voronoi_section_host(pos, centers, radii, ext, point, normal)
     _check_pore_section(hs, hc, point, normal, L, area_ref, "host")
     assert set(sec["seed"].tolist()) == set(hs["seed"].tolist())
@@ -556,11 +559,11 @@ def test_pore_cells():
     for p, s in enumerate(sec["seed"]):
         a, b = hoff[int(s)]
         assert _same_point_sets(sec["verts"][sec["offsets"][p]:sec["offsets"][p + 1]],
-                                hs["verts"][a:b], 1e-9 * L), s
+                                hs["verts"][a:b], ptol * L), s
     print(f"  Pore cells:   N={len(pos)} cells={len(cells['volume'])} (wall {int(cells['boundary'].sum())}, "
           f"{cells['num_incomplete']} flagged by the clamped window; N={len(big)}: 0) "
           f"vol err={abs(cells['volume'].sum() / pore_volume - 1):.1e} face-vol err={verr:.1e}; "
-          f"section polys={len(sec['volume'])}; host oracle: volumes 1e-12, vertex sets 1e-9 L OK")
+          f"section polys={len(sec['volume'])}; host oracle: volumes {vtol:g}, vertex sets {ptol:g} L OK")
 
 
 if __name__ == "__main__":

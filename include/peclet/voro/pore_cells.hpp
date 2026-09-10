@@ -7,7 +7,7 @@
  *
  * Both entry points run the tessellator's own gather (CellBuilder::gatherCell over the
  * counting-sort grid + presorted worklist of tess_grid.hpp — the exact worklist walk of the cold
- * build, at the pore capacity kPoreMaxPlanes / kPoreMaxTriangles) followed by the SDF clip
+ * build, at the resident capacity kMaxPlanes / kMaxTriangles) followed by the SDF clip
  * (clipCellAgainstSdf, as CellBuilder::finishCell applies it), one thread per cell, and export
  * the finished ConvexCell with the count → scan → fill pattern: a first pass over the cells
  * counts each cell's output (points and face-list entries, or section vertices), an exclusive
@@ -15,6 +15,14 @@
  * it in place. The output is therefore deterministic (seed order, independent of thread
  * scheduling) and no over-buffer is needed; the price is the second gather, which is the same
  * device-parallel work again.
+ *
+ * Capacity: the production 64/112 (kMaxPlanes / kMaxTriangles), the same the cold build clips
+ * SDF-walled cells at; a cell that overflows it is skipped and counted (numOverflow). The larger
+ * pore capacity (kPoreMaxPlanes / kPoreMaxTriangles = 128/256, the host oracle's) is NOT used
+ * here on purpose: measured 2026-09-10 on an RTX 5080, the SDF clip of a 128/256 cell is WRONG
+ * on the CUDA backend (every wall cell off by up to 22 % in volume, deterministic; the same
+ * kernel at 64/112 matches the host oracle to 6e-11, and 128/256 is exact on OpenMP) — an open
+ * CUDA-only defect of clipCellAgainstSdf at that capacity, recorded in the G.7 report.
  *
  * Layer 2 (tessellator + sdf + convex_cell).
  */
@@ -245,7 +253,7 @@ inline void statusCounts(const Status& status, int N, long& overflow, long& inco
  * Seeds inside the solid (empty cell) and cells that overflow the capacity are skipped; the
  * result counts the latter, and the cells whose gather coverage did not close (kIncomplete).
  */
-template <class Real, class Sdf, int MAXP = kPoreMaxPlanes, int MAXT = kPoreMaxTriangles>
+template <class Real, class Sdf, int MAXP = kMaxPlanes, int MAXT = kMaxTriangles>
 PoreCellsResult<Real> buildPoreCells(const Kokkos::View<Real*, peclet::core::MemSpace>& posFlat,
                                      int N, const Real L[3], const Sdf& sdf,
                                      int sw = kSearchWindow) {
@@ -333,7 +341,7 @@ PoreCellsResult<Real> buildPoreCells(const Kokkos::View<Real*, peclet::core::Mem
  * polygons tile the section exactly). Same gather and skip rules as buildPoreCells; a cell the
  * plane misses (or grazes at fewer than three crossings) yields no polygon.
  */
-template <class Real, class Sdf, int MAXP = kPoreMaxPlanes, int MAXT = kPoreMaxTriangles>
+template <class Real, class Sdf, int MAXP = kMaxPlanes, int MAXT = kMaxTriangles>
 PoreSectionResult<Real> buildPoreSection(const Kokkos::View<Real*, peclet::core::MemSpace>& posFlat,
                                          int N, const Real L[3], const Sdf& sdf,
                                          const Real point[3], const Real normal[3],
