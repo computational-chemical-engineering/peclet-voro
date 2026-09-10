@@ -139,10 +139,20 @@ if(PECLET_VORO_KOKKOS)
     set_target_properties(voro PROPERTIES
       OUTPUT_NAME _voro
       LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/peclet/voro")
-    # The package __init__.py is kept as a plain file OUTSIDE any importable peclet/ dir (so an
-    # incomplete source package can never shadow the installed one); staged into the build tree here.
-    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/packaging/voro_init.py"
-                   "${CMAKE_CURRENT_BINARY_DIR}/peclet/voro/__init__.py" COPYONLY)
+    # The package's Python files are kept as plain files OUTSIDE any importable peclet/ dir (so an
+    # incomplete source package can never shadow the installed one); staged into the build tree here
+    # and installed by the SKBUILD rule below: packaging/voro_<name>.py -> peclet/voro/<name>.py
+    # (voro_init.py -> __init__.py; pore_mesh and scenes are the lazily imported submodules).
+    set(PECLET_VORO_PY_FILES init pore_mesh scenes)
+    foreach(_py IN LISTS PECLET_VORO_PY_FILES)
+      if(_py STREQUAL "init")
+        set(_dst "__init__.py")
+      else()
+        set(_dst "${_py}.py")
+      endif()
+      configure_file("${CMAKE_CURRENT_SOURCE_DIR}/packaging/voro_${_py}.py"
+                     "${CMAKE_CURRENT_BINARY_DIR}/peclet/voro/${_dst}" COPYONLY)
+    endforeach()
     target_include_directories(voro PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/include" "${PECLET_CORE_INCLUDE}" "${PECLET_VORO_MORTON_INCLUDE}")
     target_compile_definitions(voro PRIVATE MORTON_ENABLE_KOKKOS=1 PECLET_CORE_HAVE_MORTON=1)
@@ -173,8 +183,15 @@ if(PECLET_VORO_KOKKOS)
     # for a plain `cmake --build`, so the developer workflow is unchanged.
     if(DEFINED SKBUILD)
       install(TARGETS voro LIBRARY DESTINATION peclet/voro COMPONENT python)
-      install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/packaging/voro_init.py"
-              DESTINATION peclet/voro RENAME __init__.py COMPONENT python)
+      foreach(_py IN LISTS PECLET_VORO_PY_FILES)
+        if(_py STREQUAL "init")
+          set(_dst "__init__.py")
+        else()
+          set(_dst "${_py}.py")
+        endif()
+        install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/packaging/voro_${_py}.py"
+                DESTINATION peclet/voro RENAME "${_dst}" COMPONENT python)
+      endforeach()
     endif()
     # Python smoke test (Tessellation + Simulation) on the interpreter the module was built for
     # (Python_EXECUTABLE, from peclet_require_nanobind); needs numpy there.
