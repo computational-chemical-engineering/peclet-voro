@@ -9,7 +9,11 @@ Two API tiers (QUALITY_PLAN D2, package F done 2026-09-10): the public surface i
 `peclet.voro.pore_mesh` / `peclet.voro.scenes` submodules (`packaging/voro_pore_mesh.py`,
 `voro_scenes.py` — staged + installed by the `PECLET_VORO_PY_FILES` loop in CMakeLists.txt) and,
 under MPI, `VoronoiHalo` + `DistributedTessellation`; every instrument/ablation is
-`obj.diagnostics.<name>`. Modes are validated strings, results are typed objects, triples are
+`obj.diagnostics.<name>`. No environment variable reaches the library: the cold build's stderr
+profile (timing, worklist, over-buffer rebuilds, max facets/cell) is `diagnostics.set_profile(True)`
+on `Tessellation` / `Simulation` / `DistributedTessellation` (C++: `MovingTessellation::profile`,
+`buildTessellation(..., profile)`; the old `PECLET_VORO_PROFILE` is gone), and the silent
+over-buffer rebuild of a cold build is counted in `diagnostics.build_report()['over_buffer_rebuilds']`. Modes are validated strings, results are typed objects, triples are
 3-sequences. `python/state_hash.py` prints the SHA-256 of every public path's final state — run it
 before and after any API change (at `OMP_NUM_THREADS=1`); the hashes must not move.
 

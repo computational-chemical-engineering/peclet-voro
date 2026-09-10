@@ -91,7 +91,13 @@ def test_api_contract():
     t.diagnostics.set_gate(True)
     t.build(np.random.default_rng(1).random((3000, 3)))
     rep = t.diagnostics.build_report()
-    assert set(rep) == {"buried", "reach_exceeded", "empty", "overflow", "incomplete"}
+    assert set(rep) == {"buried", "reach_exceeded", "empty", "overflow", "incomplete",
+                        "over_buffer_rebuilds"}
+    assert rep["over_buffer_rebuilds"] == 0
+    t.diagnostics.set_profile(True)   # stderr only; the numerics do not move
+    t.build(np.random.default_rng(1).random((3000, 3)))
+    assert t.diagnostics.build_report() == rep
+    t.diagnostics.set_profile(False)
     assert hasattr(s.diagnostics, "set_repair")
     # string modes: a bad value raises and the message lists the accepted set
     for call, expect in ((lambda: t.set_wall_mode("bogus"), "'exact', 'skin'"),

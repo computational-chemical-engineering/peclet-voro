@@ -64,6 +64,11 @@ struct DistributedMovingTessellation {
   /// Replicated SDF geometry (every rank holds the same provider). Call before establish().
   void setSdf(const Sdf& s) { sdf_ = s; }
   /// Wall re-gather policy forwarded to the local tessellation (see MovingTessellation::wallExact).
+  /// The cold build's timing / over-buffer report on stderr (MovingTessellation::profile).
+  void setProfile(bool on) {
+    profile_ = on;
+    mt_.profile = on;
+  }
   void setWallMode(bool exact, Real skin = Real(0)) {
     wallExact_ = exact;
     wallSkin_ = skin;
@@ -117,6 +122,7 @@ struct DistributedMovingTessellation {
     mt_.sdf = sdf_;
     mt_.wallExact = wallExact_;
     mt_.wallSkin = wallSkin_;
+    mt_.profile = profile_;
     mt_.alloc(nComb_, L_, tol_, skin_, sw_, density_, nOwned_);
     mt_.rebuild(dPos_);
     refPos_ = ownedPos;
@@ -162,6 +168,7 @@ struct DistributedMovingTessellation {
   MovingTessellation<Real, MAXP, MAXT, false, Sdf> mt_;
   Sdf sdf_{};
   bool wallExact_ = true;
+  bool profile_ = false;
   Real wallSkin_ = 0;
   Kokkos::View<Real*, Mem> dPos_;
   std::vector<Vec3> refPos_;  // owned positions at the last (re)gather (Verlet reference)

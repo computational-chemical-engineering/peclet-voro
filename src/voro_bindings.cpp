@@ -608,6 +608,10 @@ class Tess : public peclet::core::python::Releasable {
   // "never slower than a cold build" guard) and the validity counts of the last cold build.
   void set_local_certificate(bool on) { localCert_ = on; }
   void set_gate(bool on) { useGate_ = on; }
+  void set_profile(bool on) {
+    profile_ = on;
+    std::visit([&](auto& mt) { mt.profile = on; }, mt_);
+  }
   nb::dict build_report() {
     auto r = std::visit([](auto& mt) { return mt.report(); }, mt_);
     nb::dict d;
@@ -616,6 +620,7 @@ class Tess : public peclet::core::python::Releasable {
     d["empty"] = r.empty;
     d["overflow"] = r.overflow;
     d["incomplete"] = r.incomplete;
+    d["over_buffer_rebuilds"] = r.overBufferRebuilds;
     return d;
   }
 
@@ -647,6 +652,7 @@ class Tess : public peclet::core::python::Releasable {
           using T = std::decay_t<decltype(mt)>;
           mt.localCert = localCert_;
           mt.useGate = useGate_;
+          mt.profile = profile_;
           if constexpr (T::kHasSdf) {
             mt.sdf = scene_.scene;
             mt.wallExact = wallExact_;
@@ -856,7 +862,7 @@ class Tess : public peclet::core::python::Releasable {
  private:
   std::array<real_t, 3> L_{1, 1, 1};
   real_t tolFrac_ = defaults::kCertificateTolerance;
-  bool localCert_ = true, useGate_ = true;
+  bool localCert_ = true, useGate_ = true, profile_ = false;
   bool wallExact_ = true;
   real_t wallSkinFrac_ = defaults::kWallSkin;
   bool weighted_ = false, wDirty_ = false;
@@ -1106,6 +1112,10 @@ class Sim : public peclet::core::python::Releasable {
     beforeInit("diagnostics.set_repair");
     repair_ = on;
   }
+  void set_profile(bool on) {
+    profile_ = on;
+    std::visit([&](auto& s) { s.setProfile(on); }, sim_);
+  }
   void set_geometry(nb::ndarray<int, nb::c_contig> node_ints,
                     nb::ndarray<real_t, nb::c_contig> node_reals, int root, real_t grad_h) {
     beforeInit("set_geometry");
@@ -1151,6 +1161,7 @@ class Sim : public peclet::core::python::Releasable {
         [&](auto& s) {
           using T = std::decay_t<decltype(s)>;
           s.setRepair(repair_);
+          s.setProfile(profile_);
           if constexpr (std::is_same_v<T, EE<SceneT>>)
             s.setSdf(scene_.scene);
           s.init(peclet::core::toDevice<real_t>(pos_, "pos"),
@@ -1249,7 +1260,7 @@ class Sim : public peclet::core::python::Releasable {
   real_t dt_{0};
   std::array<real_t, 3> L_{1, 1, 1};
   real_t pressEq_ = 0;
-  bool repair_ = false;
+  bool repair_ = false, profile_ = false;
   bool inited_ = false;
   std::vector<real_t> pos_, vel_, mass_, visc_, bulk_;
   DView dmass_;  // device-resident masses, uploaded once in init() (E4b)
@@ -1506,6 +1517,9 @@ class DTess : public peclet::core::python::Releasable {
   }
   long num_regathers() const {
     return std::visit([](auto& d) { return d.numRegathers(); }, dmt_);
+  }
+  void set_profile(bool on) {
+    std::visit([&](auto& d) { d.setProfile(on); }, dmt_);
   }
 
   nb::ndarray<nb::numpy, real_t> get_volumes() {
@@ -1960,7 +1974,17 @@ NB_MODULE(_voro, m) {
           "build_report", [](TessDiagnostics& d) { return d.t->build_report(); },
           "Validity counts of the last build: {'buried', 'reach_exceeded', 'empty', 'overflow',\n"
           "'incomplete'} — all zero for a guaranteed-exact partition (build() already warns, or\n"
-          "raises with strict=True, when they are not).")
+          "raises with strict=True, when they are not) — and 'over_buffer_rebuilds', the number "
+          "of\n"
+          "times the build's facet/edge over-buffer estimate was exceeded and the build pass "
+          "re-run\n"
+          "at the exact demand (0 normally; each one doubles that build's cost).")
+      .def(
+          "set_profile", [](TessDiagnostics& d, bool on) { d.t->set_profile(on); },
+          nb::arg("on") = true,
+          "Print the cold build's timing (grid / build / CSR), the worklist size, the over-buffer\n"
+          "rebuilds and the max facets per cell on stderr (default off). Takes effect at the next\n"
+          "build().")
       .def(
           "set_local_certificate",
           [](TessDiagnostics& d, bool on) { d.t->set_local_certificate(on); }, nb::arg("on"),
@@ -2093,7 +2117,8 @@ NB_MODULE(_voro, m) {
                    "Particle count N set by the last `build` (0 before it).")
       .def_prop_ro(
           "diagnostics", [](Tess& t) { return TessDiagnostics{&t}; }, nb::keep_alive<0, 1>(),
-          "The diagnostics tier: build_report(), set_local_certificate(), set_gate().");
+          "The diagnostics tier: build_report(), set_local_certificate(), set_gate(), "
+          "set_profile().");
 
   // ---- FlowSolver -------------------------------------------------------------------------------
   nb::class_<FlowDiagnostics>(
@@ -2180,7 +2205,11 @@ NB_MODULE(_voro, m) {
           "set_repair", [](SimDiagnostics& d, bool on) { d.s->set_repair(on); },
           nb::arg("on") = true,
           "Opt-in (default off): use the incremental moving-point repair + reeval-published force "
-          "geometry each step instead of a full rebuild. Before init().");
+          "geometry each step instead of a full rebuild. Before init().")
+      .def(
+          "set_profile", [](SimDiagnostics& d, bool on) { d.s->set_profile(on); },
+          nb::arg("on") = true,
+          "Print each cold build's timing and over-buffer report on stderr (default off).");
 
   nb::class_<Sim>(
       m, "Simulation",
@@ -2253,7 +2282,7 @@ NB_MODULE(_voro, m) {
            "Per-particle Voronoi neighbour (facet) count (N,) int32 (a copy).")
       .def_prop_ro(
           "diagnostics", [](Sim& s) { return SimDiagnostics{&s}; }, nb::keep_alive<0, 1>(),
-          "The diagnostics tier: set_repair().");
+          "The diagnostics tier: set_repair(), set_profile().");
 
 #ifdef PECLET_VORO_MPI
   // ---- VoronoiHalo (distributed) ----------------------------------------------------------------
@@ -2310,7 +2339,11 @@ NB_MODULE(_voro, m) {
       .def_prop_ro(
           "num_regathers", [](DTessDiagnostics& d) { return d.d->num_regathers(); },
           "Number of collective re-gather + cold-rebuild events since construction (establish "
-          "counts as one).");
+          "counts as one).")
+      .def(
+          "set_profile", [](DTessDiagnostics& d, bool on) { d.d->set_profile(on); },
+          nb::arg("on") = true,
+          "Print each rank's cold-build timing and over-buffer report on stderr (default off).");
 
   nb::class_<DTess>(
       m, "DistributedTessellation",
@@ -2378,6 +2411,6 @@ NB_MODULE(_voro, m) {
            "(owned\nfirst, in establish() order).")
       .def_prop_ro(
           "diagnostics", [](DTess& d) { return DTessDiagnostics{&d}; }, nb::keep_alive<0, 1>(),
-          "The diagnostics tier: num_regathers.");
+          "The diagnostics tier: num_regathers, set_profile().");
 #endif
 }

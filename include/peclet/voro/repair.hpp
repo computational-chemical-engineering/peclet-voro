@@ -75,11 +75,12 @@ struct RepairStats {
 
 /// A2a validity diagnostics of a cold (re)build (counts over the maintained cells).
 struct BuildReport {
-  long buried = 0;         ///< power seeds outside their own cell (emptied — see kBuried)
-  long reachExceeded = 0;  ///< cells whose search reach passed half the box (min-image invalid)
-  long empty = 0;          ///< cells with no volume (in-solid seeds + buried)
-  long overflow = 0;       ///< cells that hit a capacity (planes / triangles / facets)
-  long incomplete = 0;     ///< cells whose coverage did not close
+  long buried = 0;             ///< power seeds outside their own cell (emptied — see kBuried)
+  long reachExceeded = 0;      ///< cells whose search reach passed half the box (min-image invalid)
+  long empty = 0;              ///< cells with no volume (in-solid seeds + buried)
+  long overflow = 0;           ///< cells that hit a capacity (planes / triangles / facets)
+  long incomplete = 0;         ///< cells whose coverage did not close
+  int overBufferRebuilds = 0;  ///< over-buffer misses of the build (TessellatorResult)
 };
 
 /// Resident moving-point tessellation with two-pass gather repair. MAXP/MAXT must match
@@ -113,7 +114,9 @@ struct MovingTessellation {
 
   // ---- Phase 3: adaptive three-way gate (decided after the free certificate, before any gather)
   // ----
-  bool useGate = true;  ///< high-churn → rebuild routing (the "never slower than rebuild" guard)
+  bool useGate = true;   ///< high-churn → rebuild routing (the "never slower than rebuild" guard)
+  bool profile = false;  ///< the cold build's timing / over-buffer report on stderr
+  int lastOverBufferRebuilds = 0;  ///< of the last cold (re)build (BuildReport)
   bool useDilation =
       false;  ///< dense-cluster regional dilation branch. DEFAULT OFF: on Poisson/lattice
               ///< workloads there are no genuine clusters, the verify loop already closes
@@ -172,6 +175,7 @@ struct MovingTessellation {
       r.overflow += (s & kOverflow) ? 1 : 0;
       r.incomplete += (s & kIncomplete) ? 1 : 0;
     }
+    r.overBufferRebuilds = lastOverBufferRebuilds;
     return r;
   }
 
@@ -301,9 +305,10 @@ struct MovingTessellation {
         store.nt, store.pnbr, store.tri, /*outCand=*/{}, /*outCandCnt=*/{}, /*candCap=*/0,
         /*wlc=*/nullptr, wall, /*withAreaGrad=*/false, emitNear ? near : Kokkos::View<int*, Mem>{},
         emitNear ? nearCnt : Kokkos::View<int*, Mem>{}, emitNear ? kNearCap : 0,
-        nearMarginFrac * skin);
+        nearMarginFrac * skin, /*withWallFD=*/false, /*withMoments=*/false, profile);
     nearFresh = emitNear;
     lastStatus = res.status;
+    lastOverBufferRebuilds = res.overBufferRebuilds;
     Kokkos::deep_copy(vol, res.view.cellVolume);
     Kokkos::deep_copy(xRef, pos);
     adjFresh = false;  // the cold build does not emit adjacency

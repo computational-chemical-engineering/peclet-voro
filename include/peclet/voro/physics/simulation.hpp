@@ -142,6 +142,8 @@ class ExplicitEuler {
   /// wiring/tuning on top of this scaffolding is ongoing work.
   void setRepair(bool on) { useRepair_ = on; }
   bool repair() const { return useRepair_; }
+  /// The cold build's timing / over-buffer report on stderr (buildTessellation's `profile`).
+  void setProfile(bool on) { profile_ = on; }
 
  private:
   void buildAndForce() {
@@ -155,6 +157,7 @@ class ExplicitEuler {
         const double boxVol = static_cast<double>(L_[0]) * L_[1] * L_[2];
         const Real spacing = static_cast<Real>(std::cbrt(boxVol / (N_ > 0 ? N_ : 1)));
         mt_.sdf = sdf_;
+        mt_.profile = profile_;
         mt_.alloc(N_, Larr, Real(kCertificateTolerance) * spacing, Real(kSkin) * spacing,
                   kSearchWindow, /*density=*/N_);
         mt_.rebuild(pos_);
@@ -172,7 +175,10 @@ class ExplicitEuler {
       auto res = peclet::voro::buildTessellation<Real, false, Sdf>(
           pos_, w_, N_, Larr, kSearchWindow, /*densityCount=*/-1, /*gid=*/{}, sdf_,
           /*withForceGeom=*/true, /*nBuild=*/-1, /*outNp=*/{}, /*outNt=*/{}, /*outPnbr=*/{},
-          /*outTri=*/{}, /*outCand=*/{}, /*outCandCnt=*/{}, /*candCap=*/0, &wlCache_);
+          /*outTri=*/{}, /*outCand=*/{}, /*outCandCnt=*/{}, /*candCap=*/0, &wlCache_,
+          /*outWall=*/{}, /*withAreaGrad=*/false, /*outNear=*/{}, /*outNearCnt=*/{},
+          /*nearCap=*/0, /*nearMargin=*/Real(0), /*withWallFD=*/false, /*withMoments=*/false,
+          profile_);
       view_ = res.view;
     }
     aux_ = peclet::voro::buildAuxMaps(view_);
@@ -196,7 +202,7 @@ class ExplicitEuler {
   peclet::voro::AuxMaps<Real> aux_;
   // E1 opt-in incremental path (default off): resident moving-point tessellation + its cold/repair
   // state. Kept as members (Views free before Kokkos::finalize).
-  bool useRepair_ = false, mtInit_ = false;
+  bool useRepair_ = false, mtInit_ = false, profile_ = false;
   peclet::voro::MovingTessellation<Real, kMaxPlanes, kMaxTriangles, false, Sdf> mt_;
   Sdf sdf_{};
 };

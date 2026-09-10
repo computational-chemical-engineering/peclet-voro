@@ -30,7 +30,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <Kokkos_Core.hpp>
 #include <string>
 #include <type_traits>
@@ -70,6 +69,10 @@ template <class Real>
 struct TessellatorResult {
   TessellationView<Real> view;
   Kokkos::View<int*, peclet::core::MemSpace> status;  // per-cell StatusBit mask
+  /// Times the facet / edge over-buffer estimate was exceeded and the build pass re-run at the
+  /// exact demand (0 normally; at most 2). A silent rebuild otherwise — surfaced so a caller
+  /// sees the doubled build cost without a profiling flag (Tessellation.diagnostics.build_report).
+  int overBufferRebuilds = 0;
 };
 
 /**
@@ -699,6 +702,9 @@ struct CellBuilder {
  *                 nOwned tessellates only the kept (owned) cells — the ghost cells are
  *                 needed only as cutting seeds, so building them is wasted work (~the
  *                 ghost fraction of the cold build).
+ * @param profile  print the timing (grid / build / CSR), the worklist size, over-buffer
+ *                 rebuilds and max facets per cell on stderr (the API's profile switch; the
+ *                 result's overBufferRebuilds reports the rebuilds without it).
  */
 template <class Real, bool Weighted, class Sdf = NoSdf, int MAXP = kMaxPlanes,
           int MAXT = kMaxTriangles>
@@ -716,7 +722,8 @@ TessellatorResult<Real> buildTessellation(
     WorklistCache<Real>* wlc = nullptr, WallStore<Real> outWall = {}, bool withAreaGrad = false,
     Kokkos::View<int*, peclet::core::MemSpace> outNear = {},
     Kokkos::View<int*, peclet::core::MemSpace> outNearCnt = {}, int nearCap = 0,
-    Real nearMargin = Real(0), bool withWallFD = false, bool withMoments = false) {
+    Real nearMargin = Real(0), bool withWallFD = false, bool withMoments = false,
+    bool profile = false) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   // Part-II optional outputs (see CellBuilder): emit the resident topology store / candidate skin
@@ -732,7 +739,9 @@ TessellatorResult<Real> buildTessellation(
   // Seeds with original index >= nBuildEff are candidate-only (their cell is skipped).
   const int nBuildEff = (nBuild >= 0 && nBuild < N) ? nBuild : N;
 
-  const bool prof = std::getenv("PECLET_VORO_PROFILE") != nullptr;
+  // `profile`: the timing / over-buffer report on stderr (the API's profile switch —
+  // Tessellation.diagnostics.set_profile — not an environment variable, QUALITY_PLAN D3/G.7).
+  const bool prof = profile;
   Kokkos::Timer ptimer;
   double tGrid = 0, tBuild = 0, tCsr = 0;
 
@@ -914,6 +923,7 @@ TessellatorResult<Real> buildTessellation(
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
   int nFacetsRaw = 0, nEdgesRaw = 0;
+  int overBufferRebuilds = 0;
   for (int attempt = 0;; ++attempt) {
     Kokkos::parallel_for(
         "tess.build", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int pi) {
@@ -935,6 +945,7 @@ TessellatorResult<Real> buildTessellation(
       facetCap = (size_t)nFacetsRaw;
     if (edgeOver)
       edgeCap = (size_t)nEdgesRaw;
+    ++overBufferRebuilds;
     if (prof)
       std::fprintf(stderr, "[tess.build] over-buffer exceeded (facets %d, edges %d): rebuilding\n",
                    nFacetsRaw, nEdgesRaw);
@@ -1109,6 +1120,7 @@ TessellatorResult<Real> buildTessellation(
   TessellatorResult<Real> res;
   res.view = view;
   res.status = status;
+  res.overBufferRebuilds = overBufferRebuilds;
   return res;
 }
 
