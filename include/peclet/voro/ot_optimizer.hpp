@@ -13,7 +13,7 @@
  * (A_ij = shared-face area, d_ij = seed distance) — exactly dV/dw, and exactly the pressure-Poisson
  * operator from docs/power_cell_solver_spec.md §4.2. L is assembled from the tessellation's facet
  * CSR (facetArea, facetConnVec) and solved with the suite's mesh-agnostic sparse-operator + Krylov
- * tooling (peclet::core::amr::MomentumOp / MomentumSolver, Jacobi-preconditioned BiCGStab).
+ * tooling (peclet::core::solver::MomentumOp / MomentumSolver, Jacobi-preconditioned BiCGStab).
  *
  * V_set may depend on the SDF (smaller targets near a solid ⇒ grid refinement at boundaries).
  *
@@ -36,8 +36,8 @@
 #include <string>
 #include <vector>
 
-#include "peclet/core/amr/momentum.hpp"
 #include "peclet/core/common/view.hpp"
+#include "peclet/core/solver/csr_bicgstab.hpp"  // MomentumOp + MomentumSolver (face-CSR BiCGStab)
 #include "peclet/voro/sdf.hpp"
 #include "peclet/voro/tessellator.hpp"
 
@@ -92,7 +92,7 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
   Kokkos::deep_copy(dpos, Kokkos::View<const Real*, Kokkos::HostSpace>(pos.data(), 3 * N));
   Kokkos::View<long*, MemSpace> gd;
 
-  peclet::core::amr::MomentumSolver<21> solver;
+  peclet::core::solver::MomentumSolver solver;
   solver.setJacobi(2, 0.7);  // damped-Jacobi preconditioner (no AMG on the irregular graph yet)
 
   double sumVset = 0;
@@ -225,7 +225,7 @@ OtResult otVolumeControl(std::vector<Real>& pos, std::vector<Real>& weight,
     diag[0] = 1.0;
     r[0] = 0.0;
 
-    peclet::core::amr::MomentumOp op;
+    peclet::core::solver::MomentumOp op;
     op.n = (Index)N;
     op.diag = peclet::core::toDevice(diag, "ot.diag");
     op.faceStart = peclet::core::toDevice(start, "ot.start");

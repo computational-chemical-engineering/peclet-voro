@@ -15,7 +15,7 @@
  *   ∂V_c/∂w_c = Σ_k A_k/(2 d_k) ,  ∂V_c/∂w_j = −A_k/(2 d_k).
  * Newton–Raphson with the Gauss-Newton Hessian H = 2γ Σ_c (∇V_c)(∇V_c)ᵀ, ASSEMBLED as a scalar CSR
  * over the flattened DOFs, solved by CG with a Jacobi OR multicolour Gauss–Seidel preconditioner
- * (peclet::core::amr::greedyColoring); an Armijo line search on E completes the step.
+ * (peclet::core::solver::greedyColoring); an Armijo line search on E completes the step.
  */
 #ifndef PECLET_VORO_MESH_OPTIMIZER_HPP
 #define PECLET_VORO_MESH_OPTIMIZER_HPP
@@ -31,7 +31,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "peclet/core/amr/momentum.hpp"      // greedyColoring
+#include "peclet/core/solver/coloring.hpp"   // greedyColoring
 #include "peclet/core/solver/graph_amg.hpp"  // smoothed-aggregation AMG (O(N) CG preconditioner)
 #include "peclet/voro/energy/interface.hpp"  // rung A3: interfacial energy on the published view
 #include "peclet/voro/ot_optimizer.hpp"      // OtResult + detail::toHostVec/toHostVecT
@@ -392,10 +392,10 @@ OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
       };
 
       // preconditioner z ≈ H⁻¹ r.
-      peclet::core::amr::Coloring col;
+      peclet::core::solver::Coloring col;
       std::vector<Index> colIdxHost;
       if (prec == Precond::ColoredGS) {
-        col = peclet::core::amr::greedyColoring(ostart, onbr, (Index)nD);
+        col = peclet::core::solver::greedyColoring(ostart, onbr, (Index)nD);
         colIdxHost = detail::toHostVecT<Index>(col.idx);
       }
       // Smoothed-aggregation AMG: rebuilt each Newton step (H moves with the geometry) from the

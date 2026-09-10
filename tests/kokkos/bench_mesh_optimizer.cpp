@@ -36,7 +36,7 @@
 #include <string>
 #include <vector>
 
-#include "peclet/core/amr/momentum.hpp"      // greedyColoring / Coloring (colored-GS)
+#include "peclet/core/solver/coloring.hpp"   // greedyColoring / Coloring (colored-GS)
 #include "peclet/core/solver/graph_amg.hpp"  // GraphAMG / HostCsrOp / amgPcg
 #include "peclet/voro/mesh_optimizer.hpp"  // meshVolumeOptimize, Precond, buildTessellation, detail
 #include "peclet/voro/sdf.hpp"
@@ -348,7 +348,7 @@ int pcg(const solver::HostCsrOp& H, std::vector<double>& x, const std::vector<do
 // symmetric multicolour Gauss–Seidel preconditioner (forward+backward sweep, z=0 start).
 struct SgsPrec {
   const solver::HostCsrOp* H;
-  peclet::core::amr::Coloring col;
+  peclet::core::solver::Coloring col;
   std::vector<Index> colIdx;
   void operator()(const std::vector<double>& r, std::vector<double>& z) const {
     const int n = (int)H->n;
@@ -516,7 +516,7 @@ int main(int argc, char** argv) {
       {
         SgsPrec sgs;
         sgs.H = &H;
-        sgs.col = peclet::core::amr::greedyColoring(H.start, H.nbr, (Index)nD);
+        sgs.col = peclet::core::solver::greedyColoring(H.start, H.nbr, (Index)nD);
         sgs.colIdx = peclet::voro::detail::toHostVecT<Index>(sgs.col.idx);
         run("colored-GS-CG",
             [&](const std::vector<double>& r, std::vector<double>& z) { sgs(r, z); });
