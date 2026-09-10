@@ -225,8 +225,8 @@ KOKKOS_INLINE_FUNCTION void areaGradFill(const Cell& c, const int* faces, int nf
   }
 }
 
-template <class Real, bool Weighted, class Sdf, bool TrackAdj = false, int MAXP = 64,
-          int MAXT = 112>
+template <class Real, bool Weighted, class Sdf, bool TrackAdj = false, int MAXP = kMaxPlanes,
+          int MAXT = kMaxTriangles>
 struct CellBuilder {
   using MemSpace = peclet::core::MemSpace;
   // Cell capacities: 64 planes / 112 dual triangles is the production layout (the topology
@@ -700,13 +700,14 @@ struct CellBuilder {
  *                 needed only as cutting seeds, so building them is wasted work (~the
  *                 ghost fraction of the cold build).
  */
-template <class Real, bool Weighted, class Sdf = NoSdf, int MAXP = 64, int MAXT = 112>
+template <class Real, bool Weighted, class Sdf = NoSdf, int MAXP = kMaxPlanes,
+          int MAXT = kMaxTriangles>
 TessellatorResult<Real> buildTessellation(
     const Kokkos::View<Real*, peclet::core::MemSpace>& posFlat,
-    const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N, const Real L[3], int sw = 4,
-    int densityCount = -1, Kokkos::View<long*, peclet::core::MemSpace> gid = {}, Sdf sdf = {},
-    bool withForceGeom = true, int nBuild = -1,
-    Kokkos::View<int*, peclet::core::MemSpace> outNp = {},
+    const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N, const Real L[3],
+    int sw = kSearchWindow, int densityCount = -1,
+    Kokkos::View<long*, peclet::core::MemSpace> gid = {}, Sdf sdf = {}, bool withForceGeom = true,
+    int nBuild = -1, Kokkos::View<int*, peclet::core::MemSpace> outNp = {},
     Kokkos::View<int*, peclet::core::MemSpace> outNt = {},
     Kokkos::View<int*, peclet::core::MemSpace> outPnbr = {},
     Kokkos::View<unsigned*, peclet::core::MemSpace> outTri = {},

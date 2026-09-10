@@ -56,7 +56,7 @@ static constexpr const char* kPrec = "FP64";
 
 using Exec = peclet::core::ExecSpace;
 using Mem = peclet::core::MemSpace;
-static constexpr int CMAXP = 64, CMAXT = 112;
+static constexpr int CMAXP = peclet::voro::kMaxPlanes, CMAXT = peclet::voro::kMaxTriangles;
 static constexpr int KCAND = 256;  // candidate (skin) list cap emitted by buildTessellation
 using Cell = peclet::voro::ConvexCell<real_t, CMAXP, CMAXT>;
 using Store = peclet::voro::TopologyStore<CMAXP, CMAXT>;

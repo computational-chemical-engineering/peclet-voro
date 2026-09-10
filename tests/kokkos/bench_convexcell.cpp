@@ -57,10 +57,10 @@ KOKKOS_INLINE_FUNCTION unsigned long mortonEncode(int x, int y, int z) {
 // state (pn/pd/pnbr[MAXP] + t*/v*/alive[MAXT]); below ~MAXT=48 it stops spilling to local memory
 // and throughput jumps. Override at compile time to sweep.
 #ifndef CC_MAXP
-#define CC_MAXP 64
+#define CC_MAXP peclet::voro::kMaxPlanes
 #endif
 #ifndef CC_MAXT
-#define CC_MAXT 112
+#define CC_MAXT peclet::voro::kMaxTriangles
 #endif
 
 struct Result {

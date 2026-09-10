@@ -64,9 +64,10 @@ enum class Precond { Jacobi, ColoredGS, GraphAMG, SteepestDescent };
 template <class Real, bool Weighted = false, class Sdf = NoSdf>
 OtResult meshVolumeOptimize(std::vector<Real>& pos, std::vector<Real>& weight,
                             const std::vector<Real>& vsetIn, const Real L[3], int N, int sw,
-                            const Sdf& sdf, int maxNewton, Real tol, int cgIters = 300,
-                            Precond prec = Precond::Jacobi, bool verbose = false,
-                            Real muBarrier = 0, Real muDecay = (Real)0.7, bool freeEnergy = false) {
+                            const Sdf& sdf, int maxNewton, Real tol,
+                            int cgIters = kOptimizerCgIters, Precond prec = Precond::Jacobi,
+                            bool verbose = false, Real muBarrier = 0,
+                            Real muDecay = (Real)kBarrierDecay, bool freeEnergy = false) {
   using peclet::core::Index;
   using MemSpace = peclet::core::MemSpace;
   const Real Larr[3] = {L[0], L[1], L[2]};
@@ -547,7 +548,7 @@ void interfaceGradReconstruct(const std::vector<Real>& x, const std::vector<int>
                               double sigma, const Real L[3], int N, int sw, const Sdf& sdf,
                               std::vector<double>& g, double& E) {
   using MemSpace = peclet::core::MemSpace;
-  using RCell = ConvexCell<Real, 128, 256>;
+  using RCell = ConvexCell<Real, kPoreMaxPlanes, kPoreMaxTriangles>;
   const Real Larr[3] = {L[0], L[1], L[2]}, Lh[3] = {L[0] / 2, L[1] / 2, L[2] / 2};
   Kokkos::View<Real*, MemSpace> dw;
   Kokkos::View<long*, MemSpace> gd;
@@ -625,14 +626,15 @@ void interfaceGradReconstruct(const std::vector<Real>& x, const std::vector<int>
             gn[3 * l + cc] += 0.5 * sigma * dA[((size_t)k * np + l) * 3 + cc];
       }
       // route ∂E_c/∂n_l → positions (self + neighbours) and scatter into g.
-      double gx[128], gy[128], gz[128];
+      double gx[kPoreMaxPlanes], gy[kPoreMaxPlanes], gz[kPoreMaxPlanes];
       for (int l = 0; l < np; ++l) {
         gx[l] = gn[3 * l];
         gy[l] = gn[3 * l + 1];
         gz[l] = gn[3 * l + 2];
       }
       const double seed3[3] = {(double)x[3 * c], (double)x[3 * c + 1], (double)x[3 * c + 2]};
-      double fSelf[3], fwSelf, fnx[128], fny[128], fnz[128], fwn[128];
+      double fSelf[3], fwSelf, fnx[kPoreMaxPlanes], fny[kPoreMaxPlanes], fnz[kPoreMaxPlanes],
+          fwn[kPoreMaxPlanes];
       chainToDofs<Voronoi>(cell, seed3, (const double*)nullptr, 0.0, (const double*)nullptr,
                            (double)L[0], gx, gy, gz, fSelf, fwSelf, fnx, fny, fnz, fwn);
       g[3 * c] += fSelf[0];
@@ -769,7 +771,7 @@ InterfaceResult interfaceMinimize(std::vector<Real>& pos, const std::vector<int>
 template <class Real, class Sdf = NoSdf>
 OtResult meshVolumeOptimizeDevice(std::vector<Real>& posHost, const std::vector<Real>& vsetIn,
                                   const Real L[3], int N, int sw, const Sdf& sdf, int maxNewton,
-                                  Real tol, int cgIters = 300, bool verbose = false) {
+                                  Real tol, int cgIters = kOptimizerCgIters, bool verbose = false) {
   using MemSpace = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using DV = Kokkos::View<double*, MemSpace>;

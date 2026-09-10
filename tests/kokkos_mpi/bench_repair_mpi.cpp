@@ -51,7 +51,7 @@
 using real_t = double;
 using Vec3 = std::array<real_t, 3>;
 using Mem = peclet::core::MemSpace;
-static constexpr int CMAXP = 64, CMAXT = 112;
+static constexpr int CMAXP = peclet::voro::kMaxPlanes, CMAXT = peclet::voro::kMaxTriangles;
 
 static real_t wrap1(real_t x, real_t L) {
   x -= L * std::floor(x / L);

@@ -48,7 +48,7 @@ using real_t = double;
 #endif
 using Exec = peclet::core::ExecSpace;
 using Mem = peclet::core::MemSpace;
-static constexpr int CMAXP = 64, CMAXT = 112;
+static constexpr int CMAXP = peclet::voro::kMaxPlanes, CMAXT = peclet::voro::kMaxTriangles;
 using Store = peclet::voro::TopologyStore<CMAXP, CMAXT>;
 using clk = std::chrono::high_resolution_clock;
 static double secs(clk::time_point a, clk::time_point b) {

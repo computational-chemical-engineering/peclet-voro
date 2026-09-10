@@ -27,6 +27,7 @@
 
 #include "morton/morton.hpp"  // suite spatial-index primitive (after Kokkos_Core: MORTON_HD->KOKKOS_FUNCTION)
 #include "peclet/core/common/view.hpp"
+#include "peclet/voro/params.hpp"             // kSearchWindow
 #include "peclet/voro/tessellation_view.hpp"  // gid_t
 
 namespace peclet::voro {
@@ -101,7 +102,7 @@ struct WorklistCache {
 template <class Real, bool Weighted>
 TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, peclet::core::MemSpace>& posFlat,
                              const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N,
-                             const Real L[3], int sw = 4, int densityCount = -1,
+                             const Real L[3], int sw = kSearchWindow, int densityCount = -1,
                              Kokkos::View<long*, peclet::core::MemSpace> gid = {},
                              WorklistCache<Real>* wlc = nullptr) {
   using peclet::core::MemSpace;

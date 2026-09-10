@@ -155,21 +155,22 @@ class ExplicitEuler {
         const double boxVol = static_cast<double>(L_[0]) * L_[1] * L_[2];
         const Real spacing = static_cast<Real>(std::cbrt(boxVol / (N_ > 0 ? N_ : 1)));
         mt_.sdf = sdf_;
-        mt_.alloc(N_, Larr, Real(1e-4) * spacing, Real(0.25) * spacing, /*sw=*/4, /*density=*/N_);
+        mt_.alloc(N_, Larr, Real(kCertificateTolerance) * spacing, Real(kSkin) * spacing,
+                  kSearchWindow, /*density=*/N_);
         mt_.rebuild(pos_);
         mtInit_ = true;
       } else {
         mt_.step(pos_);
       }
-      view_ = peclet::voro::reevalPublish<Real, 64, 112>(mt_.store, pos_, mt_.vol, N_, Larr,
-                                                         mt_.wall, mt_.xRef);
+      view_ = peclet::voro::reevalPublish<Real, kMaxPlanes, kMaxTriangles>(
+          mt_.store, pos_, mt_.vol, N_, Larr, mt_.wall, mt_.xRef);
     } else {
       // Pass the persistent worklist cache (last arg) so the step-invariant worklist table is built
       // once and reused across steps (E3). All intermediate args are the buildTessellation
       // defaults; the Sdf template arg is named explicitly because a defaulted `{}` Sdf cannot be
       // deduced.
       auto res = peclet::voro::buildTessellation<Real, false, Sdf>(
-          pos_, w_, N_, Larr, /*sw=*/4, /*densityCount=*/-1, /*gid=*/{}, sdf_,
+          pos_, w_, N_, Larr, kSearchWindow, /*densityCount=*/-1, /*gid=*/{}, sdf_,
           /*withForceGeom=*/true, /*nBuild=*/-1, /*outNp=*/{}, /*outNt=*/{}, /*outPnbr=*/{},
           /*outTri=*/{}, /*outCand=*/{}, /*outCandCnt=*/{}, /*candCap=*/0, &wlCache_);
       view_ = res.view;
@@ -196,7 +197,7 @@ class ExplicitEuler {
   // E1 opt-in incremental path (default off): resident moving-point tessellation + its cold/repair
   // state. Kept as members (Views free before Kokkos::finalize).
   bool useRepair_ = false, mtInit_ = false;
-  peclet::voro::MovingTessellation<Real, 64, 112, false, Sdf> mt_;
+  peclet::voro::MovingTessellation<Real, kMaxPlanes, kMaxTriangles, false, Sdf> mt_;
   Sdf sdf_{};
 };
 

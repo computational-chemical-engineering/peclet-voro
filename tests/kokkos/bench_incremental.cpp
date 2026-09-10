@@ -30,7 +30,7 @@
 using real_t = float;
 using Exec = peclet::core::ExecSpace;
 using Mem = peclet::core::MemSpace;
-static constexpr int CMAXP = 64, CMAXT = 112;
+static constexpr int CMAXP = peclet::voro::kMaxPlanes, CMAXT = peclet::voro::kMaxTriangles;
 using Cell = peclet::voro::ConvexCell<real_t, CMAXP, CMAXT>;
 using clk = std::chrono::high_resolution_clock;
 static double secs(clk::time_point a, clk::time_point b) {

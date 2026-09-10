@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # check_include_graph.sh — enforce the acyclic layering of include/peclet/voro (voro/CLAUDE.md):
 #
-#   L0  convex_cell + leaves      convex_cell.hpp plane_policy.hpp tessellation_view.hpp
-#                                 topology_store.hpp transpose.hpp verlet_skin.hpp tess_grid.hpp
+#   L0  params, convex_cell +     params.hpp convex_cell.hpp plane_policy.hpp tessellation_view.hpp
+#       leaves                    topology_store.hpp transpose.hpp verlet_skin.hpp tess_grid.hpp
 #   L1  sdf                       sdf.hpp
 #   L2  tessellator               tessellator.hpp subset_gather.hpp
 #   L3  repair / reeval           repair.hpp reeval_tessellation.hpp dynamic_validate.hpp
@@ -20,7 +20,7 @@ INC_DIR="${1:-$(cd "$(dirname "$0")/.." && pwd)/include/peclet/voro}"
 
 layer_of() {  # header path relative to INC_DIR -> layer number
   case "$1" in
-    convex_cell.hpp|plane_policy.hpp|tessellation_view.hpp|topology_store.hpp|transpose.hpp|verlet_skin.hpp|tess_grid.hpp) echo 0 ;;
+    params.hpp|convex_cell.hpp|plane_policy.hpp|tessellation_view.hpp|topology_store.hpp|transpose.hpp|verlet_skin.hpp|tess_grid.hpp) echo 0 ;;
     sdf.hpp) echo 1 ;;
     tessellator.hpp|subset_gather.hpp) echo 2 ;;
     repair.hpp|reeval_tessellation.hpp|dynamic_validate.hpp) echo 3 ;;

@@ -29,6 +29,7 @@ half-edge CPU engine has been retired and removed; the device path is the whole 
 voro/
 ├── include/
 │   └── peclet/voro/                 # the Kokkos tessellator engine (namespace peclet::voro)
+│       ├── params.hpp               #   the named defaults: cell capacities, gather window, tolerance / skin
 │       ├── convex_cell.hpp          #   compact dual-triangle ConvexCell + per-vertex geometry
 │       ├── tessellator.hpp          #   cold build: grid + worklist gather + clip + CSR publish
 │       ├── repair.hpp               #   MovingTessellation: incremental two-pass repair update

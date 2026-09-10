@@ -89,6 +89,7 @@
 #include "peclet/voro/fv/covolume.hpp"
 #include "peclet/voro/fv/mesh.hpp"
 #include "peclet/voro/mesh_optimizer.hpp"
+#include "peclet/voro/params.hpp"
 #include "peclet/voro/physics/simulation.hpp"
 #include "peclet/voro/reeval_tessellation.hpp"
 #include "peclet/voro/repair.hpp"
@@ -118,33 +119,33 @@ namespace peclet::voro::pybind {
 // below are generated from them.
 // --------------------------------------------------------------------------------------------------
 namespace defaults {
-// ConvexCell capacity (planes / dual triangles) of the resident tessellation — the production
-// 64/112 (README "Early wall clip"); the pore-space reconstruction uses a larger cell because
-// wall-cut interstitial cells carry more planes.
-constexpr int kMaxPlanes = 64;
-constexpr int kMaxTriangles = 112;
-constexpr int kPoreMaxPlanes = 128;
-constexpr int kPoreMaxTriangles = 256;
-// Repair: the certificate tolerance and the Verlet skin, both as fractions of the mean spacing
-// cbrt(V/N); the grid gather window of the tessellator (cells per axis around a seed).
-constexpr double kCertificateTolerance = 1e-4;
-constexpr double kSkin = 0.25;
-constexpr int kSearchWindow = 4;
+// The engine-level defaults live in include/peclet/voro/params.hpp (the template defaults and
+// default arguments of the headers name them); re-exported here, never repeated: the ConvexCell
+// capacities of the resident tessellation and of the pore-space reconstruction, the grid gather
+// window, the repair tolerance + Verlet skin (fractions of the mean spacing cbrt(V/N)), the
+// optimisers' CG cap and the log-barrier decay.
+using peclet::voro::kBarrierDecay;
+using peclet::voro::kCertificateTolerance;
+using peclet::voro::kMaxPlanes;
+using peclet::voro::kMaxTriangles;
+using peclet::voro::kOptimizerCgIters;
+using peclet::voro::kPoreMaxPlanes;
+using peclet::voro::kPoreMaxTriangles;
+using peclet::voro::kSearchWindow;
+using peclet::voro::kSkin;
 // SDF geometry: the central-difference step of the SDF gradient; the wall re-gather skin
 // (fraction of the mean spacing) of the 'skin' wall mode.
 constexpr double kSdfGradientStep = 1e-5;
 constexpr double kWallSkin = 0.0;
-// Mesh optimisers (Gauss-Newton on Σ(V/V_ref − 1)², the interface minimiser): the optimiser's own
-// search window, iteration caps, gradient tolerance, CG iteration caps, the log-barrier decay of
-// the pore-space optimiser, and the interface tension.
+// Mesh optimisers (Gauss-Newton on Σ(V/V_ref − 1)², the interface minimiser), bound surface only:
+// the optimiser's own search window, iteration caps, gradient tolerance, the pore-space CG cap,
+// and the interface tension.
 constexpr int kOptimizerSearchWindow = 5;
 constexpr int kPoreSearchWindow = 6;
 constexpr int kOptimizerMaxIter = 60;
 constexpr int kPoreMaxIter = 80;
 constexpr double kOptimizerTolerance = 1e-9;
-constexpr int kOptimizerCgIters = 300;
 constexpr int kPoreCgIters = 400;
-constexpr double kBarrierDecay = 0.7;
 constexpr double kInterfaceSigma = 1.0;
 // Pore-space cell reconstruction: nearest seeds gathered per cell, and the cap on the counting-sort
 // grid resolution.

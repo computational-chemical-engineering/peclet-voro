@@ -34,10 +34,10 @@ static double secs(clk::time_point a, clk::time_point b) {
 }
 static constexpr int KCAND = 64;  // cached closest candidates per cell
 #ifndef CC_MAXP
-#define CC_MAXP 64
+#define CC_MAXP peclet::voro::kMaxPlanes
 #endif
 #ifndef CC_MAXT
-#define CC_MAXT 112
+#define CC_MAXT peclet::voro::kMaxTriangles
 #endif
 
 int main(int argc, char** argv) {

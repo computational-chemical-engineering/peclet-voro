@@ -83,8 +83,9 @@ struct BuildReport {
 };
 
 /// Resident moving-point tessellation with two-pass gather repair. MAXP/MAXT must match
-/// CellBuilder::kMaxP / kMaxT (64 / 112).
-template <class Real, int MAXP = 64, int MAXT = 112, bool Weighted = false, class Sdf = NoSdf>
+/// CellBuilder::kMaxP / kMaxT (params.hpp: kMaxPlanes / kMaxTriangles).
+template <class Real, int MAXP = kMaxPlanes, int MAXT = kMaxTriangles, bool Weighted = false,
+          class Sdf = NoSdf>
 struct MovingTessellation {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
@@ -103,7 +104,7 @@ struct MovingTessellation {
   int nProc =
       0;  ///< cells this instance MAINTAINS (single-domain: N; MPI: owned, [0,nProc)). The grid
           ///< + gather candidates always span all N (ghosts are cut candidates, not maintained).
-  int sw = 4, densityCount = -1;
+  int sw = kSearchWindow, densityCount = -1;
   Real L[3] = {1, 1, 1};
   Real tol =
       0;  ///< certificate tolerance (absolute distance); ~1e-4·spacing FP64, ~2e-3·spacing FP32
@@ -218,8 +219,8 @@ struct MovingTessellation {
   /// the
   ///                owned count: cells [0,nProc) are repaired, [nProc,N) are ghost cut-candidates
   ///                only.
-  void alloc(int n, const Real Lbox[3], Real tol_, Real skin_, int sw_ = 4, int densityCount_ = -1,
-             int nProc_ = -1) {
+  void alloc(int n, const Real Lbox[3], Real tol_, Real skin_, int sw_ = kSearchWindow,
+             int densityCount_ = -1, int nProc_ = -1) {
     N = n;
     nProc = (nProc_ < 0) ? n : nProc_;
     sw = sw_;

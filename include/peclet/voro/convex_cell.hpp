@@ -26,6 +26,7 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "peclet/voro/params.hpp"        // kMaxPlanes / kMaxTriangles: the capacity defaults
 #include "peclet/voro/plane_policy.hpp"  // Voronoi/Power plane-from-DOF policies (leaf: Kokkos only)
 
 // Loop unroll hint, applied ONLY in the CUDA/HIP device passes (where it lets the compiler
@@ -135,7 +136,7 @@ KOKKOS_INLINE_FUNCTION void dedgeFoot(const Dual<Real, K> v[3], const Dual<Real,
 /// Compact convex Voronoi cell. MAXP planes (<=255 so a plane index fits in a byte),
 /// MAXT dual triangles (= primal vertices). Trivially default-constructible (POD) so it
 /// lives in registers / a per-thread stack.
-template <class Real, int MAXP = 64, int MAXT = 96, bool TrackAdj = false>
+template <class Real, int MAXP = kMaxPlanes, int MAXT = kMaxTriangles, bool TrackAdj = false>
 struct ConvexCell {
   static_assert(MAXP <= 255, "plane index must fit in unsigned char");
   static constexpr bool kTrackAdj =

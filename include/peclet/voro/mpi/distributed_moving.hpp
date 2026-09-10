@@ -34,7 +34,7 @@ namespace peclet::voro::mpi {
 /// `Sdf` (rung A0): an SDF solid provider, replicated on every rank (set it with setSdf() before
 /// establish()); the owned cells are clipped and boundary-watched exactly as in the single-domain
 /// MovingTessellation. Default NoSdf leaves the driver unchanged.
-template <class Real, int MAXP = 64, int MAXT = 112, class Sdf = NoSdf>
+template <class Real, int MAXP = kMaxPlanes, int MAXT = kMaxTriangles, class Sdf = NoSdf>
 struct DistributedMovingTessellation {
   using Vec3 = std::array<Real, 3>;
   using Mem = typename Kokkos::DefaultExecutionSpace::memory_space;
