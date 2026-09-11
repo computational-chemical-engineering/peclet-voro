@@ -38,6 +38,28 @@ failure signal. `core` and `morton` are found as sibling checkouts (`../core`, `
 `cmake/PecletDeps.cmake` (`-DPECLET_VENDOR_SIBLINGS=ON` fetches them at the pinned tags instead — CI's
 configure-only check). The version is read from `pyproject.toml` (do not edit `project(VERSION)`).
 
+## Settled decisions — do not reverse silently
+
+Chosen *against* the obvious or textbook alternative, on measured evidence. Full entries with
+verbatim quotes and provenance in [`../docs/decisions/voro.md`](../docs/decisions/voro.md); the index is
+[`../docs/DECISIONS.md`](../docs/DECISIONS.md). Reversing one takes a new recorded decision, not a
+judgement call in the moment.
+
+- **The GPU topology is the dual-triangle ConvexCell**, not a half-edge cell representation.
+- **Robustness is topology-oriented (Sugihara), valid-by-construction — NOT exact predicates.**
+- **The collocated pressure coupling is the ABC approximate projection, NOT Rhie–Chow** (the same
+  decision flow and amr hold; it has been re-proposed by mistake in all three).
+- **The optimizer move direction is steepest descent (plain −g), not Newton** — the GN Hessian is
+  rank-deficient here.
+- **Physics uses the sqrt-free area-vector formula**, not `facetAreasPerVertex`'s magnitude.
+- **The equivalence contract is a 1e-9 volume tolerance plus an exact neighbour set** — explicitly
+  NOT bit-exactness.
+- **Morton (Z-order) indexing is GPU-only**, not for the CPU backend.
+- **Closed dead ends, do not re-attempt:** the cooperative/warp-parallel half-edge cut;
+  `-ffast-math` reciprocal speedups (a ceiling, not shippable); order-free volume walk without
+  stored adjacency (atan2 is not the bottleneck). Cold-build gather at ~70 distance tests/cell is
+  **near-optimal — stop chasing it.**
+
 ## Header map (one-way layering, enforced by `tools/check_include_graph.sh` = ctest `test_include_graph`)
 
 | layer | headers | what |
