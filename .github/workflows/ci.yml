@@ -96,14 +96,21 @@ jobs:
         run: ctest --test-dir build -LE bench --timeout 1200 --output-on-failure -j1
 
       # The wheel builds against the PINNED core / morton tags (PECLET_CORE_TAG / PECLET_MORTON_TAG in
-      # cmake/PecletDeps.cmake), not the sibling checkouts above: prove those tags still resolve and
-      # configure (headers only; nothing is compiled here).
-      - name: Configure-only against the pinned core / morton tags
+      # cmake/PecletDeps.cmake), not the sibling checkouts above.
+      #
+      # This step COMPILES. It used to configure only, which proved the tags resolved but not that
+      # the code builds against them -- and a consumer using a core header added after the pinned tag
+      # fails at compile, not configure. That is exactly what happened on 2026-09-10: voro moved to
+      # peclet/core/solver/{coloring,csr_bicgstab}.hpp while still pinning core v0.6.1, which predates
+      # both headers. CI stayed green; the wheel build would not have compiled. Tests are left off
+      # here -- we need the module the wheel actually builds, not the test tree.
+      - name: Build against the pinned core / morton tags
         working-directory: voro
         run: |
           cmake -B build_tag -G Ninja \
-            -DPECLET_VORO_KOKKOS=ON -DPECLET_VORO_BUILD_TESTS=ON -DPECLET_VENDOR_SIBLINGS=ON \
+            -DPECLET_VORO_KOKKOS=ON -DPECLET_VORO_BUILD_PYTHON=ON -DPECLET_VENDOR_SIBLINGS=ON \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"
+          cmake --build build_tag --parallel
 
   # ── MPI (distributed) tests ──────────────────────────────────────────────────
   mpi:
