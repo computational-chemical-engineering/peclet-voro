@@ -2028,7 +2028,10 @@ NB_MODULE(_voro, m) {
       "adaptive gate) when displacements are large, so it is never much slower than a cold\n"
       "build. Periodic box anchored at the origin. Single domain (one process); see\n"
       "DistributedTessellation for the MPI driver. Instruments: `diagnostics`.")
-      .def(nb::init<>())
+      .def(nb::init<>(),
+           "Tessellation(): takes no arguments. Configure with `set_domain` (required) and "
+           "optionally `set_tolerance` / `set_geometry` / `set_wall_mode` / `set_weights` before "
+           "the first `build(positions)`.")
       .def("set_domain", &Tess::set_domain, nb::arg("extent"),
            nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
            nb::arg("periodic") = std::array<bool, 3>{true, true, true},
@@ -2239,7 +2242,13 @@ NB_MODULE(_voro, m) {
       "repaired each step on the device. Set the particle state, `init`, `set_dt`, then `step`;\n"
       "the state setters raise after `init` (the state is then resident on the device).\n"
       "Instruments: `diagnostics`.")
-      .def(nb::init<>())
+      .def(nb::init<>(),
+           "Simulation(): takes no arguments. Configure with `set_domain` (required),\n"
+           "`set_positions` / `set_masses` (required) and optionally `set_velocities` / "
+           "`set_pressure` /\n"
+           "`set_viscosities` / `set_bulk_viscosities` / `set_geometry` before the one `init()` "
+           "call\n"
+           "that uploads the state to the device and builds the first tessellation.")
       .def("set_domain", &Sim::set_domain, nb::arg("extent"),
            nb::arg("origin") = std::array<real_t, 3>{0, 0, 0},
            nb::arg("periodic") = std::array<bool, 3>{true, true, true},
