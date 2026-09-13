@@ -19,6 +19,14 @@ set(PECLET_ARBORX_TAG "v2.1"  CACHE STRING "Vendored ArborX git tag")
 set(PECLET_CORE_TAG    "v1.0.0"  CACHE STRING "Vendored core git tag (headers)")
 set(PECLET_MORTON_TAG "v1.0.0"  CACHE STRING "Vendored morton git tag (headers)")
 option(PECLET_VENDOR_DEPS "Force FetchContent-build of Kokkos/ArborX/siblings (self-contained wheel)" OFF)
+
+# Extra -D flags for the VENDORED Kokkos configure (wheel builds only; ignored when Kokkos comes
+# from a prefix). The nested configure below is a separate CMake run, so nothing set on THIS command
+# line reaches it -- and a platform whose OpenMP needs coaxing has no other way in. Measured needs
+# (2026-09-13 wheel probe): Windows wants -DOpenMP_RUNTIME_MSVC=llvm, because MSVC's default
+# /openmp is OpenMP 2.0 and Kokkos requires 3.0; a platform with no usable OpenMP at all takes
+# -DKokkos_ENABLE_OPENMP=OFF and gets a Serial wheel (the later -D wins over the default below).
+set(PECLET_VENDOR_KOKKOS_ARGS "" CACHE STRING "Extra -D flags for the vendored Kokkos configure")
 # Fetch ONLY the sibling headers (core, morton) at their pinned tags even when sibling checkouts exist,
 # keeping Kokkos from the prefix: what CI's configure-only step uses to prove the pinned tags resolve.
 option(PECLET_VENDOR_SIBLINGS "Force FetchContent of the core/morton headers at PECLET_*_TAG" OFF)
@@ -85,7 +93,8 @@ macro(peclet_require_kokkos)
     message(STATUS "[peclet] Kokkos ${Kokkos_VERSION} from prefix (${Kokkos_DEVICES})")
   else()
     _peclet_stage_build(kokkos "https://github.com/kokkos/kokkos.git" "${PECLET_KOKKOS_TAG}"
-                        -DKokkos_ENABLE_OPENMP=ON -DKokkos_ENABLE_SERIAL=ON)
+                        -DKokkos_ENABLE_OPENMP=ON -DKokkos_ENABLE_SERIAL=ON
+                        ${PECLET_VENDOR_KOKKOS_ARGS})
     list(APPEND CMAKE_PREFIX_PATH "${PECLET_STAGE_PREFIX}")
     find_package(Kokkos CONFIG REQUIRED)
     message(STATUS "[peclet] vendored Kokkos ${Kokkos_VERSION} @ ${PECLET_STAGE_PREFIX}")
