@@ -56,7 +56,13 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 # ── Compile options ───────────────────────────────────────────────────────────
-add_compile_options(-Wall -Wextra -Wpedantic)
+# GNU-style; MSVC rejects them outright ("D8021: invalid numeric argument '/Wextra'") and it leaks
+# into subprojects such as nanobind-static, not just ours.
+if(MSVC)
+  add_compile_options(/W3)
+else()
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
 
 # ── Dependencies ─────────────────────────────────────────────────────────────
 find_package(OpenMP)
