@@ -18,6 +18,7 @@ on:
 jobs:
   sdist:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
@@ -46,6 +47,7 @@ jobs:
   wheels:
     name: wheels · ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -75,9 +77,21 @@ jobs:
   # the module rpath baked by -DPECLET_CUDA_RUNTIME_WHEEL=ON. Mirrors peclet-flow's cuda-wheel job.
   # The PECLET_VORO_KOKKOS / PECLET_VORO_BUILD_PYTHON cmake defines come from the toml's [tool.scikit-build]
   # cmake.define table, so `pip wheel .` builds the device module without extra flags.
+  # One job PER INTERPRETER. It used to be one job looping `for PY in cp310..cp313` serially, and on
+  # 2026-09-14 that died at GitHub's hard 6-hour cap during the 1.0.1 release, taking `publish` with
+  # it (suite docs/RELEASE_PREP.md 11.5). The work is genuinely ~73 min per wheel -- voro is
+  # header-only, so one translation unit carries ~12k lines of templated device code through nvcc for
+  # five GPU architectures -- and four of those in series is ~5 h against a 6 h cap, which it had been
+  # sitting at 83% of since 1.0.0. Kokkos costs 2 m 20 s, so rebuilding it per job is a rounding error
+  # next to running the four wheels concurrently.
   cuda-wheel:
-    name: cuda wheels (peclet-voro-cu13, manylinux_2_28 x86_64)
+    name: cuda wheel (peclet-voro-cu13, ${{ matrix.py }}, manylinux_2_28 x86_64)
     runs-on: ubuntu-latest
+    timeout-minutes: 180          # ~80 min expected; fail as a budget, not as a silent 6 h kill
+    strategy:
+      fail-fast: false
+      matrix:
+        py: [cp310-cp310, cp311-cp311, cp312-cp312, cp313-cp313]
     container:
       image: quay.io/pypa/manylinux_2_28_x86_64
     env:
@@ -118,15 +132,13 @@ jobs:
             "-DKokkos_ARCH_${KOKKOS_ARCH}=ON" -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}"
           cmake --build /tmp/kokkos/build --target install -j
 
-      - name: Build + repair CUDA wheels (cp310–cp313)
+      - name: Build + repair the CUDA wheel for ${{ matrix.py }}
         run: |
           export PATH="${CUDA_HOME}/bin:$PATH"
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/kokkos-cuda"
           cp packaging/pyproject-cuda.toml pyproject.toml   # -> peclet-voro-cu13 + nvidia-cuda-runtime dep
           mkdir -p /tmp/raw /tmp/out
-          for PY in cp310-cp310 cp311-cp311 cp312-cp312 cp313-cp313; do
-            "/opt/python/${PY}/bin/pip" wheel . --no-deps -w /tmp/raw
-          done
+          "/opt/python/${{ matrix.py }}/bin/pip" wheel . --no-deps -w /tmp/raw
           # Retag to manylinux (libcudart/libcuda are external: excluded), then re-add the nvidia rpath
           # auditwheel resets, so `import peclet.voro` finds libcudart in the nvidia-cuda-runtime wheel.
           /opt/python/cp312-cp312/bin/pip install -q auditwheel wheel
@@ -145,12 +157,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-cuda
+          name: wheels-cuda-${{ matrix.py }}
           path: /tmp/out/*.whl
 
   publish:
     needs: [sdist, wheels, cuda-wheel]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     environment: pypi
     permissions:
