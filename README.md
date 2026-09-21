@@ -199,7 +199,7 @@ ke   = s.kinetic_energy()            # scalars are bare names; arrays that copy 
 t_now = s.time
 
 # SDF solids + power weights on the moving-point path (Voronoi methods plan, rung A0)
-scene = peclet.core.geom.SceneBuilder()
+scene = peclet.geom.SceneBuilder()
 root = scene.add_leaf("sphere", [0.25], translation=(0.5, 0.5, 0.5))
 node_ints, node_reals, _, _ = scene.encode()
 t.set_geometry(node_ints, node_reals, root=root)   # any analytic core scene (CSG, transforms, ...)
