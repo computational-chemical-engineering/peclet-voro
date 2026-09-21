@@ -6,6 +6,15 @@
 [![CI](https://github.com/computational-chemical-engineering/peclet-voro/actions/workflows/ci.yml/badge.svg)](https://github.com/computational-chemical-engineering/peclet-voro/actions/workflows/ci.yml)
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21132443.svg)](https://doi.org/10.5281/zenodo.21132443)
 
+```bash
+pip install peclet-voro          # CPU (OpenMP) wheels — or `pip install peclet` for the whole family
+pip install peclet-voro-cu13     # the CUDA 13 build of the same module, in its OWN venv
+```
+
+Both ship the dynamic Voronoi tessellator as `peclet.voro`; they provide the **same import**, so they are mutually
+exclusive in one environment — one venv per backend. Multi-GPU/MPI and AMD/HIP are source or
+container builds: see [Install & run](https://computational-chemical-engineering.github.io/peclet/DEPLOYMENT/).
+
 A **Kokkos** engine for dynamic Voronoi tessellation of moving particles in three
 dimensions, part of the `peclet` suite. The same sources run on **CUDA / HIP / OpenMP**
 (the backend is chosen by the bootstrapped Kokkos prefix the build is pointed at, not
