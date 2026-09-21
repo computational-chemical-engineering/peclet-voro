@@ -96,7 +96,8 @@ if(PECLET_VORO_BUILD_TESTS OR PECLET_VORO_BUILD_BENCHMARKS)
 endif()
 
 # ── Python bindings ───────────────────────────────────────────────────────────
-# The Python surface is the device-native nanobind module `peclet.voro` (src/voro_bindings.cpp),
+# The Python surface is the device-native nanobind module `peclet.voro` (src/voro_*.cpp: one
+# translation unit per subsystem, see PECLET_VORO_PY_SOURCES below),
 # configured below with -DPECLET_VORO_BUILD_PYTHON=ON. The legacy pybind11 module over the retired
 # half-edge engine has been removed.
 
@@ -166,7 +167,24 @@ if(PECLET_VORO_KOKKOS)
     peclet_require_nanobind()
     # NOMINSIZE: nanobind's default -Os size optimization is rejected by nvcc ("'s': expected a
     # number") since Kokkos device sources compile as CXX through the launch compiler.
-    nanobind_add_module(voro NB_STATIC NOMINSIZE src/voro_bindings.cpp)
+    # ONE translation unit per subsystem, not one for the whole module.  nvcc compiles a TU's
+    # device instantiations SERIALLY (and, for a multi-arch wheel, once per architecture inside the
+    # same process), so a single binding TU pins the whole extension to one core: the CUDA wheel job
+    # measured 61-100 min against flow's ~17 for MORE device kernels, the difference being that flow
+    # has three TUs.  Splitting by subsystem lets `make -j` overlap them.  The seams are the classes
+    # themselves; `voro_bindings_tess.hpp` keeps Tess::face_mesh() out-of-line so that including the
+    # tessellation header from another TU does not re-instantiate it (QUALITY_PLAN G.8).
+    set(PECLET_VORO_PY_SOURCES
+      src/voro_bindings.cpp        # NB_MODULE + the typed results; no engine
+      src/voro_tessellation.cpp    # Tessellation: the four MovingTessellation variants
+      src/voro_flow.cpp            # FlowSolver: collocated + covolume Navier-Stokes
+      src/voro_simulation.cpp      # Simulation: the two ExplicitEuler variants
+      src/voro_optimizers.cpp      # optimize_volume_mesh, minimize_interface
+      src/voro_pore.cpp)           # the SDF-walled pore-space family
+    if(PECLET_VORO_MPI)
+      list(APPEND PECLET_VORO_PY_SOURCES src/voro_mpi.cpp)  # VoronoiHalo, DistributedTessellation
+    endif()
+    nanobind_add_module(voro NB_STATIC NOMINSIZE ${PECLET_VORO_PY_SOURCES})
     # -> peclet.voro._voro (NB_MODULE(_voro)), re-exported by peclet/voro/__init__.py. The extension +
     # the staged __init__.py land under <build>/peclet/voro so `import peclet.voro` works both from the
     # build tree (dev loop, PYTHONPATH=<build>) and from the SKBUILD wheel install.

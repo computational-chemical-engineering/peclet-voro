@@ -77,7 +77,7 @@ voro/
 │       │   ├── voronoi_halo.hpp     #   distributed ghost-gather over core's ParticleMigrator
 │       │   └── distributed_moving.hpp #  distributed MovingTessellation (repair under MPI)
 │       └── tessellation_view.hpp    # published read-only CSR device view (engine<->consumer seam)
-├── src/voro_bindings.cpp     # nanobind Python module (`peclet.voro`)
+├── src/voro_*.cpp            # nanobind Python module (`peclet.voro`), one TU per subsystem
 ├── packaging/voro_init.py    # the package __init__ (staged/installed as peclet/voro/__init__.py)
 ├── packaging/voro_pore_mesh.py  # peclet.voro.pore_mesh (redistribute_pore_mesh + the bound pore family)
 ├── packaging/voro_scenes.py     # peclet.voro.scenes (sphere_union_scene, sphere_union_sdf)

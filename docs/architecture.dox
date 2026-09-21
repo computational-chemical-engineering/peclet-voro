@@ -98,7 +98,8 @@
  *
  * \section arch_python Python
  *
- * The nanobind module `peclet.voro` (`src/voro_bindings.cpp`) exposes `Tessellation` (cold
+ * The nanobind module `peclet.voro` (`src/voro_*.cpp`, one translation unit per subsystem so
+ * that nvcc compiles their device instantiations concurrently) exposes `Tessellation` (cold
  * build, incremental repair, volumes, neighbour counts), `Simulation` (the fluid solver),
  * `FlowSolver`, the mesh optimisers, the `pore_mesh` / `scenes` submodules and, under MPI,
  * `VoronoiHalo` + `DistributedTessellation`; instruments live on each object's `diagnostics`.

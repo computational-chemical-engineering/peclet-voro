@@ -1,8 +1,9 @@
 # CLAUDE.md — peclet.voro
 
 Dynamic 3-D Voronoi tessellation of moving particles on Kokkos (CUDA/HIP/OpenMP), header-only C++20
-under `include/peclet/voro/`, driven from Python as `peclet.voro` (`src/voro_bindings.cpp`, nanobind on
-core's zero-copy bridge). Names follow `../docs/NAMING.md`: `set_domain(extent=)` (origin (0,0,0) and
+under `include/peclet/voro/`, driven from Python as `peclet.voro` (`src/voro_*.cpp`, nanobind on
+core's zero-copy bridge — ONE translation unit per subsystem, see "Why the module is seven
+files" below). Names follow `../docs/NAMING.md`: `set_domain(extent=)` (origin (0,0,0) and
 all-periodic are CHECKED), `set_dt` + `dt` + `step(n)`, scalars/counts bare, copied-out arrays `get_*`.
 Two API tiers (QUALITY_PLAN D2, package F done 2026-09-10): the public surface is `Tessellation`,
 `FlowSolver`, `Simulation`, `optimize_volume_mesh`, `minimize_interface`, the lazily imported
@@ -37,6 +38,45 @@ A plain `cmake -B build` (no Kokkos) configures zero tests — "No tests were fo
 failure signal. `core` and `morton` are found as sibling checkouts (`../core`, `../morton`) through
 `cmake/PecletDeps.cmake` (`-DPECLET_VENDOR_SIBLINGS=ON` fetches them at the pinned tags instead — CI's
 configure-only check). The version is read from `pyproject.toml` (do not edit `project(VERSION)`).
+
+## Why the module is seven files
+
+`src/` holds ONE translation unit per subsystem, not one for the whole module, and that is a
+build-time decision rather than a taste one. **nvcc compiles a TU's device instantiations serially,
+and for a multi-arch wheel it repeats the whole job once per architecture inside the same process**,
+so a single binding TU pins the extension to one core no matter what `-j` says. Measured on this
+tree (one TU, `voro_bindings.cpp` as it stood): 326 s for one architecture, **922 s for two** — 2.8x,
+not 2x. The CUDA wheel job builds five (`CUDA_ARCH: 75` plus gencode 80/90/100/120) and took
+61-100 min, against peclet-flow's ~17 min for MORE device kernels (242 vs 146); the difference was
+never the physics, it was that flow has three TUs and voro had one.
+
+The seams are the classes themselves:
+
+| TU | owns |
+|---|---|
+| `voro_bindings.cpp` | `NB_MODULE` + the typed results. No engine. |
+| `voro_tessellation.cpp` | `Tessellation` — the four `MovingTessellation<..,W,S>` variants |
+| `voro_flow.cpp` | `FlowSolver` — collocated + covolume |
+| `voro_simulation.cpp` | `Simulation` — the two `ExplicitEuler<S>` variants |
+| `voro_optimizers.cpp` | `optimize_volume_mesh`, `minimize_interface` |
+| `voro_pore.cpp` | the SDF-walled pore-space family + its host oracle |
+| `voro_mpi.cpp` | `VoronoiHalo`, `DistributedTessellation` (in the source list only under MPI) |
+
+`voro_bindings_common.hpp` carries the host-side glue (array conversion, the domain/mode contract
+checks, the SDF scene holder, the typed results); `voro_bindings_optim.hpp` the two helpers the
+optimiser and pore TUs share; `voro_bindings_tess.hpp` the `Tess` class, because `Flow` and the
+distributed drivers name it.
+
+**The one rule that keeps the split from being pointless**: `Tess::face_mesh()` is DECLARED in
+`voro_bindings_tess.hpp` and DEFINED in `voro_tessellation.cpp`. It is the only `Tess` method a
+second TU calls, and its body instantiates `reevalPublish` / `buildAuxMaps` / `buildFaceMesh` for
+all four variants — inline, it would re-instantiate them in `voro_flow.cpp` and `voro_mpi.cpp` and
+trade serial compilation for redundant compilation. This is suite QUALITY_PLAN G.8, the same
+discipline as flow's `src/flow_solver_staggered.cpp` + `extern template`. **If you add a `Tess`
+member that another TU needs, declare it in the header and define it in `voro_tessellation.cpp`.**
+
+Adding a subsystem means adding a TU and a `bind*(nb::module_&)` entry in
+`voro_bindings_common.hpp`, called from `NB_MODULE` — not growing an existing file.
 
 ## Settled decisions — do not reverse silently
 
