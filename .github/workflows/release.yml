@@ -140,7 +140,15 @@ jobs:
       # CUDA_ARCH number: TURING75/75, AMPERE80/80, HOPPER90/90, BLACKWELL120/120.)
       KOKKOS_ARCH: "TURING75"
       CUDA_ARCH: "75"
-      NVCC_APPEND_FLAGS: "-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_120,code=sm_120"
+      # --threads: nvcc compiles the architectures SERIALLY by default, and this module is one
+      # translation unit (pyproject.toml sets CMAKE_UNITY_BUILD), so -j has nothing to parallelise
+      # and the five-way arch cost lands on one core. Measured locally, 5 architectures, 4 cores
+      # (the runner's count): 2268 s -> 735 s, a 3.09x cut, and bit-identical by construction --
+      # the per-arch compilations are independent and see the same source under the same flags.
+      # It is the arch count that costs, not the kernels: 1 arch 326 s, 2 arches 922 s (superlinear).
+      # Watch the first run for memory: -t4 holds four cicc processes on this TU at once. If the
+      # runner OOMs, lower it to 2 (still ~1.4x) rather than dropping it.
+      NVCC_APPEND_FLAGS: "-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_120,code=sm_120 --threads 4"
       CUDA_PKG: "13-0"          # CUDA toolkit package suffix (cuda-nvcc-13-0 …) — the oldest 13.x, see above
       CUDA_HOME: "/usr/local/cuda-13.0"
     steps:

@@ -61,7 +61,17 @@ minimum-version = "0.8"
 cmake.version = ">=3.24"
 # Build the device Python module (the install rule for the `voro` target is guarded by SKBUILD); the
 # extension + peclet/voro/__init__.py are placed by CMake install() into the peclet namespace.
-cmake.define = { PECLET_VORO_KOKKOS = "ON", PECLET_VORO_BUILD_PYTHON = "ON", PECLET_VORO_BUILD_TESTS = "OFF" }
+#
+# CMAKE_UNITY_BUILD: src/ is one translation unit per subsystem (CLAUDE.md, "Why the module is seven
+# files") because that makes an INCREMENTAL rebuild cost one subsystem instead of all 2445 lines --
+# 41 s -> 11-24 s on the host backend. A FROM-SCRATCH build wants the opposite: the seven TUs each
+# re-parse Kokkos, nanobind and the Python headers once per compilation pass, which measured 2.03x
+# the total CPU work of the single TU, and no amount of -j buys that back on a 4-vCPU runner
+# (5 architectures, 4 cores: single TU + `nvcc --threads 4` 735 s, best split configuration 1227 s).
+# Unity re-concatenates them into one TU, so every from-source install -- wheels included -- gets
+# the single-TU compilation while the dev tree keeps the split. Proved equivalent: python/state_hash.py
+# reproduces all 18 hashes under the unity build.
+cmake.define = { PECLET_VORO_KOKKOS = "ON", PECLET_VORO_BUILD_PYTHON = "ON", PECLET_VORO_BUILD_TESTS = "OFF", CMAKE_UNITY_BUILD = "ON", CMAKE_UNITY_BUILD_BATCH_SIZE = "0" }
 wheel.install-dir = "."
 wheel.packages = []
 # Note: SuiteNanobind.cmake lives in the umbrella (../cmake), so `pip install .` resolves it from a

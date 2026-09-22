@@ -78,6 +78,31 @@ member that another TU needs, declare it in the header and define it in `voro_te
 Adding a subsystem means adding a TU and a `bind*(nb::module_&)` entry in
 `voro_bindings_common.hpp`, called from `NB_MODULE` — not growing an existing file.
 
+**The split is for the DEV LOOP, not for the wheel**, and the two want opposite things. Measured,
+one architecture, host backend, `-j8`: editing anything in the old single TU cost 41 s; in the split
+tree, `voro_optimizers.cpp` costs 11 s, `voro_flow.cpp` 12 s, `voro_tessellation.cpp` 24 s. But a
+FROM-SCRATCH build pays each TU's re-parse of Kokkos + nanobind + the Python headers once per
+compilation pass, which is **2.03x the single TU's total CPU work** (922 s -> 1869 s at `-j1`,
+2 arches), and four cores cannot divide that back. At the wheel's five architectures on a 4-vCPU
+runner:
+
+| | wall |
+|---|---|
+| single TU, as the wheel built it | 2268 s |
+| **single TU + `nvcc --threads 4`** | **735 s** |
+| split `-j4` + `--threads 2` (best split config) | 1227 s |
+| split `-j4` | 1941 s |
+
+So `pyproject.toml` sets `CMAKE_UNITY_BUILD=ON`: every from-source install re-concatenates the seven
+TUs into one and gets the single-TU compilation, while a dev `cmake -B build_dev` keeps the split.
+`python/state_hash.py` reproduces all 18 hashes under the unity build — **if you add a TU, check it
+still unity-builds** (a name collision between two TUs only shows up there).
+
+The real lever for the wheel was never the file layout: nvcc compiles the architectures serially, so
+`--threads` in `NVCC_APPEND_FLAGS` (release.yml) is worth 3.09x on its own. The per-TU critical path,
+if you ever do need to split further, is `voro_flow.cpp` (660 s at 2 arches) — the collocated +
+covolume solvers, NOT the tessellator (647 s), which is where one would expect it.
+
 ## Settled decisions — do not reverse silently
 
 Chosen *against* the obvious or textbook alternative, on measured evidence. Full entries with
