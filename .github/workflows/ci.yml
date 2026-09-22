@@ -104,13 +104,23 @@ jobs:
       # peclet/core/solver/{coloring,csr_bicgstab}.hpp while still pinning core v0.6.1, which predates
       # both headers. CI stayed green; the wheel build would not have compiled. Tests are left off
       # here -- we need the module the wheel actually builds, not the test tree.
-      - name: Build against the pinned core / morton tags
+      #
+      # CMAKE_UNITY_BUILD is how the WHEEL compiles this module (pyproject.toml): src/ is one
+      # translation unit per subsystem for the dev loop's sake, and every from-source install
+      # concatenates them back into one because that is 2x cheaper in total CPU. The configure
+      # above builds the split; this one builds the unity, so both are exercised on every push.
+      # Without it, a name collision between two TUs -- the one failure mode unity has and the
+      # split does not -- would surface for the first time while cutting a release.
+      - name: Build against the pinned core / morton tags (as the wheel does: unity)
         working-directory: voro
         run: |
           cmake -B build_tag -G Ninja \
             -DPECLET_VORO_KOKKOS=ON -DPECLET_VORO_BUILD_PYTHON=ON -DPECLET_VENDOR_SIBLINGS=ON \
+            -DCMAKE_UNITY_BUILD=ON -DCMAKE_UNITY_BUILD_BATCH_SIZE=0 \
             -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/kokkos-install"
           cmake --build build_tag --parallel
+          test -f build_tag/CMakeFiles/voro.dir/Unity/unity_0_cxx.cxx \
+            || { echo "::error::the unity build produced no unity TU -- CMAKE_UNITY_BUILD was ignored"; exit 1; }
 
   # ── MPI (distributed) tests ──────────────────────────────────────────────────
   mpi:
