@@ -41,14 +41,14 @@ configure-only check). The version is read from `pyproject.toml` (do not edit `p
 
 ## Why the module is seven files
 
-`src/` holds ONE translation unit per subsystem, not one for the whole module, and that is a
-build-time decision rather than a taste one. **nvcc compiles a TU's device instantiations serially,
-and for a multi-arch wheel it repeats the whole job once per architecture inside the same process**,
-so a single binding TU pins the extension to one core no matter what `-j` says. Measured on this
-tree (one TU, `voro_bindings.cpp` as it stood): 326 s for one architecture, **922 s for two** — 2.8x,
-not 2x. The CUDA wheel job builds five (`CUDA_ARCH: 75` plus gencode 80/90/100/120) and took
-61-100 min, against peclet-flow's ~17 min for MORE device kernels (242 vs 146); the difference was
-never the physics, it was that flow has three TUs and voro had one.
+`src/` holds ONE translation unit per subsystem, not one for the whole module. **Read the "for the
+dev loop, not for the wheel" part below before reasoning about this** — the split was originally
+justified by the CUDA wheel taking 61-100 min against peclet-flow's ~17 for MORE device kernels
+(242 vs 146), on the theory that flow has three TUs and voro had one. That theory was WRONG, and
+measuring it is what showed so: the wheel's cost is the architecture count, not the file layout, and
+`nvcc --threads` fixes it for one line. flow's three TUs removed *duplicate instantiation*; voro had
+none to remove, so splitting could only add fixed cost to buy a parallelism `--threads` supplies more
+cheaply. What survived that measurement is the dev-loop argument, which is a good one on its own.
 
 The seams are the classes themselves:
 
