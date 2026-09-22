@@ -140,15 +140,20 @@ jobs:
       # CUDA_ARCH number: TURING75/75, AMPERE80/80, HOPPER90/90, BLACKWELL120/120.)
       KOKKOS_ARCH: "TURING75"
       CUDA_ARCH: "75"
-      # --threads: nvcc compiles the architectures SERIALLY by default, and this module is one
-      # translation unit (pyproject.toml sets CMAKE_UNITY_BUILD), so -j has nothing to parallelise
-      # and the five-way arch cost lands on one core. Measured locally, 5 architectures, 4 cores
-      # (the runner's count): 2268 s -> 735 s, a 3.09x cut, and bit-identical by construction --
-      # the per-arch compilations are independent and see the same source under the same flags.
-      # It is the arch count that costs, not the kernels: 1 arch 326 s, 2 arches 922 s (superlinear).
-      # Watch the first run for memory: -t4 holds four cicc processes on this TU at once. If the
-      # runner OOMs, lower it to 2 (still ~1.4x) rather than dropping it.
-      NVCC_APPEND_FLAGS: "-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_120,code=sm_120 --threads 4"
+      NVCC_APPEND_FLAGS: "-gencode arch=compute_80,code=sm_80 -gencode arch=compute_90,code=sm_90 -gencode arch=compute_100,code=sm_100 -gencode arch=compute_120,code=sm_120"
+      # --threads budget (used by the wheel step below, NOT here -- see that step for why).
+      # MEASURED: the peak resident set of a single nvcc compiler process on this module's one
+      # translation unit is 3.7 GB (one architecture, five-arch build of the unity TU). --threads N
+      # runs N of those AT ONCE, so N is a memory decision, not a core-count decision: 4 threads is
+      # ~15 GB against a hosted runner's 16 GB, which is too close to the edge to put in a release
+      # path. 4200 is the 3.7 GB measurement plus headroom for the architectures NOT separately
+      # measured (sm_90 / sm_100 could peak higher than the one that was); the reserve covers the
+      # rest of the job. On a standard 16 GB runner this lands on 2 threads; on a larger runner it
+      # scales up on its own, capped at 4.
+      # To raise it, measure first -- build the unity TU for all five arches at --threads 1 and
+      # sample `ps -eo rss,comm` for the max single cicc -- and put the number here, not a guess.
+      NVCC_MB_PER_THREAD: "4200"
+      NVCC_MB_RESERVE: "4000"
       CUDA_PKG: "13-0"          # CUDA toolkit package suffix (cuda-nvcc-13-0 …) — the oldest 13.x, see above
       CUDA_HOME: "/usr/local/cuda-13.0"
     steps:
@@ -179,7 +184,45 @@ jobs:
           export CMAKE_PREFIX_PATH="${GITHUB_WORKSPACE}/kokkos-cuda"
           cp packaging/pyproject-cuda.toml pyproject.toml   # -> peclet-voro-cu13 + nvidia-cuda-runtime dep
           mkdir -p /tmp/raw /tmp/out
-          "/opt/python/${{ matrix.py }}/bin/pip" wheel . --no-deps -w /tmp/raw
+
+          # nvcc compiles the architectures SERIALLY inside one process, and this module is a single
+          # translation unit (pyproject.toml sets CMAKE_UNITY_BUILD), so -j has nothing to parallelise
+          # and the five-way arch cost lands on one core. `--threads` parallelises it. Measured, five
+          # architectures on four cores: 2268 s -> 735 s, a 3.09x cut. Bit-identical by construction --
+          # the per-arch compilations are independent and see the same source under the same flags.
+          # It is the arch COUNT that costs, not the kernel count: 1 arch 326 s, 2 arches 922 s.
+          #
+          # Scoped to this step on purpose. NVCC_APPEND_FLAGS is a job-level variable and the Kokkos
+          # build above runs `cmake --build -j` across many translation units, where -j and --threads
+          # would MULTIPLY. Here there is exactly one TU, so N threads means N compilers, no more.
+          #
+          # The hazard is memory: --threads N holds N cicc processes on this one large TU at once, and
+          # a hosted runner has ~16 GB against the 503 GB box these timings came from. So the count is
+          # chosen from what the runner actually reports, and a failure walks it down instead of
+          # failing the release -- an OOM here would land AFTER the tag was cut.
+          build_wheel () {   # $1 = nvcc --threads value
+            rm -rf /tmp/raw && mkdir -p /tmp/raw
+            NVCC_APPEND_FLAGS="${NVCC_APPEND_FLAGS} --threads $1" \
+              "/opt/python/${{ matrix.py }}/bin/pip" wheel . --no-deps -w /tmp/raw
+          }
+          mem_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
+          echo "runner MemAvailable: ${mem_mb} MB; budgeting ${NVCC_MB_PER_THREAD} MB per nvcc thread"
+          want=$(( (mem_mb - NVCC_MB_RESERVE) / NVCC_MB_PER_THREAD ))
+          [ "$want" -gt 4 ] && want=4
+          [ "$want" -lt 1 ] && want=1
+          case "$want" in 4) attempts="4 2 1" ;; 3) attempts="3 1" ;; 2) attempts="2 1" ;; *) attempts="1" ;; esac
+          echo "nvcc --threads attempts: ${attempts}"
+          built=0
+          for t in $attempts; do
+            echo "::group::pip wheel with nvcc --threads $t"
+            if build_wheel "$t"; then built=1; echo "::endgroup::"; break; fi
+            echo "::endgroup::"
+            echo "::warning::CUDA wheel build failed at --threads ${t}. If cicc was OOM-killed (signal 9 / 'Killed'), the retry at a lower thread count is the fix and the wheel is unaffected; any other failure will reproduce identically below."
+          done
+          if [ "$built" != 1 ]; then
+            echo "::error::the CUDA wheel failed even at --threads 1 -- this is not a memory problem, look at the first failure above."
+            exit 1
+          fi
           # Retag to manylinux (libcudart/libcuda are external: excluded), then re-add the nvidia rpath
           # auditwheel resets, so `import peclet.voro` finds libcudart in the nvidia-cuda-runtime wheel.
           /opt/python/cp312-cp312/bin/pip install -q auditwheel wheel

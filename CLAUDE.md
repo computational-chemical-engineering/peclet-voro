@@ -99,7 +99,13 @@ TUs into one and gets the single-TU compilation, while a dev `cmake -B build_dev
 still unity-builds** (a name collision between two TUs only shows up there).
 
 The real lever for the wheel was never the file layout: nvcc compiles the architectures serially, so
-`--threads` in `NVCC_APPEND_FLAGS` (release.yml) is worth 3.09x on its own. The per-TU critical path,
+`--threads` in the wheel step (release.yml) is worth 3.09x on its own — **at four threads on a box
+with memory to spare.** It is a MEMORY decision, not a core-count one: one nvcc compiler peaks at
+**3.7 GB** on this TU and `--threads N` runs N at once, so four threads is ~15 GB against a hosted
+runner's 16 GB. release.yml therefore derives the count from the runner's own `MemAvailable`
+(2 on a standard runner, more on a larger one) and walks it down on failure rather than failing a
+release build. Note the flag is set in the WHEEL STEP, not the job env: the Kokkos build in the same
+job runs `cmake --build -j` over many TUs, where `-j` and `--threads` would multiply. The per-TU critical path,
 if you ever do need to split further, is `voro_flow.cpp` (660 s at 2 arches) — the collocated +
 covolume solvers, NOT the tessellator (647 s), which is where one would expect it.
 
