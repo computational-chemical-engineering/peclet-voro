@@ -111,7 +111,7 @@ jobs:
       # above builds the split; this one builds the unity, so both are exercised on every push.
       # Without it, a name collision between two TUs -- the one failure mode unity has and the
       # split does not -- would surface for the first time while cutting a release.
-      - name: Build against the pinned core / morton tags (as the wheel does: unity)
+      - name: "Build against the pinned core / morton tags (as the wheel does: unity)"
         working-directory: voro
         run: |
           cmake -B build_tag -G Ninja \
