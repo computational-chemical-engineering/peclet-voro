@@ -1,10 +1,10 @@
 # peclet.voro — distributed tessellation (core halo)
 
 Block-decomposed Voronoi tessellation across MPI ranks, built on the shared `core` halo
-(migration + ghost particles) via its `peclet.core.mpi` Python shim, and the `peclet.voro` Python module.
+(migration + ghost particles) via its `peclet.halo` Python shim, and the `peclet.voro` Python module.
 
 ```bash
-# build peclet.voro (this repo) and peclet.core.mpi (core), then:
+# build peclet.voro (this repo) and peclet.halo (core), then:
 PYTHONPATH=../build_suite/python:../../core/python/build \
     mpirun -np 4 python3 mpi/validate_voronoi.py
 ```

@@ -96,7 +96,7 @@ void bindTessellation(nb::module_& m) {
            doc("Clip the cells by an SDF solid given as a core shape scene in the flat node "
                "encoding\n(node_ints int32 (3 per node), node_reals float64 (16 per node)) — "
                "exactly "
-               "what\npeclet.core.geom.Scene.encode() returns and dem.add_analytic_wall takes; "
+               "what\npeclet.geom.SceneBuilder.encode() returns and dem.add_analytic_wall takes; "
                "`root` is the\ntree root to evaluate. Suite sign convention: sdf < 0 inside the "
                "solid. Seeds inside the\nsolid get no cell (volume 0); cells reaching into it gain "
                "wall facets. Applies to the\nnext `build` and is carried through every `step` "

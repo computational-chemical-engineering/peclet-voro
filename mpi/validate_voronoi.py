@@ -1,7 +1,7 @@
 # stale: predates the Kokkos voro API (voro.ExplicitEuler / set_l no longer exist); kept as the distributed-scheme record.
 """Distributed Voronoi tessellation validated against the serial tessellation.
 
-Block-decompose a periodic particle set across ranks (core `peclet.core.mpi`), gather ghost
+Block-decompose a periodic particle set across ranks (core `peclet.halo`), gather ghost
 particles one interaction radius deep, and have each rank tessellate its owned+ghost set with peclet.voro,
 keeping the OWNED cells. Because the domain is periodic, the ghosts need no special imaging: each rank
 tessellates in the full periodic [0,L] box (`put_in_box` wraps the gathered images back to canonical
@@ -15,7 +15,7 @@ import sys
 import numpy as np
 from mpi4py import MPI
 from peclet import voro
-import peclet.core.mpi
+import peclet.halo
 
 comm = MPI.COMM_WORLD
 rank, size = comm.rank, comm.size
@@ -52,7 +52,7 @@ if rank == 0:
     vfull, nfull = tessellate(g_pos)
 
 # distributed: own a block, gather ghosts, tessellate owned+ghost, keep owned cells
-mig = peclet.core.mpi.ParticleMigrator(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
+mig = peclet.halo.ParticleMigrator(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
 own = np.array([mig.owner_of(tuple(p)) for p in g_pos])
 mine = np.where(own == rank)[0]
 pos = g_pos[mine].copy()

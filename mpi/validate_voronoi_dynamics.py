@@ -14,7 +14,7 @@ import sys
 import numpy as np
 from mpi4py import MPI
 from peclet import voro
-import peclet.core.mpi
+import peclet.halo
 
 comm = MPI.COMM_WORLD
 rank, size = comm.rank, comm.size
@@ -68,7 +68,7 @@ if rank == 0:
     ref = np.array(s.get_positions()) % L
 
 # distributed
-mig = peclet.core.mpi.ParticleMigrator(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
+mig = peclet.halo.ParticleMigrator(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
 own = np.array([mig.owner_of(tuple(p)) for p in g_pos])
 mine = np.where(own == rank)[0]
 pos, vel, idd = g_pos[mine].copy(), g_vel[mine].copy(), ids[mine].astype(np.float64)

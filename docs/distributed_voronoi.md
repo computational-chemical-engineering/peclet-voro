@@ -3,7 +3,7 @@
 Suite roadmap Phase 5: decompose the periodic domain into blocks across MPI ranks; each rank gathers
 **ghost particles** one interaction radius deep so the Voronoi cells touching its block boundary close
 correctly; validate the owned cells against the serial tessellation. The Lagrangian halo (migration +
-ghost particles) is reused from `core` via its `peclet.core.mpi` Python shim, exactly as in
+ghost particles) is reused from `core` via its `peclet.halo` Python shim, exactly as in
 `dem`. The per-cell observables (`peclet.voro.get_volumes()` / `get_neighbor_counts()`, the latter reading the
 `cellFacetCount` view) give the serial-vs-distributed comparison.
 
@@ -32,7 +32,7 @@ must itself be correct → *its* neighbours (the 2nd ring) must be present. So t
 
 ## The algorithm (per rank)
 
-1. **Migrate** particles to their owning block (`peclet.core.mpi.ParticleMigrator.migrate`, periodic-aware).
+1. **Migrate** particles to their owning block (`peclet.halo.ParticleMigrator.migrate`, periodic-aware).
 2. **Gather ghosts** within `rcut` of the block (`gather_ghosts`); `rcut` must exceed the largest
    owned-cell circumradius (a perturbed lattice of spacing 1 needs `rcut ≈ 1`).
 3. **Tessellate owned + ghost in the full periodic `[0,L]` box** (`voro`), `put_in_box` first.
@@ -73,7 +73,7 @@ The dynamics above re-gathers full ghost **state** every step. A leaner alternat
   tessellation from scratch; integrate owned; discard ghosts.
 - **scheme C (force forward):** build a **persistent** owner↔ghost halo once per `rebuild_every`
   steps, hold one local Simulation over owned+ghost, and each step velocity-Verlet owned+ghost while
-  **forwarding the owner forces onto their ghost copies** (`peclet.core.mpi.ParticleHalo.forward`) and integrating the
+  **forwarding the owner forces onto their ghost copies** (`peclet.halo.ParticleHalo.forward`) and integrating the
   ghosts locally with them — so ghosts track their owners with no per-step state re-gather, and the
   tessellation is updated incrementally instead of rebuilt. (For Voronoi the owned-cell force is
   already complete from the local closure, so the *reverse* contributes zero; only the *forward* is

@@ -23,7 +23,7 @@ import sys
 import numpy as np
 from mpi4py import MPI
 from peclet import voro
-import peclet.core.mpi
+import peclet.halo
 
 comm = MPI.COMM_WORLD
 rank, size = comm.rank, comm.size
@@ -70,7 +70,7 @@ if rank == 0:
 
 
 def own_initial():
-    mig = peclet.core.mpi.ParticleMigrator(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
+    mig = peclet.halo.ParticleMigrator(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
     o = np.array([mig.owner_of(tuple(p)) for p in g_pos])
     m = np.where(o == rank)[0]
     return mig, g_pos[m].copy(), g_vel[m].copy(), ids[m].astype(np.float64)
@@ -98,7 +98,7 @@ def run_regather():
 
 def run_scheme_c():
     mig, pos, vel, idd = own_initial()
-    halo = peclet.core.mpi.ParticleHalo(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
+    halo = peclet.halo.ParticleHalo(origin=[0, 0, 0], extent=[L, L, L], cells=gs, periodic=[True, True, True])
     t_mpi = 0.0
     s = None
     x = v = F = None

@@ -131,7 +131,7 @@ using SceneT = peclet::voro::SdfScene<real_t>;
 using Mem = peclet::core::MemSpace;
 
 // A device-resident core shape scene + the SdfScene provider over it. The node table comes from the
-// flat node encoding (3 int32 + 16 float64 per node) that peclet.core.geom.Scene.encode() returns
+// flat node encoding (3 int32 + 16 float64 per node) that peclet.geom.SceneBuilder.encode() returns
 // (the same arrays dem.add_analytic_wall takes); the encoding carries no sampled grids, so this is
 // the ANALYTIC vocabulary (primitives + CSG + transforms).
 struct SceneHolder {

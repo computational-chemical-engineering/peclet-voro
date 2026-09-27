@@ -364,7 +364,7 @@ void bindMpi(nb::module_& m) {
            nb::arg("periodic") = std::array<bool, 3>{true, true, true},
            "Build the ORB decomposition of the box [origin, origin+extent) on `cells` ORB cells "
            "per axis\nwith per-axis `periodic` flags, over MPI_COMM_WORLD (the suite-wide domain "
-           "quartet, as\npeclet.core.mpi.ParticleHalo).")
+           "quartet, as\npeclet.halo.ParticleHalo).")
       .def_prop_ro("rank", &VHalo::rank, "This rank's MPI index.")
       .def_prop_ro("num_ranks", &VHalo::num_ranks, "Number of MPI ranks.")
       .def("owned_mask", &VHalo::owned_mask, nb::arg("positions"),

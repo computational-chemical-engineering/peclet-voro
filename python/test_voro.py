@@ -153,7 +153,7 @@ def test_simulation():
 
 def sphere_scene(centre, radius):
     """Flat node encoding (3 int32 + 16 float64 per node) of one solid sphere — what
-    peclet.core.geom.Scene.encode() would return for scene.add_sphere(radius, translation=centre)."""
+    peclet.geom.SceneBuilder.encode() would return for scene.add_sphere(radius, translation=centre)."""
     kSphere = 1
     node_ints = np.array([kSphere, -1, -1], dtype=np.int32)
     node_reals = np.zeros(16, dtype=np.float64)

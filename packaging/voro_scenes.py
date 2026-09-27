@@ -1,7 +1,7 @@
 """peclet.voro.scenes — small SDF scene helpers for the tessellator's ``set_geometry``.
 
 The tessellator takes a core shape scene in the flat node encoding (``node_ints`` (n,3) int32,
-``node_reals`` (n,16) float64, a root index) — what :meth:`peclet.core.geom.SceneBuilder.encode`
+``node_reals`` (n,16) float64, a root index) — what :meth:`peclet.geom.SceneBuilder.encode`
 returns. These helpers build the two encodings the pore-space examples need without importing
 ``peclet.core``: the CSG union of solid spheres (a packed bed as walls) and its numpy evaluation.
 """
