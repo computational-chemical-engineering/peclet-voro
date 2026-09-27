@@ -62,7 +62,14 @@ Changelog = "https://github.com/computational-chemical-engineering/peclet/blob/m
 [tool.scikit-build]
 minimum-version = "0.8"
 cmake.version = ">=3.24"
-cmake.define = { PECLET_VORO_KOKKOS = "ON", PECLET_VORO_BUILD_PYTHON = "ON", PECLET_VORO_BUILD_TESTS = "OFF", PECLET_CUDA_RUNTIME_WHEEL = "ON" }
+# CMAKE_UNITY_BUILD is OFF here, unlike the CPU pyproject: the CUDA wheel compiles the six split
+# TUs, one at a time (release.yml sets CMAKE_BUILD_PARALLEL_LEVEL=1 for this job). Each split TU's
+# cicc peaks well below the whole module's, which is what a 16 GB hosted runner can hold. Stated
+# explicitly because this file had simply omitted it -- the CUDA wheel was ALREADY a split build,
+# and ninja's default -j (nproc + 2) ran six of those compilations at once, which is what got the
+# v1.0.3 runners killed. Same code either way: python/state_hash.py gives identical hashes split
+# and unity.
+cmake.define = { PECLET_VORO_KOKKOS = "ON", PECLET_VORO_BUILD_PYTHON = "ON", PECLET_VORO_BUILD_TESTS = "OFF", PECLET_CUDA_RUNTIME_WHEEL = "ON", CMAKE_UNITY_BUILD = "OFF" }
 wheel.install-dir = "."
 wheel.packages = []
 sdist.include = ["src", "include", "packaging", "cmake", "CMakeLists.txt", "README.md", "LICENSE"]

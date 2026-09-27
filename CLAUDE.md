@@ -95,6 +95,12 @@ runner:
 
 So `pyproject.toml` sets `CMAKE_UNITY_BUILD=ON`: every from-source install re-concatenates the seven
 TUs into one and gets the single-TU compilation, while a dev `cmake -B build_dev` keeps the split.
+**The CUDA wheel is the exception** (since 1.0.4): `packaging/pyproject-cuda.toml` builds the SPLIT
+TUs, one at a time (`CMAKE_BUILD_PARALLEL_LEVEL=1` in release.yml), at `--threads 1`. It never had
+the unity flag, so 1.0.3's CUDA wheel was already split — and ninja's default -j ran six split
+compilations at once, which killed every hosted runner (1.0.3 tagged, never published). Serial
+split compilation trades wall time for the smallest peak memory; do not raise -j or `--threads`
+without a `gh workflow run release.yml` rehearsal that builds all five cu13 wheels.
 `python/state_hash.py` reproduces all 18 hashes under the unity build — **if you add a TU, check it
 still unity-builds** (a name collision between two TUs only shows up there).
 

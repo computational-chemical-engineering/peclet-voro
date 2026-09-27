@@ -120,7 +120,11 @@ jobs:
   cuda-wheel:
     name: cuda wheel (peclet-voro-cu13, ${{ matrix.py }}, manylinux_2_28 x86_64)
     runs-on: ubuntu-latest
-    timeout-minutes: 180          # ~95 min expected; fail as a budget, not as a silent 6 h kill
+    # Serial split compilation (CMAKE_BUILD_PARALLEL_LEVEL=1, --threads 1; see the wheel step). Measured
+    # 2026-09-27 on a 48-core box, five arches: 5441 s of nvcc for the six TUs, 2.4x the unity TU's
+    # 2268 s. v1.0.2's single-TU build took 1.0-1.7 h here, so ~2.5-4 h is expected: the budget sits just
+    # under the hosted runner's 6 h job limit, still a budget failure rather than a silent kill.
+    timeout-minutes: 350
     strategy:
       fail-fast: false
       matrix:
@@ -154,6 +158,10 @@ jobs:
       # sample `ps -eo rss,comm` for the max single cicc -- and put the number here, not a guess.
       NVCC_MB_PER_THREAD: "4200"
       NVCC_MB_RESERVE: "4000"
+      # MEASURED 2026-09-27 (five arches, nvcc 13.2, --threads 1, peak RSS of the largest process
+      # nvcc spawns, per TU): voro_flow 6189 MB, voro_tessellation 6181, voro_simulation 5742,
+      # voro_pore 3726, voro_optimizers 1240, voro_bindings 866. The per-thread figure above predates
+      # this and is LOW for the split TUs; with -j1 the cap below is what binds.
       # HARD CAP on the budget above, and it is 1. The v1.0.3 release (2026-09-27, run 36311764962)
       # proved the budget wrong on a real runner: MemAvailable 14503 MB -> 2 threads, and every one
       # of the five cu13 jobs had the WHOLE RUNNER killed (exit 137, "runner has received a shutdown
@@ -193,18 +201,28 @@ jobs:
           cp packaging/pyproject-cuda.toml pyproject.toml   # -> peclet-voro-cu13 + nvidia-cuda-runtime dep
           mkdir -p /tmp/raw /tmp/out
 
-          # nvcc compiles the architectures SERIALLY inside one process, and this module is a single
-          # translation unit (pyproject.toml sets CMAKE_UNITY_BUILD), so -j has nothing to parallelise
-          # and the five-way arch cost lands on one core. `--threads` parallelises it. Measured, five
+          # ONE COMPILATION AT A TIME. packaging/pyproject-cuda.toml (copied over pyproject.toml above)
+          # builds the split TUs (six; voro_mpi.cpp is MPI-only), NOT the CPU wheel's unity TU -- it
+          # never set CMAKE_UNITY_BUILD.
+          # Left alone, scikit-build-core's ninja runs nproc + 2 = 6 of them at once, each nvcc holding
+          # a cicc of its own, and that is what killed every v1.0.3 runner (exit 137, "runner has
+          # received a shutdown signal") at --threads 2 AND at --threads 1. CMAKE_BUILD_PARALLEL_LEVEL=1
+          # (cmake --build passes it to ninja as -j1) bounds the job to one nvcc process, whose peak is
+          # a single split TU's cicc. It costs wall time -- the split does ~2x the unity's total CPU
+          # work, all of it serial now -- which the job's timeout-minutes budgets for.
+          export CMAKE_BUILD_PARALLEL_LEVEL=1
+          #
+          # nvcc compiles the architectures SERIALLY inside one process; `--threads` parallelises
+          # them, at the price of one cicc per thread held at once. Measured (unity TU), five
           # architectures on four cores: 2268 s -> 735 s, a 3.09x cut. Bit-identical by construction --
           # the per-arch compilations are independent and see the same source under the same flags.
           # It is the arch COUNT that costs, not the kernel count: 1 arch 326 s, 2 arches 922 s.
           #
           # Scoped to this step on purpose. NVCC_APPEND_FLAGS is a job-level variable and the Kokkos
           # build above runs `cmake --build -j` across many translation units, where -j and --threads
-          # would MULTIPLY. Here there is exactly one TU, so N threads means N compilers, no more.
+          # would MULTIPLY. Here -j is 1 (above), so N threads means N compilers, no more.
           #
-          # The hazard is memory: --threads N holds N cicc processes on this one large TU at once, and
+          # The hazard is memory: --threads N holds N cicc processes on one TU at once, and
           # a hosted runner has ~16 GB against the 503 GB box these timings came from. So the count is
           # chosen from what the runner actually reports, and a failure walks it down instead of
           # failing the release -- an OOM here would land AFTER the tag was cut.
