@@ -154,6 +154,14 @@ jobs:
       # sample `ps -eo rss,comm` for the max single cicc -- and put the number here, not a guess.
       NVCC_MB_PER_THREAD: "4200"
       NVCC_MB_RESERVE: "4000"
+      # HARD CAP on the budget above, and it is 1. The v1.0.3 release (2026-09-27, run 36311764962)
+      # proved the budget wrong on a real runner: MemAvailable 14503 MB -> 2 threads, and every one
+      # of the five cu13 jobs had the WHOLE RUNNER killed (exit 137, "runner has received a shutdown
+      # signal") 10-20 min into the wheel build. A runner kill is not a failed command, so the
+      # 2 -> 1 fallback below never ran; 1.0.3 was tagged but never published. One thread is the
+      # configuration every release before 87cfc7c shipped with. Raise this only after a
+      # `gh workflow run release.yml` rehearsal at the higher count has built all five wheels.
+      NVCC_MAX_THREADS: "1"
       CUDA_PKG: "13-0"          # CUDA toolkit package suffix (cuda-nvcc-13-0 …) — the oldest 13.x, see above
       CUDA_HOME: "/usr/local/cuda-13.0"
     steps:
@@ -206,9 +214,10 @@ jobs:
               "/opt/python/${{ matrix.py }}/bin/pip" wheel . --no-deps -w /tmp/raw
           }
           mem_mb=$(awk '/MemAvailable/{print int($2/1024)}' /proc/meminfo)
-          echo "runner MemAvailable: ${mem_mb} MB; budgeting ${NVCC_MB_PER_THREAD} MB per nvcc thread"
+          echo "runner MemAvailable: ${mem_mb} MB; budgeting ${NVCC_MB_PER_THREAD} MB per nvcc thread, capped at ${NVCC_MAX_THREADS}"
           want=$(( (mem_mb - NVCC_MB_RESERVE) / NVCC_MB_PER_THREAD ))
           [ "$want" -gt 4 ] && want=4
+          [ "$want" -gt "$NVCC_MAX_THREADS" ] && want=$NVCC_MAX_THREADS
           [ "$want" -lt 1 ] && want=1
           case "$want" in 4) attempts="4 2 1" ;; 3) attempts="3 1" ;; 2) attempts="2 1" ;; *) attempts="1" ;; esac
           echo "nvcc --threads attempts: ${attempts}"
