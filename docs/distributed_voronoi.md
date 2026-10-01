@@ -7,8 +7,12 @@ ghost particles) is reused from `core` via its `peclet.halo` Python shim, exactl
 `dem`. The per-cell observables (`peclet.voro.get_volumes()` / `get_neighbor_counts()`, the latter reading the
 `cellFacetCount` view) give the serial-vs-distributed comparison.
 
-This page documents the **Python validation path** under `mpi/` (the scripts named below). The
-distributed engine itself lives in C++ — `include/peclet/voro/mpi/` (`VoronoiHalo`,
+This page records the scheme and the **Python validation** that first established it. Those three
+drivers (`mpi/validate_voronoi.py`, `mpi/validate_voronoi_dynamics.py`,
+`mpi/validate_voronoi_scheme_c.py`) were written against the pre-Kokkos `ExplicitEuler` /
+`NavierStokes` API and were **removed** once that API was retired; the code is in git history at
+commit `59d7e21` (their last revision, e.g. `git show 59d7e21:mpi/validate_voronoi_scheme_c.py`), and
+their measured results are kept below. The distributed engine itself lives in C++ — `include/peclet/voro/mpi/` (`VoronoiHalo`,
 `DistributedMovingTessellation`) and `fv/distributed.hpp` (the collocated solver over the halo) —
 and is gated by `tests/kokkos_mpi` at np = 1, 2, 4; see the README's "Distributed (MPI)" section.
 Both drivers are bound in an MPI build of `peclet.voro`: `VoronoiHalo(cells, extent=…)` (the
@@ -16,12 +20,19 @@ gather; `mpi/validate_voronoi_halo.py`) and `DistributedTessellation(cells, exte
 repair driver: `establish`, `step`, owned `get_volumes` / `get_neighbor_counts` / `get_wall_counts`,
 `diagnostics.num_regathers`; `python/state_hash.py --mpi`).
 
-**Status: implemented and validated.**
-- *Tessellation* (`mpi/validate_voronoi.py`): owned-cell **volumes and neighbour counts** match the
-  serial full-box tessellation to **machine precision** (max ~1e-15, 0 neighbour mismatches) at
-  np=1/2/4; owned volumes sum exactly to the box (perfect partition).
-- *Dynamics* (`mpi/validate_voronoi_dynamics.py`): 6 steps of compressible-Euler dynamics distributed
-  vs serial match to **machine precision** (~4e-15) at np=1/2/4.
+**Status: implemented and validated.** The test case of all three removed drivers: a periodic box
+`L = 6`, N = 8³ = 512 seeds on a perturbed simple-cubic lattice (spacing 0.75, uniform jitter ±0.1 for
+the tessellation, ±0.08 for the dynamics, seed 0; Gaussian velocities σ = 0.3, seed 1), core migrator
+over a 16³ cell grid, mass density 1, pressure 1, `dt = 2e-3`.
+- *Tessellation* (`validate_voronoi.py`, ghost depth `rcut = 1.0`): owned-cell **volumes and neighbour
+  counts** match the serial full-box tessellation to **machine precision** (max ~1e-15, mean ~3e-16,
+  0 neighbour-count mismatches) at np=1/2/4; owned volumes sum exactly to the box (perfect
+  partition). Total ghosts gathered: 256 at np=2, 640 at np=4.
+- *Dynamics* (`validate_voronoi_dynamics.py`, `rcut = 2.0`): 6 steps distributed vs serial, owned
+  positions compared by global id. Compressible Euler matches to **machine precision** (~4e-15) at
+  np=1/2/4. The viscous NavierStokes solver (viscosity = bulk viscosity = 0.05) matches to ~3e-9 at
+  np=4, converged at the 2-ring halo and stable for `rcut` 2.0–2.6; the residual vs Euler's 4e-15 is
+  OpenMP reduction-order noise in the viscous face sum, not a halo error.
 
 ### Halo depth: 1 ring for the tessellation, 2 rings for the dynamics
 The owned cells *close* with a **1-ring** halo (`rcut ≳ max owned-cell circumradius`). But the **force**
@@ -64,7 +75,7 @@ These were tried before the periodic-subset insight above; keep to step 3 instea
   SDFs (slab/cylinder/sphere); a box SDF has creases at edges/corners and hangs in the clip, even with
   all particles inside.
 
-## Two communication schemes (`mpi/validate_voronoi_scheme_c.py`)
+## Two communication schemes (removed driver `validate_voronoi_scheme_c.py`)
 
 The dynamics above re-gathers full ghost **state** every step. A leaner alternative communicates only
 **forces** over a persistent halo (the "scheme C" / conservative-flux exchange):
@@ -78,10 +89,12 @@ The dynamics above re-gathers full ghost **state** every step. A leaner alternat
   tessellation is updated incrementally instead of rebuilt. (For Voronoi the owned-cell force is
   already complete from the local closure, so the *reverse* contributes zero; only the *forward* is
   needed. The `voro` force/integrate split — `recompute_forces`/`get_forces`/`set_forces` — lets the
-  Python driver insert the exchange between force computation and the Verlet kick.)
+  Python driver insert the exchange between force computation and the Verlet kick; the manual Verlet
+  was verified bit-identical to the built-in `step()`.)
 
-Both match the serial trajectory to **machine precision**. Profiling (np=2, N=512, 40 steps; single
-shared dev box):
+Both match the serial trajectory to **machine precision**. Profiling (np=2, N=512, 40 steps, ghost
+depth `rcut = 2.0` + skin 0.5 for scheme C; MPI time = the max over ranks of the time in
+migrate/gather/build/forward; single shared dev box, 2026-06-02, commit `14974ef`):
 
 | scheme | MPI time / step | total / step |
 |---|---|---|
@@ -104,5 +117,6 @@ between rebuilds (the usual neighbour-list-rebuild trade-off).
   (multi-plane) clip. The periodic case (above) needs none of it.
 - Lees–Edwards (sheared) boxes: the migrator/halo would need the LE image shift (deferred; see the
   suite `docs/ROADMAP.md` Phase 1 note).
-- Perf: each rank currently rebuilds a `peclet.voro.Simulation` per validation; a persistent tessellation
-  with incremental `update()` is the natural next step for a running distributed simulation.
+- Perf: the removed Python drivers rebuilt a whole simulation per rank per step (re-gather) or per
+  `rebuild_every` steps (scheme C); the persistent tessellation with incremental repair is the C++
+  `DistributedTessellation` driver (`establish` once, then `step`), bound in the MPI module.

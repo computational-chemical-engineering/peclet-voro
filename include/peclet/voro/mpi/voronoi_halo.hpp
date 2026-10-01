@@ -10,7 +10,7 @@
  *
  * This wrapper reuses core for all of that — exactly the infrastructure
  * the dem distributed step uses, and the C++ counterpart of the validated
- * mpi/validate_voronoi.py recipe:
+ * Python recipe recorded in docs/distributed_voronoi.md:
  *   - peclet::core::decomp::BlockDecomposer<3> : ORB block ownership;
  *   - peclet::core::halo::ParticleMigrator<3>  : ownerOf() + periodic wrap;
  *   - peclet::core::halo::ParticleHaloTopology<3>      : gather ghost seeds within rcut and

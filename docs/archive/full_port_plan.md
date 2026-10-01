@@ -59,7 +59,8 @@ force/integrate split for the distributed scheme-C path) and the energies as dev
 reductions; a thin device `Simulation` facade orchestrating
 tessellate → publish → force → integrate. *Accept:* a full trajectory matches the
 legacy `Simulation::step` to machine precision (the `mpi/validate_voronoi_dynamics`
-scenarios, run against the device path).
+scenarios, run against the device path; that driver was removed later, see
+`docs/distributed_voronoi.md`).
 
 **5. Incompressible projection — DEFERRED (no faithful port possible).** The legacy
 `Incompressible` is an **incomplete stub**: `buildConstraintMatrix()` only assembles
