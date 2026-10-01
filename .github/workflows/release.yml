@@ -26,8 +26,8 @@ jobs:
     name: landing page is not stale
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           repository: computational-chemical-engineering/peclet
           path: .peclet-umbrella
