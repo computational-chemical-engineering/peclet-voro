@@ -1,7 +1,8 @@
 /**
  * @file lagrangian/operators.hpp
  * \brief The cell operators of the Lagrangian power-cell method (M7 NHV-W, DESIGN_NOTE §2.1, §2.4,
- * §10.2) as matrix-free facet loops over CellFacets (lagrangian/facets.hpp), periodic box:
+ * §10.2) as matrix-free facet loops over CellFacets (lagrangian/facets.hpp), periodic box with
+ * optional fixed walls:
  *
  *   J_x = ∂V/∂x at fixed w:   (J_x v)_i = Σ_f (A/d) [ (c_f − x_i)·v_i + (x_j′ − c_f)·v_j ]
  *   H   = ∂V/∂w:              (H w)_i  = Σ_f A/(2d) (w_i − w_j)            (TPFA Laplacian)
@@ -18,8 +19,14 @@
  * result is deterministic. Since both sides of a facet are computed separately, Cᵀ is the transpose
  * of C (and J_xᵀ of J_x) to round-off, not bit-for-bit.
  *
- * Walls: the operators are periodic-only for now (the wall terms of C and of the Rayleigh function,
- * DESIGN_NOTE §2.4/§10.2, are not implemented); the binding refuses a walled tessellation.
+ * Walls (fixed, impermeable, no-slip; DESIGN_NOTE §2.4, §10.2). The wall facets of CellFacets
+ * (outward unit normal n̂_w, area A^w, generator-relative centroid c^w) enter as
+ *   C:  (C v)_i += Σ_w A^w n̂_w·(v_w − v_i), v_w = 0  — cancels the inner sum's implied wall flux,
+ *       so 1ᵀC = 0 and Cᵀ1 = 0 hold with walls (C(const) = 0 only for a velocity along the walls);
+ *   ζ:  R_w = ½ Σ_w μ_i A^w |P_w v_i|² / δ_w,  P_w = I − n̂_w n̂_wᵀ,  δ_w = n̂_w·(c^w − x_i) the
+ *       generator–wall distance (the §2.4 wall rule, slip length 0), a per-cell diagonal block;
+ *   J_x, H: no wall term (a fixed wall facet does not move with x or w: Neumann for H).
+ * G^s stays the inner-facet gradient of §2.1 (the wall term is not part of it).
  */
 #ifndef PECLET_VORO_LAGRANGIAN_OPERATORS_HPP
 #define PECLET_VORO_LAGRANGIAN_OPERATORS_HPP
@@ -113,6 +120,9 @@ void applyDivergence(const CellFacets<Real>& F, const LView<Real>& v, const LVie
           for (int a = 0; a < 3; ++a)
             acc += s * G.centroid(3 * f + a) * (v(3 * j + a) - v(3 * i + a));
         }
+        for (int f = G.wallOffset(i); f < G.wallOffset(i + 1); ++f)
+          for (int a = 0; a < 3; ++a)
+            acc -= G.wallArea(f) * G.wallNormal(3 * f + a) * v(3 * i + a);
         out(i) = acc;
       });
 }
@@ -136,6 +146,9 @@ void applyDivergenceT(const CellFacets<Real>& F, const LView<Real>& l, const LVi
             acc[a] += s * ((c - G.conn(3 * f + a)) * l(j) - c * l(k));
           }
         }
+        for (int f = G.wallOffset(k); f < G.wallOffset(k + 1); ++f)
+          for (int a = 0; a < 3; ++a)
+            acc[a] -= G.wallArea(f) * G.wallNormal(3 * f + a) * l(k);
         for (int a = 0; a < 3; ++a)
           out(3 * k + a) = acc[a];
       });
@@ -177,10 +190,11 @@ struct DissipationScratch {
       , gam("lagrangian.gam", 9 * static_cast<std::size_t>(N)) {}
 };
 
-/// out (3N) = ζ v, the Hessian of R_in(v) = Σ_f μ_f V_f |sym G_f|² (so R_in = ½ vᵀζv and the
-/// dissipation rate is vᵀζv). `mu` (N) is the cell viscosity; μ_f is its harmonic mean (μ for like
-/// facets). Three gathers: G^s; per facet the stress S_f = 2μ_f V_f sym G_f with its direct
-/// (v_j − v_i)/d adjoint and the Ḡ adjoint Γ_i = Σ_f ½(S_f − (S_f n̂)⊗n̂); then G^sᵀ Γ.
+/// out (3N) = ζ v, the Hessian of R(v) = Σ_f μ_f V_f |sym G_f|² + R_w (so R = ½ vᵀζv and the
+/// dissipation rate is vᵀζv; R_w the no-slip wall term, see the file comment). `mu` (N) is the cell
+/// viscosity; μ_f is its harmonic mean (μ for like facets). Three gathers: G^s; per facet the
+/// stress S_f = 2μ_f V_f sym G_f with its direct (v_j − v_i)/d adjoint and the Ḡ adjoint Γ_i = Σ_f
+/// ½(S_f − (S_f n̂)⊗n̂); then G^sᵀ Γ.
 template <class Real>
 void applyDissipation(const CellFacets<Real>& F, const LView<Real>& mu, const LView<Real>& v,
                       const LView<Real>& out, DissipationScratch<Real>& scr) {
@@ -223,6 +237,19 @@ void applyDissipation(const CellFacets<Real>& F, const LView<Real>& mu, const LV
             for (int b = 0; b < 3; ++b)
               gm[3 * a + b] += Real(0.5) * (S[3 * a + b] - Sn[a] * n[b]);
           }
+        }
+        // R_w = ½ Σ_w μ_i A^w |P_w v_i|² / δ_w (no-slip wall facets)
+        for (int f = G.wallOffset(i); f < G.wallOffset(i + 1); ++f) {
+          const Real nw[3] = {G.wallNormal(3 * f), G.wallNormal(3 * f + 1),
+                              G.wallNormal(3 * f + 2)};
+          const Real dw = nw[0] * G.wallCentroid(3 * f) + nw[1] * G.wallCentroid(3 * f + 1) +
+                          nw[2] * G.wallCentroid(3 * f + 2);
+          if (!(dw > Real(0)))
+            continue;
+          const Real kw = mu(i) * G.wallArea(f) / dw;
+          const Real vn = nw[0] * v(3 * i) + nw[1] * v(3 * i + 1) + nw[2] * v(3 * i + 2);
+          for (int a = 0; a < 3; ++a)
+            o[a] += kw * (v(3 * i + a) - vn * nw[a]);
         }
         for (int e = 0; e < 9; ++e)
           gam(9 * i + e) = gm[e];
