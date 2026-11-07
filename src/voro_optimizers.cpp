@@ -56,8 +56,8 @@ void bindOptimizers(nb::module_& m) {
           fmt(kOptimizerTolerance) + ")\nand cg_iters (" + fmt(kOptimizerCgIters) +
           ") are peclet.voro.defaults. Returns an OptimizeResult (positions, weights, iters,\n"
           "max_vol_err, mean_vol_err, converged, num_empty). Pure Voronoi (use_weights=False)\n"
-          "reaches equal/graded volumes well; weights add fuller volume control but are limited "
-          "by\nthe periodic tessellation's ~1% min-image floor."));
+          "reaches equal/graded volumes well; weights add fuller volume control, limited to\n"
+          "targets reachable without burying a cell (a seed outside its own power cell)."));
 
   m.def(
       "minimize_interface",

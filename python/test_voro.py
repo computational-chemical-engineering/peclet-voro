@@ -242,8 +242,9 @@ def test_weights():
     t1.set_weights(w)
     t1.build(pos)
     v2 = t1.get_volumes()
-    # the periodic min-image power diagram is not an exact partition at nonzero weight spread
-    # (documented ~1e-2 floor; rung A2 of the Voronoi methods plan makes it exact)
+    # the periodic min-image power diagram is an exact partition while no cell is buried (sum V =
+    # box to ~1e-15); random seeds have close pairs, so even these small weights can bury one (its
+    # volume is the loss measured here, 8e-5 at N = 8000) -- hence the loose bound
     err = abs(v2.sum() / L**3 - 1.0)
     assert err < 1e-2 and (v2 >= 0).all(), err
     assert not np.array_equal(v0, v2)
@@ -253,7 +254,7 @@ def test_weights():
         assert not st["fell_back"]
     assert abs(t1.get_volumes().sum() / L**3 - 1.0) < 1e-2
     # A2a diagnostics: large-spread weights on overlapping (random) balls bury cells — reported,
-    # warned, and raised under strict=True; the small weights above bury none.
+    # warned, and raised under strict=True; the small weights above bury at most a few.
     rep = t1.diagnostics.build_report()
     import warnings
     wbig = (rng.random(N) * 2.0 * spacing) ** 2
@@ -269,7 +270,7 @@ def test_weights():
         raise AssertionError("strict build must raise on buried cells")
     except RuntimeError:
         pass
-    print(f"  Weights:      N={N}  power volumes sum err={err:.1e} (periodic min-image floor); "
+    print(f"  Weights:      N={N}  power volumes sum err={err:.1e} (buried cells); "
           f"small-w report {rep}; large-w buried={big['buried']}")
 
 
