@@ -14,9 +14,11 @@ peclet::voro::fv::FaceMesh<real_t> Tess::face_mesh() {
   const real_t Larr[3] = {L_[0], L_[1], L_[2]};
   return std::visit(
       [&](auto& mt) {
-        auto view =
-            peclet::voro::reevalPublish<real_t, defaults::kMaxPlanes, defaults::kMaxTriangles>(
-                mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef);
+        using Policy = typename std::decay_t<decltype(mt)>::PlanePolicy;
+        auto view = peclet::voro::reevalPublish<real_t, defaults::kMaxPlanes,
+                                                defaults::kMaxTriangles, Policy>(
+            mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef, /*withAreaGrad=*/false,
+            /*withMoments=*/false, weight_);
         auto aux = peclet::voro::buildAuxMaps(view);
         return peclet::voro::fv::buildFaceMesh(view, aux);
       },
