@@ -312,6 +312,12 @@ class Tess : public peclet::core::python::Releasable {
   nb::dict get_cell_moments();
   nb::ndarray<nb::numpy, real_t> get_weights();
   nb::dict solve_weights(nb::ndarray<real_t, nb::c_contig> volumes, real_t tol, int max_iter);
+  nb::dict reduced_potential(nb::ndarray<int, nb::c_contig> types,
+                             std::optional<nb::ndarray<real_t, nb::c_contig>> tension,
+                             std::optional<nb::ndarray<real_t, nb::c_contig>> sigma_wall,
+                             std::optional<nb::ndarray<real_t, nb::c_contig>> density,
+                             std::optional<std::array<real_t, 3>> gravity, real_t reference_density,
+                             real_t tol);
   bool has_geometry() const { return scene_.set; }
 
   // Per-cell number of resident SDF wall planes (0 everywhere without geometry).
