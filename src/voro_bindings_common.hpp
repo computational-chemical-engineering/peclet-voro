@@ -258,6 +258,7 @@ struct InterfaceResult {
 void bindOptimizers(nb::module_& m);
 void bindPore(nb::module_& m);
 void bindTessellation(nb::module_& m);
+void bindLagrangian(nb::module_& m);
 void bindFlow(nb::module_& m);
 void bindSimulation(nb::module_& m);
 #ifdef PECLET_VORO_MPI

@@ -142,6 +142,7 @@ NB_MODULE(_voro, m) {
   bindOptimizers(m);
   bindPore(m);
   bindTessellation(m);
+  bindLagrangian(m);
   bindFlow(m);
   bindSimulation(m);
 #ifdef PECLET_VORO_MPI

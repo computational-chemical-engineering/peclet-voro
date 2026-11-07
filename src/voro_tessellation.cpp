@@ -178,6 +178,31 @@ void bindTessellation(nb::module_& m) {
           "Returns {'interface_energy', 'wall_energy', 'lloyd_energy', 'tension_energy', 'force' "
           "(N,3) = dE/dx,\n'force_w' (N,) = dE/dw when weights are set}. Descend along −force to "
           "minimise.")
+      .def("get_facets", &Tess::get_facets,
+           "The interior facets of the resident cells (Voronoi or power), each ONCE, from its "
+           "lower\n"
+           "cell i < j, as a dict of arrays (n facets): 'i', 'j' (int32), 'area' (n,), 'centroid'\n"
+           "(n,3) in cell i's unwrapped frame (x_i + (c − x_i), possibly outside the box),\n"
+           "'dvec' (n,3) = x_j′ − x_i to the neighbour image that owns the facet (outward normal\n"
+           "of i = dvec/|dvec|), 'second_moment' (n,3,3) = ∫_f (y−c)(y−c)ᵀ dA. Physical units.\n"
+           "Computed in each cell's generator frame on the resident topology.")
+      .def("get_wall_facets", &Tess::get_wall_facets,
+           "The SDF wall facets of the resident cells: {'i' (int32), 'area', 'centroid' (n,3) in\n"
+           "cell i's unwrapped frame, 'normal' (n,3) outward unit normal}. Empty without geometry.")
+      .def("get_cell_moments", &Tess::get_cell_moments,
+           "{'volume' (N,), 'centroid' (N,3) in each cell's unwrapped frame}: the cell volume and\n"
+           "centroid by cones from the generator (an independent evaluation of get_volumes()).")
+      .def("get_weights", &Tess::get_weights,
+           "The current power weights (N,) (a copy; zeros for a Voronoi tessellation).")
+      .def("solve_weights", &Tess::solve_weights, nb::arg("volumes"), nb::arg("tol") = 1e-12,
+           nb::arg("max_iter") = 50,
+           "Solve for the power weights that give every cell the target `volumes` (N,), which\n"
+           "must sum to the tessellated volume (damped Newton of Kitagawa-Merigot-Thibert on\n"
+           "H = dV/dw, AMG-PCG; each iterate a cold rebuild). Starts from the current weights\n"
+           "(set_weights + build first); stops at max|V - V0|/V0 <= tol. Leaves the tessellation\n"
+           "built at the solution (get_weights()). Returns {'iterations', 'max_rel_err',\n"
+           "'converged', 'roundoff_floor', 'history': [{'max_rel_err', 'alpha',\n"
+           "'pcg_iterations', 'pcg_rel_residual', 'halvings'}]}.")
       .def_prop_ro("num_particles", &Tess::num_particles,
                    "Particle count N set by the last `build` (0 before it).")
       .def_prop_ro(

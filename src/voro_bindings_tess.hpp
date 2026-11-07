@@ -17,6 +17,7 @@
 #include "peclet/voro/energy/volume.hpp"
 #include "peclet/voro/energy/wall.hpp"
 #include "peclet/voro/fv/mesh.hpp"
+#include "peclet/voro/lagrangian/facets.hpp"
 #include "peclet/voro/reeval_tessellation.hpp"
 #include "peclet/voro/repair.hpp"
 #include "peclet/voro/topology_store.hpp"
@@ -301,6 +302,17 @@ class Tess : public peclet::core::python::Releasable {
   // The face mesh of the resident tessellation (track C): reevalPublish over the store, then the
   // reciprocal map and the owner/neighbour face records (fv/mesh.hpp). Used by FlowSolver.
   peclet::voro::fv::FaceMesh<real_t> face_mesh();
+
+  // ---- M7 Lagrangian power-cell method: DEFINED in voro_lagrangian.cpp (the export, the
+  // operators and the weight solve instantiate there, once) ----
+  // The facet geometry of the resident cells (lagrangian/facets.hpp), policy-correct.
+  peclet::voro::lagrangian::CellFacets<real_t> cell_facets();
+  nb::dict get_facets();
+  nb::dict get_wall_facets();
+  nb::dict get_cell_moments();
+  nb::ndarray<nb::numpy, real_t> get_weights();
+  nb::dict solve_weights(nb::ndarray<real_t, nb::c_contig> volumes, real_t tol, int max_iter);
+  bool has_geometry() const { return scene_.set; }
 
   // Per-cell number of resident SDF wall planes (0 everywhere without geometry).
   nb::ndarray<nb::numpy, int> get_wall_counts() {

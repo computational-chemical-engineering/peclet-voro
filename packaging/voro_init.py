@@ -11,6 +11,8 @@ The public surface (suite/docs/QUALITY_PLAN.md D2 — everything else is on each
 
 * :class:`Tessellation` — cold build + incremental repair of a moving point set, volumes, neighbour
   and wall counts, the energy layer (``energy_forces``).
+* :class:`FacetOperators` — the cell operators of the Lagrangian power-cell method (volume
+  Jacobian, weight Hessian, FV divergence, face-gradient dissipation) on a built Tessellation.
 * :class:`FlowSolver` — the static collocated / covolume Navier–Stokes solvers on the face mesh.
 * :class:`Simulation` — the moving-cell compressible-Euler / Navier–Stokes fluid.
 * :func:`optimize_volume_mesh`, :func:`minimize_interface` — mesh optimisers on a periodic box.
@@ -28,6 +30,7 @@ top-level ``__init__.py``.
 
 from . import _voro
 from ._voro import (  # noqa: F401
+    FacetOperators,
     FlowSolver,
     InterfaceResult,
     OptimizeResult,
@@ -42,6 +45,7 @@ from ._voro import (  # noqa: F401
 
 __all__ = [
     "Tessellation",
+    "FacetOperators",
     "FlowSolver",
     "Simulation",
     "optimize_volume_mesh",
