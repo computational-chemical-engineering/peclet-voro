@@ -202,6 +202,24 @@ void bindTessellation(nb::module_& m) {
            "built at the solution (get_weights()). Returns {'iterations', 'max_rel_err',\n"
            "'converged', 'roundoff_floor', 'history': [{'max_rel_err', 'alpha',\n"
            "'pcg_iterations', 'pcg_rel_residual', 'halvings'}]}.")
+      .def("reduced_potential", &Tess::reduced_potential, nb::arg("types"),
+           nb::arg("tension") = nb::none(), nb::arg("sigma_wall") = nb::none(),
+           nb::arg("density") = nb::none(), nb::arg("gravity") = nb::none(),
+           nb::arg("reference_density") = 0.0, nb::arg("tol") = 1e-12,
+           "The potential at the CURRENT cell volumes, U~(x) = U(x, w*(x)), of a POWER\n"
+           "tessellation (M7 NHV-W): w* holds the volumes, so U~ is reduced by the adjoint\n"
+           "    H pi = -dU/dw  (H = dV/dw, AMG-PCG to relative residual `tol`),\n"
+           "    grad U~ = dU/dx + J_x^T pi.\n"
+           "U = sum over unlike facets of tension[t_i, t_j] A_ij  (tension (nTypes, nTypes))\n"
+           "  + sum over wall facets of sigma_wall[t_i] A_w        (sigma_wall (nTypes,))\n"
+           "  - sum_i (density[t_i] - reference_density) gravity . int_{C_i} y dy\n"
+           "(facet gravity, cells integrated unwrapped at their generator: reference_density 0\n"
+           "with walls perpendicular to gravity; the mean density Sum m / |Omega| for a domain\n"
+           "periodic along gravity, whose energy then jumps when a generator wraps). All terms\n"
+           "optional; `types` (N,) int32. Returns {'interface_energy', 'wall_energy',\n"
+           "'gravity_energy', 'energy', 'gradient' (N,3) = grad U~, 'gradient_x' (N,3) = dU/dx,\n"
+           "'gradient_w' (N,) = dU/dw, 'pi' (N,) (mean zero), 'pcg_iterations',\n"
+           "'pcg_rel_residual'}. Descend along -gradient.")
       .def_prop_ro("num_particles", &Tess::num_particles,
                    "Particle count N set by the last `build` (0 before it).")
       .def_prop_ro(

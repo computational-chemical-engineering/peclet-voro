@@ -6,6 +6,7 @@
 
 #include "peclet/voro/lagrangian/facets.hpp"
 #include "peclet/voro/lagrangian/operators.hpp"
+#include "peclet/voro/lagrangian/potential.hpp"
 #include "peclet/voro/lagrangian/weight_solve.hpp"
 #include "voro_bindings_tess.hpp"
 
@@ -174,6 +175,94 @@ nb::dict Tess::solve_weights(nb::ndarray<real_t, nb::c_contig> volumes, real_t t
   return d;
 }
 
+nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
+                                 std::optional<nb::ndarray<real_t, nb::c_contig>> tension,
+                                 std::optional<nb::ndarray<real_t, nb::c_contig>> sigma_wall,
+                                 std::optional<nb::ndarray<real_t, nb::c_contig>> density,
+                                 std::optional<std::array<real_t, 3>> gravity,
+                                 real_t reference_density, real_t tol) {
+  if (N_ == 0 || !weighted_)
+    throw std::runtime_error(
+        "voro: reduced_potential() needs a built POWER tessellation (set_weights, build, "
+        "usually solve_weights first): U~ is reduced through the weights.");
+  const int N = N_;
+  if (static_cast<int>(types.size()) != N)
+    throw std::runtime_error("voro: reduced_potential(types) must be (N,)");
+  int nT = 0;
+  for (int i = 0; i < N; ++i) {
+    if (types.data()[i] < 0)
+      throw std::invalid_argument("voro: reduced_potential(types) must be >= 0");
+    nT = std::max(nT, types.data()[i] + 1);
+  }
+  auto table = [&](const std::optional<nb::ndarray<real_t, nb::c_contig>>& a, std::size_t n,
+                   const char* what) {
+    if (!a)
+      return DView{};
+    if (a->size() < n)
+      throw std::runtime_error(std::string("voro: reduced_potential(") + what +
+                               ") is too short for max(types)+1 = " + std::to_string(nT) +
+                               " types");
+    return peclet::core::toDevice<real_t>(std::vector<real_t>(a->data(), a->data() + n), what);
+  };
+  const std::size_t sT = static_cast<std::size_t>(nT);
+  if (tension && tension->size() != sT * sT)
+    throw std::runtime_error("voro: reduced_potential(tension) must be (nTypes, nTypes)");
+  const DView dten = table(tension, sT * sT, "tension");
+  const DView dsw = table(sigma_wall, sT, "sigma_wall");
+  const DView drho = table(density, sT, "density");
+  if (density.has_value() != gravity.has_value())
+    throw std::invalid_argument(
+        "voro: reduced_potential() takes `density` and `gravity` together (facet gravity)");
+  const lag::CellFacets<real_t> F = cell_facets();
+  Kokkos::View<int*, Mem> dtype("rp.type", N);
+  Kokkos::deep_copy(dtype, Kokkos::View<const int*, Kokkos::HostSpace>(types.data(), N));
+  DView gx("rp.dUdx", 3 * static_cast<std::size_t>(N)), gw("rp.dUdw", N);
+  real_t eIf = 0, eWall = 0, eG = 0;
+  const real_t Larr[3] = {L_[0], L_[1], L_[2]};
+  std::visit(
+      [&](auto& mt) {
+        using T = std::decay_t<decltype(mt)>;
+        using Policy = typename T::PlanePolicy;
+        if constexpr (std::is_same_v<Policy, peclet::voro::Power>) {
+          if (dten.extent(0) == 0 && dsw.extent(0) == 0)
+            return;
+          auto view = peclet::voro::reevalPublish<real_t, defaults::kMaxPlanes,
+                                                  defaults::kMaxTriangles, Policy>(
+              mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef, /*withAreaGrad=*/true,
+              /*withMoments=*/false, weight_);
+          if (dten.extent(0) > 0)
+            eIf = peclet::voro::energy::interfaceEnergyForce<real_t, Policy>(
+                view, dtype, dten, nT, pos_, weight_, L_[0], gx, gw, mt.sdf);
+          if (dsw.extent(0) > 0)
+            eWall = peclet::voro::energy::wallEnergyForce<real_t, Policy>(
+                view, dtype, dsw, mt.sdf, pos_, weight_, L_[0], gx, gw);
+        } else {
+          throw std::logic_error("voro: weighted Tessellation without a power engine");
+        }
+      },
+      mt_);
+  if (drho.extent(0) > 0) {
+    const real_t g[3] = {(*gravity)[0], (*gravity)[1], (*gravity)[2]};
+    eG = lag::facetGravity(F, pos_, dtype, drho, g, reference_density, Larr, gx, gw);
+  }
+  lag::WeightSolveParams prm;
+  prm.pcgTol = tol;
+  DView pi("rp.pi", N), grad("rp.grad", 3 * static_cast<std::size_t>(N));
+  const lag::AdjointResult R = lag::reducedGradient(F, gx, gw, pi, grad, prm);
+  nb::dict d;
+  d["interface_energy"] = eIf;
+  d["wall_energy"] = eWall;
+  d["gravity_energy"] = eG;
+  d["energy"] = eIf + eWall + eG;
+  d["gradient"] = toNumpy3(peclet::core::toVector(grad));
+  d["gradient_x"] = toNumpy3(peclet::core::toVector(gx));
+  d["gradient_w"] = toNumpy1(peclet::core::toVector(gw));
+  d["pi"] = toNumpy1(peclet::core::toVector(pi));
+  d["pcg_iterations"] = R.pcgIters;
+  d["pcg_rel_residual"] = R.pcgRelRes;
+  return d;
+}
+
 // --------------------------------------------------------------------------------------------------
 // FacetOperators: J_x, J_xᵀ, H, C, Cᵀ, G^s and ζ of a snapshot of the resident cells.
 // --------------------------------------------------------------------------------------------------
@@ -234,10 +323,6 @@ class FacetOperators : public peclet::core::python::Releasable {
 
   // A scalar viscosity arrives as a one-element vector.
   void init(Tess& t, std::vector<real_t> mu) {
-    if (t.has_geometry())
-      throw std::runtime_error(
-          "voro: FacetOperators are periodic-only for now (the wall terms of C and of the "
-          "Rayleigh function are not implemented); clear_geometry() and rebuild.");
     F_ = t.cell_facets();
     const int N = F_.nCells;
     if (static_cast<int>(mu.size()) == 1)
@@ -265,8 +350,11 @@ void bindLagrangian(nb::module_& m) {
   nb::class_<FacetOperators>(
       m, "FacetOperators",
       "The cell operators of the Lagrangian power-cell method on a SNAPSHOT of a built\n"
-      "Tessellation's cells (periodic box; Voronoi or power): matrix-free facet loops on the\n"
-      "device. Velocities are (N,3), cell scalars (N,). `apply(op, x)` with op one of\n"
+      "Tessellation's cells (periodic box, with or without SDF walls; Voronoi or power):\n"
+      "matrix-free facet loops on the device. Walls are fixed, impermeable and no-slip: C\n"
+      "gains -A_w n_w.v_i per wall facet, the Rayleigh function 1/2 mu A_w |P_w v_i|^2 / delta_w\n"
+      "(delta_w the generator-wall distance); J_x and H have no wall term.\n"
+      "Velocities are (N,3), cell scalars (N,). `apply(op, x)` with op one of\n"
       "  'volume_jacobian'   J_x v = ∂V/∂x|_w · v                      (N,3) -> (N,)\n"
       "  'volume_jacobian_t' J_xᵀ p                                    (N,)  -> (N,3)\n"
       "  'weight_hessian'    H w = ∂V/∂w · w = Σ A/(2d)(w_i − w_j)     (N,)  -> (N,)\n"

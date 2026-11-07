@@ -11,6 +11,10 @@
  *       ζ(translation) = 0; adjointness ⟨C v, l⟩ = ⟨v, Cᵀ l⟩, ⟨J_x v, p⟩ = ⟨v, J_xᵀ p⟩ and ζ
  *       symmetric, all to round-off.
  *   (C) Weight solve: damped Newton from w = 0 to max|V − V⁰|/V⁰ ≤ 1e-12.
+ *   (D) Potential (lagrangian/potential.hpp), periodic facet gravity (ρ_ref = mean density) on
+ *       power cells: ∂_xU and ∂_wU against central differences at fixed w, Σ ∂_wU = 0, and the
+ *       adjoint ∇Ũ = ∂_xU + J_xᵀπ against central differences of Ũ(x) = U(x, w*(x)) with the
+ *       weight solve re-run per evaluation (DESIGN_NOTE §10.2, gate W0), all ≤ 1e-6 relative.
  */
 #include <algorithm>
 #include <cmath>
@@ -22,6 +26,7 @@
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/lagrangian/facets.hpp"
 #include "peclet/voro/lagrangian/operators.hpp"
+#include "peclet/voro/lagrangian/potential.hpp"
 #include "peclet/voro/lagrangian/weight_solve.hpp"
 #include "peclet/voro/repair.hpp"
 
@@ -109,8 +114,8 @@ double checkGeometry(const MT& mt, const lag::CellFacets<real_t>& F, const DV& p
             const real_t m2 =
                 sec[0] + sec[4] + sec[8] + a * (df[0] * df[0] + df[1] * df[1] + df[2] * df[2]);
             const real_t ref = cc.faceMoment2(k);
-            // in units of h⁴: faceMoment2 fans from the foot point, which for a sliver face lies far
-            // outside it, so its own round-off is ~ε h⁴, not ε A h²
+            // in units of h⁴: faceMoment2 fans from the foot point, which for a sliver face lies
+            // far outside it, so its own round-off is ~ε h⁴, not ε A h²
             const real_t e = Kokkos::fabs(m2 - ref) / (hh * hh);
             acc = e > acc ? e : acc;
           }
@@ -182,6 +187,92 @@ double checkOperators(const lag::CellFacets<real_t>& F, std::mt19937& rng) {
   return e;
 }
 
+// (D) facet gravity + adjoint by finite differences; returns the worst relative error
+template <class MT>
+double checkPotential(MT& mp, const std::vector<real_t>& x, const DV& w,
+                      const std::vector<double>& V0, real_t L, real_t h) {
+  const int N = static_cast<int>(V0.size());
+  const real_t Larr[3] = {L, L, L};
+  const real_t g[3] = {real_t(0.2), real_t(-0.1), real_t(-1)};
+  std::vector<int> ty(N);
+  std::vector<real_t> rho = {1.0, 3.0};
+  double m = 0, vol = 0;
+  for (int i = 0; i < N; ++i) {
+    const real_t dx = x[3 * i] - 0.5 * L, dy = x[3 * i + 1] - 0.5 * L, dz = x[3 * i + 2] - 0.5 * L;
+    ty[i] = dx * dx + dy * dy + dz * dz < 0.09 * L * L ? 1 : 0;
+    m += rho[ty[i]] * V0[i];
+    vol += V0[i];
+  }
+  const real_t rhoRef = m / vol;
+  const Kokkos::View<int*, Mem> dty = peclet::core::toDevice<int>(ty, "ty");
+  const DV drho = toDev(rho, "rho");
+  // U(x, wt), and optionally ∂_xU, ∂_wU, at a rebuild of mp
+  auto energy = [&](const std::vector<real_t>& xx, const DV& wt, DV gx, DV gw) {
+    const DV p = toDev(xx, "p");
+    mp.setWeights(wt);
+    mp.rebuild(p);
+    const auto F = lag::exportCellFacets<real_t, peclet::voro::Power>(mp.store, p, wt, N, Larr);
+    if (gx.extent(0) == 0) {
+      gx = DV("gx", 3 * N);
+      gw = DV("gw", N);
+    }
+    return std::make_pair(lag::facetGravity(F, p, dty, drho, g, rhoRef, Larr, gx, gw), F);
+  };
+  // Ũ(xx): the weights re-solved for V0 from a warm start
+  auto reduced = [&](const std::vector<real_t>& xx) {
+    DV wt("wt", N);
+    Kokkos::deep_copy(wt, w);
+    const DV p = toDev(xx, "p");
+    mp.setWeights(wt);
+    mp.rebuild(p);
+    lag::WeightSolveParams prm;
+    prm.tol = 1e-14;
+    prm.maxIter = 20;
+    lag::solveWeights(mp, p, wt, V0, Larr, prm);
+    return energy(xx, wt, DV{}, DV{}).first;
+  };
+  DV gx("gx", 3 * N), gw("gw", N), pi("pi", N), grad("grad", 3 * N);
+  const auto F = energy(x, w, gx, gw).second;
+  lag::WeightSolveParams aprm;
+  aprm.pcgTol = 1e-14;
+  const auto ar = lag::reducedGradient(F, gx, gw, pi, grad, aprm);
+  const auto hx = toHost(gx), hw = toHost(gw), hg = toHost(grad);
+  double sw = 0;
+  for (real_t v : hw)
+    sw += v;
+  const double eSum = std::fabs(sw) / maxAbs(hw);
+  double eX = 0, eW = 0, eR = 0, eXonly = 0;
+  const real_t ex = real_t(1e-4) * h, ew = real_t(1e-4) * h * h;
+  for (int k : {N / 3, (2 * N) / 3}) {  // interior generators: no wrap within ±ex
+    for (int a = 0; a < 3; ++a) {
+      std::vector<real_t> xp = x, xm = x;
+      xp[3 * k + a] += ex;
+      xm[3 * k + a] -= ex;
+      const double fd =
+          (energy(xp, w, DV{}, DV{}).first - energy(xm, w, DV{}, DV{}).first) / (2 * ex);
+      eX = std::max(eX, std::fabs(fd - hx[3 * k + a]) / maxAbs(hx));
+      const double fr = (reduced(xp) - reduced(xm)) / (2 * ex);
+      eR = std::max(eR, std::fabs(fr - hg[3 * k + a]) / maxAbs(hg));
+      eXonly = std::max(eXonly, std::fabs(fr - hx[3 * k + a]) / maxAbs(hg));
+    }
+    std::vector<real_t> wv = toHost(w);
+    std::vector<real_t> wp = wv, wm = wv;
+    wp[k] += ew;
+    wm[k] -= ew;
+    const double fd = (energy(x, toDev(wp, "wp"), DV{}, DV{}).first -
+                       energy(x, toDev(wm, "wm"), DV{}, DV{}).first) /
+                      (2 * ew);
+    eW = std::max(eW, std::fabs(fd - hw[k]) / maxAbs(hw));
+  }
+  mp.setWeights(w);  // leave mp at the reference state
+  mp.rebuild(toDev(x, "x"));
+  std::printf(
+      "  (D) facet gravity FD: dU/dx=%.1e dU/dw=%.1e sum dU/dw=%.1e | adjoint (pcg %d it, %.1e): "
+      "grad U~ vs FD(U~)=%.1e (dU/dx alone %.1e)\n",
+      eX, eW, eSum, ar.pcgIters, ar.pcgRelRes, eR, eXonly);
+  return std::max({eX, eW, eR, eSum * 1e6});
+}
+
 int run(int n, unsigned seed) {
   const real_t L = 1.0, h = L / n;
   const int N = n * n * n;
@@ -250,6 +341,7 @@ int run(int n, unsigned seed) {
     std::printf("      exported V vs targets: %.1e\n", e);
     rc |= e <= 1e-11 ? 0 : 1;
   }
+  rc |= checkPotential(mp, x, w, V0, L, h) <= 1e-6 ? 0 : 1;
   return rc;
 }
 

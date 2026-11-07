@@ -653,9 +653,91 @@ def test_lagrangian():
     # 1e-10, not 1e-12: a vertex where a wall plane meets two nearly parallel facet planes is an
     # ill-conditioned intersection (measured 4e-12 at N = 3000)
     assert nw > 0 and e_wall < 1e-10, (nw, e_wall)
+    e_slab, e_red = _lagrangian_slab(rng)
     print(f"  Lagrangian:   facet identities voronoi={e_vor:.1e} power={e_pow:.1e} "
           f"walls={e_wall:.1e} ({nw} wall facets); weight solve {r['iterations']} it, "
-          f"max|V-V0|/V0={r['max_rel_err']:.1e}")
+          f"max|V-V0|/V0={r['max_rel_err']:.1e}; walled slab operators {e_slab:.1e}, "
+          f"reduced potential FD {e_red:.1e}")
+
+
+def _slab_scene(z0, z1, L):
+    """The solid outside the fluid slab z0 < z < z1, on BOTH sides of the periodic seam (the SDF is
+    evaluated at unwrapped cell coordinates and is not periodic): boxes [z1-L, z0] and [z1, z0+L]."""
+    ni = np.array([3, -1, -1, 3, -1, -1, 32, 0, 1], dtype=np.int32)
+    nr = np.zeros(48)
+    for k, cz in enumerate((0.5 * (z0 + z1 - L), 0.5 * (z0 + z1 + L))):
+        nr[16 * k:16 * k + 3] = (2 * L, 2 * L, 0.5 * (z0 - z1 + L))
+        nr[16 * k + 8:16 * k + 11] = (0.5 * L, 0.5 * L, cz)
+    for k in range(3):
+        nr[16 * k + 14] = nr[16 * k + 15] = 1.0
+    return ni, nr
+
+
+def _lagrangian_slab(rng):
+    """Walls: FacetOperators wall terms (C'1 = 0, C of a velocity along the walls = 0, adjointness,
+    zeta symmetric) and Tessellation.reduced_potential (interface + wetting + facet gravity) on a
+    sessile drop in a walled slab: sum dU/dw = 0 and grad U~ vs central differences of U~(x) with the
+    weight solve re-run per evaluation. Returns the two worst relative errors."""
+    N, L, z0, z1 = 1500, 1.0, 0.25, 0.75
+    ni, nr = _slab_scene(z0, z1, L)
+    pos = rng.random((N, 3)) * L
+    pos[:, 2] = z0 + (z1 - z0) * pos[:, 2]
+
+    def build(p, w=None):
+        t = voro.Tessellation()
+        t.set_domain(extent=(L, L, L))
+        t.set_geometry(ni, nr, root=2)
+        if w is not None:
+            t.set_weights(w)
+        t.build(p, strict=True)
+        return t
+
+    for _ in range(10):  # a few Lloyd steps: relaxed cells
+        pos = np.ascontiguousarray(build(pos).get_cell_moments()["centroid"] % L)
+    t = build(pos, np.zeros(N))
+    V = t.get_volumes()
+    assert abs(V.sum() / (z1 - z0) - 1) < 1e-12
+    V0 = V * (1 + 0.1 * (2 * rng.random(N) - 1))
+    V0 *= V.sum() / V0.sum()
+    r = t.solve_weights(V0)
+    assert r["converged"], r
+    w = t.get_weights()
+    op = voro.FacetOperators(t, viscosity=np.exp(0.5 * rng.standard_normal(N)))
+    v, u, l = rng.standard_normal((N, 3)), rng.standard_normal((N, 3)), rng.standard_normal(N)
+    Cv, Ctl = op.apply("divergence", v), op.apply("divergence_t", l)
+    Zu, Zv = op.apply("dissipation", u), op.apply("dissipation", v)
+    e = max(abs(Cv @ l - (v * Ctl).sum()) / (np.linalg.norm(Cv) * np.linalg.norm(l)),
+            abs((Zu * v).sum() - (u * Zv).sum()) / (np.linalg.norm(Zu) * np.linalg.norm(v)),
+            np.abs(op.apply("divergence_t", np.ones(N))).max() / np.abs(Ctl).max(),
+            np.abs(op.apply("divergence", np.tile([1.0, -2.0, 0.0], (N, 1)))).max() / np.abs(Cv).max())
+    # wall terms present: a velocity normal to the walls is not divergence-free at wall cells
+    assert np.abs(op.apply("divergence", np.tile([0.0, 0.0, 1.0], (N, 1)))).max() > 0.1 * np.abs(Cv).max()
+    h = ((z1 - z0) / N) ** (1 / 3)
+    c = np.array([0.5, 0.5, z0 + 1.5 * h])
+    types = (np.linalg.norm(pos - c, axis=1) < 3.5 * h).astype(np.int32)
+    kw = dict(tension=np.array([[0.0, 1.0], [1.0, 0.0]]), sigma_wall=np.array([0.0, 0.4]),
+              density=np.array([1.0, 50.0]), gravity=(0.0, 0.0, -1.0), tol=1e-14)
+    R = t.reduced_potential(types, **kw)
+    gw, g = R["gradient_w"], R["gradient"]
+    e_sum = abs(gw.sum()) / np.abs(gw).max()
+    assert e_sum < 1e-12, e_sum
+    # FD of U~ at a contact-line cell (wall facet + unlike facet) of the drop
+    wf = np.unique(t.get_wall_facets()["i"])
+    k = [i for i in wf if types[i] == 1][0]
+
+    def reduced(p):
+        tt = build(p, w)
+        assert tt.solve_weights(V0, tol=1e-14, max_iter=20)["converged"]
+        return tt.reduced_potential(types, **kw)["energy"]
+
+    e_red, eps = 0.0, 1e-4 * h
+    for a in range(3):
+        pp, pm = pos.copy(), pos.copy()
+        pp[k, a] += eps
+        pm[k, a] -= eps
+        e_red = max(e_red, abs((reduced(pp) - reduced(pm)) / (2 * eps) - g[k, a]) / np.abs(g).max())
+    assert e < 1e-11 and e_red < 1e-6, (e, e_red)
+    return e, e_red
 
 
 if __name__ == "__main__":
