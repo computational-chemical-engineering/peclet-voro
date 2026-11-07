@@ -267,10 +267,10 @@ class Tess : public peclet::core::python::Releasable {
         [&](auto& mt) {
           using T = std::decay_t<decltype(mt)>;
           using Policy = typename T::PlanePolicy;
-          auto view =
-              peclet::voro::reevalPublish<real_t, defaults::kMaxPlanes, defaults::kMaxTriangles>(
-                  mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef, /*withAreaGrad=*/true,
-                  /*withMoments=*/lloyd != 0);
+          auto view = peclet::voro::reevalPublish<real_t, defaults::kMaxPlanes,
+                                                  defaults::kMaxTriangles, Policy>(
+              mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef, /*withAreaGrad=*/true,
+              /*withMoments=*/lloyd != 0, weight_);
           if (lloyd != 0)
             eLloyd = peclet::voro::energy::lloydEnergyForce<real_t>(view, pos_, lloyd, force);
           if (facet_tension != 0)
