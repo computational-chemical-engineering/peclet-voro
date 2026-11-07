@@ -28,6 +28,7 @@
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/plane_policy.hpp"
 #include "peclet/voro/sdf.hpp"  // WallStore
 #include "peclet/voro/tessellation_view.hpp"
 #include "peclet/voro/tessellator.hpp"  // areaGradEnumerate / areaGradFill (rung A3)
@@ -45,13 +46,18 @@ namespace peclet::voro {
 /// `withAreaGrad` (rung A3): also publish the facet-edge area-Jacobian CSR (the same layout the
 /// cold build emits, with a deterministic prefix-sum reservation), so the energy layer runs on
 /// the incremental path too.
-template <class Real, int MAXP, int MAXT>
+/// `Policy` + `weight` (rung M7): the plane policy of the resident engine. A Power tessellation is
+/// re-evaluated on its radical planes with the resident weights (`weight`, N), so the published
+/// geometry is the power geometry of the power topology; Voronoi (the default) ignores `weight`
+/// and is byte-identical to the historical path.
+template <class Real, int MAXP, int MAXT, class Policy = Voronoi>
 TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
                                      const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
                                      const Kokkos::View<Real*, peclet::core::MemSpace>& vol, int N,
                                      const Real L[3], WallStore<Real> wall = {},
                                      Kokkos::View<Real*, peclet::core::MemSpace> xRef = {},
-                                     bool withAreaGrad = false, bool withMoments = false) {
+                                     bool withAreaGrad = false, bool withMoments = false,
+                                     Kokkos::View<Real*, peclet::core::MemSpace> weight = {}) {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Cell = ConvexCell<Real, MAXP, MAXT, false>;
@@ -147,6 +153,7 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
     Kokkos::View<int*, Mem> bs = base, eb = ebase;
     WallStore<Real> Wl = wall;
     Kokkos::View<Real*, Mem> XR = xRef;
+    Kokkos::View<Real*, Mem> W = weight;
     const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
     Kokkos::parallel_for(
         "reevalPublish.fill", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
@@ -160,7 +167,13 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
             dz = dz > Lzh ? dz - Lz : (dz < -Lzh ? dz + Lz : dz);
             Wl.load(i, c, dx, dy, dz);
           }
-          c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
+          const Real* wPtr = W.data();  // force-capture W OUTSIDE the constexpr-if (nvcc rule)
+          (void)wPtr;
+          if constexpr (Policy::kHasWeightDof)
+            c.template reevalGeometry<Policy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
+                                              wPtr[i], wPtr);
+          else
+            c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
           int idx = 0;
           const int b = bs(i);
           int faces[kMaxF];
