@@ -96,6 +96,10 @@ if(PECLET_VORO_BUILD_TESTS)
   # and an independent host brute-force radical-plane oracle (per-cell volume + neighbour set).
   add_voro_kokkos_test(test_power_cells)
 
+  # M7 Lagrangian power-cell layer: facet export (closure / moment identity / second moments vs
+  # the engine), the cell operators (null spaces, adjointness), the KMT weight solve to 1e-12.
+  add_voro_kokkos_test(test_lagrangian)
+
   # P5: differentiable SDF wall force (seed-foot J_wall). FD-vs-analytic — flat wall exact, sphere
   # first-order.
   add_voro_kokkos_test(test_sdf_policy)
