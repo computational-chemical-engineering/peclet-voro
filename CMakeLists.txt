@@ -177,6 +177,7 @@ if(PECLET_VORO_KOKKOS)
     set(PECLET_VORO_PY_SOURCES
       src/voro_bindings.cpp        # NB_MODULE + the typed results; no engine
       src/voro_tessellation.cpp    # Tessellation: the four MovingTessellation variants
+      src/voro_lagrangian.cpp      # facet export, FacetOperators, weight solve (M7)
       src/voro_flow.cpp            # FlowSolver: collocated + covolume Navier-Stokes
       src/voro_simulation.cpp      # Simulation: the two ExplicitEuler variants
       src/voro_optimizers.cpp      # optimize_volume_mesh, minimize_interface

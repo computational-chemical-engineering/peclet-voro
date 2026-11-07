@@ -566,6 +566,97 @@ def test_pore_cells():
           f"section polys={len(sec['volume'])}; host oracle: volumes {vtol:g}, vertex sets {ptol:g} L OK")
 
 
+def _facet_identities(t, pos, L):
+    """Per cell: closure sum A n = 0 and the moment identity sum A (c - x_i) (x) n = V I over the
+    interior AND wall facets; V from the cone fan vs get_volumes(). Returns the worst relative error."""
+    N = len(pos)
+    F, W, M = t.get_facets(), t.get_wall_facets(), t.get_cell_moments()
+    i, j, A = F["i"], F["j"], F["area"]
+    n = F["dvec"] / np.linalg.norm(F["dvec"], axis=1)[:, None]
+    ci = F["centroid"] - pos[i]
+    cj = ci - F["dvec"]
+    clo = np.zeros((N, 3))
+    T = np.zeros((N, 3, 3))
+    np.add.at(clo, i, A[:, None] * n)
+    np.add.at(clo, j, -A[:, None] * n)
+    np.add.at(T, i, A[:, None, None] * np.einsum("fa,fb->fab", ci, n))
+    np.add.at(T, j, -A[:, None, None] * np.einsum("fa,fb->fab", cj, n))
+    wi = W["i"]
+    np.add.at(clo, wi, W["area"][:, None] * W["normal"])
+    np.add.at(T, wi, W["area"][:, None, None] *
+              np.einsum("fa,fb->fab", W["centroid"] - pos[wi], W["normal"]))
+    V, Vt = M["volume"], t.get_volumes()
+    live = Vt > 0
+    h = (L**3 / N) ** (1.0 / 3.0)
+    e_clo = np.abs(clo[live]).max() / h**2
+    e_mom = np.abs(T[live] - V[live, None, None] * np.eye(3)).max() / V[live].mean()
+    e_vol = np.abs(V[live] / Vt[live] - 1).max()
+    return max(e_clo, e_mom, e_vol), F
+
+
+def test_lagrangian():
+    """M7 Lagrangian layer: facet export identities (Voronoi, power, SDF walls), the weight solve,
+    and the FacetOperators null spaces."""
+    rng = np.random.default_rng(5)
+    N, L = 3000, 1.0
+    pos = rng.random((N, 3)) * L
+    t = voro.Tessellation()
+    t.set_domain(extent=(L, L, L))
+    t.build(pos)
+    e_vor, F = _facet_identities(t, pos, L)
+    assert e_vor < 1e-12, e_vor
+    assert F["second_moment"].shape == (len(F["i"]), 3, 3)
+    assert np.all(F["i"] < F["j"])
+    # power: weights for +-5 % target volumes (random points have close pairs: a small spread keeps
+    # every seed inside its own cell)
+    V = t.get_volumes()
+    V0 = V * (1 + 0.05 * (2 * rng.random(N) - 1))
+    V0 *= V.sum() / V0.sum()
+    t.set_weights(np.zeros(N))
+    t.build(pos)
+    r = t.solve_weights(V0)
+    assert r["converged"] and r["max_rel_err"] <= 1e-12, r
+    assert np.abs(t.get_volumes() / V0 - 1).max() <= 1e-12
+    e_pow, _ = _facet_identities(t, pos, L)
+    assert e_pow < 1e-12, e_pow
+    op = voro.FacetOperators(t, viscosity=2.0)
+    one = np.ones(N)
+    assert np.abs(op.apply("weight_hessian", one)).max() < 1e-12 * np.abs(
+        op.apply("weight_hessian", rng.standard_normal(N))).max()
+    tr = np.tile([1.0, -2.0, 0.5], (N, 1))
+    assert np.abs(op.apply("dissipation", tr)).max() < 1e-12 * np.abs(
+        op.apply("dissipation", rng.standard_normal((N, 3)))).max()
+    assert np.abs(op.apply("divergence_t", one)).max() < 1e-12 * np.abs(
+        op.apply("divergence_t", rng.standard_normal(N))).max()
+    try:
+        op.apply("laplacian", one)
+        raise AssertionError("an unknown operator name must raise")
+    except ValueError:
+        pass
+    # SDF walls: the wall facets close the cells. A FLAT wall (a slab z in [0.4, 0.6]; the SDF is not
+    # periodic, so keep it off the seam): the
+    # tangent-plane clip is exact there, so neighbouring cells share their facets exactly (on a
+    # curved wall each cell clips by its own tangent planes and the two sides of a facet differ).
+    tw = voro.Tessellation()
+    tw.set_domain(extent=(L, L, L))
+    ni = np.array([3, -1, -1], dtype=np.int32)                     # kBox
+    nr = np.zeros(16)
+    nr[0:3] = (2.0, 2.0, 0.1)                                       # half-sizes
+    nr[8:11] = (0.5, 0.5, 0.5)
+    nr[11:15] = (0.0, 0.0, 0.0, 1.0)
+    nr[15] = 1.0
+    tw.set_geometry(ni, nr, root=0)
+    tw.build(pos)
+    e_wall, _ = _facet_identities(tw, pos, L)
+    nw = len(tw.get_wall_facets()["i"])
+    # 1e-10, not 1e-12: a vertex where a wall plane meets two nearly parallel facet planes is an
+    # ill-conditioned intersection (measured 4e-12 at N = 3000)
+    assert nw > 0 and e_wall < 1e-10, (nw, e_wall)
+    print(f"  Lagrangian:   facet identities voronoi={e_vor:.1e} power={e_pow:.1e} "
+          f"walls={e_wall:.1e} ({nw} wall facets); weight solve {r['iterations']} it, "
+          f"max|V-V0|/V0={r['max_rel_err']:.1e}")
+
+
 if __name__ == "__main__":
     print(f"peclet.voro execution_space = {voro.execution_space}")
     test_tessellation()
@@ -574,6 +665,7 @@ if __name__ == "__main__":
     test_geometry()
     test_weights()
     test_energy_forces()
+    test_lagrangian()
     test_flow_solver()
     test_redistribute()
     test_pore_cells()
