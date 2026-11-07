@@ -20,11 +20,13 @@
  * The optimiser is host-orchestrated (rebuild the power tessellation each Newton step, assemble +
  * solve); the solve itself runs on the Kokkos device. Depends on Effort 1 (power cells).
  *
- * LIMITATION (deferred): the PERIODIC min-image power diagram is not an exact partition (Effort 1:
- * volumes off the box by ~1% at non-trivial weights), so the OT system V=V_set is inconsistent
- * below that floor and the Newton residual plateaus at ~1% of the box volume. The Hessian is
- * FD-validated correct and the solve/line-search are sound; a clean converging OT needs an
- * exact-partition power tessellation (a non-periodic / walled domain, or the multi-image gather).
+ * LIMITATION: the periodic min-image power diagram IS an exact partition while every seed lies
+ * inside its own cell (Σ V = box volume to ≤ 2e-15, M7 WO1′); volume goes missing only when a
+ * cell is BURIED (its seed outside its own power cell: the engine empties it, build_report()
+ * ['buried'] > 0), which happens on close seed pairs at large weight spread. Then V = V_set has
+ * no solution in voro's small-weight regime and the Newton residual stalls at the buried cells'
+ * volume. Keep the targets within reach of the seed distribution (relaxed seeds, moderate
+ * spread); lagrangian/weight_solve.hpp rejects any step that buries a cell.
  * For pure-Voronoi position-based volume control that has no such floor, use mesh_optimizer.hpp.
  */
 #ifndef PECLET_VORO_OT_OPTIMIZER_HPP
