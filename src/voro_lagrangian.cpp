@@ -493,7 +493,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     withIntegIfAny([&](auto& I) { I.setSolverOptions(schurAssembled_, adjointTol_, saddleTol_); });
   }
   // M7 WO-PERF trials (private): the saddle method, B's rotational chi, AMG reuse
-  void set_perf_options(const std::string& method, real_t rotational, int amgReuse) {
+  void set_perf_options(const std::string& method, real_t rotational, int amgReuse, real_t warmTol,
+                        real_t newtonTol) {
     namespace lg = peclet::voro::lagrangian;
     if (method == "schur")
       method_ = lg::SaddleMethod::kSchurCG;
@@ -504,13 +505,17 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     else
       throw std::invalid_argument(
           "voro: LagrangianFlow._set_perf_options(method in 'schur', 'coupled', 'projection')");
-    if (!(rotational >= 0) || amgReuse < 0)
+    if (!(rotational >= 0) || amgReuse < 0 || !(warmTol > 0) || !(newtonTol > 0))
       throw std::invalid_argument(
-          "voro: LagrangianFlow._set_perf_options(rotational >= 0, amg_reuse >= 0)");
+          "voro: LagrangianFlow._set_perf_options(rotational >= 0, amg_reuse >= 0, tolerances > "
+          "0)");
     rotational_ = rotational;
     amgReuse_ = amgReuse;
+    warmTol_ = warmTol;
+    newtonTol_ = newtonTol;
     perfSet_ = true;
-    withIntegIfAny([&](auto& I) { I.setPerfOptions(method_, rotational_, amgReuse_); });
+    withIntegIfAny(
+        [&](auto& I) { I.setPerfOptions(method_, rotational_, amgReuse_, warmTol_, newtonTol_); });
   }
   void set_gauge(int every, real_t strain, real_t alpha_max) {
     if (every < 0 || !(strain >= 0) || !(alpha_max >= 0))
@@ -858,7 +863,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
             if (adjointTol_ > 0)
               I->setSolverOptions(schurAssembled_, adjointTol_, saddleTol_);
             if (perfSet_)
-              I->setPerfOptions(method_, rotational_, amgReuse_);
+              I->setPerfOptions(method_, rotational_, amgReuse_, warmTol_, newtonTol_);
             if constexpr (T::kHasSdf)
               i1_ = std::move(I);
             else
@@ -884,6 +889,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   peclet::voro::lagrangian::SaddleMethod method_ = peclet::voro::lagrangian::SaddleMethod::kSchurCG;
   real_t rotational_ = 1;
   int amgReuse_ = 0;
+  real_t warmTol_ = 1e-10, newtonTol_ = 1e-10;
   bool perfSet_ = false;  // false: the integrator's defaults
   std::optional<real_t> rhoRef_;
   real_t dtUser_ = 0, cfl_ = 0.2, cap_ = 0.5, time_ = 0, lastDt_ = 0, theta_ = 0.5;
@@ -973,11 +979,14 @@ void bindLagrangian(nb::module_& m) {
            "weights solved there; DESIGN_NOTE option S; the default: second order in the energy)\n"
            "or 'start' (x^n; first order).")
       .def("_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "schur",
-           nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 0,
+           nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 0, nb::arg("warm_tol") = 1e-10,
+           nb::arg("newton_tol") = 1e-10,
            "M7 WO-PERF solver trials (not public API): the kick's saddle method ('schur' nested\n"
            "Schur CG, 'coupled' block-preconditioned FGMRES, 'projection' rotational incremental\n"
            "pressure correction with chi = `rotational`), and AMG hierarchy reuse over at most\n"
-           "`amg_reuse` further setups (0: rebuilt every setup).")
+           "`amg_reuse` further setups (0: rebuilt every setup); the relative tolerances of the "
+           "warm-start\n"
+           "and Newton H solves.")
       .def("_set_solver_options", &LagrangianFlow::set_solver_options, nb::arg("schur_assembled"),
            nb::arg("adjoint_tol"), nb::arg("saddle_tol") = 1e-12,
            "M7 WO4a solver trials (not public API): AMG on the assembled C M^-1 C^T as the Schur\n"

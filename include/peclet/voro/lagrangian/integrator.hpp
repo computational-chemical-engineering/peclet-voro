@@ -216,9 +216,10 @@ struct SaddleParams {
   /// 4096); inviscid 113 → 23 outer, but its 4× dearer setup makes the step ~7 % slower.
   bool schurAssembled = true;
   SaddleMethod method = SaddleMethod::kSchurCG;
-  /// B: χ of the rotational multiplier update μ += φ + χ a (2 μ_min / V_i) (C v*)_i (the
-  /// Cahouet–Chabard term at flow's "min" coefficient: μ_min the least cell viscosity); 0: plain
-  /// incremental
+  /// B: χ of the rotational multiplier update μ += φ + χ a (μ_min / V_i) (C v*)_i — flow's
+  /// rotational term −χ μ_min ∇·u* (its default mode "min", χ = 1: the least cell viscosity, stable
+  /// at any contrast); χ = 2 is the whole gradient part of the stress-form ζ (the Cahouet–Chabard
+  /// 2μ/V). 0: plain incremental
   double rotational = 1.0;
   int restart = 40;      ///< A: FGMRES restart length
   int coupledInner = 2;  ///< A: Jacobi-PCG iterations of Â⁻¹ in the preconditioner (0: Jacobi)
@@ -289,7 +290,7 @@ class SaddleSolver {
       cc_ = peclet::core::toDevice<Real>(cc, "sd.cc");
       const double muMin = N > 0 ? *std::min_element(mh.begin(), mh.end()) : 0.0;
       for (int i = 0; i < N; ++i)
-        cc[i] = vh[i] > 0 ? 2.0 * muMin / vh[i] : 0.0;
+        cc[i] = vh[i] > 0 ? muMin / vh[i] : 0.0;
       ccMin_ = peclet::core::toDevice<Real>(cc, "sd.ccMin");
     }
     Kokkos::Timer tb;
@@ -498,8 +499,8 @@ class SaddleSolver {
       }
     }
     if (proj && viscous_ && a > Real(0) && prm.rotational > 0) {
-      // rotational update: μ += χ a (2 μ_min / V) C v* — S⁻¹ ≈ S₀⁻¹ + a·2μ/V (Cahouet–Chabard)
-      // carries the viscous part of the multiplier increment that the S₀ projection leaves out
+      // rotational update: μ += χ a (μ_min / V) C v* — the viscous part of the multiplier
+      // increment the S₀ projection leaves out (S⁻¹ ≈ S₀⁻¹ + a·2μ/V, Cahouet–Chabard; flow's −μ∇·u*)
       const LView<Real> rs = rStar_, cm = ccMin_;
       const Real ca = Real(prm.rotational) * a;
       Kokkos::parallel_for(
@@ -886,6 +887,9 @@ struct IntegratorParams {
   /// this many further setups, and rebuilt early when their solve needs more than 1.5× (+2) the
   /// iterations it took right after the build. 0: rebuilt at every setup (the WO4 behaviour).
   int amgReuse = 0;
+  /// relative residual of the linear warm-start H solves (x^{n+1} and the option-S midpoint) and
+  /// of the Newton H solves (the inexact-Newton forcing; the volumes still close to weightTol)
+  double warmTol = 1e-10, newtonTol = 1e-10;
   // ---- the gauge G″ (DESIGN_NOTE §12.3.2) ----
   int gaugeEvery = 1;              ///< the gauge after kick 2 every this many steps (0: off)
   double gaugeStrain = 3;          ///< c_g: α_i = min(α_max, c_g τ ε̂_i)
@@ -1315,10 +1319,13 @@ class Integrator {
     prm_.saddle.tol = saddleTol;
   }
   /// M7 WO-PERF knobs: the saddle method, B's rotational χ, A-solve tolerances and AMG reuse.
-  void setPerfOptions(SaddleMethod method, double rotational, int amgReuse) {
+  void setPerfOptions(SaddleMethod method, double rotational, int amgReuse, double warmTol,
+                      double newtonTol) {
     prm_.saddle.method = method;
     prm_.saddle.rotational = rotational;
     prm_.amgReuse = amgReuse;
+    prm_.warmTol = warmTol;
+    prm_.newtonTol = newtonTol;
   }
   void setGauge(int every, double strain, double alphaMax) {
     prm_.gaugeEvery = every;
@@ -1372,7 +1379,7 @@ class Integrator {
           KOKKOS_LAMBDA(const int i) { r(i) = i == 0 ? Real(0) : ms * (r(i) - mean); });
     }
     WeightSolveParams wp;
-    wp.pcgTol = prm_.hTol;
+    wp.pcgTol = prm_.warmTol;
     wp.amg = &hAmg_;
     solvePinnedH(F_, tmpN_, dw_, wp);
     {
@@ -1394,6 +1401,7 @@ class Integrator {
     wp.tol = prm_.weightTol;
     wp.maxIter = prm_.weightMaxIter;
     wp.repair = true;
+    wp.pcgTol = prm_.newtonTol;
     const WeightSolveResult ws = solveWeights(*mt_, pos_, weight_, V0h_, L_, wp);
     rep.tRepair += ws.evalSeconds;
     rep.evaluations += ws.evaluations;
@@ -1605,7 +1613,7 @@ class Integrator {
           "nhvw.warmRhs", Kokkos::RangePolicy<Exec>(0, N_),
           KOKKOS_LAMBDA(const int i) { r(i) = i == 0 ? Real(0) : mt * (r(i) - mean); });
       WeightSolveParams wp;
-      wp.pcgTol = prm_.hTol;
+      wp.pcgTol = prm_.warmTol;
       wp.amg = &hAmg_;
       rep.warmIters = solvePinnedH(F_, tmpN_, dw_, wp).first;
       const LView<Real> w = weight_, dw = dw_;
@@ -1630,7 +1638,7 @@ class Integrator {
     WeightSolveParams wp;
     wp.tol = prm_.weightTol;
     wp.maxIter = prm_.weightMaxIter;
-    wp.pcgTol = prm_.hTol;
+    wp.pcgTol = prm_.newtonTol;
     wp.repair = true;
     wp.amg = &hAmg_;
     WeightSolveResult ws = solveWeights(*mt_, pos_, weight_, V0h_, L_, wp);
