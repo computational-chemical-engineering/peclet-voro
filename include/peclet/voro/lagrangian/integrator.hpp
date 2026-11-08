@@ -660,13 +660,30 @@ struct StepReport {
   double tGauge = 0;
 };
 
-/// Result of Integrator::relax (the t = 0 interface relaxation).
+/// Parameters of the t = 0 relaxation R0 (DESIGN_NOTE §12.3.1; the values of the P4 pilot).
+struct RelaxParams {
+  int maxIter = 5000;  ///< descent iterations at most
+  int window = 250;    ///< the convergence test compares F over this many iterations
+  double tol = 1e-6;   ///< stop when |ΔF|/F < tol over one window
+  double kappa = 100;  ///< volume-penalty stiffness κ: F = E_σ + (κσh²/2) Σ ((V−V⁰)/V⁰)²
+  double eta = 0.1;    ///< the descent step δ = −(η/κ) ∇F / σ
+  double maxShift = 0.15;    ///< step-4 check: max |s_f|/d_f after the OT solve
+  double volumeTol = 1e-12;  ///< step-4 check: max |V − V⁰|/V⁰ after the OT solve
+};
+
+/// Result of Integrator::relax (R0).
 struct RelaxReport {
-  int iterations = 0, accepted = 0;
-  int solveFails = 0, energyRejects = 0;  ///< failed trials by cause (diagnostics)
-  bool converged = false;
-  double potentialChange = 0;  ///< Ũ(end) − Ũ(start)
-  std::vector<double> area;    ///< unlike-facet area at iteration 0, window, 2·window, ...
+  int iterations = 0;          ///< descent iterations taken
+  bool converged = false;      ///< the |ΔF|/F window test stopped the descent (else maxIter)
+  std::vector<double> energy;  ///< F at iteration 0, window, 2·window, ... (and at the stop)
+  std::vector<double> area;    ///< the unlike-facet area at the same iterations (Voronoi cells)
+  int otIterations = 0;        ///< the closing OT Newton solve (from w = 0)
+  bool otConverged = false;
+  double maxVolumeError = 0;  ///< step-4 checks at the solved power cells
+  double maxShift = 0;
+  double minMargin = 0;
+  double unlikeArea = 0;  ///< the unlike-facet area of the solved power cells
+  bool passed = false;    ///< all step-4 checks hold
 };
 
 /// NHV-W on a resident POWER MovingTessellation `MT`. Holds the velocity, the reference volumes
@@ -848,36 +865,148 @@ class Integrator {
     return x;
   }
 
-  /// The t = 0 interface relaxation (DESIGN_NOTE §2.8 "Initialisation"): the gauge with P_i = I
-  /// (full Ũ descent of the interface cells, the bulk Lloyd step unchanged), repeated until the
-  /// unlike-facet area changes by less than `tol` (relative) over `window` iterations, or
-  /// `maxIter`. Its ΔŨ is NOT added to the gauge counter (it precedes the run); call at t = 0 only.
-  RelaxReport relax(double tol, int window, int maxIter) {
+  /// The t = 0 relaxation R0 (DESIGN_NOTE §12.3.1; replaces the power-cell descent of §2.8
+  /// "Initialisation"). The reference volumes V⁰ are the caller's (the Lloyd volumes).
+  ///  1. On VORONOI cells (w ≡ 0, a cold rebuild), steepest descent on all generators of
+  ///     F(x) = E_σ(x) + (κσh²/2) Σ_i ((V_i − V⁰_i)/V⁰_i)²,  δ = −(η/κ) ∇F / σ,
+  ///     E_σ the interface energy alone (no wall, no gravity term), σ the largest tension, h the
+  ///     mean spacing (|Ω|/N)^{1/3}; ∇F = ∂_xE_σ + J_xᵀ (∂F/∂V) at w = 0, each iterate an
+  ///     incremental repair. No guard and no Lloyd. A Voronoi generator cannot leave its cell.
+  ///     Stop after maxIter iterations, or when |ΔF|/F < tol over `window` iterations.
+  ///  2. One OT Newton solve from w = 0 to V(x, w) = V⁰ (cold rebuilds, the §10.2 tolerance), then
+  ///     the state (facets, ∇Ũ, π) at the solution. v is untouched.
+  ///  3. The step-4 checks (RelaxReport::passed): max|V − V⁰|/V⁰ ≤ volumeTol, max |s_f|/d_f ≤
+  ///     maxShift, min_i m_i > 0 (minMargin()). Call at t = 0 only; no energy counter is touched.
+  RelaxReport relax(const RelaxParams& rp = {}) {
     RelaxReport r;
-    const double U0 = parts_.total() + wrapOffset_;
-    double last = unlikeArea();
-    r.area.push_back(last);
-    for (int it = 1; it <= maxIter; ++it) {
-      StepReport rep;
-      double dU = 0, dK = 0;
-      gauge(0.0, true, rep, dU, dK);
-      r.accepted += rep.gaugeAccepted ? 1 : 0;
-      r.solveFails += rep.gaugeSolveFails;
-      r.energyRejects += rep.gaugeEnergyRejects;
+    double sigma = 0;
+    if (spec_.tension.extent(0) > 0)
+      for (double s : peclet::core::toVector(spec_.tension))
+        sigma = std::max(sigma, s);
+    double vt = 0;
+    for (double v : V0h_)
+      vt += v;
+    const double h = std::cbrt(vt / N_);
+    PotentialSpec<Real> st = spec_;  // E_σ only
+    st.sigmaWall = LView<Real>();
+    st.density = LView<Real>();
+    for (int a = 0; a < 3; ++a)
+      st.gravity[a] = 0;
+    Kokkos::deep_copy(weight_, Real(0));
+    mt_->setWeights(weight_);
+    mt_->rebuild(pos_);
+    const Real c = rp.kappa * sigma * h * h;
+    const Real step = sigma > 0 ? rp.eta / (rp.kappa * sigma) : 0;
+    double Flast = 0;
+    for (int it = 0;; ++it) {
+      F_ = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_, mt_->wall, mt_->xRef,
+                                         mt_->vol);
+      matchFacets(F_);
+      Kokkos::deep_copy(gx_, Real(0));
+      Kokkos::deep_copy(gw_, Real(0));
+      const PotentialParts pp = partitionPotential(*mt_, F_, pos_, weight_, L_, st, gx_, gw_);
+      const LView<Real> vol = F_.volume, v0 = V0_, p = tmpN_;
+      Real pen = 0;
+      Kokkos::parallel_reduce(
+          "nhvw.r0Penalty", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i, Real& acc) {
+            const Real e = (vol(i) - v0(i)) / v0(i);
+            p(i) = c * e / v0(i);  // ∂F/∂V_i
+            acc += e * e;
+          },
+          pen);
+      const double F = pp.interface + 0.5 * c * pen;
       r.iterations = it;
-      if (it % window == 0) {
-        const double A = unlikeArea();
-        r.area.push_back(A);
-        const bool done = !(last > 0) || std::fabs(A - last) <= tol * last;
-        last = A;
-        if (done) {
+      const bool last = it >= rp.maxIter || step == 0;
+      if (it % rp.window == 0 || last) {
+        r.energy.push_back(F);
+        r.area.push_back(unlikeArea());
+      }
+      if (it % rp.window == 0) {
+        if (it > 0 && (!(F > 0) || std::fabs(F - Flast) < rp.tol * F)) {
           r.converged = true;
           break;
         }
+        Flast = F;
       }
+      if (last)
+        break;
+      applyVolumeJacobianT(F_, tmpN_, b_);
+      const LView<Real> P = pos_, gx = gx_, jt = b_;
+      const Kokkos::Array<Real, 3> L3 = {L_[0], L_[1], L_[2]};
+      Kokkos::parallel_for(
+          "nhvw.r0Step", Kokkos::RangePolicy<Exec>(0, 3 * N_), KOKKOS_LAMBDA(const int k) {
+            const Real Lk = L3[k % 3];
+            const Real x = P(k) - step * (gx(k) + jt(k));
+            P(k) = x - Lk * Kokkos::floor(x / Lk);
+          });
+      mt_->step(pos_);
     }
-    r.potentialChange = parts_.total() + wrapOffset_ - U0;
+    // ---- 2. OT from w = 0 ----
+    Kokkos::deep_copy(weight_, Real(0));
+    mt_->setWeights(weight_);
+    mt_->rebuild(pos_);
+    WeightSolveParams wp;
+    wp.tol = prm_.weightTol;
+    wp.maxIter = prm_.weightMaxIter;
+    wp.pcgTol = prm_.hTol;
+    const WeightSolveResult ws = solveWeights(*mt_, pos_, weight_, V0h_, L_, wp);
+    r.otIterations = ws.iters;
+    r.otConverged = ws.converged;
+    // ---- 3. the state at the solution and the checks ----
+    evalState();
+    {
+      const LView<Real> vol = F_.volume, v0 = V0_;
+      Real e = 0;
+      Kokkos::parallel_reduce(
+          "nhvw.r0Vol", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i, Real& acc) {
+            const Real q = Kokkos::fabs(vol(i) - v0(i)) / v0(i);
+            acc = q > acc ? q : acc;
+          },
+          Kokkos::Max<Real>(e));
+      r.maxVolumeError = e;
+    }
+    double sUnlike = 0;
+    shifts(r.maxShift, sUnlike);
+    r.minMargin = minMargin();
+    r.unlikeArea = unlikeArea();
+    r.passed = r.otConverged && r.maxVolumeError <= rp.volumeTol && r.maxShift <= rp.maxShift &&
+               r.minMargin > 0;
     return r;
+  }
+
+  /// min_i m_i over the current facets (cellMargins).
+  double minMargin() const {
+    cellMargins(F_, tmpN_);
+    const LView<Real> m = tmpN_;
+    Real out = 0;
+    Kokkos::parallel_reduce(
+        "nhvw.minMargin", Kokkos::RangePolicy<Exec>(0, N_),
+        KOKKOS_LAMBDA(const int i, Real& acc) { acc = m(i) < acc ? m(i) : acc; },
+        Kokkos::Min<Real>(out));
+    return out;
+  }
+
+  /// m (N) = the distance from x_i to its own facet planes, m_i = min_f (d_f/2 + s_{i,f}),
+  /// s_{i,f} = (w_i − w_j)/(2d_f) (positive away from i), over i's interior facets (DESIGN_NOTE
+  /// §12.3.2 step 4); m_i ≤ 0: the generator is on or behind a facet of its own cell.
+  void cellMargins(const CellFacets<Real>& F, const LView<Real>& m) const {
+    const CellFacets<Real> G = F;
+    const LView<Real> w = weight_;
+    Kokkos::parallel_for(
+        "nhvw.margins", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
+          Real mi = Kokkos::Experimental::finite_max_v<Real>;
+          for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+            Real d2 = 0;
+            for (int c = 0; c < 3; ++c)
+              d2 += G.conn(3 * f + c) * G.conn(3 * f + c);
+            const Real d = Kokkos::sqrt(d2);
+            const Real q = Real(0.5) * d + (w(i) - w(G.nbr(f))) / (Real(2) * d);
+            mi = q < mi ? q : mi;
+          }
+          m(i) = mi;
+        });
   }
 
   /// Σ of the unlike-facet areas (each facet once).

@@ -479,25 +479,41 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     }
     dirty_ = true;
   }
-  /// The t = 0 interface relaxation (Integrator::relax).
-  nb::dict relax(real_t tol, int window, int max_iterations) {
-    if (!(tol > 0) || window < 1 || max_iterations < 1)
+  /// The t = 0 relaxation R0 (Integrator::relax, DESIGN_NOTE §12.3.1). Raises when a closing
+  /// check fails (the run must not start from that state).
+  nb::dict relax(int max_iterations, real_t tol, int window, real_t kappa, real_t eta) {
+    if (max_iterations < 0 || !(tol > 0) || window < 1 || !(kappa > 0) || !(eta > 0))
       throw std::invalid_argument(
-          "voro: LagrangianFlow.relax() takes tol > 0, window >= 1, max_iterations >= 1");
+          "voro: LagrangianFlow.relax() takes max_iterations >= 0, tol > 0, window >= 1, "
+          "kappa > 0, eta > 0");
     prepare();
+    lag::RelaxParams rp;
+    rp.maxIter = max_iterations;
+    rp.tol = tol;
+    rp.window = window;
+    rp.kappa = kappa;
+    rp.eta = eta;
     lag::RelaxReport r;
-    withInteg([&](auto& I) { r = I.relax(tol, window, max_iterations); });
+    withInteg([&](auto& I) { r = I.relax(rp); });
     t_->wHost_ = peclet::core::toVector(t_->weight_);
     t_->wDirty_ = false;
+    if (!r.passed)
+      throw std::runtime_error(
+          "voro: LagrangianFlow.relax(): a closing check failed (OT converged " +
+          std::to_string(r.otConverged) + " in " + std::to_string(r.otIterations) +
+          " iterations; max |V - V0|/V0 = " + std::to_string(r.maxVolumeError) +
+          " (<= 1e-12); max |s|/d = " + std::to_string(r.maxShift) +
+          " (<= 0.15); min margin = " + std::to_string(r.minMargin) + " (> 0))");
     nb::dict d;
     d["iterations"] = r.iterations;
-    d["accepted"] = r.accepted;
-    d["solve_fails"] = r.solveFails;
-    d["energy_rejects"] = r.energyRejects;
-    withInteg([&](auto& I) { d["restore_rebuilds"] = I.restoreRebuilds(); });
     d["converged"] = r.converged;
-    d["potential_change"] = r.potentialChange;
-    d["unlike_area"] = toNumpy1(std::vector<real_t>(r.area.begin(), r.area.end()));
+    d["energy"] = toNumpy1(std::vector<real_t>(r.energy.begin(), r.energy.end()));
+    d["unlike_area_history"] = toNumpy1(std::vector<real_t>(r.area.begin(), r.area.end()));
+    d["ot_iterations"] = r.otIterations;
+    d["max_volume_error"] = r.maxVolumeError;
+    d["max_shift"] = r.maxShift;
+    d["min_margin"] = r.minMargin;
+    d["unlike_area"] = r.unlikeArea;
     return d;
   }
   void set_velocities(nb::ndarray<real_t, nb::c_contig> v) {
@@ -898,12 +914,16 @@ void bindLagrangian(nb::module_& m) {
            nb::arg("gradient") = nb::none(),
            "No-slip wall velocity u_w(y) = offset + gradient @ y at the wall facets (tangential\n"
            "part; e.g. Couette between z-walls: gradient[0, 2] = shear rate). Default 0.")
-      .def("relax", &LagrangianFlow::relax, nb::arg("tol") = 1e-4, nb::arg("window") = 100,
-           nb::arg("max_iterations") = 20000,
-           "The t = 0 interface relaxation: the gauge with the full descent (no tangential\n"
-           "projection) until the unlike-facet area changes by < tol (relative) per `window`\n"
-           "iterations. Returns iterations, accepted, converged, potential_change and the\n"
-           "unlike_area history (one value per window).")
+      .def("relax", &LagrangianFlow::relax, nb::arg("max_iterations") = 5000, nb::arg("tol") = 1e-6,
+           nb::arg("window") = 250, nb::arg("kappa") = 100.0, nb::arg("eta") = 0.1,
+           "The t = 0 relaxation R0 (M7 DESIGN_NOTE §12.3.1), from a Lloyd mesh whose volumes\n"
+           "are the reference volumes: steepest descent of F = E_sigma + (kappa sigma h^2/2)\n"
+           "sum ((V - V0)/V0)^2 on VORONOI cells (w = 0), step -(eta/kappa) grad F / sigma, until\n"
+           "|dF|/F < tol over `window` iterations or `max_iterations`; then one OT solve to V0.\n"
+           "Raises if a closing check fails (max |V - V0|/V0 <= 1e-12, max |s|/d <= 0.15, every\n"
+           "generator strictly inside its cell). Returns iterations, converged, energy and\n"
+           "unlike_area_history (per window), ot_iterations, max_volume_error, max_shift,\n"
+           "min_margin and unlike_area (the solved power cells). Call at t = 0 only.")
       .def("set_velocities", &LagrangianFlow::set_velocities, nb::arg("velocities"))
       .def("get_velocities", &LagrangianFlow::get_velocities)
       .def("get_positions", &LagrangianFlow::get_positions)

@@ -310,8 +310,9 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     rc |= (worstV <= 1e-12 && worstCold <= 1e-9 && err[0] / err[1] >= 3.0) ? 0 : 1;
   }
 
-  // --- (F) the gauge: relax() descends Ũ at held volumes; one gauged inviscid step keeps Σ m v
-  // and C v = 0, with ΔŨ, ΔK ≤ 0 ---
+  // --- (F) R0 (DESIGN_NOTE §12.3.1): the Voronoi-cell descent of F = E_σ + volume penalty from
+  // the Voronoi volumes, then OT; F and the area fall, the closing checks hold. Then the gauge:
+  // one gauged inviscid step keeps Σ m v and C v = 0, with ΔŨ, ΔK ≤ 0 ---
   {
     lag::PotentialSpec<real_t> spec;
     spec.types = dty;
@@ -320,26 +321,35 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     lag::FlowParams fp;
     fp.density = {1.0, 10.0};
     fp.viscosity = {0.0, 0.0};
+    lag::RelaxReport rr;
+    {
+      DV p3 = toDev(x, "f.pos3"), w3("f.w3", N);
+      MT m3;
+      m3.alloc(N, Larr, real_t(1e-10) * h, real_t(0.25) * h, 4, N);
+      m3.setWeights(w3);
+      m3.rebuild(p3);
+      const auto Vh = toHost(Kokkos::subview(m3.vol, std::make_pair(0, N)));
+      const std::vector<double> Vvor(Vh.begin(), Vh.end());
+      lag::Integrator<MT> I(m3, p3, w3, Larr, Vvor, spec, fp, std::vector<real_t>(3 * N, 0.0));
+      lag::RelaxParams rp;
+      rp.maxIter = 200;
+      rp.window = 50;
+      rr = I.relax(rp);
+    }
+    std::printf(
+        "  (F) R0: %d it (converged %d) F %.4f -> %.4f, Voronoi area %.4f -> %.4f; OT %d it "
+        "max|V-V0|/V0=%.1e max s/d=%.3f min margin/h=%.3f power area %.4f passed=%d\n",
+        rr.iterations, int(rr.converged), rr.energy.front(), rr.energy.back(), rr.area.front(),
+        rr.area.back(), rr.otIterations, rr.maxVolumeError, rr.maxShift, rr.minMargin / h,
+        rr.unlikeArea, int(rr.passed));
+    rc |= (rr.passed && rr.energy.back() < rr.energy.front() && rr.area.back() < rr.area.front())
+              ? 0
+              : 1;
     DV p2 = toDev(x, "f.pos"), w2 = toDev(w0, "f.w");
     MT m2;
     m2.alloc(N, Larr, real_t(1e-10) * h, real_t(0.25) * h, 4, N);
     m2.setWeights(w2);
     m2.rebuild(p2);
-    double A0 = 0, A1 = 0, dU = 0, worstV = 0;
-    int iters = 0, acc = 0, rebuilds = 0;
-    {
-      lag::Integrator<MT> I(m2, p2, w2, Larr, V0, spec, fp, std::vector<real_t>(3 * N, 0.0));
-      A0 = I.unlikeArea();
-      const auto rr = I.relax(1e-4, 10, 100);
-      A1 = I.unlikeArea();
-      dU = rr.potentialChange;
-      iters = rr.iterations;
-      acc = rr.accepted;
-      rebuilds = I.restoreRebuilds();
-      const auto Vh = toHost(Kokkos::subview(m2.vol, std::make_pair(0, N)));
-      for (int i = 0; i < N; ++i)
-        worstV = std::max(worstV, std::fabs(Vh[i] - V0[i]) / V0[i]);
-    }
     lag::Integrator<MT> I(m2, p2, w2, Larr, V0, spec, fp, v);
     double P0[3] = {0, 0, 0}, P1[3] = {0, 0, 0}, pn = 0, maxV = 0;
     for (int i = 0; i < N; ++i) {
@@ -365,13 +375,11 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     for (double c : toHost(cv))
       cmax = std::max(cmax, std::fabs(c) * tau / maxV);
     std::printf(
-        "  (F) gauge: relax %d it (%d accepted, %d restore rebuilds) area %.4f -> %.4f dU=%.2e "
-        "max|V-V0|/V0=%.1e; step: tries=%d accepted=%d dU=%.2e dK=%.2e |dP|/sum m|v|=%.1e |Cv| "
+        "  (F) gauge step: tries=%d accepted=%d dU=%.2e dK=%.2e |dP|/sum m|v|=%.1e |Cv| "
         "tau/maxV=%.1e\n",
-        iters, acc, rebuilds, A0, A1, dU, worstV, r.gaugeTries, int(r.gaugeAccepted),
-        r.gaugePotential, r.gaugeKinetic, dP, cmax);
-    rc |= (dU <= 0 && A1 < A0 && acc > 0 && worstV <= 1e-12 && r.gaugeTries > 0 &&
-           r.gaugePotential <= 0 && r.gaugeKinetic <= 0 && dP <= 1e-12 && cmax <= 1e-11)
+        r.gaugeTries, int(r.gaugeAccepted), r.gaugePotential, r.gaugeKinetic, dP, cmax);
+    rc |= (r.gaugeTries > 0 && r.gaugePotential <= 0 && r.gaugeKinetic <= 0 && dP <= 1e-12 &&
+           cmax <= 1e-11)
               ? 0
               : 1;
   }
