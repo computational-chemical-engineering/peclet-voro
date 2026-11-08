@@ -26,7 +26,7 @@ cmake -B build_dev -DPECLET_VORO_KOKKOS=ON -DPECLET_VORO_BUILD_PYTHON=ON \
       -DPECLET_VORO_MPI=ON -DPECLET_VORO_BUILD_TESTS=ON \
       -DCMAKE_PREFIX_PATH="$PWD/../extern/install/host-openmp"    # or nvidia-cuda (nvcc on PATH)
 cmake --build build_dev -j8                          # -> build_dev/peclet/voro/_voro.*.so
-ctest --test-dir build_dev -N                        # 43 = 25 single-rank + 18 MPI (label `mpi`)
+ctest --test-dir build_dev -N                        # 44 = 26 single-rank + 18 MPI (label `mpi`)
 OMP_NUM_THREADS=4 OMP_PROC_BIND=false ctest --test-dir build_dev -LE bench --output-on-failure
 PYTHONPATH=build_dev python python/test_voro.py      # the Python smoke test on its own
 ```
