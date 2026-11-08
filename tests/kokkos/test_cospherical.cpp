@@ -29,8 +29,10 @@
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/dynamic_validate.hpp"
+#include "peclet/voro/plane_policy.hpp"
 #include "peclet/voro/reeval_tessellation.hpp"
 #include "peclet/voro/repair.hpp"
+#include "peclet/voro/tess_grid.hpp"
 #include "peclet/voro/tessellator.hpp"
 
 using real_t = double;
@@ -233,6 +235,228 @@ int repairCase(const std::string& name, const std::vector<real_t>& half, real_t 
   return rc;
 }
 
+// ---- near-lattice power cells: the cold build's clip vs the repair gather's (M7, 2026-11-08) ----
+//
+// The cold build clips with the lean ConvexCell, the repair gather (MovingTessellation::gatherSet)
+// with the adjacency-tracking one (TrackAdj): the same cut decisions, a different horizon
+// collection. On an (almost) exact cubic lattice with small power weights every cell has 8-cell
+// vertices and 4-cell edges, and the gather order passes through further cospherical corners of
+// the still-open cell, so the clip's growDisk fallback runs on many cuts. growDisk exempted the
+// edges to candidates that might still join K; one that never joined then failed the horizon
+// walk's inconsistentFan, which kept K's triangle and broke the disk — the gathered cell was
+// published EMPTY (an "overflow") while the cold build had it whole: the M7 rest gate's weight
+// solve then saw a buried cell. The cases below gate the two clips against each other.
+
+/// The failing cell, recorded: seed 824 of the M7 walled 16^3 rest gate (ratio 1000, option S,
+/// step 33), its weights ~1e-17 h^2 apart, in the gather's clip order — the early wall plane, then
+/// the worklist. Row: neighbour id, plane direction, offset (exactly as passed to clip).
+constexpr double kLatticeCell[][5] = {
+    {peclet::voro::kBoundaryFacet, 0, 0, 1, 0.4375},
+    {1027, 0.0625, 0.0625, -0.0625, 0.005859375},
+    {644, -0.0625, 0.0625, 0, 0.00390625},
+    {836, 0, 0.0625, 0, 0.001953125},
+    {1028, 0.0625, 0.0625, 0, 0.00390625},
+    {1004, 0.0625, -0.0625, 0, 0.00390625},
+    {1016, 0.0625, 0, 0, 0.001953125},
+    {620, -0.0625, -0.0625, 0, 0.00390625},
+    {632, -0.0625, 0, 0, 0.001953125},
+    {812, 0, -0.0625, 0, 0.001953125},
+    {619, -0.0625, -0.0625, -0.0625, 0.005859375},
+    {631, -0.0625, 0, -0.0625, 0.00390625},
+    {811, 0, -0.0625, -0.0625, 0.00390625},
+    {823, 0, 0, -0.0625, 0.001953125},
+    {1003, 0.0625, -0.0625, -0.0625, 0.005859375},
+    {1015, 0.0625, 0, -0.0625, 0.00390625},
+    {643, -0.0625, 0.0625, -0.0625, 0.005859375},
+    {835, 0, 0.0625, -0.0625, 0.00390625},
+    {1005, 0.0625, -0.0625, 0.0625, 0.0058593750000000009},
+    {1006, 0.0625, -0.0625, 0.125, 0.011718749999999998},
+    {1017, 0.0625, 0, 0.0625, 0.0039062500000000009},
+    {1018, 0.0625, 0, 0.125, 0.0097656249999999983},
+    {452, -0.125, 0.0625, 0, 0.009765625},
+    {645, -0.0625, 0.0625, 0.0625, 0.0058593750000000009},
+    {646, -0.0625, 0.0625, 0.125, 0.011718749999999998},
+    {837, 0, 0.0625, 0.0625, 0.0039062500000000009},
+    {838, 0, 0.0625, 0.125, 0.0097656249999999983},
+    {621, -0.0625, -0.0625, 0.0625, 0.0058593750000000009},
+    {622, -0.0625, -0.0625, 0.125, 0.011718749999999998},
+    {633, -0.0625, 0, 0.0625, 0.0039062500000000009},
+    {634, -0.0625, 0, 0.125, 0.0097656249999999983},
+    {813, 0, -0.0625, 0.0625, 0.0039062500000000009},
+    {814, 0, -0.0625, 0.125, 0.0097656249999999983},
+    {825, 0, 0, 0.0625, 0.0019531250000000004},
+};
+
+template <bool TrackAdj>
+double clipRecorded(bool& overflow) {
+  peclet::voro::ConvexCell<double, peclet::voro::kMaxPlanes, peclet::voro::kMaxTriangles, TrackAdj>
+      c;
+  c.initBox(1.0, 1.0, 1.0);
+  for (const auto& r : kLatticeCell) {
+    const double pdir[3] = {r[1], r[2], r[3]};
+    c.clip(pdir, r[4], (int)r[0]);
+  }
+  overflow = c.overflow;
+  return c.overflow ? 0.0 : c.volumePerVertex();
+}
+
+int latticeCellCase() {
+  const double h3 = std::pow(1.0 / 16, 3);
+  bool o0 = false, o1 = false;
+  const double v0 = clipRecorded<false>(o0), v1 = clipRecorded<true>(o1);
+  const double e0 = std::abs(v0 / h3 - 1), e1 = std::abs(v1 / h3 - 1);
+  const bool pass = !o0 && !o1 && e0 <= 1e-12 && e1 <= 1e-12;
+  std::printf("  %-34s |V/h^3-1| lean %.2e (ovf %d) adj %.2e (ovf %d) %s\n", "M7 lattice cell 824",
+              e0, (int)o0, e1, (int)o1, pass ? "OK" : "FAIL");
+  return pass ? 0 : 1;
+}
+
+/// Uniform deviate in [-1, 1) from a counter (splitmix64): the same draws on every backend.
+KOKKOS_INLINE_FUNCTION double hashU(unsigned long long k) {
+  k += 0x9E3779B97F4A7C15ull;
+  k = (k ^ (k >> 30)) * 0xBF58476D1CE4E5B9ull;
+  k = (k ^ (k >> 27)) * 0x94D049BB133111EBull;
+  k ^= k >> 31;
+  return double(k >> 11) * 0x1.0p-52 - 1.0;
+}
+
+/// `trials` interior cells of the 16^3 lattice (seed and its 124 neighbours in [-2,2]^3, each
+/// displaced by ex h and weighted W0 + ew h^2 times a deviate; W0 the M7 state's common weight),
+/// clipped in distance order with random ties (the worklist's shell structure; order 0) or in
+/// random order (order 1, a harder stress), by the lean and by the TrackAdj ConvexCell. Gate:
+/// neither overflows, |V/h^3 - 1| <= 1e-6 (the perturbation moves V by ~ex) and the two volumes
+/// agree to 1e-12 h^3.
+int latticeClipCase(double ex, double ew, int order, int trials) {
+  constexpr int K = 124;
+  const double h = 1.0 / 16, h3 = h * h * h;
+  long bad = 0;
+  double maxErr = 0, maxDiff = 0;
+  Kokkos::parallel_reduce(
+      "latticeClip", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, trials),
+      KOKKOS_LAMBDA(int tr, long& nb, double& me, double& md) {
+        unsigned long long key = 1000003ull * (unsigned long long)tr;
+        double c[3], xi[3];
+        for (int d = 0; d < 3; ++d) {
+          c[d] = (2 + int(6 * (hashU(key++) + 1)) + 0.5) * h;  // lattice site in [2, 13]
+          xi[d] = c[d] + ex * h * hashU(key++);
+        }
+        const double w0 = -7.1e-14 * h * h;
+        const double wi = w0 + ew * h * h * hashU(key++);
+        double r[K][3], off[K], kk[K];
+        int ord[K], m = 0;
+        for (int a = -2; a <= 2; ++a)
+          for (int b = -2; b <= 2; ++b)
+            for (int e = -2; e <= 2; ++e) {
+              if (a == 0 && b == 0 && e == 0)
+                continue;
+              const int o[3] = {a, b, e};
+              for (int d = 0; d < 3; ++d)
+                r[m][d] = (c[d] + o[d] * h + ex * h * hashU(key++)) - xi[d];
+              const double wj = w0 + ew * h * h * hashU(key++);
+              off[m] = peclet::voro::Power::offsetFromRel<double>(r[m], wi, wj);
+              kk[m] = (order == 0 ? double(a * a + b * b + e * e) : 0.0) + 0.5 * hashU(key++);
+              ord[m] = m;
+              ++m;
+            }
+        for (int i = 1; i < K; ++i)  // insertion sort by key
+          for (int j = i; j > 0 && kk[ord[j]] < kk[ord[j - 1]]; --j) {
+            const int t = ord[j];
+            ord[j] = ord[j - 1];
+            ord[j - 1] = t;
+          }
+        peclet::voro::ConvexCell<double, peclet::voro::kMaxPlanes, peclet::voro::kMaxTriangles,
+                                 false>
+            lean;
+        peclet::voro::ConvexCell<double, peclet::voro::kMaxPlanes, peclet::voro::kMaxTriangles,
+                                 true>
+            adj;
+        lean.initBox(1.0, 1.0, 1.0);
+        adj.initBox(1.0, 1.0, 1.0);
+        for (int q = 0; q < K; ++q) {
+          lean.clip(r[ord[q]], off[ord[q]], ord[q]);
+          adj.clip(r[ord[q]], off[ord[q]], ord[q]);
+        }
+        const double vl = lean.overflow ? 0.0 : lean.volumePerVertex();
+        const double va = adj.overflow ? 0.0 : adj.volumePerVertex();
+        const double err = Kokkos::max(Kokkos::fabs(vl / h3 - 1), Kokkos::fabs(va / h3 - 1));
+        const double diff = Kokkos::fabs(vl - va) / h3;
+        me = Kokkos::max(me, err);
+        md = Kokkos::max(md, diff);
+        nb += (lean.overflow || adj.overflow || !(err <= 1e-6) || !(diff <= 1e-12)) ? 1 : 0;
+      },
+      bad, Kokkos::Max<double>(maxErr), Kokkos::Max<double>(maxDiff));
+  char name[64];
+  std::snprintf(name, sizeof name, "lattice clip %s ex %.0e ew %.0e", order ? "rand" : "dist", ex,
+                ew);
+  std::printf("  %-34s %d cells: bad %ld, max|V/h^3-1| %.1e, max|V_lean-V_adj|/h^3 %.1e %s\n", name,
+              trials, bad, maxErr, maxDiff, bad == 0 ? "OK" : "FAIL");
+  return bad == 0 ? 0 : 1;
+}
+
+/// The tessellation-level contract on a weighted near-lattice (periodic 16^3, positions displaced
+/// by ex h, weights W0 + ew h^2 times a deviate) at the M7 certificate tolerance 1e-10 h: a cold
+/// build (gated), then the repair's gather of EVERY cell at the same input — its volumes must equal
+/// the cold build's to 1e-12 — then MovingTessellation::step to an independently perturbed input
+/// against a cold build there (gated; the 1e-9 equivalence contract).
+int latticeRepairCase(double ex, double ew) {
+  const int n = 16, N = n * n * n;
+  const real_t h = real_t(1) / n, Larr[3] = {1, 1, 1};
+  auto sample = [&](unsigned long long key, std::vector<real_t>& x, std::vector<real_t>& w) {
+    x.resize(3 * N);
+    w.resize(N);
+    for (int k = 0; k < n; ++k)
+      for (int j = 0; j < n; ++j)
+        for (int i = 0; i < n; ++i) {
+          const int c = i + n * (j + n * k), g[3] = {i, j, k};
+          for (int d = 0; d < 3; ++d)
+            x[3 * c + d] = (g[d] + real_t(0.5)) * h + ex * h * hashU(key++);
+          w[c] = (real_t(-7.1e-14) + ew * hashU(key++)) * h * h;
+        }
+  };
+  std::vector<real_t> x0, w0, x1, w1;
+  sample(17, x0, w0);
+  sample(91000017, x1, w1);
+  auto pos0 = toDevice(x0, "p0"), wt0 = toDevice(w0, "w0");
+  auto pos1 = toDevice(x1, "p1"), wt1 = toDevice(w1, "w1");
+  char name[64];
+  std::snprintf(name, sizeof name, "lattice power ex %.0e ew %.0e", ex, ew);
+  Kokkos::View<long*, Mem> gd;
+  auto cold0 = peclet::voro::buildTessellation<real_t, true>(pos0, wt0, N, Larr, 4, N, gd,
+                                                             peclet::voro::NoSdf{}, true);
+  int rc = gate(std::string(name) + " (cold)", cold0.view, cold0.status, N);
+  auto vCold = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, cold0.view.cellVolume);
+  peclet::voro::MovingTessellation<real_t, 64, 112, true> mt;
+  mt.alloc(N, Larr, real_t(1e-10) * h, real_t(0.25) * h, 4, N);
+  mt.setWeights(wt0);
+  mt.rebuild(pos0);
+  auto grid = peclet::voro::buildTessGrid<real_t, true>(pos0, wt0, N, Larr, 4, N, gd);
+  Kokkos::View<int*, Mem> all("all", N);
+  Kokkos::parallel_for(
+      "iota", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N),
+      KOKKOS_LAMBDA(int i) { all(i) = i; });
+  mt.gatherSet(grid, all, N, pos0);
+  auto vGath = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mt.vol);
+  double dGath = 0;
+  for (int i = 0; i < N; ++i)
+    dGath = std::max(dGath, std::abs((double)vGath(i) - (double)vCold(i)) / (double)vCold(i));
+  rc |= dGath <= 1e-12 ? 0 : 1;
+  // step to the second sample (weights and positions both change) vs a cold build there
+  mt.setWeights(wt1);
+  mt.step(pos1);
+  auto cold1 = peclet::voro::buildTessellation<real_t, true>(pos1, wt1, N, Larr, 4, N, gd,
+                                                             peclet::voro::NoSdf{}, true);
+  rc |= gate(std::string(name) + " (cold, moved)", cold1.view, cold1.status, N);
+  auto vc = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, cold1.view.cellVolume);
+  auto vs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mt.vol);
+  double dStep = 0;
+  for (int i = 0; i < N; ++i)
+    dStep = std::max(dStep, std::abs((double)vs(i) - (double)vc(i)) / (double)vc(i));
+  rc |= dStep <= 1e-9 ? 0 : 1;
+  std::printf("  %-34s gather: max|V-V_cold|/V %.2e (1e-12); step: %.2e (1e-9) %s\n", "", dGath,
+              dStep, rc == 0 ? "OK" : "FAIL");
+  return rc;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -259,6 +483,14 @@ int main(int argc, char** argv) {
       rc |= repairCase("repair mirror dyadic" + tag, randomHalf(20, 9u), 0, 20, tolFrac);
       rc |= repairCase("repair mirror jitter 1e-15" + tag, randomHalf(20, 9u), 1e-15, 0, tolFrac);
     }
+    rc |= latticeCellCase();
+    for (double ex : {0.0, 1e-16, 1e-14, 1e-12, 1e-9})
+      for (double ew : {0.0, 1e-15, 1e-9})
+        rc |= latticeClipCase(ex, ew, 0, 4000);
+    for (double ex : {0.0, 1e-16, 1e-14, 1e-12})
+      rc |= latticeClipCase(ex, 1e-15, 1, 30000);
+    for (double ex : {0.0, 1e-16, 1e-12, 1e-9})
+      rc |= latticeRepairCase(ex, 1e-15);
     std::printf("%s\n", rc == 0 ? "ALL COSPHERICAL CASES PASS" : "COSPHERICAL CASES FAILED");
   }
   Kokkos::finalize();

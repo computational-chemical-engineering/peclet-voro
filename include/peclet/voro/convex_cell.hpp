@@ -1107,54 +1107,87 @@ struct ConvexCell {
   /// a disk with a simple boundary — it shares exactly one edge with K and its third plane is not
   /// yet on K, or two edges (closing a notch) while the boundary keeps >= 3 edges — and every new
   /// horizon edge passes inconsistentFan. What is left out lay on the plane to round-off. Never
-  /// reached on generic input; O(nt^2) lookups when it is.
+  /// reached on generic input; O(nt^2) lookups per round when it is.
+  ///
+  /// An edge to a candidate not yet in K is exempt from inconsistentFan while K grows (the
+  /// candidate may still join and close it), so a grown K is checked once more: an edge to a
+  /// candidate that never joined is a horizon edge like any other, and the horizon walk would
+  /// keep K's triangle on it (inconsistentFan), breaking the disk (measured: a near-lattice
+  /// power cell published empty as an overflow). Such a candidate is glued to K by an undefined
+  /// fan corner yet cannot join, so it stays on the plane; it leaves the candidate set — every
+  /// triangle bordering it then fails fanOk too — and K is regrown. Each round drops one
+  /// candidate, so at most nt rounds.
   KOKKOS_INLINE_FUNCTION int growDisk(bool* kill, int pi) {
     bool cand[MAXT];
-    Real sv[MAXT];
+    Real sv[MAXT];  // the cut's slack: > 0 on the candidates (the clip killed only s > 0), else 0
     for (int t = 0; t < nt; ++t) {
-      cand[t] = kill[t];
+      sv[t] = kill[t] ? n[pi][0] * vx[t] + n[pi][1] * vy[t] + n[pi][2] * vz[t] - nn[pi] : Real(0);
       kill[t] = false;
-      if (cand[t])
-        sv[t] = n[pi][0] * vx[t] + n[pi][1] * vy[t] + n[pi][2] * vz[t] - nn[pi];
     }
     unsigned char touch[MAXP];
-    for (int k = 0; k < MAXP; ++k)
-      touch[k] = 0;
-    int H = 0;  // boundary length of K
-    int k = 0;  // its triangle count (returned)
-    for (bool first = true;; first = false) {
-      int pick = -1, pickM = 0;
+    for (int round = 0; round <= nt; ++round) {
       for (int t = 0; t < nt; ++t) {
-        if (!cand[t] || (pick >= 0 && sv[t] <= sv[pick]))
-          continue;
-        const int ut[3] = {t0[t], t1[t], t2[t]};
-        int mt = 0, shared = 0;
-        bool fanOk = true;
-        for (int e = 0; e < 3; ++e) {
-          const int o = across(t, e);
-          if (o >= 0 && kill[o]) {
-            ++mt;
-            shared = e;
-          } else if (!(o >= 0 && cand[o]) &&
-                     inconsistentFan(ut[e], ut[(e + 1) % 3], ut[(e + 2) % 3], pi)) {
-            fanOk = false;  // a survivor's edge: horizon for good (edges to candidates may close)
+        cand[t] = sv[t] > Real(0);
+        kill[t] = false;
+      }
+      for (int k = 0; k < np; ++k)
+        touch[k] = 0;
+      int H = 0;  // boundary length of K
+      int k = 0;  // its triangle count (returned)
+      for (bool first = true;; first = false) {
+        int pick = -1, pickM = 0;
+        for (int t = 0; t < nt; ++t) {
+          if (!cand[t] || (pick >= 0 && sv[t] <= sv[pick]))
+            continue;
+          const int ut[3] = {t0[t], t1[t], t2[t]};
+          int mt = 0, shared = 0;
+          bool fanOk = true;
+          for (int e = 0; e < 3; ++e) {
+            const int o = across(t, e);
+            if (o >= 0 && kill[o]) {
+              ++mt;
+              shared = e;
+            } else if (!(o >= 0 && cand[o]) &&
+                       inconsistentFan(ut[e], ut[(e + 1) % 3], ut[(e + 2) % 3], pi)) {
+              fanOk = false;  // a survivor's edge: horizon for good (edges to candidates may close)
+            }
+          }
+          const bool disk =
+              first ? mt == 0 : (mt == 1 && !touch[ut[(shared + 2) % 3]]) || (mt == 2 && H > 3);
+          if (fanOk && disk) {
+            pick = t;
+            pickM = mt;
           }
         }
-        const bool disk =
-            first ? mt == 0 : (mt == 1 && !touch[ut[(shared + 2) % 3]]) || (mt == 2 && H > 3);
-        if (fanOk && disk) {
-          pick = t;
-          pickM = mt;
+        if (pick < 0)
+          break;
+        ++k;
+        kill[pick] = true;
+        cand[pick] = false;
+        H += 3 - 2 * pickM;
+        touch[t0[pick]] = touch[t1[pick]] = touch[t2[pick]] = 1;
+      }
+      // the deferred edges: K's edges to candidates that never joined
+      int stay = -1;
+      for (int t = 0; t < nt && stay < 0; ++t) {
+        if (!kill[t])
+          continue;
+        const int ut[3] = {t0[t], t1[t], t2[t]};
+        for (int e = 0; e < 3; ++e) {
+          const int o = across(t, e);
+          if (o >= 0 && cand[o] && inconsistentFan(ut[e], ut[(e + 1) % 3], ut[(e + 2) % 3], pi)) {
+            stay = o;
+            break;
+          }
         }
       }
-      if (pick < 0)
+      if (stay < 0)
         return k;
-      ++k;
-      kill[pick] = true;
-      cand[pick] = false;
-      H += 3 - 2 * pickM;
-      touch[t0[pick]] = touch[t1[pick]] = touch[t2[pick]] = 1;
+      sv[stay] = Real(0);
     }
+    for (int t = 0; t < nt; ++t)  // unreachable: every round drops a candidate
+      kill[t] = false;
+    return 0;
   }
 
   KOKKOS_INLINE_FUNCTION bool empty() const {
