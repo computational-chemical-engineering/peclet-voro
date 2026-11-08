@@ -26,7 +26,7 @@ cmake -B build_dev -DPECLET_VORO_KOKKOS=ON -DPECLET_VORO_BUILD_PYTHON=ON \
       -DPECLET_VORO_MPI=ON -DPECLET_VORO_BUILD_TESTS=ON \
       -DCMAKE_PREFIX_PATH="$PWD/../extern/install/host-openmp"    # or nvidia-cuda (nvcc on PATH)
 cmake --build build_dev -j8                          # -> build_dev/peclet/voro/_voro.*.so
-ctest --test-dir build_dev -N                        # 42 = 24 single-rank + 18 MPI (label `mpi`)
+ctest --test-dir build_dev -N                        # 43 = 25 single-rank + 18 MPI (label `mpi`)
 OMP_NUM_THREADS=4 OMP_PROC_BIND=false ctest --test-dir build_dev -LE bench --output-on-failure
 PYTHONPATH=build_dev python python/test_voro.py      # the Python smoke test on its own
 ```
@@ -152,9 +152,9 @@ assigning it a layer in the script, or the test fails.
 
 ## Tests vs benchmarks
 
-`tests/kokkos/test_*.cpp` are the 21 device ctests (`add_voro_kokkos_test`); plus
+`tests/kokkos/test_*.cpp` are the 22 device ctests (`add_voro_kokkos_test`); plus
 `bench_dynamic_update_gates`, `test_include_graph` (script) and `test_voro_python`
-(`python/test_voro.py`, needs `PECLET_VORO_BUILD_PYTHON=ON`) = 24.
+(`python/test_voro.py`, needs `PECLET_VORO_BUILD_PYTHON=ON`) = 25.
 `bench_dynamic_update --gates` (ctest `bench_dynamic_update_gates`) is a real gate — its FP64 binary is
 always built with the tests. Every other `bench_*` (incl. the `_f32` precision variants and Voro++, the
 `bench_convexcell` throughput reference, pinned by commit) is opt-in via `PECLET_VORO_BUILD_BENCHMARKS=ON`

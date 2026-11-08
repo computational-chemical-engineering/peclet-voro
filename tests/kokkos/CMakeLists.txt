@@ -113,6 +113,10 @@ if(PECLET_VORO_BUILD_TESTS)
   # Vertex-local sort-free geometry (design note): acceptance criteria in FP64.
   add_voro_kokkos_test(test_pervertex_geometry)
 
+  # Cospherical robustness: exactly mirrored seed sets (4-cell edges, 6-cell vertices), dyadic and
+  # 1e-15-jittered variants, power policy, and the moving-point repair — the invariants must hold.
+  add_voro_kokkos_test(test_cospherical)
+
   # Part II: consolidated moving-point UPDATE driver. Its Phase-1 gates double as a self-test (GATE 0
   # corruption catch, GATE 1 subset/partner/skin), so the FP64 binary is always built with the tests;
   # the timing modes (strategy sweep, phase-0 characterisation) are `bench`-labelled below.
