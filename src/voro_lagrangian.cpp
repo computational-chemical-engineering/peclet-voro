@@ -444,8 +444,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   void set_kick_constraint(const std::string& mode) {
     if (mode != "start" && mode != "midpoint")
       throw std::invalid_argument(
-          "voro: LagrangianFlow.set_kick_constraint(mode) takes 'start' (C of kick 1 at x^n, the "
-          "default) or 'midpoint' (at x^n + dt/2 v^n, option S)");
+          "voro: LagrangianFlow.set_kick_constraint(mode) takes 'midpoint' (C of kick 1 at x^n + "
+          "dt/2 v^n, option S, the default) or 'start' (at x^n)");
     midpoint_ = mode == "midpoint";
     dirty_ = true;
   }
@@ -703,7 +703,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   std::vector<double> V0_, rho_, mu_, tension_, sigmaWall_;
   std::vector<real_t> vel_;
   std::array<real_t, 3> gravity_{0, 0, 0}, bodyAmp_{0, 0, 0}, bodyWave_{0, 0, 0};
-  bool hasGravity_ = false, midpoint_ = false;
+  bool hasGravity_ = false, midpoint_ = true;
   std::optional<real_t> rhoRef_;
   real_t dtUser_ = 0, cfl_ = 0.2, cap_ = 0.5, time_ = 0, lastDt_ = 0, theta_ = 0.5;
   std::array<double, 4> acc_{0, 0, 0, 0};
@@ -779,8 +779,9 @@ void bindLagrangian(nb::module_& m) {
            nb::arg("capillary") = 0.5,
            "Step-size constants C_cfl, C_sigma (0 switches a limit off).")
       .def("set_kick_constraint", &LagrangianFlow::set_kick_constraint, nb::arg("mode"),
-           "Where kick 1's velocity constraint is taken: 'start' (x^n, default) or 'midpoint'\n"
-           "(x^n + dt/2 v^n with the weights solved there; DESIGN_NOTE option S).")
+           "Where kick 1's velocity constraint is taken: 'midpoint' (x^n + dt/2 v^n with the\n"
+           "weights solved there; DESIGN_NOTE option S; the default: second order in the energy)\n"
+           "or 'start' (x^n; first order).")
       .def("set_velocities", &LagrangianFlow::set_velocities, nb::arg("velocities"))
       .def("get_velocities", &LagrangianFlow::get_velocities)
       .def("get_positions", &LagrangianFlow::get_positions)

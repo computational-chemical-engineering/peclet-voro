@@ -3,7 +3,8 @@
  * \brief One time step of the Lagrangian power-cell method NHV-W (M7 DESIGN_NOTE §10.3 item 6,
  * with §2.6 for the linear solves and §2.7 steps 3 and 5 for the heat and the step size):
  *
- *   1. kick 1 at x^n, friction fused (θ-midpoint), velocity constraint C^n v^{½} = 0:
+ *   1. kick 1 at x^n, friction fused (θ-midpoint), velocity constraint C^n v^{½} = 0 (by default
+ *      C and ζ of kick 1 at x^n + (τ/2) v^n instead, option S, IntegratorParams::midpointConstraint):
  *        (M + θ(τ/2)ζ^n) v^{½} + (τ/2) C^{nᵀ} λ₁ = (M − (1−θ)(τ/2)ζ^n) v^n − (τ/2)(∇Ũ^n − M
  * a(x^n));
  *   2. drift x^{n+1} = x^n + τ v^{½} (wrapped into the box); weights warm-started by
@@ -444,7 +445,9 @@ struct IntegratorParams {
   double hTol = 1e-10;              ///< relative residual of the warm-start and Newton H solves
   double adjointTol = 1e-12;        ///< relative residual of the π solve
   int maxHalvings = 4;              ///< τ halvings when the weight solve fails (W-Q7)
-  bool midpointConstraint = false;  ///< option S: kick 1's C at x^n + (τ/2) v^n
+  /// option S (the default since M7 WO4′, orchestrator decision 2026-11-08: second order in the
+  /// energy, ×4.2 per τ halving vs ×2.4 at x^n): kick 1's C at x^n + (τ/2) v^n; false: at x^n
+  bool midpointConstraint = true;
   double repairTol = 1e-10;  ///< repaired-topology volume check (cone fan vs engine), relative
 };
 
