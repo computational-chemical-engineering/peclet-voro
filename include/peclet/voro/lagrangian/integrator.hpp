@@ -17,13 +17,13 @@
  *      work W += (τ/2) (M a)ᵀ(v_old + v_new)/2 per kick, so that K + Ũ + Q + Q_c − W is conserved
  *      to the integrator's O(τ²);
  *   5. step size τ = min(C_cfl min_i h_i/|v_i|, C_σ √(ρ_σ h_min³/σ_max), τ_user) (stableStep);
- *   6. the gauge (DESIGN_NOTE §2.8 as simplified by §10.3 item 4) after kick 2, every
- *      IntegratorParams::gaugeEvery steps (see gauge()); its ΔŨ and ΔK go to their own counters, so
- *      K + Ũ + Q + Q_c − W − ΔŨ_G − ΔK_G is what the integrator conserves to O(τ²).
- * Moving no-slip walls: the wall term of R becomes ½ Σ_w μ_i A^w |P_w(v_i − u_w)|²/δ_w with u_w a
- * linear field (FlowParams::wallVelocity/wallGradient) at the wall-facet centroid; the affine part
- * −f_w enters the kick's right-hand side and its work f_wᵀv̄ goes to the body work W (C is
- * unchanged: u_w is taken tangential, P_w u_w). No topology bookkeeping beyond the repair's.
+ *   6. the gauge G″ (DESIGN_NOTE §12.3.2: strain-activated, Lloyd-only, ascent-free) after kick 2,
+ *      every IntegratorParams::gaugeEvery steps (see gauge()); its ΔŨ and ΔK go to their own
+ * counters, so K + Ũ + Q + Q_c − W − ΔŨ_G − ΔK_G is what the integrator conserves to O(τ²). Moving
+ * no-slip walls: the wall term of R becomes ½ Σ_w μ_i A^w |P_w(v_i − u_w)|²/δ_w with u_w a linear
+ * field (FlowParams::wallVelocity/wallGradient) at the wall-facet centroid; the affine part −f_w
+ * enters the kick's right-hand side and its work f_wᵀv̄ goes to the body work W (C is unchanged: u_w
+ * is taken tangential, P_w u_w). No topology bookkeeping beyond the repair's.
  *
  * The saddle [M + θ(τ/2)ζ, (τ/2)Cᵀ; C, 0] is solved by preconditioned CG on the Schur complement
  * S = C A⁻¹ Cᵀ (A = M + θ(τ/2)ζ) for μ = (τ/2)λ, preconditioned by AMG on the assembled
@@ -616,14 +616,15 @@ struct IntegratorParams {
   /// energy, ×4.2 per τ halving vs ×2.4 at x^n): kick 1's C at x^n + (τ/2) v^n; false: at x^n
   bool midpointConstraint = true;
   double repairTol = 1e-10;  ///< repaired-topology volume check (cone fan vs engine), relative
-  // ---- the gauge (DESIGN_NOTE §2.8, §10.3 item 4) ----
-  int gaugeEvery = 1;   ///< the gauge after kick 2 every this many steps (0: off)
-  double alphaI = 0.2;  ///< interface: δ_i = −α_I P_i ∇_iŨ / σ_i (tangential descent)
-  double alphaB = 0.1;  ///< bulk: δ_i = α_B (b_i − x_i), b_i the power-cell centroid
-  double alphaBRule = 1.5;  ///< automatic floor α_B ≥ alphaBRule · τ max_i |∇v|_i (§10.3 item 4)
-  int gaugeRetries = 3;     ///< energy-guard halvings of α_I, α_B before the gauge is skipped
-  double kernelLength = 2;  ///< ℓ/h_i of the interface-normal kernel (§2.2; support 3ℓ)
-  double normalLloydShift = 0.25;  ///< W-Q2: above this max unlike |s|/d, a normal Lloyd part on I
+  // ---- the gauge G″ (DESIGN_NOTE §12.3.2) ----
+  int gaugeEvery = 1;              ///< the gauge after kick 2 every this many steps (0: off)
+  double gaugeStrain = 3;          ///< c_g: α_i = min(α_max, c_g τ ε̂_i)
+  double gaugeAlphaMax = 0.2;      ///< α_max
+  double gaugeSkip = 1e-6;         ///< skip the gauge (state untouched) when max_i α_i < this
+  int gaugeRetries = 3;            ///< halvings of all α_i on a rejected trial before the skip
+  double kernelLength = 2;         ///< ℓ/h_i of the interface-normal kernel (§2.2; support 3ℓ)
+  double normalLloydShift = 0.25;  ///< W-Q2: a cell of I with an unlike |s|/d above this also
+                                   ///< gets the normal Lloyd part m̂m̂ᵀ(b_i − x_i)
 };
 
 /// Per-step record (energies are the values AFTER the step).
@@ -646,16 +647,21 @@ struct StepReport {
   /// tPotential's split: facet export + match, U and ∂U, the H hierarchy, the π solve (the rest is
   /// the L_ρ setup, charged to kick2.tSetup)
   double tFacets = 0, tEnergy = 0, tAmgH = 0, tAdjoint = 0;
+  double minMargin =
+      0;  ///< min_i m_i after the step (cellMargins; > 0: every seed inside its cell)
   // the gauge (zero when it did not run)
-  int gaugeTries = 0;          ///< trials evaluated (0: the gauge did not run this step)
-  bool gaugeAccepted = false;  ///< a trial passed the energy guard
-  bool gaugeNormal = false;    ///< the W-Q2 normal Lloyd component was on
+  int gaugeTries = 0;          ///< trials evaluated (0: skipped or off this step)
+  bool gaugeAccepted = false;  ///< a trial was accepted
+  int gaugeNormal = 0;         ///< cells of I with the W-Q2 normal Lloyd part
   int gaugeInterface = 0;      ///< |I|
+  int gaugeProjected = 0;      ///< cells whose ascent component was removed (step 3)
+  int gaugeCapped = 0;         ///< cells scaled down by the margin cap (step 4)
+  double gaugeAlphaMax = 0;    ///< max_i α_i (computed also when the gauge is skipped)
   double gaugePotential = 0;   ///< ΔŨ of the accepted trial (≤ 0)
   double gaugeKinetic = 0;     ///< ΔK of the momentum projection (≤ 0)
-  double gaugeAlphaB = 0;      ///< α_B used (after the floor)
-  int gaugeSolveFails = 0;     ///< trials whose weight solve failed (diagnostics)
-  int gaugeEnergyRejects = 0;  ///< trials rejected by the energy guard (diagnostics)
+  int gaugeSolveFails = 0;     ///< trials whose weight solve failed
+  int gaugeMarginRejects = 0;  ///< trials with a seed on or behind its own facet
+  int gaugeEnergyRejects = 0;  ///< trials with Ũ(x̃) > Ũ(x)
   double gaugeTrialDU = 0;     ///< ΔŨ of the last evaluated trial (diagnostics)
   double tGauge = 0;
 };
@@ -747,6 +753,8 @@ class Integrator {
     lamG_ = LView<Real>("nhvw.lamGauge", n);
     gs_ = LView<Real>("nhvw.gradV", 9 * n);
     cls_ = Kokkos::View<int*, Mem>("nhvw.gaugeClass", n);
+    aG_ = LView<Real>("nhvw.gaugeAlpha", n);
+    mG_ = LView<Real>("nhvw.margin", n);
     iList_ = Kokkos::View<int*, Mem>("nhvw.iList", n);
     const double* ug = fp_.wallGradient;
     movingWall_ = fp_.wallVelocity[0] != 0 || fp_.wallVelocity[1] != 0 ||
@@ -779,7 +787,7 @@ class Integrator {
     time_ += tau;
     if (prm_.gaugeEvery > 0 && ++stepCount_ % prm_.gaugeEvery == 0) {
       double dU = 0, dK = 0;
-      gauge(tau, false, rep, dU, dK);
+      gauge(tau, rep, dU, dK);
       gaugeU_ += dU;
       gaugeK_ += dK;
     }
@@ -795,6 +803,7 @@ class Integrator {
     rep.wrapOffset = wrapOffset_;
     rep.maxSpeed = maxSpeed();
     shifts(rep.maxShift, rep.maxShiftUnlike);
+    rep.minMargin = minMargin();
     return rep;
   }
 
@@ -1034,10 +1043,10 @@ class Integrator {
     prm_.adjointTol = adjointTol;
     prm_.saddle.tol = saddleTol;
   }
-  void setGauge(double alphaI, double alphaB, int every) {
-    prm_.alphaI = alphaI;
-    prm_.alphaB = alphaB;
+  void setGauge(int every, double strain, double alphaMax) {
     prm_.gaugeEvery = every;
+    prm_.gaugeStrain = strain;
+    prm_.gaugeAlphaMax = alphaMax;
   }
   double theta() const { return prm_.theta; }
   double time() const { return time_; }
@@ -1374,52 +1383,72 @@ class Integrator {
     return true;
   }
 
-  /// The gauge G (DESIGN_NOTE §2.8 as simplified by §10.3 item 4) at the current state x:
-  ///  sets     I = the cells with an unlike facet; B_U \ I = the cells with a tensioned wall facet
-  ///           (no contact lines yet); Bulk = the rest. A cell whose plane bounds an unlike facet
-  ///           (i, j) neighbours both i and j, so a cell of another type: it is in I already.
-  ///  trial    Bulk: δ_i = α_B (b_i − x_i), b_i the centroid of the (wall-clipped) power cell.
-  ///           I: δ_i = −α_I P_i ∇_iŨ / σ_i, σ_i the largest tension of i's unlike facets,
-  ///           P_i = I − m̂_i m̂_iᵀ, m_i = Σ_{k∈I, t_k=t_i, r<3ℓ} w(r) a_k (a_k = Σ_unlike A n̂,
-  ///           w the §2.2 kernel, ℓ = kernelLength·h_i, minimum image; â_i if |m_i| < 0.1|a_i|);
-  ///           P_i = I for `descent` (the t = 0 relaxation). B_U \ I: 0. The note's h_i²/σ_i is
-  ///           read as the stiffness scale of a facet-area energy, ∇_iŨ/h_i² · h_i²/σ_i, so that δ
-  ///           is a length (M7 WO4′ DECISION, reported). W-Q2: when the max unlike |s|/d exceeds
-  ///           normalLloydShift, I also gets the normal Lloyd part α_B m̂ m̂ᵀ(b_i − x_i).
-  ///           α_B is floored at alphaBRule·τ max_i|G^s_i|_F (capped at 1, a full Lloyd step).
-  ///  volume   x̃ = x + δ, w̃ = w*(x̃) by the warm-started, repaired OT Newton (no SHAKE, no
-  ///           J-projection: shape and weights reset together).
-  ///  guard    accept iff Ũ(x̃) ≤ Ũ(x) (with the periodic-in-g wrap jump), else halve α_I and α_B
-  ///           together, at most gaugeRetries times, else skip (x, w and the engine restored).
-  ///  momentum v_i travels with its cell; then the M-projection onto C(x̃)v = 0 (one saddle with
-  ///           A = M); ΔK ≤ 0, Σ m_i v_i kept (1ᵀC = 0 without walls).
+  /// The gauge G″ (DESIGN_NOTE §12.3.2) at x = x^{n+1}, v = v^{n+1}: strain-activated, Lloyd-only,
+  /// ascent-free; it never descends Ũ (D12.1, D12.2).
+  ///  1. activation  ε̇_i = ‖sym(G_i v)‖_F (the linear-exact cell gradient), ε̂_i = its max over i
+  ///                 and i's face neighbours, α_i = min(α_max, c_g τ ε̂_i). max_i α_i < gaugeSkip:
+  ///                 nothing else runs, the state is untouched bit for bit.
+  ///  2. raw move    sets: CL = cells with both a wall facet and an unlike facet; I = the other
+  ///                 cells with an unlike facet; the rest. CL: r_i = 0. I: r_i = P_i(b_i − x_i),
+  ///                 plus m̂_im̂_iᵀ(b_i − x_i) when an unlike facet of i has |s|/d >
+  ///                 normalLloydShift (W-Q2), P_i = I − m̂_im̂_iᵀ with m̂ the §2.8 step-1 kernel
+  ///                 normal (m_i = Σ_{k∈I, t_k=t_i, r<3ℓ} w(r) a_k; â_i if |m_i| < 0.1|a_i|).
+  ///                 The rest: r_i = b_i − x_i (b_i the centroid of the clipped power cell).
+  ///                 δ_i = α_i r_i.
+  ///  3. projection  g_i = ∇_iŨ: if g_i·δ_i > 0, δ_i −= (g_i·δ_i/|g_i|²) g_i (ΔŨ ≤ 0 to first
+  ///                 order, cell by cell).
+  ///  4. margin cap  |δ_i| ≤ ½ m_i (cellMargins; δ_i = 0 if m_i ≤ 0).
+  ///  5. trial       x̃ = x + δ, OT warm-started from w^{n+1} (moveAndSolve); reject if OT fails,
+  ///                 min_i m_i(x̃) ≤ 0 or Ũ(x̃) > Ũ(x) (with the periodic-in-g wrap jump); on a
+  ///                 rejection halve all α_i (δ scales linearly), at most gaugeRetries times, then
+  ///                 skip (x, w and the engine restored).
+  ///  6. acceptance  v_i travels with its cell; the M-projection onto C(x̃)v = 0 (one saddle with
+  ///                 A = M); ∇Ũ(x̃) recomputed (evalState).
   /// dU, dK: the accepted trial's ΔŨ ≤ 0 and ΔK ≤ 0 (0 when skipped).
-  void gauge(double tau, bool descent, StepReport& rep, double& dU, double& dK) {
+  void gauge(double tau, StepReport& rep, double& dU, double& dK) {
     Kokkos::Timer t;
     dU = dK = 0;
-    double alphaB = prm_.alphaB;
-    if (tau > 0 && prm_.alphaBRule > 0) {
-      cellGradient(F_, vel_, gs_);
-      const LView<Real> gs = gs_;
-      Real gm = 0;
-      Kokkos::parallel_reduce(
-          "nhvw.gradVmax", Kokkos::RangePolicy<Exec>(0, N_),
-          KOKKOS_LAMBDA(const int i, Real& acc) {
+    // ---- 1. activation ----
+    cellGradient(F_, vel_, gs_);
+    {
+      const LView<Real> gs = gs_, e = tmpN_;
+      Kokkos::parallel_for(
+          "nhvw.gaugeStrain", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
             Real q = 0;
-            for (int e = 0; e < 9; ++e)
-              q += gs(9 * i + e) * gs(9 * i + e);
-            q = Kokkos::sqrt(q);
-            acc = q > acc ? q : acc;
-          },
-          Kokkos::Max<Real>(gm));
-      alphaB = std::min(1.0, std::max(alphaB, prm_.alphaBRule * tau * gm));
+            for (int a = 0; a < 3; ++a)
+              for (int b = 0; b < 3; ++b) {
+                const Real sab = Real(0.5) * (gs(9 * i + 3 * a + b) + gs(9 * i + 3 * b + a));
+                q += sab * sab;
+              }
+            e(i) = Kokkos::sqrt(q);
+          });
     }
-    double sAll = 0, sUnlike = 0;
-    shifts(sAll, sUnlike);
-    const bool normal = sUnlike > prm_.normalLloydShift;
-    rep.gaugeNormal = normal;
-    rep.gaugeAlphaB = alphaB;
-    rep.gaugeInterface = gaugeDisplacement(alphaB, descent, normal);
+    {
+      const CellFacets<Real> G = F_;
+      const LView<Real> e = tmpN_, al = aG_;
+      const Real cg = prm_.gaugeStrain * tau, amax = prm_.gaugeAlphaMax;
+      Real am = 0;
+      Kokkos::parallel_reduce(
+          "nhvw.gaugeAlpha", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i, Real& acc) {
+            Real m = e(i);
+            for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+              const Real q = e(G.nbr(f));
+              m = q > m ? q : m;
+            }
+            const Real a = cg * m < amax ? cg * m : amax;
+            al(i) = a;
+            acc = a > acc ? a : acc;
+          },
+          Kokkos::Max<Real>(am));
+      rep.gaugeAlphaMax = am;
+      if (!(am >= prm_.gaugeSkip)) {
+        rep.tGauge = t.seconds();
+        return;
+      }
+    }
+    // ---- 2-4. the displacement ----
+    rep.gaugeInterface = gaugeDisplacement(rep);
     Kokkos::deep_copy(pos0_, pos_);
     Kokkos::deep_copy(w0_, weight_);
     const double U0 = parts_.total() + wrapOffset_;
@@ -1430,18 +1459,30 @@ class Integrator {
         CellFacets<Real> Ft = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_,
                                                             mt_->wall, mt_->xRef, mt_->vol);
         matchFacets(Ft);
-        Kokkos::deep_copy(gx_, Real(0));
-        Kokkos::deep_copy(gw_, Real(0));
-        const PotentialParts pt = partitionPotential(*mt_, Ft, pos_, weight_, L_, spec_, gx_, gw_);
-        rep.gaugeTrialDU = pt.total() + wrapOffset_ - wrapJump() - U0;
-        if (pt.total() + wrapOffset_ - wrapJump() <= U0) {
-          accumulateWrap();
-          evalState();
-          dU = parts_.total() + wrapOffset_ - U0;
-          rep.gaugeAccepted = true;
-          break;
+        cellMargins(Ft, mG_);
+        const LView<Real> mg = mG_;
+        Real mmin = 0;
+        Kokkos::parallel_reduce(
+            "nhvw.gaugeTrialMargin", Kokkos::RangePolicy<Exec>(0, N_),
+            KOKKOS_LAMBDA(const int i, Real& acc) { acc = mg(i) < acc ? mg(i) : acc; },
+            Kokkos::Min<Real>(mmin));
+        if (mmin > Real(0)) {
+          Kokkos::deep_copy(gx_, Real(0));
+          Kokkos::deep_copy(gw_, Real(0));
+          const PotentialParts pt =
+              partitionPotential(*mt_, Ft, pos_, weight_, L_, spec_, gx_, gw_);
+          rep.gaugeTrialDU = pt.total() + wrapOffset_ - wrapJump() - U0;
+          if (pt.total() + wrapOffset_ - wrapJump() <= U0) {
+            accumulateWrap();
+            evalState();
+            dU = parts_.total() + wrapOffset_ - U0;
+            rep.gaugeAccepted = true;
+            break;
+          }
+          ++rep.gaugeEnergyRejects;
+        } else {
+          ++rep.gaugeMarginRejects;
         }
-        ++rep.gaugeEnergyRejects;
       } else {
         ++rep.gaugeSolveFails;
       }
@@ -1454,8 +1495,7 @@ class Integrator {
           "nhvw.gaugeMv", Kokkos::RangePolicy<Exec>(0, 3 * N_),
           KOKKOS_LAMBDA(const int k) { b(k) = m(k / 3) * v(k); });
       Kokkos::deep_copy(lamG_, Real(0));
-      const double tp = tau > 0 ? tau : 1.0;
-      saddle_.solve(Real(0), Real(0.5 * tp), Real(prm_.saddle.tol * maxV0_ / tp), b_, vel_, lamG_,
+      saddle_.solve(Real(0), Real(0.5 * tau), Real(prm_.saddle.tol * maxV0_ / tau), b_, vel_, lamG_,
                     prm_.saddle);
       kinetic_ = kineticEnergy();
       dK = kinetic_ - K0;
@@ -1466,15 +1506,15 @@ class Integrator {
     rep.tGauge = t.seconds();
   }
 
-  /// The gauge's trial displacement at the full α into gd_ (see gauge()); returns |I|.
-  int gaugeDisplacement(double alphaB, bool descent, bool normalLloyd) {
+  /// G″ steps 2-4 (see gauge()): δ (gd_) from α (aG_); returns |I| and counts the normal-part,
+  /// projected and capped cells into `rep`.
+  int gaugeDisplacement(StepReport& rep) {
     const CellFacets<Real> G = F_;
     const auto T = spec_.types;
-    const int nT = spec_.nTypes;
-    const LView<Real> ten = spec_.tension, sw = spec_.sigmaWall, a = aI_, g = grad_, d = gd_,
-                      h = h_, P = pos_;
-    const bool hasTen = ten.extent(0) > 0, hasSw = sw.extent(0) > 0;
+    const LView<Real> a = aI_, g = grad_, d = gd_, h = h_, P = pos_, w = weight_, al = aG_,
+                      mg = mG_;
     const Kokkos::View<int*, Mem> cls = cls_, list = iList_;
+    // classes: 0 the rest, 1 I, 2 CL (an unlike and a wall facet)
     Kokkos::parallel_for(
         "nhvw.gaugeSets", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
           Real ai[3] = {0, 0, 0};
@@ -1490,10 +1530,7 @@ class Integrator {
             for (int c = 0; c < 3; ++c)
               ai[c] += sc * G.conn(3 * f + c);
           }
-          int c = iface ? 1 : 0;
-          if (!iface && hasSw && sw(T(i)) != Real(0) && G.wallOffset(i + 1) > G.wallOffset(i))
-            c = 2;
-          cls(i) = c;
+          cls(i) = !iface ? 0 : (G.wallOffset(i + 1) > G.wallOffset(i) ? 2 : 1);
           for (int e = 0; e < 3; ++e)
             a(3 * i + e) = ai[e];
         });
@@ -1508,77 +1545,101 @@ class Integrator {
           }
         },
         nI);
+    cellMargins(F_, mG_);
     const int n = nI;
     const Kokkos::Array<Real, 3> L3 = {L_[0], L_[1], L_[2]};
-    const Real aI = prm_.alphaI, aB = alphaB, kl = prm_.kernelLength;
+    const Real kl = prm_.kernelLength, sThr = prm_.normalLloydShift;
+    int nNormal = 0, nProj = 0, nCap = 0;
     // the kernel sum is a brute-force loop over I (|I| ~ N^{2/3}); a cell list is the upgrade
-    Kokkos::parallel_for(
-        "nhvw.gaugeDelta", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
+    Kokkos::parallel_reduce(
+        "nhvw.gaugeDelta", Kokkos::RangePolicy<Exec>(0, N_),
+        KOKKOS_LAMBDA(const int i, int& cN, int& cP, int& cC) {
           Real di[3] = {0, 0, 0};
           if (cls(i) == 0) {
             for (int c = 0; c < 3; ++c)
-              di[c] = aB * G.cellCentroid(3 * i + c);
-          } else if (cls(i) == 1 && hasTen) {
-            Real sig = 0;
-            for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
-              const int j = G.nbr(f);
-              if (T(j) != T(i)) {
-                const Real sf = ten(T(i) * nT + T(j));
-                sig = sf > sig ? sf : sig;
+              di[c] = G.cellCentroid(3 * i + c);
+          } else if (cls(i) == 1) {
+            const Real ell2 = kl * h(i) * kl * h(i), rc2 = Real(9) * ell2;
+            Real m[3] = {0, 0, 0};
+            for (int q = 0; q < n; ++q) {
+              const int k = list(q);
+              if (T(k) != T(i))
+                continue;
+              Real r2 = 0;
+              for (int c = 0; c < 3; ++c) {
+                Real dx = P(3 * k + c) - P(3 * i + c);
+                dx -= L3[c] * Kokkos::floor(dx / L3[c] + Real(0.5));
+                r2 += dx * dx;
               }
-            }
-            if (sig > Real(0)) {
-              const Real ell2 = kl * h(i) * kl * h(i), rc2 = Real(9) * ell2;
-              Real m[3] = {0, 0, 0};
-              for (int q = 0; q < n; ++q) {
-                const int k = list(q);
-                if (T(k) != T(i))
-                  continue;
-                Real r2 = 0;
-                for (int c = 0; c < 3; ++c) {
-                  Real dx = P(3 * k + c) - P(3 * i + c);
-                  dx -= L3[c] * Kokkos::floor(dx / L3[c] + Real(0.5));
-                  r2 += dx * dx;
-                }
-                if (r2 >= rc2)
-                  continue;
-                const Real u = Real(1) - r2 / rc2;
-                const Real wgt = Kokkos::exp(-r2 / ell2) * u * u * u;
-                for (int c = 0; c < 3; ++c)
-                  m[c] += wgt * a(3 * k + c);
-              }
-              Real mn = Kokkos::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
-              const Real an = Kokkos::sqrt(a(3 * i) * a(3 * i) + a(3 * i + 1) * a(3 * i + 1) +
-                                           a(3 * i + 2) * a(3 * i + 2));
-              if (mn < Real(0.1) * an) {  // thin film: the cell's own vector area
-                for (int c = 0; c < 3; ++c)
-                  m[c] = a(3 * i + c);
-                mn = an;
-              }
-              Real nh[3] = {0, 0, 0};
-              const bool hasN = mn > Real(0);
-              if (hasN)
-                for (int c = 0; c < 3; ++c)
-                  nh[c] = m[c] / mn;
-              Real gi[3] = {g(3 * i), g(3 * i + 1), g(3 * i + 2)};
-              if (!descent && hasN) {
-                const Real gn = nh[0] * gi[0] + nh[1] * gi[1] + nh[2] * gi[2];
-                for (int c = 0; c < 3; ++c)
-                  gi[c] -= gn * nh[c];
-              }
+              if (r2 >= rc2)
+                continue;
+              const Real u = Real(1) - r2 / rc2;
+              const Real wgt = Kokkos::exp(-r2 / ell2) * u * u * u;
               for (int c = 0; c < 3; ++c)
-                di[c] = -aI * gi[c] / sig;
-              if (normalLloyd && hasN) {
-                const Real bn = nh[0] * G.cellCentroid(3 * i) + nh[1] * G.cellCentroid(3 * i + 1) +
-                                nh[2] * G.cellCentroid(3 * i + 2);
+                m[c] += wgt * a(3 * k + c);
+            }
+            Real mn = Kokkos::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+            const Real an = Kokkos::sqrt(a(3 * i) * a(3 * i) + a(3 * i + 1) * a(3 * i + 1) +
+                                         a(3 * i + 2) * a(3 * i + 2));
+            if (mn < Real(0.1) * an) {  // thin film: the cell's own vector area
+              for (int c = 0; c < 3; ++c)
+                m[c] = a(3 * i + c);
+              mn = an;
+            }
+            for (int c = 0; c < 3; ++c)
+              di[c] = G.cellCentroid(3 * i + c);
+            if (mn > Real(0)) {
+              Real nh[3];
+              for (int c = 0; c < 3; ++c)
+                nh[c] = m[c] / mn;
+              bool normal = false;
+              for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+                const int j = G.nbr(f);
+                if (T(j) == T(i))
+                  continue;
+                Real d2 = 0;
                 for (int c = 0; c < 3; ++c)
-                  di[c] += aB * bn * nh[c];
+                  d2 += G.conn(3 * f + c) * G.conn(3 * f + c);
+                if (Kokkos::fabs(w(i) - w(j)) / (Real(2) * d2) > sThr)
+                  normal = true;
+              }
+              if (!normal) {
+                const Real bn = nh[0] * di[0] + nh[1] * di[1] + nh[2] * di[2];
+                for (int c = 0; c < 3; ++c)
+                  di[c] -= bn * nh[c];
+              } else {
+                ++cN;
               }
             }
           }
+          // δ_i = α_i r_i
+          for (int c = 0; c < 3; ++c)
+            di[c] *= al(i);
+          // 3. remove the ascent component
+          const Real gi[3] = {g(3 * i), g(3 * i + 1), g(3 * i + 2)};
+          const Real gd = gi[0] * di[0] + gi[1] * di[1] + gi[2] * di[2];
+          const Real gg = gi[0] * gi[0] + gi[1] * gi[1] + gi[2] * gi[2];
+          if (gd > Real(0) && gg > Real(0)) {
+            for (int c = 0; c < 3; ++c)
+              di[c] -= gd / gg * gi[c];
+            ++cP;
+          }
+          // 4. the margin cap |δ_i| ≤ ½ m_i
+          const Real dn = Kokkos::sqrt(di[0] * di[0] + di[1] * di[1] + di[2] * di[2]);
+          const Real cap = Real(0.5) * mg(i);
+          if (dn > cap) {
+            const Real sc = cap > Real(0) ? cap / dn : Real(0);
+            for (int c = 0; c < 3; ++c)
+              di[c] *= sc;
+            ++cC;
+          }
           for (int c = 0; c < 3; ++c)
             d(3 * i + c) = di[c];
-        });
+        },
+        nNormal, nProj, nCap);
+    rep.gaugeNormal = nNormal;
+    rep.gaugeProjected = nProj;
+    rep.gaugeCapped = nCap;
     return n;
   }
 
@@ -1722,7 +1783,7 @@ class Integrator {
   Real L_[3] = {1, 1, 1};
   double maxV0_ = 0;
   LView<Real> V0_, rho_, mu_, mass_, h_, vel_, vh_, b_, zo_, zn_, grad_, gx_, gw_, pi_, lam1_,
-      lam2_, tmpN_, dw_, pos0_, w0_, wrapS_, gd_, aI_, lamG_, gs_, fw_;
+      lam2_, tmpN_, dw_, pos0_, w0_, wrapS_, gd_, aI_, lamG_, gs_, fw_, aG_, mG_;
   Kokkos::View<int*, Mem> cls_, iList_;
   bool movingWall_ = false;
   long stepCount_ = 0;

@@ -375,11 +375,12 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     for (double c : toHost(cv))
       cmax = std::max(cmax, std::fabs(c) * tau / maxV);
     std::printf(
-        "  (F) gauge step: tries=%d accepted=%d dU=%.2e dK=%.2e |dP|/sum m|v|=%.1e |Cv| "
-        "tau/maxV=%.1e\n",
-        r.gaugeTries, int(r.gaugeAccepted), r.gaugePotential, r.gaugeKinetic, dP, cmax);
-    rc |= (r.gaugeTries > 0 && r.gaugePotential <= 0 && r.gaugeKinetic <= 0 && dP <= 1e-12 &&
-           cmax <= 1e-11)
+        "  (F) gauge G'' step: max alpha=%.2e |I|=%d projected=%d capped=%d tries=%d accepted=%d "
+        "dU=%.2e dK=%.2e min margin/h=%.3f |dP|/sum m|v|=%.1e |Cv| tau/maxV=%.1e\n",
+        r.gaugeAlphaMax, r.gaugeInterface, r.gaugeProjected, r.gaugeCapped, r.gaugeTries,
+        int(r.gaugeAccepted), r.gaugePotential, r.gaugeKinetic, r.minMargin / h, dP, cmax);
+    rc |= (r.gaugeTries > 0 && r.gaugeAccepted && r.gaugePotential <= 0 && r.gaugeKinetic <= 0 &&
+           r.minMargin > 0 && dP <= 1e-12 && cmax <= 1e-11)
               ? 0
               : 1;
   }
@@ -395,10 +396,17 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     fp.viscosity = {0.1};
     lag::Integrator<MT> I(mt, pos, w, Larr, V0, spec, fp, std::vector<real_t>(3 * N, 0.0));
     double vmax = 0;
-    for (int s = 0; s < 3; ++s)
-      vmax = std::max(vmax, I.step(0.01).maxSpeed);
-    std::printf("  (E) rest: max|v| after 3 steps = %.1e (exactly 0 expected)\n", vmax);
-    rc |= vmax == 0.0 ? 0 : 1;
+    int tries = 0;
+    for (int s = 0; s < 3; ++s) {
+      const auto r = I.step(0.01);
+      vmax = std::max(vmax, r.maxSpeed);
+      tries += r.gaugeTries;
+    }
+    std::printf(
+        "  (E) rest: max|v| after 3 steps = %.1e (exactly 0 expected), gauge trials %d (0: "
+        "skipped at rest)\n",
+        vmax, tries);
+    rc |= (vmax == 0.0 && tries == 0) ? 0 : 1;
   }
   return rc;
 }

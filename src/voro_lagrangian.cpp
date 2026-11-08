@@ -459,14 +459,14 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     saddleTol_ = saddleTol;
     withIntegIfAny([&](auto& I) { I.setSolverOptions(schurAssembled_, adjointTol_, saddleTol_); });
   }
-  void set_gauge(real_t interface, real_t bulk, int every) {
-    if (!(interface >= 0) || !(bulk >= 0) || every < 0)
+  void set_gauge(int every, real_t strain, real_t alpha_max) {
+    if (every < 0 || !(strain >= 0) || !(alpha_max >= 0))
       throw std::invalid_argument(
-          "voro: LagrangianFlow.set_gauge() takes interface >= 0, bulk >= 0, every >= 0");
-    alphaI_ = interface;
-    alphaB_ = bulk;
+          "voro: LagrangianFlow.set_gauge() takes every >= 0, strain >= 0, alpha_max >= 0");
     gaugeEvery_ = every;
-    withIntegIfAny([&](auto& I) { I.setGauge(alphaI_, alphaB_, gaugeEvery_); });
+    strain_ = strain;
+    alphaMax_ = alpha_max;
+    withIntegIfAny([&](auto& I) { I.setGauge(gaugeEvery_, strain_, alphaMax_); });
   }
   void set_wall_velocity(std::array<real_t, 3> offset,
                          std::optional<nb::ndarray<real_t, nb::c_contig>> gradient) {
@@ -639,11 +639,15 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["kick2_t_solve"] = col([](const auto& r) { return r.kick2.tTotal; });
     d["gauge_tries"] = col([](const auto& r) { return r.gaugeTries; });
     d["gauge_accepted"] = col([](const auto& r) { return r.gaugeAccepted ? 1 : 0; });
-    d["gauge_normal"] = col([](const auto& r) { return r.gaugeNormal ? 1 : 0; });
+    d["gauge_normal"] = col([](const auto& r) { return r.gaugeNormal; });
+    d["gauge_projected"] = col([](const auto& r) { return r.gaugeProjected; });
+    d["gauge_capped"] = col([](const auto& r) { return r.gaugeCapped; });
+    d["gauge_margin_rejects"] = col([](const auto& r) { return r.gaugeMarginRejects; });
+    d["min_margin"] = col([](const auto& r) { return r.minMargin; });
     d["gauge_interface_cells"] = col([](const auto& r) { return r.gaugeInterface; });
     d["gauge_potential"] = col([](const auto& r) { return r.gaugePotential; });
     d["gauge_kinetic"] = col([](const auto& r) { return r.gaugeKinetic; });
-    d["gauge_bulk_alpha"] = col([](const auto& r) { return r.gaugeAlphaB; });
+    d["gauge_alpha_max"] = col([](const auto& r) { return r.gaugeAlphaMax; });
     d["t_gauge"] = col([](const auto& r) { return r.tGauge; });
     d["gauge_solve_fails"] = col([](const auto& r) { return r.gaugeSolveFails; });
     d["gauge_energy_rejects"] = col([](const auto& r) { return r.gaugeEnergyRejects; });
@@ -792,7 +796,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
             I->setMidpointConstraint(midpoint_);
             I->setTime(time_);
             I->setAccumulators(acc_[0], acc_[1], acc_[2], acc_[3], acc_[4], acc_[5]);
-            I->setGauge(alphaI_, alphaB_, gaugeEvery_);
+            I->setGauge(gaugeEvery_, strain_, alphaMax_);
             if (adjointTol_ > 0)
               I->setSolverOptions(schurAssembled_, adjointTol_, saddleTol_);
             if constexpr (T::kHasSdf)
@@ -821,7 +825,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   std::array<double, 6> acc_{0, 0, 0, 0, 0, 0};
   std::array<real_t, 3> wallU_{0, 0, 0};
   std::array<real_t, 9> wallG_{0, 0, 0, 0, 0, 0, 0, 0, 0};
-  real_t alphaI_ = 0.2, alphaB_ = 0.1;
+  real_t strain_ = 3, alphaMax_ = 0.2;
   int gaugeEvery_ = 1;
   bool dirty_ = true;
   const real_t* posData_ = nullptr;
@@ -870,7 +874,8 @@ void bindLagrangian(nb::module_& m) {
       "body-force work W; K + U~ + Q + Q_c - W is conserved to O(dt^2). Physical inputs only:\n"
       "per-type density / viscosity, the tension table, wall tension, gravity, a body\n"
       "acceleration amp*sin(k.x), and the step: dt = min(cfl*min h/|v|, capillary*sqrt(rho\n"
-      "h^3/sigma), set_dt cap). No gauge, no topology bookkeeping beyond the repair.\n"
+      "h^3/sigma), set_dt cap). The gauge G'' after kick 2 (set_gauge); no topology bookkeeping "
+      "beyond the repair.\n"
       "`volumes` (N,): the reference volumes (default: the current ones).")
       .def(nb::init<Tess&, nb::ndarray<int, nb::c_contig>,
                     std::optional<nb::ndarray<real_t, nb::c_contig>>>(),
@@ -903,13 +908,18 @@ void bindLagrangian(nb::module_& m) {
            "M7 WO4a solver trials (not public API): AMG on the assembled C M^-1 C^T as the Schur\n"
            "preconditioner, the relative tolerance of the pi (adjoint) solve, and the saddle's\n"
            "constraint tolerance |C v|_inf <= saddle_tol max V / dt.")
-      .def("set_gauge", &LagrangianFlow::set_gauge, nb::arg("interface") = 0.2,
-           nb::arg("bulk") = 0.1, nb::arg("every") = 1,
-           "The NHV-W gauge after kick 2 every `every` steps (0: off): interface cells descend\n"
-           "Ũ tangentially, delta = -interface P grad_i Ũ / sigma_i; bulk cells move\n"
-           "bulk (b_i - x_i) to their power-cell centroid (floored at 1.5 dt max|grad v|);\n"
-           "weights re-solved, energy guard (Ũ must not rise; 3 halvings), then v projected\n"
-           "onto C v = 0 in the M-metric. Its dU, dK are counted separately (energies()).")
+      .def(
+          "set_gauge", &LagrangianFlow::set_gauge, nb::arg("every") = 1, nb::arg("strain") = 3.0,
+          nb::arg("alpha_max") = 0.2,
+          "The gauge G'' (M7 DESIGN_NOTE §12.3.2) after kick 2 every `every` steps (0: off):\n"
+          "strain-activated, Lloyd-only and ascent-free. alpha_i = min(alpha_max, strain * dt *\n"
+          "max |sym grad v| over the cell and its face neighbours); skipped, the state untouched,\n"
+          "when max alpha < 1e-6. Interface cells move tangentially to their power-cell centroid\n"
+          "(plus the normal part when an unlike facet has |s|/d > 0.25), contact-line cells stay,\n"
+          "the rest move to the centroid: delta = alpha (b - x); each cell's ascent component\n"
+          "along grad U~ removed, |delta| capped at half the distance to its own facet planes;\n"
+          "weights re-solved, rejected if U~ rises or a seed leaves its cell (3 halvings), then\n"
+          "v projected onto C v = 0 in the M-metric. Its dU, dK are counted separately.")
       .def("set_wall_velocity", &LagrangianFlow::set_wall_velocity, nb::arg("offset"),
            nb::arg("gradient") = nb::none(),
            "No-slip wall velocity u_w(y) = offset + gradient @ y at the wall facets (tangential\n"
