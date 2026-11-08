@@ -321,7 +321,8 @@ class Tess : public peclet::core::python::Releasable {
                              std::optional<nb::ndarray<real_t, nb::c_contig>> sigma_wall,
                              std::optional<nb::ndarray<real_t, nb::c_contig>> density,
                              std::optional<std::array<real_t, 3>> gravity, real_t reference_density,
-                             real_t tol);
+                             real_t tol, const std::string& interface_energy,
+                             std::optional<nb::ndarray<real_t, nb::c_contig>> volumes);
   bool has_geometry() const { return scene_.set; }
 
   // Per-cell number of resident SDF wall planes (0 everywhere without geometry).

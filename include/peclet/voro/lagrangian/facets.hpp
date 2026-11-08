@@ -59,7 +59,47 @@ struct CellFacets {
   Kokkos::View<Real*, Mem> wallNormal;    // 3*nWall: outward unit normal
   Kokkos::View<Real*, Mem> volume;        // nCells: V_i (cone fan from the generator)
   Kokkos::View<Real*, Mem> cellCentroid;  // 3*nCells: b_i − x_i
+  // Higher moments, exported only on request (exportCellFacets(..., withHigherMoments = true);
+  // empty otherwise): the facet's central third moment ∫_f η⊗η⊗η dA, η = y − c, as its ten
+  // symmetric components in the sym3Index order (xxx, xxy, xxz, xyy, xyz, xzz, yyy, yyz, yzz, zzz),
+  // and the cell's second moment about the generator ∫_{C_i} (y−x_i)(y−x_i)ᵀ dV (cone fan, like
+  // volume and cellCentroid). Used by the nonlocal capillary energy
+  // (lagrangian/nonlocal_energy.hpp).
+  Kokkos::View<Real*, Mem> third;       // 10*nFacets (optional)
+  Kokkos::View<Real*, Mem> cellSecond;  // 9*nCells (optional), row-major
+  bool hasHigherMoments() const { return cellSecond.extent(0) > 0; }
 };
+
+/// Index of the symmetric third-moment component (a ≤ b ≤ c after sorting) in the 10-vector.
+KOKKOS_INLINE_FUNCTION int sym3Index(int a, int b, int c) {
+  // sort a ≤ b ≤ c
+  if (a > b) {
+    const int t = a;
+    a = b;
+    b = t;
+  }
+  if (b > c) {
+    const int t = b;
+    b = c;
+    c = t;
+  }
+  if (a > b) {
+    const int t = a;
+    a = b;
+    b = t;
+  }
+  // lexicographic over a ≤ b ≤ c in {0,1,2}: offsets of a = 0 (6 entries), a = 1 (3), a = 2 (1)
+  const int baseA = a == 0 ? 0 : (a == 1 ? 6 : 9);
+  // within a: pairs (b, c) with a ≤ b ≤ c
+  int k = 0;
+  for (int bb = a; bb <= 2; ++bb)
+    for (int cc = bb; cc <= 2; ++cc) {
+      if (bb == b && cc == c)
+        return baseA + k;
+      ++k;
+    }
+  return -1;
+}
 
 /// Geometry of face k of cell `c` (vertices generator-relative): area, centroid, second-moment
 /// tensor about the centroid, and the face's cone from the generator (signed volume and first
@@ -156,6 +196,71 @@ KOKKOS_INLINE_FUNCTION bool faceMoments(const Cell& c, int k, Real& area, Real c
   return true;
 }
 
+/// Higher moments of face k of cell `c` about the point `cen` (vertices generator-relative), on
+/// the same signed fan as faceMoments: the third moment ∫_f (y−cen)^{⊗3} dA (ten symmetric
+/// components, sym3Index order) and the second moment of the face's cone from the generator,
+/// ∫_cone y yᵀ dV. Per fan triangle (p, q, r) the third moment is the cubic-exact rule
+/// (A_t/60)[3 Σ_v v^{⊗3} + 8 Σ_edges m^{⊗3} + 27 g^{⊗3}] (vertices, edge midpoints, centroid),
+/// so the result does not depend on the fan; a cone tetrahedron (0, v0, v1, v2) of signed volume
+/// V_t has ∫ y yᵀ = (V_t/20)(Σ v vᵀ + s sᵀ), s = v0 + v1 + v2.
+template <class Cell, class Real>
+KOKKOS_INLINE_FUNCTION void faceHigherMoments(const Cell& c, int k, const Real cen[3],
+                                              Real third[10], Real coneSec[9]) {
+  for (int e = 0; e < 10; ++e)
+    third[e] = Real(0);
+  for (int e = 0; e < 9; ++e)
+    coneSec[e] = Real(0);
+  Real fx[Cell::MAXFV], fy[Cell::MAXFV], fz[Cell::MAXFV];
+  const int m = c.faceOrdered(k, fx, fy, fz);
+  const Real nl = Kokkos::sqrt(c.nn[k]);
+  if (m < 3 || !(nl > Real(0)))
+    return;
+  const Real u[3] = {c.n[k][0] / nl, c.n[k][1] / nl, c.n[k][2] / nl};
+  const Real p[3] = {fx[0] - cen[0], fy[0] - cen[1], fz[0] - cen[2]};
+  for (int q = 1; q + 1 < m; ++q) {
+    const Real a[3] = {fx[q] - cen[0], fy[q] - cen[1], fz[q] - cen[2]};
+    const Real b[3] = {fx[q + 1] - cen[0], fy[q + 1] - cen[1], fz[q + 1] - cen[2]};
+    const Real e1[3] = {a[0] - p[0], a[1] - p[1], a[2] - p[2]};
+    const Real e2[3] = {b[0] - p[0], b[1] - p[1], b[2] - p[2]};
+    const Real at = Real(0.5) * ((e1[1] * e2[2] - e1[2] * e2[1]) * u[0] +
+                                 (e1[2] * e2[0] - e1[0] * e2[2]) * u[1] +
+                                 (e1[0] * e2[1] - e1[1] * e2[0]) * u[2]);
+    // the seven nodes and their weights (×60/A_t)
+    Real pts[7][3];
+    const Real wts[7] = {3, 3, 3, 8, 8, 8, 27};
+    for (int r = 0; r < 3; ++r) {
+      pts[0][r] = p[r];
+      pts[1][r] = a[r];
+      pts[2][r] = b[r];
+      pts[3][r] = Real(0.5) * (p[r] + a[r]);
+      pts[4][r] = Real(0.5) * (a[r] + b[r]);
+      pts[5][r] = Real(0.5) * (b[r] + p[r]);
+      pts[6][r] = (p[r] + a[r] + b[r]) / Real(3);
+    }
+    const Real w = at / Real(60);
+    for (int n = 0; n < 7; ++n) {
+      const Real* y = pts[n];
+      const Real ww = w * wts[n];
+      int e = 0;
+      for (int r = 0; r < 3; ++r)
+        for (int s = r; s < 3; ++s)
+          for (int t = s; t < 3; ++t)
+            third[e++] += ww * y[r] * y[s] * y[t];
+    }
+    const Real v0[3] = {fx[0], fy[0], fz[0]}, v1[3] = {fx[q], fy[q], fz[q]},
+               v2[3] = {fx[q + 1], fy[q + 1], fz[q + 1]};
+    const Real vt =
+        (v0[0] * (v1[1] * v2[2] - v1[2] * v2[1]) - v0[1] * (v1[0] * v2[2] - v1[2] * v2[0]) +
+         v0[2] * (v1[0] * v2[1] - v1[1] * v2[0])) /
+        Real(6);
+    const Real sv[3] = {v0[0] + v1[0] + v2[0], v0[1] + v1[1] + v2[1], v0[2] + v1[2] + v2[2]};
+    const Real wv = vt / Real(20);
+    for (int r = 0; r < 3; ++r)
+      for (int t = 0; t < 3; ++t)
+        coneSec[3 * r + t] += wv * (v0[r] * v0[t] + v1[r] * v1[t] + v2[r] * v2[t] + sv[r] * sv[t]);
+  }
+}
+
 namespace detail {
 /// A plane is a face iff ≥3 live triangles use it (reevalPublish's criterion).
 template <class Cell>
@@ -205,7 +310,8 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
                                   const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N,
                                   const Real L[3], WallStore<Real> wall = {},
                                   Kokkos::View<Real*, peclet::core::MemSpace> xRef = {},
-                                  Kokkos::View<Real*, peclet::core::MemSpace> engineVol = {}) {
+                                  Kokkos::View<Real*, peclet::core::MemSpace> engineVol = {},
+                                  bool withHigherMoments = false) {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Cell = ConvexCell<Real, MAXP, MAXT, false>;
@@ -286,13 +392,19 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
       Kokkos::View<Real*, Mem>(view_alloc(std::string("lag.wNormal"), WithoutInitializing), 3 * sW);
   F.volume = Kokkos::View<Real*, Mem>("lag.volume", static_cast<std::size_t>(N));
   F.cellCentroid = Kokkos::View<Real*, Mem>("lag.cellCen", 3 * static_cast<std::size_t>(N));
+  if (withHigherMoments) {
+    F.third = Kokkos::View<Real*, Mem>(view_alloc(std::string("lag.third"), WithoutInitializing),
+                                       10 * sF);
+    F.cellSecond = Kokkos::View<Real*, Mem>("lag.cellSec", 9 * static_cast<std::size_t>(N));
+  }
+  const bool hm = withHigherMoments;
   const CellFacets<Real> G = F;
   Kokkos::parallel_for(
       "lagrangian.facets.fill", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         Cell c;
         detail::loadCell<Policy>(st, Wl, P, W, XR, L3, i, c);
         int fi = G.facetOffset(i), wi = G.wallOffset(i);
-        Real V = 0, M[3] = {0, 0, 0};
+        Real V = 0, M[3] = {0, 0, 0}, Q[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
         for (int k = 0; k < c.np; ++k) {
           if (!detail::isFace(c, k))
             continue;
@@ -303,8 +415,17 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
           M[0] += cm[0];
           M[1] += cm[1];
           M[2] += cm[2];
+          Real th[10], cq[9];
+          if (hm) {
+            faceHigherMoments(c, k, cen, th, cq);
+            for (int e = 0; e < 9; ++e)
+              Q[e] += cq[e];
+          }
           const int j = c.pnbr[k];
           if (j >= 0 && (!hasEV || EV(j) > Real(0))) {
+            if (hm)
+              for (int e = 0; e < 10; ++e)
+                G.third(10 * fi + e) = th[e];
             G.nbr(fi) = j;
             G.area(fi) = a;
             Real r[3] = {P(3 * j) - P(3 * i), P(3 * j + 1) - P(3 * i + 1),
@@ -333,6 +454,9 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
         const Real iv = V > Real(0) ? Real(1) / V : Real(0);
         for (int d = 0; d < 3; ++d)
           G.cellCentroid(3 * i + d) = M[d] * iv;
+        if (hm)
+          for (int e = 0; e < 9; ++e)
+            G.cellSecond(9 * i + e) = Q[e];
       });
   return F;
 }
@@ -409,6 +533,8 @@ FacetMatch matchFacets(CellFacets<Real>& F) {
   Kokkos::View<int*, Mem> nbr("lag.nbr", sK);
   Kokkos::View<Real*, Mem> area("lag.area", sK), cen("lag.cen", 3 * sK), conn("lag.conn", 3 * sK),
       sec("lag.sec", 9 * sK);
+  const bool hm = F.third.extent(0) > 0;
+  Kokkos::View<Real*, Mem> thd("lag.third", hm ? 10 * sK : 0);
   Kokkos::parallel_for(
       "lagrangian.facets.matchFill", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         int o = off(i);
@@ -423,6 +549,9 @@ FacetMatch matchFacets(CellFacets<Real>& F) {
           }
           for (int e = 0; e < 9; ++e)
             sec(9 * o + e) = G.second(9 * f + e);
+          if (hm)
+            for (int e = 0; e < 10; ++e)
+              thd(10 * o + e) = G.third(10 * f + e);
           ++o;
         }
       });
@@ -433,6 +562,8 @@ FacetMatch matchFacets(CellFacets<Real>& F) {
   F.centroid = cen;
   F.conn = conn;
   F.second = sec;
+  if (hm)
+    F.third = thd;
   return res;
 }
 

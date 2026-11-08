@@ -37,12 +37,14 @@
 #define PECLET_VORO_LAGRANGIAN_POTENTIAL_HPP
 
 #include <Kokkos_Core.hpp>
+#include <stdexcept>
 #include <utility>
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/energy/interface.hpp"
 #include "peclet/voro/energy/wall.hpp"
 #include "peclet/voro/lagrangian/facets.hpp"
+#include "peclet/voro/lagrangian/nonlocal_energy.hpp"
 #include "peclet/voro/lagrangian/operators.hpp"
 #include "peclet/voro/lagrangian/weight_solve.hpp"
 #include "peclet/voro/reeval_tessellation.hpp"
@@ -110,10 +112,16 @@ Real facetGravity(const CellFacets<Real>& F, const LView<Real>& pos,
   return U;
 }
 
+/// Which capillary energy carries `tension` (DESIGN_NOTE §12.2 D12.4): the raw unlike-facet area
+/// (the default) or the moment-blob nonlocal energy E_M (§12.3.3, lagrangian/nonlocal_energy.hpp).
+enum class InterfaceEnergy { Facet, Nonlocal };
+
 /// The physical inputs of U(x, w) = E_σ + E_w + U_g (DESIGN_NOTE §2.2 items 1–3) as device
 /// tables indexed by the cell type: `tension` (nTypes², σ_ab; empty: no interface energy),
 /// `sigmaWall` (nTypes, σ_s; empty: no wetting), `density` (nTypes; empty: no gravity) with the
-/// gravity vector and the reference density of facetGravity.
+/// gravity vector and the reference density of facetGravity. With `interfaceEnergy == Nonlocal`
+/// E_M replaces E_σ; it needs the reference volumes `refVolume` (N) and the widths `nonlocal`
+/// (nonlocalParams(V⁰)).
 template <class Real>
 struct PotentialSpec {
   Kokkos::View<int*, peclet::core::MemSpace> types;  ///< N
@@ -121,6 +129,9 @@ struct PotentialSpec {
   LView<Real> tension, sigmaWall, density;
   Real gravity[3] = {0, 0, 0};
   Real rhoRef = 0;
+  InterfaceEnergy interfaceEnergy = InterfaceEnergy::Facet;
+  LView<Real> refVolume;          ///< N, V⁰ (Nonlocal only)
+  NonlocalParams<Real> nonlocal;  ///< E_M widths (Nonlocal only)
 };
 
 struct PotentialParts {
@@ -153,15 +164,30 @@ PotentialParts partitionPotential(MT& mt, const CellFacets<Real>& F, const LView
   static_assert(std::is_same_v<Policy, Power>, "partitionPotential needs a power tessellation");
   PotentialParts e;
   const int N = F.nCells;
-  if (s.tension.extent(0) > 0 || s.sigmaWall.extent(0) > 0) {
+  const bool nonlocal = s.tension.extent(0) > 0 && s.interfaceEnergy == InterfaceEnergy::Nonlocal;
+  if ((s.tension.extent(0) > 0 && !nonlocal) || s.sigmaWall.extent(0) > 0) {
     auto view =
         detail::publishPower<Real, Policy>(mt.store, pos, mt.vol, N, L, mt.wall, mt.xRef, weight);
-    if (s.tension.extent(0) > 0)
+    if (s.tension.extent(0) > 0 && !nonlocal)
       e.interface = energy::interfaceEnergyForce<Real, Policy>(
           view, s.types, s.tension, s.nTypes, pos, weight, L[0], gradX, gradW, mt.sdf);
     if (s.sigmaWall.extent(0) > 0)
       e.wall = energy::wallEnergyForce<Real, Policy>(view, s.types, s.sigmaWall, mt.sdf, pos,
                                                      weight, L[0], gradX, gradW);
+  }
+  if (nonlocal) {
+    if (static_cast<int>(s.refVolume.extent(0)) != N)
+      throw std::logic_error("voro: the nonlocal interface energy needs the reference volumes");
+    if (F.hasHigherMoments()) {
+      e.interface = nonlocalInterfaceEnergy(F, pos, s.types, s.tension, s.nTypes, s.refVolume,
+                                            s.nonlocal, L, gradX, gradW);
+    } else {  // the same facets (export + reciprocity match), with the higher moments
+      CellFacets<Real> Fm = exportCellFacets<Real, Policy>(mt.store, pos, weight, N, L, mt.wall,
+                                                           mt.xRef, mt.vol, true);
+      matchFacets(Fm);
+      e.interface = nonlocalInterfaceEnergy(Fm, pos, s.types, s.tension, s.nTypes, s.refVolume,
+                                            s.nonlocal, L, gradX, gradW);
+    }
   }
   if (s.density.extent(0) > 0)
     e.gravity = facetGravity(F, pos, s.types, s.density, s.gravity, s.rhoRef, L, gradX, gradW);
