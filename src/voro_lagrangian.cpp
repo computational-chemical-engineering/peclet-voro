@@ -179,12 +179,27 @@ nb::dict Tess::solve_weights(nb::ndarray<real_t, nb::c_contig> volumes, real_t t
   return d;
 }
 
+namespace {
+/// The validated `interface_energy` mode: 'facet' (the raw unlike-facet area, the default) or
+/// 'nonlocal' (the moment-blob energy E_M, DESIGN_NOTE §12.3.3).
+lag::InterfaceEnergy interfaceEnergyMode(const std::string& m, const char* where) {
+  if (m == "facet")
+    return lag::InterfaceEnergy::Facet;
+  if (m == "nonlocal")
+    return lag::InterfaceEnergy::Nonlocal;
+  throw std::invalid_argument(std::string("voro: ") + where +
+                              ": interface_energy must be 'facet' or 'nonlocal', got '" + m + "'");
+}
+}  // namespace
+
 nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
                                  std::optional<nb::ndarray<real_t, nb::c_contig>> tension,
                                  std::optional<nb::ndarray<real_t, nb::c_contig>> sigma_wall,
                                  std::optional<nb::ndarray<real_t, nb::c_contig>> density,
                                  std::optional<std::array<real_t, 3>> gravity,
-                                 real_t reference_density, real_t tol) {
+                                 real_t reference_density, real_t tol,
+                                 const std::string& interface_energy,
+                                 std::optional<nb::ndarray<real_t, nb::c_contig>> volumes) {
   if (N_ == 0 || !weighted_)
     throw std::runtime_error(
         "voro: reduced_potential() needs a built POWER tessellation (set_weights, build, "
@@ -231,6 +246,20 @@ nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
     for (int a = 0; a < 3; ++a)
       spec.gravity[a] = (*gravity)[a];
   spec.rhoRef = reference_density;
+  spec.interfaceEnergy = interfaceEnergyMode(interface_energy, "reduced_potential");
+  if (spec.interfaceEnergy == lag::InterfaceEnergy::Nonlocal) {
+    // V⁰ of E_M: the given reference volumes, else the current cell volumes
+    std::vector<double> V0 =
+        volumes ? std::vector<double>(volumes->data(), volumes->data() + volumes->size())
+                : peclet::core::toVector(F.volume);
+    if (static_cast<int>(V0.size()) != N)
+      throw std::runtime_error("voro: reduced_potential(volumes) must be (N,)");
+    spec.refVolume = peclet::core::toDevice<real_t>(V0, "rp.V0");
+    spec.nonlocal = lag::nonlocalParams<real_t>(V0);
+  } else if (volumes) {
+    throw std::invalid_argument(
+        "voro: reduced_potential(volumes) is the V0 of interface_energy='nonlocal' only");
+  }
   const real_t Larr[3] = {L_[0], L_[1], L_[2]};
   const lag::PotentialParts e = std::visit(
       [&](auto& mt) -> lag::PotentialParts {
@@ -412,6 +441,10 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     if (v.size() != static_cast<std::size_t>(nT_ * nT_))
       throw std::runtime_error("voro: LagrangianFlow.set_tension() must be (nTypes, nTypes)");
     tension_.assign(v.data(), v.data() + v.size());
+    dirty_ = true;
+  }
+  void set_interface_energy(const std::string& mode) {
+    interfaceEnergy_ = interfaceEnergyMode(mode, "LagrangianFlow.set_interface_energy()");
     dirty_ = true;
   }
   void set_wall_tension(nb::ndarray<real_t, nb::c_contig> v) {
@@ -715,6 +748,11 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     spec.nTypes = nT_;
     if (!tension_.empty())
       spec.tension = peclet::core::toDevice<real_t>(tension_, "lf.tension");
+    spec.interfaceEnergy = interfaceEnergy_;
+    if (interfaceEnergy_ == lag::InterfaceEnergy::Nonlocal) {
+      spec.refVolume = peclet::core::toDevice<real_t>(V0_, "lf.V0");
+      spec.nonlocal = lag::nonlocalParams<real_t>(V0_);
+    }
     if (!sigmaWall_.empty())
       spec.sigmaWall = peclet::core::toDevice<real_t>(sigmaWall_, "lf.sigmaWall");
     if (hasGravity_) {
@@ -796,6 +834,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   std::vector<int> types_;
   int nT_ = 0;
   std::vector<double> V0_, rho_, mu_, tension_, sigmaWall_;
+  lag::InterfaceEnergy interfaceEnergy_ = lag::InterfaceEnergy::Facet;
   std::vector<real_t> vel_;
   std::array<real_t, 3> gravity_{0, 0, 0}, bodyAmp_{0, 0, 0}, bodyWave_{0, 0, 0};
   bool hasGravity_ = false, midpoint_ = true, schurAssembled_ = false;
@@ -866,6 +905,10 @@ void bindLagrangian(nb::module_& m) {
            "Dynamic viscosity per type (nTypes,), >= 0 (default 0: inviscid).")
       .def("set_tension", &LagrangianFlow::set_tension, nb::arg("tension"),
            "Interface tension table (nTypes, nTypes) on unlike facets.")
+      .def("set_interface_energy", &LagrangianFlow::set_interface_energy, nb::arg("mode"),
+           "The capillary energy that carries the tension table: 'facet' (the raw unlike-facet\n"
+           "area, the default) or 'nonlocal' (the moment-blob Gaussian nonlocal perimeter E_M,\n"
+           "C^{1,1} in the positions: width s = h, cutoff 5s, h = (sum V0 / N)^(1/3)).")
       .def("set_wall_tension", &LagrangianFlow::set_wall_tension, nb::arg("wall_tension"),
            "Solid-fluid tension per type (nTypes,) on wall facets (wetting).")
       .def("set_gravity", &LagrangianFlow::set_gravity, nb::arg("gravity"),

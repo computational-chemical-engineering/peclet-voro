@@ -209,6 +209,7 @@ void bindTessellation(nb::module_& m) {
            nb::arg("tension") = nb::none(), nb::arg("sigma_wall") = nb::none(),
            nb::arg("density") = nb::none(), nb::arg("gravity") = nb::none(),
            nb::arg("reference_density") = 0.0, nb::arg("tol") = 1e-12,
+           nb::arg("interface_energy") = "facet", nb::arg("volumes") = nb::none(),
            "The potential at the CURRENT cell volumes, U~(x) = U(x, w*(x)), of a POWER\n"
            "tessellation (M7 NHV-W): w* holds the volumes, so U~ is reduced by the adjoint\n"
            "    H pi = -dU/dw  (H = dV/dw, AMG-PCG to relative residual `tol`),\n"
@@ -222,7 +223,10 @@ void bindTessellation(nb::module_& m) {
            "optional; `types` (N,) int32. Returns {'interface_energy', 'wall_energy',\n"
            "'gravity_energy', 'energy', 'gradient' (N,3) = grad U~, 'gradient_x' (N,3) = dU/dx,\n"
            "'gradient_w' (N,) = dU/dw, 'pi' (N,) (mean zero), 'pcg_iterations',\n"
-           "'pcg_rel_residual'}. Descend along -gradient.")
+           "'pcg_rel_residual'}. Descend along -gradient.\n"
+           "interface_energy='nonlocal' replaces the facet area by the moment-blob Gaussian\n"
+           "nonlocal perimeter E_M (C^{1,1}; width s = h, cutoff 5s), whose pair weights are the\n"
+           "reference `volumes` (N,) (default: the current cell volumes).")
       .def_prop_ro("num_particles", &Tess::num_particles,
                    "Particle count N set by the last `build` (0 before it).")
       .def_prop_ro(

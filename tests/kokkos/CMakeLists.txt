@@ -100,6 +100,10 @@ if(PECLET_VORO_BUILD_TESTS)
   # the engine), the cell operators (null spaces, adjointness), the KMT weight solve to 1e-12.
   add_voro_kokkos_test(test_lagrangian)
 
+  # M7 moment-blob nonlocal capillary energy E_M: facet third moments (divergence theorem vs cone
+  # fan), the normalisation, FD of dE/dx, dE/dw and of the reduced U~ (OT re-solved).
+  add_voro_kokkos_test(test_nonlocal_energy)
+
   # P5: differentiable SDF wall force (seed-foot J_wall). FD-vs-analytic — flat wall exact, sphere
   # first-order.
   add_voro_kokkos_test(test_sdf_policy)
