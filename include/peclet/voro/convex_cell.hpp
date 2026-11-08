@@ -678,14 +678,6 @@ struct ConvexCell {
   /// edge (eps / sine = eps^(1/3)) stays a fraction of it.
   static constexpr Real kFanSine2 = sizeof(Real) == sizeof(float) ? Real(6.0e-10) : Real(1.4e-21);
 
-  KOKKOS_INLINE_FUNCTION Real planeDet(int a, int b, int c) const {
-    const Real* x = n[a];
-    const Real* y = n[b];
-    const Real* z = n[c];
-    return x[0] * (y[1] * z[2] - y[2] * z[1]) + x[1] * (y[2] * z[0] - y[0] * z[2]) +
-           x[2] * (y[0] * z[1] - y[1] * z[0]);
-  }
-
   /// Topology-oriented rule of the clip (Sugihara–Iri: the combinatorial structure first,
   /// floating point only a guide). A killed triangle (x, y, z) whose edge {x, y} is on the horizon
   /// spawns the fan triangle (x, y, p): the corner where the cell edge x∩y crosses the new plane
@@ -703,8 +695,13 @@ struct ConvexCell {
   /// not strictly of the killed corner's orientation with |sin| > sqrt(kFanSine2) (Cramer's
   /// error along the edge grows as eps / sine; keeping the vertex costs at most sine x edge).
   KOKKOS_INLINE_FUNCTION bool inconsistentFan(int x, int y, int z, int p) const {
-    const Real dp = planeDet(x, y, p);
-    return !(dp * planeDet(x, y, z) > Real(0)) || dp * dp <= kFanSine2 * nn[x] * nn[y] * nn[p];
+    const Real* a = n[x];
+    const Real* b = n[y];
+    const Real d[3] = {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                       a[0] * b[1] - a[1] * b[0]};  // direction of the edge x∩y
+    const Real dp = n[p][0] * d[0] + n[p][1] * d[1] + n[p][2] * d[2];  // det(x, y, p)
+    const Real dz = n[z][0] * d[0] + n[z][1] * d[1] + n[z][2] * d[2];  // det(x, y, z)
+    return !(dp * dz > Real(0)) || dp * dp <= kFanSine2 * nn[x] * nn[y] * nn[p];
   }
 
   KOKKOS_INLINE_FUNCTION bool anyKilled(const bool* kill) const {
@@ -712,6 +709,14 @@ struct ConvexCell {
       if (kill[t])
         return true;
     return false;
+  }
+
+  /// Lean-path validity with the cheap cases first: a conflict region of one or two triangles is a
+  /// disk iff its horizon has k + 2 edges (two triangles: adjacent, not disjoint); larger ones walk
+  /// the horizon (simpleHorizonEdges).
+  KOKKOS_INLINE_FUNCTION bool diskHorizon(int k, int H, const unsigned char* nA,
+                                          const unsigned char* nB) const {
+    return k <= 2 ? H == k + 2 : simpleHorizonEdges(nA, nB, H);
   }
 
   /// Validity of a cut (lean path): the horizon edges {nA[i], nB[i]} (unoriented — the box
@@ -722,26 +727,31 @@ struct ConvexCell {
                                                  int H) const {
     if (H < 3)
       return false;
-    unsigned char deg[MAXP];
+    // e1/e2[p] = 1 + the (at most two) horizon edges at plane p; then follow the chain once.
+    unsigned short e1[MAXP], e2[MAXP];
     for (int i = 0; i < H; ++i)
-      deg[nA[i]] = deg[nB[i]] = 0;
-    for (int i = 0; i < H; ++i)
-      if (++deg[nA[i]] > 2 || ++deg[nB[i]] > 2)
-        return false;
+      e1[nA[i]] = e2[nA[i]] = e1[nB[i]] = e2[nB[i]] = 0;
+    for (int i = 0; i < H; ++i) {
+      const int ends[2] = {nA[i], nB[i]};
+      for (int k = 0; k < 2; ++k) {
+        const int p = ends[k];
+        if (!e1[p])
+          e1[p] = (unsigned short)(i + 1);
+        else if (!e2[p])
+          e2[p] = (unsigned short)(i + 1);
+        else
+          return false;  // a pinch: plane p on three or more horizon edges
+      }
+    }
     int prev = 0, cur = nB[0], steps = 1;
     while (cur != nA[0]) {
-      int nx = -1;
-      for (int j = 0; j < H; ++j)
-        if (j != prev && (nA[j] == cur || nB[j] == cur)) {
-          nx = j;
-          break;
-        }
+      const int nx = (e1[cur] - 1 == prev ? e2[cur] : e1[cur]) - 1;
       if (nx < 0 || ++steps > H)
         return false;
       cur = (nA[nx] == cur) ? nB[nx] : nA[nx];
       prev = nx;
     }
-    return steps == H;
+    return steps == H;  // one loop through every edge
   }
 
   /// Validity of a cut (TrackAdj path): the walked cycle hA[0..H) must visit each plane once and
@@ -816,7 +826,7 @@ struct ConvexCell {
 
     // Mark triangles whose dual vertex is outside the new half-space (nf·v > nf·nf).
     bool kill[MAXT];
-    bool any = false;
+    int nk = 0;  // killed triangles
     Real smax = Real(-1e30);
     for (int t = 0; t < nt; ++t) {
       kill[t] = false;
@@ -827,14 +837,14 @@ struct ConvexCell {
         smax = s;
       if (s > 0) {
         kill[t] = true;
-        any = true;
+        ++nk;
       }
     }
     if (gapOut) {  // s = n·v − n·n is |n| times the distance beyond the plane
       const Real nl = Kokkos::sqrt(nn[pi]);
       *gapOut = nl > Real(0) ? smax / nl : Real(-1e30);
     }
-    if (!any)
+    if (nk == 0)
       return false;  // candidate does not cut -> no-op, plane not committed
 
     // The conflict region K (the killed triangles) must be a disk whose fan corners inherit the
@@ -847,17 +857,21 @@ struct ConvexCell {
       // triangle edge whose sharing triangle survives, the new plane gets a triangle (x, y, pi).
       // Collect first, then mutate.
       unsigned char nA[MAXT], nB[MAXT];
-      int nnew = collectHorizon(kill, pi, nA, nB);
-      if (!overflow && anyKilled(kill) && !simpleHorizonEdges(nA, nB, nnew)) {
+      // (no horizon <=> nothing killed: the seed is inside every half-space, so a cut never
+      // takes the whole cell)
+      int nnew = collectHorizon(kill, pi, nA, nB, nk);
+      if (!overflow && nnew > 0 && !diskHorizon(nk, nnew, nA, nB)) {
         degenerate = true;
-        growDisk(kill, pi);
-        nnew = collectHorizon(kill, pi, nA, nB);
-        if (!overflow && anyKilled(kill) && !simpleHorizonEdges(nA, nB, nnew))
+        nk = growDisk(kill, pi);
+        nnew = collectHorizon(kill, pi, nA, nB, nk);
+        if (!overflow && nnew > 0 && !diskHorizon(nk, nnew, nA, nB))
           overflow = true;  // cannot happen (growDisk builds a disk): report, never publish
       }
-      if (!anyKilled(kill))
+      if (nnew == 0 && !anyKilled(kill))
         return false;  // every outside vertex lay on the plane: it only touches the cell
       np = pi + 1;     // commit the plane
+      if (nnew == 0)
+        overflow = true;  // killed but no surviving boundary (cannot happen for a real cut)
       if (overflow)
         return true;
       // Remove killed triangles.
@@ -880,15 +894,15 @@ struct ConvexCell {
       // (O(conflict), no findSharing), then stitch the new fan's adjacency in O(1) per edge. ----
       int hA[MAXT], hB[MAXT], hSurv[MAXT],
           hBack[MAXT];  // horizon edge {A,B}, survivor across it, slot back
-      int H = walkHorizon(kill, pi, hA, hB, hSurv, hBack);
-      if (!overflow && H > 0 && !simpleHorizonCycle(kill, hA, H)) {
+      int H = walkHorizon(kill, pi, hA, hB, hSurv, hBack, nk);
+      if (!overflow && H > 0 && !(nk <= 2 ? H == nk + 2 : simpleHorizonCycle(kill, hA, H))) {
         degenerate = true;
-        growDisk(kill, pi);
-        H = walkHorizon(kill, pi, hA, hB, hSurv, hBack);
-        if (!overflow && H > 0 && !simpleHorizonCycle(kill, hA, H))
+        nk = growDisk(kill, pi);
+        H = walkHorizon(kill, pi, hA, hB, hSurv, hBack, nk);
+        if (!overflow && H > 0 && !(nk <= 2 ? H == nk + 2 : simpleHorizonCycle(kill, hA, H)))
           overflow = true;  // cannot happen (growDisk builds a disk): report, never publish
       }
-      if (!anyKilled(kill))
+      if (H == 0 && !anyKilled(kill))
         return false;  // every outside vertex lay on the plane: it only touches the cell
       np = pi + 1;     // commit the plane
       if (H == 0)
@@ -934,7 +948,7 @@ struct ConvexCell {
   /// that fails inconsistentFan on one of its horizon edges is kept (it is ON the plane) and the
   /// collection restarts — at most once per killed triangle.
   KOKKOS_INLINE_FUNCTION int collectHorizon(bool* kill, int pi, unsigned char* nA,
-                                            unsigned char* nB) {
+                                            unsigned char* nB, int& nk) {
     int nnew = 0;
     bool redo = true;
     while (redo) {
@@ -950,6 +964,7 @@ struct ConvexCell {
           if (other >= 0 && !kill[other]) {
             if (inconsistentFan(x, y, vtx[(e + 2) % 3], pi)) {
               kill[t] = false;  // t is ON the plane: keep it
+              --nk;
               degenerate = true;
               redo = true;
               break;
@@ -975,7 +990,7 @@ struct ConvexCell {
   /// fails inconsistentFan is kept and the walk restarts. Only the cycle through the first
   /// boundary edge is walked; simpleHorizonCycle checks that it is the whole boundary.
   KOKKOS_INLINE_FUNCTION int walkHorizon(bool* kill, int pi, int* hA, int* hB, int* hSurv,
-                                         int* hBack) {
+                                         int* hBack, int& nk) {
     if constexpr (TrackAdj) {
       int H = 0;
       bool redo = true;
@@ -1009,6 +1024,7 @@ struct ConvexCell {
                                                        : t2[tt];
           if (inconsistentFan(A, B, C, pi)) {
             kill[tt] = false;  // tt is ON the plane: keep it, restart the walk
+            --nk;
             degenerate = true;
             redo = true;
             break;
@@ -1070,7 +1086,7 @@ struct ConvexCell {
       }
       return H;
     } else {
-      (void)kill, (void)pi, (void)hA, (void)hB, (void)hSurv, (void)hBack;
+      (void)kill, (void)pi, (void)hA, (void)hB, (void)hSurv, (void)hBack, (void)nk;
       return 0;
     }
   }
@@ -1092,7 +1108,7 @@ struct ConvexCell {
   /// yet on K, or two edges (closing a notch) while the boundary keeps >= 3 edges — and every new
   /// horizon edge passes inconsistentFan. What is left out lay on the plane to round-off. Never
   /// reached on generic input; O(nt^2) lookups when it is.
-  KOKKOS_INLINE_FUNCTION void growDisk(bool* kill, int pi) {
+  KOKKOS_INLINE_FUNCTION int growDisk(bool* kill, int pi) {
     bool cand[MAXT];
     Real sv[MAXT];
     for (int t = 0; t < nt; ++t) {
@@ -1105,6 +1121,7 @@ struct ConvexCell {
     for (int k = 0; k < MAXP; ++k)
       touch[k] = 0;
     int H = 0;  // boundary length of K
+    int k = 0;  // its triangle count (returned)
     for (bool first = true;; first = false) {
       int pick = -1, pickM = 0;
       for (int t = 0; t < nt; ++t) {
@@ -1131,7 +1148,8 @@ struct ConvexCell {
         }
       }
       if (pick < 0)
-        return;
+        return k;
+      ++k;
       kill[pick] = true;
       cand[pick] = false;
       H += 3 - 2 * pickM;
