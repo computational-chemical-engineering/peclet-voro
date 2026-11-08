@@ -210,6 +210,7 @@ struct SaddleStats {
   double constraint = 0;  ///< ‖C v‖_∞ τ / max V (recomputed from v)
   double viscNumber = 0;  ///< max ν τ / h²
   bool amgInner = false;  ///< inner preconditioner was AMG
+  double tolUsed = 0;     ///< the ‖C v‖_∞ bound applied (after the physical scaling)
   // wall-clock split (diagnostics; seconds): AMG setups charged to this kick (the L_ρ hierarchy of
   // the last setup() and the viscous one), inner A-solves, Schur preconditioner applications
   double tSetup = 0, tInner = 0, tPrecond = 0, tTotal = 0;
@@ -276,6 +277,28 @@ class SaddleSolver {
                   ap);
     setupSeconds_ = tb.seconds();
     mh_ = mh;
+    {  // ‖C‖ per unit velocity: max_i Σ_f (A/d)|c_f| + Σ_w A_w (the physically scaled stop in solve)
+      const CellFacets<Real> G = F;
+      Real sc = 0;
+      Kokkos::parallel_reduce(
+          "sd.cscale", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N),
+          KOKKOS_LAMBDA(const int i, Real& acc) {
+            Real a = 0;
+            for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+              Real d2 = 0, c2 = 0;
+              for (int e = 0; e < 3; ++e) {
+                d2 += G.conn(3 * f + e) * G.conn(3 * f + e);
+                c2 += G.centroid(3 * f + e) * G.centroid(3 * f + e);
+              }
+              a += G.area(f) * Kokkos::sqrt(c2 / d2);
+            }
+            for (int f = G.wallOffset(i); f < G.wallOffset(i + 1); ++f)
+              a += G.wallArea(f);
+            acc = a > acc ? a : acc;
+          },
+          Kokkos::Max<Real>(sc));
+      cScale_ = sc;
+    }
     if (viscous_) {  // approximate diagonal of ζ: Σ_f μ_f A/(3d)(1 + n_a²) + wall μ A_w/δ_w (1 −
                      // n_wa²)
       const CellFacets<Real> G = F;
@@ -344,6 +367,26 @@ class SaddleSolver {
       st.tSetup += tPart.seconds();
     }
     const LView<Real> r = r_, z = z_, zo = zOld_, p = p_, s = s_, q = q_, vv = v, mu = lam;
+    {  // the stop, physically scaled (M7 WO4a): ‖C v‖_∞ ≤ min(tolAbs, tol · ‖C‖ · v_ref), with
+       // v_ref = max_i |b_i|/m_i the velocity the kick would produce unconstrained. tolAbs alone
+       // (tol · max V/τ, §2.6) is relative to the grid velocity h/τ: at rest, where b is round-off,
+       // it accepted the warm start with no iteration and its divergent part (measured 1.1e-13 v_g
+       // on the walled 16³ layer, ratio 1000; 1.5e-15 v_g once projected)
+      const LView<Real> B = b, m = mass_;
+      Real vr = 0;
+      Kokkos::parallel_reduce(
+          "sd.vref", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i, Real& acc) {
+            const Real q2 = B(3 * i) * B(3 * i) + B(3 * i + 1) * B(3 * i + 1) +
+                            B(3 * i + 2) * B(3 * i + 2);
+            const Real u = Kokkos::sqrt(q2) / m(i);
+            acc = u > acc ? u : acc;
+          },
+          Kokkos::Max<Real>(vr));
+      const Real tp = Real(prm.tol) * cScale_ * vr;
+      tolAbs = tp < tolAbs ? tp : tolAbs;
+      st.tolUsed = tolAbs;
+    }
     {  // warm start: μ₀ = (τ/2) λ_guess (mean removed), v₀ = A⁻¹(b − Cᵀμ₀)
       Kokkos::parallel_for(
           "sd.mu0", Kokkos::RangePolicy<Exec>(0, N),
@@ -532,6 +575,7 @@ class SaddleSolver {
   std::vector<double> mh_;
   bool viscous_ = false, useAmg_ = false, assembled_ = false;
   double nuH2_ = 0, setupSeconds_ = 0;
+  Real cScale_ = 0;
   peclet::core::solver::GraphAMGDevice lrho_, visc_;
   LView<Real> cc_, r_, z_, zOld_, p_, s_, w_, q_, ir_, iz_, ip_, iq_, zdiag_, c0_, c1_;
   DissipationScratch<Real> scr_;
@@ -556,7 +600,10 @@ struct IntegratorParams {
   double weightTol = 1e-12;  ///< max |V − V⁰|/V⁰ of the per-step weight solve
   int weightMaxIter = 50;
   double hTol = 1e-10;              ///< relative residual of the warm-start and Newton H solves
-  double adjointTol = 1e-12;        ///< relative residual of the π solve
+  /// relative residual of the π solve: ∇Ũ = ∂_xU + J_xᵀπ cancels O(ρ g z A) terms to its round-off,
+  /// and at 1e-12 the π error was its floor (rest: 3e-13 vs 9e-16 at 1e-15, +3 PCG iterations;
+  /// M7 WO4a)
+  double adjointTol = 1e-14;
   int maxHalvings = 4;              ///< τ halvings when the weight solve fails (W-Q7)
   /// option S (the default since M7 WO4′, orchestrator decision 2026-11-08: second order in the
   /// energy, ×4.2 per τ halving vs ×2.4 at x^n): kick 1's C at x^n + (τ/2) v^n; false: at x^n
