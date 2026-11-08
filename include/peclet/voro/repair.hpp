@@ -75,11 +75,12 @@ struct RepairStats {
 
 /// A2a validity diagnostics of a cold (re)build (counts over the maintained cells).
 struct BuildReport {
-  long buried = 0;             ///< power seeds outside their own cell (emptied — see kBuried)
-  long reachExceeded = 0;      ///< cells whose search reach passed half the box (min-image invalid)
-  long empty = 0;              ///< cells with no volume (in-solid seeds + buried)
-  long overflow = 0;           ///< cells that hit a capacity (planes / triangles / facets)
-  long incomplete = 0;         ///< cells whose coverage did not close
+  long buried = 0;         ///< power seeds outside their own cell (emptied — see kBuried)
+  long reachExceeded = 0;  ///< cells whose search reach passed half the box (min-image invalid)
+  long empty = 0;          ///< cells with no volume (in-solid seeds + buried)
+  long overflow = 0;       ///< cells that hit a capacity (planes / triangles / facets)
+  long incomplete = 0;     ///< cells whose coverage did not close
+  long degenerate = 0;     ///< cells cut through a (near-)cospherical vertex (kDegenerate; valid)
   int overBufferRebuilds = 0;  ///< over-buffer misses of the build (TessellatorResult)
 };
 
@@ -174,6 +175,7 @@ struct MovingTessellation {
       r.empty += (s & kEmpty) ? 1 : 0;
       r.overflow += (s & kOverflow) ? 1 : 0;
       r.incomplete += (s & kIncomplete) ? 1 : 0;
+      r.degenerate += (s & kDegenerate) ? 1 : 0;
     }
     r.overBufferRebuilds = lastOverBufferRebuilds;
     return r;

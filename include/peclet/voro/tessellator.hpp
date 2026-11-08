@@ -62,7 +62,11 @@ enum StatusBit {
   // search reach exceeded half the smallest box edge, so the min-image gather may have missed a
   // non-nearest periodic image and the partition is not guaranteed exact.
   kBuried = 16,
-  kReachExceeded = 32
+  kReachExceeded = 32,
+  // Informational, NOT a defect: a cut of this cell met (near-)cospherical input — a vertex ON the
+  // cutting plane to round-off — and the clip's topology rule decided it (ConvexCell::degenerate,
+  // see inconsistentFan / growDisk). The cell is a valid convex cell, exact up to round-off.
+  kDegenerate = 64
 };
 
 template <class Real>
@@ -443,6 +447,8 @@ struct CellBuilder {
     int st = kOk;
     if (c.overflow)
       st |= kOverflow;
+    if (c.degenerate)
+      st |= kDegenerate;
     // A2a: the converged search reach must stay within the min-image half box.
     {
       const Real reachR =

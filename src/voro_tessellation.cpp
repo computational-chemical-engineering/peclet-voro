@@ -37,7 +37,10 @@ void bindTessellation(nb::module_& m) {
           "of\n"
           "times the build's facet/edge over-buffer estimate was exceeded and the build pass "
           "re-run\n"
-          "at the exact demand (0 normally; each one doubles that build's cost).")
+          "at the exact demand (0 normally; each one doubles that build's cost). Also\n"
+          "'degenerate' (informational, not a defect): cells a cut met through a cospherical\n"
+          "vertex (e.g. a seed set mirrored across a plane), decided by the clip's topology rule;\n"
+          "they are valid cells, exact up to round-off.")
       .def(
           "set_profile", [](TessDiagnostics& d, bool on) { d.t->set_profile(on); },
           nb::arg("on") = true,

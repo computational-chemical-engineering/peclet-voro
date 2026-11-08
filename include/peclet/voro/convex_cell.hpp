@@ -154,7 +154,10 @@ struct ConvexCell {
   Real vx[MAXT], vy[MAXT], vz[MAXT];           ///< cached dual-vertex position per triangle
   bool alive[MAXT];                            ///< triangle live flag
   int nt;                                      ///< triangle high-water mark
-  bool overflow;  ///< set if MAXP/MAXT exceeded -> cell invalid, caller falls back
+  bool overflow;    ///< set if MAXP/MAXT exceeded -> cell invalid, caller falls back
+  bool degenerate;  ///< a cut overrode a round-off sign by the topology rule (inconsistentFan,
+                    ///< growDisk): the cell is valid and exact up to round-off, but its input
+                    ///< was (near-)cospherical. Informational; reported as kDegenerate.
 
   /// Per-triangle edge adjacency, maintained incrementally in `clip` when TrackAdj — the input to
   /// the O(nt) Lawson local-convexity certificate (`isLocallyConvex`). Zero-footprint when
@@ -187,6 +190,7 @@ struct ConvexCell {
     np = 6;
     nt = 0;
     overflow = false;
+    degenerate = false;
     // 8 corners: x-plane (0|1), y-plane (2|3), z-plane (4|5)
     for (int sx = 0; sx < 2; ++sx)
       for (int sy = 0; sy < 2; ++sy)
@@ -240,6 +244,7 @@ struct ConvexCell {
       }
     np = 6;
     overflow = false;
+    degenerate = false;
   }
 
   /// Part II (moving points): re-evaluate this cell's geometry IN PLACE after the seeds moved,
@@ -667,6 +672,106 @@ struct ConvexCell {
     }
   }
 
+  /// Squared sine below which a fan corner counts as degenerate (see inconsistentFan): eps^(4/3)
+  /// of the cell's precision (|sin| ~ 4e-11 in double, 2e-5 in float), so the error of keeping an
+  /// on-plane vertex (<= sine x edge) stays far below the cell size while Cramer's error along the
+  /// edge (eps / sine = eps^(1/3)) stays a fraction of it.
+  static constexpr Real kFanSine2 = sizeof(Real) == sizeof(float) ? Real(6.0e-10) : Real(1.4e-21);
+
+  KOKKOS_INLINE_FUNCTION Real planeDet(int a, int b, int c) const {
+    const Real* x = n[a];
+    const Real* y = n[b];
+    const Real* z = n[c];
+    return x[0] * (y[1] * z[2] - y[2] * z[1]) + x[1] * (y[2] * z[0] - y[0] * z[2]) +
+           x[2] * (y[0] * z[1] - y[1] * z[0]);
+  }
+
+  /// Topology-oriented rule of the clip (Sugihara–Iri: the combinatorial structure first,
+  /// floating point only a guide). A killed triangle (x, y, z) whose edge {x, y} is on the horizon
+  /// spawns the fan triangle (x, y, p): the corner where the cell edge x∩y crosses the new plane
+  /// p. In exact arithmetic p crosses that edge in the same sense as z bounds it (both corners lie
+  /// on the edge, the killed one beyond p), so det(x, y, p) and det(x, y, z) share a sign: the
+  /// new corner inherits the killed one's orientation, and the per-vertex geometry (which orients
+  /// every corner by that sign) keeps summing over a consistently oriented closed surface.
+  /// Exactly cospherical input (a seed set mirrored across a plane: four cells per edge, six per
+  /// vertex) puts the edge, or the corner, ON p; only round-off then decided that the killed
+  /// vertex is outside, and the fan corner is undefined (normals coplanar: Cramer returns the
+  /// seed or a far point) or reversed (a corner twisted against its neighbours, which the
+  /// per-vertex sums turn into an O(1) volume error with a perfectly valid-looking topology).
+  /// The rule: such a vertex is ON the plane and is kept — the cut then leaves it in place, which
+  /// is exact for a plane that only touches the cell there. Returns true iff the fan corner is
+  /// not strictly of the killed corner's orientation with |sin| > sqrt(kFanSine2) (Cramer's
+  /// error along the edge grows as eps / sine; keeping the vertex costs at most sine x edge).
+  KOKKOS_INLINE_FUNCTION bool inconsistentFan(int x, int y, int z, int p) const {
+    const Real dp = planeDet(x, y, p);
+    return !(dp * planeDet(x, y, z) > Real(0)) || dp * dp <= kFanSine2 * nn[x] * nn[y] * nn[p];
+  }
+
+  KOKKOS_INLINE_FUNCTION bool anyKilled(const bool* kill) const {
+    for (int t = 0; t < nt; ++t)
+      if (kill[t])
+        return true;
+    return false;
+  }
+
+  /// Validity of a cut (lean path): the horizon edges {nA[i], nB[i]} (unoriented — the box
+  /// triangles are not consistently oriented) must form ONE simple cycle, i.e. the conflict region
+  /// is a disk: every horizon plane on exactly two edges (no pinch) and a single loop (no second
+  /// component or hole). Anything else would leave a non-manifold cell.
+  KOKKOS_INLINE_FUNCTION bool simpleHorizonEdges(const unsigned char* nA, const unsigned char* nB,
+                                                 int H) const {
+    if (H < 3)
+      return false;
+    unsigned char deg[MAXP];
+    for (int i = 0; i < H; ++i)
+      deg[nA[i]] = deg[nB[i]] = 0;
+    for (int i = 0; i < H; ++i)
+      if (++deg[nA[i]] > 2 || ++deg[nB[i]] > 2)
+        return false;
+    int prev = 0, cur = nB[0], steps = 1;
+    while (cur != nA[0]) {
+      int nx = -1;
+      for (int j = 0; j < H; ++j)
+        if (j != prev && (nA[j] == cur || nB[j] == cur)) {
+          nx = j;
+          break;
+        }
+      if (nx < 0 || ++steps > H)
+        return false;
+      cur = (nA[nx] == cur) ? nB[nx] : nA[nx];
+      prev = nx;
+    }
+    return steps == H;
+  }
+
+  /// Validity of a cut (TrackAdj path): the walked cycle hA[0..H) must visit each plane once and
+  /// cover EVERY horizon edge of the conflict region (a second component or a hole has edges the
+  /// walk from one start never reaches).
+  KOKKOS_INLINE_FUNCTION bool simpleHorizonCycle(const bool* kill, const int* hA, int H) const {
+    if constexpr (TrackAdj) {
+      if (H < 3)
+        return false;
+      unsigned char seen[MAXP];
+      for (int i = 0; i < H; ++i)
+        seen[hA[i]] = 0;
+      for (int i = 0; i < H; ++i)
+        if (seen[hA[i]]++)
+          return false;
+      int total = 0;
+      for (int t = 0; t < nt; ++t)
+        if (kill[t])
+          for (int e = 0; e < 3; ++e) {
+            const int s = adj[t * 3 + e];
+            total += (s >= 0 && alive[s] && !kill[s]) ? 1 : 0;
+          }
+      return total == H;
+    } else {
+      (void)kill;
+      (void)hA;
+      return H >= 3;
+    }
+  }
+
   KOKKOS_INLINE_FUNCTION int allocTri() {
     for (int s = 0; s < nt; ++s)
       if (!alive[s])
@@ -732,32 +837,29 @@ struct ConvexCell {
     if (!any)
       return false;  // candidate does not cut -> no-op, plane not committed
 
-    np = pi + 1;  // commit the plane
-
+    // The conflict region K (the killed triangles) must be a disk whose fan corners inherit the
+    // killed corners' orientation. The signs above give that for every generic cut; on
+    // (near-)cospherical input the round-off-decided vertices can break it, and the topology
+    // decides instead: first per horizon edge (inconsistentFan, inside the collection), then — if
+    // K is still not a disk — by regrowing it from the outermost vertex (growDisk).
     if constexpr (!TrackAdj) {
-      // ---- Lean path (unchanged): collect the horizon by findSharing, then retriangulate. ----
-      // For each killed triangle edge whose sharing triangle is alive, the new plane gets a
-      // triangle (x, y, pi). Collect first, then mutate.
+      // ---- Lean path: collect the horizon by findSharing, then retriangulate. For each killed
+      // triangle edge whose sharing triangle survives, the new plane gets a triangle (x, y, pi).
+      // Collect first, then mutate.
       unsigned char nA[MAXT], nB[MAXT];
-      int nnew = 0;
-      for (int t = 0; t < nt; ++t) {
-        if (!kill[t])
-          continue;
-        const int vtx[3] = {t0[t], t1[t], t2[t]};
-        for (int e = 0; e < 3; ++e) {
-          const int x = vtx[e], y = vtx[(e + 1) % 3];
-          const int other = findSharing(t, x, y);
-          if (other >= 0 && !kill[other]) {
-            if (nnew < MAXT) {
-              nA[nnew] = (unsigned char)x;
-              nB[nnew] = (unsigned char)y;
-              ++nnew;
-            } else {
-              overflow = true;
-            }
-          }
-        }
+      int nnew = collectHorizon(kill, pi, nA, nB);
+      if (!overflow && anyKilled(kill) && !simpleHorizonEdges(nA, nB, nnew)) {
+        degenerate = true;
+        growDisk(kill, pi);
+        nnew = collectHorizon(kill, pi, nA, nB);
+        if (!overflow && anyKilled(kill) && !simpleHorizonEdges(nA, nB, nnew))
+          overflow = true;  // cannot happen (growDisk builds a disk): report, never publish
       }
+      if (!anyKilled(kill))
+        return false;  // every outside vertex lay on the plane: it only touches the cell
+      np = pi + 1;     // commit the plane
+      if (overflow)
+        return true;
       // Remove killed triangles.
       for (int t = 0; t < nt; ++t)
         if (kill[t])
@@ -775,90 +877,24 @@ struct ConvexCell {
       }
     } else {
       // ---- TrackAdj path: walk the conflict-region boundary as ONE oriented cycle via `adj`
-      // (O(conflict), no findSharing), then stitch the new fan's adjacency in O(1) per edge. The
-      // conflict region (vertices outside the new half-space) is connected and its boundary is a
-      // single cycle for a convex clip. ----
+      // (O(conflict), no findSharing), then stitch the new fan's adjacency in O(1) per edge. ----
       int hA[MAXT], hB[MAXT], hSurv[MAXT],
           hBack[MAXT];  // horizon edge {A,B}, survivor across it, slot back
-      int H = 0;
-      // Start edge: a killed triangle with a surviving neighbour across some slot.
-      int t0k = -1, e0 = -1;
-      for (int t = 0; t < nt && t0k < 0; ++t) {
-        if (!kill[t])
-          continue;
-        for (int e = 0; e < 3; ++e) {
-          const int s = adj[t * 3 + e];
-          if (s >= 0 && alive[s] && !kill[s]) {
-            t0k = t;
-            e0 = e;
-            break;
-          }
-        }
+      int H = walkHorizon(kill, pi, hA, hB, hSurv, hBack);
+      if (!overflow && H > 0 && !simpleHorizonCycle(kill, hA, H)) {
+        degenerate = true;
+        growDisk(kill, pi);
+        H = walkHorizon(kill, pi, hA, hB, hSurv, hBack);
+        if (!overflow && H > 0 && !simpleHorizonCycle(kill, hA, H))
+          overflow = true;  // cannot happen (growDisk builds a disk): report, never publish
       }
-      if (t0k < 0) {
-        overflow = true;
+      if (!anyKilled(kill))
+        return false;  // every outside vertex lay on the plane: it only touches the cell
+      np = pi + 1;     // commit the plane
+      if (H == 0)
+        overflow = true;  // no surviving boundary (cannot happen for a real cut)
+      if (overflow)
         return true;
-      }  // no surviving boundary (cannot happen for a real cut)
-      const int vstart[3] = {t0[t0k], t1[t0k], t2[t0k]};
-      int A = vstart[e0], B = vstart[(e0 + 1) % 3];
-      int tt = t0k, ee = e0;
-      const int guardMax = 6 * nt + 12;
-      int guard = 0;
-      do {
-        const int surv = adj[tt * 3 + ee];
-        int back = 0;
-        for (int f = 0; f < 3; ++f)
-          if (adj[surv * 3 + f] == tt) {
-            back = f;
-            break;
-          }
-        if (H < MAXT) {
-          hA[H] = A;
-          hB[H] = B;
-          hSurv[H] = surv;
-          hBack[H] = back;
-          ++H;
-        } else {
-          overflow = true;
-          break;
-        }
-        // Pivot around vertex B, rotating through killed triangles, until we exit to the next
-        // survivor.
-        const int pivot = B;
-        int rt = tt, arrival = ee, rotGuard = 0;
-        while (true) {
-          const int rv[3] = {t0[rt], t1[rt], t2[rt]};
-          const int lv = (rv[0] == pivot)   ? 0
-                         : (rv[1] == pivot) ? 1
-                                            : 2;                      // local index of pivot in rt
-          const int crossSlot = (arrival == lv) ? (lv + 2) % 3 : lv;  // the OTHER B-edge of rt
-          const int rn = adj[rt * 3 + crossSlot];
-          if (rn >= 0 && kill[rn]) {  // still inside the conflict region: keep rotating around B
-            int f = (adj[rn * 3 + 0] == rt) ? 0 : (adj[rn * 3 + 1] == rt) ? 1 : 2;
-            rt = rn;
-            arrival = f;
-            if (++rotGuard > guardMax) {
-              overflow = true;
-              break;
-            }
-            continue;
-          }
-          // rn survives -> edge crossSlot of rt is the next horizon edge, oriented out of the
-          // pivot.
-          const int u = rv[crossSlot], w = rv[(crossSlot + 1) % 3];
-          A = pivot;
-          B = (u == pivot) ? w : u;
-          tt = rt;
-          ee = crossSlot;
-          break;
-        }
-        if (overflow)
-          break;
-        if (++guard > guardMax) {
-          overflow = true;
-          break;
-        }
-      } while (!(tt == t0k && ee == e0));
 
       // Remove killed triangles (frees their slots for the fan via allocTri).
       for (int t = 0; t < nt; ++t)
@@ -867,7 +903,7 @@ struct ConvexCell {
       // Allocate the whole fan first (so τ_{i±1} cross-references resolve), then set topology +
       // adjacency.
       int tau[MAXT];
-      bool ok = !overflow;
+      bool ok = true;
       for (int i = 0; i < H && ok; ++i) {
         tau[i] = allocTri();
         if (tau[i] < 0)
@@ -891,6 +927,216 @@ struct ConvexCell {
       }
     }
     return true;
+  }
+
+  /// Lean-path horizon of the conflict region `kill` for plane pi: every edge {x, y} of a killed
+  /// triangle whose sharing triangle survives, into nA/nB; returns their count. A killed triangle
+  /// that fails inconsistentFan on one of its horizon edges is kept (it is ON the plane) and the
+  /// collection restarts — at most once per killed triangle.
+  KOKKOS_INLINE_FUNCTION int collectHorizon(bool* kill, int pi, unsigned char* nA,
+                                            unsigned char* nB) {
+    int nnew = 0;
+    bool redo = true;
+    while (redo) {
+      redo = false;
+      nnew = 0;
+      for (int t = 0; t < nt && !redo; ++t) {
+        if (!kill[t])
+          continue;
+        const int vtx[3] = {t0[t], t1[t], t2[t]};
+        for (int e = 0; e < 3; ++e) {
+          const int x = vtx[e], y = vtx[(e + 1) % 3];
+          const int other = findSharing(t, x, y);
+          if (other >= 0 && !kill[other]) {
+            if (inconsistentFan(x, y, vtx[(e + 2) % 3], pi)) {
+              kill[t] = false;  // t is ON the plane: keep it
+              degenerate = true;
+              redo = true;
+              break;
+            }
+            if (nnew < MAXT) {
+              nA[nnew] = (unsigned char)x;
+              nB[nnew] = (unsigned char)y;
+              ++nnew;
+            } else {
+              overflow = true;
+            }
+          }
+        }
+      }
+    }
+    return nnew;
+  }
+
+  /// TrackAdj-path horizon: walk the boundary of the conflict region `kill` as one oriented cycle
+  /// through `adj` (pivoting around each horizon vertex through the killed triangles), recording
+  /// edge {A,B}, the survivor across it and the survivor's slot back. Returns the cycle length (0
+  /// when no killed triangle has a surviving neighbour). As collectHorizon, a killed triangle that
+  /// fails inconsistentFan is kept and the walk restarts. Only the cycle through the first
+  /// boundary edge is walked; simpleHorizonCycle checks that it is the whole boundary.
+  KOKKOS_INLINE_FUNCTION int walkHorizon(bool* kill, int pi, int* hA, int* hB, int* hSurv,
+                                         int* hBack) {
+    if constexpr (TrackAdj) {
+      int H = 0;
+      bool redo = true;
+      while (redo) {
+        redo = false;
+        H = 0;
+        // Start edge: a killed triangle with a surviving neighbour across some slot.
+        int t0k = -1, e0 = -1;
+        for (int t = 0; t < nt && t0k < 0; ++t) {
+          if (!kill[t])
+            continue;
+          for (int e = 0; e < 3; ++e) {
+            const int s = adj[t * 3 + e];
+            if (s >= 0 && alive[s] && !kill[s]) {
+              t0k = t;
+              e0 = e;
+              break;
+            }
+          }
+        }
+        if (t0k < 0)
+          return 0;
+        const int vstart[3] = {t0[t0k], t1[t0k], t2[t0k]};
+        int A = vstart[e0], B = vstart[(e0 + 1) % 3];
+        int tt = t0k, ee = e0;
+        const int guardMax = 6 * nt + 12;
+        int guard = 0;
+        do {
+          const int C = (t0[tt] != A && t0[tt] != B)   ? t0[tt]
+                        : (t1[tt] != A && t1[tt] != B) ? t1[tt]
+                                                       : t2[tt];
+          if (inconsistentFan(A, B, C, pi)) {
+            kill[tt] = false;  // tt is ON the plane: keep it, restart the walk
+            degenerate = true;
+            redo = true;
+            break;
+          }
+          const int surv = adj[tt * 3 + ee];
+          int back = 0;
+          for (int f = 0; f < 3; ++f)
+            if (adj[surv * 3 + f] == tt) {
+              back = f;
+              break;
+            }
+          if (H < MAXT) {
+            hA[H] = A;
+            hB[H] = B;
+            hSurv[H] = surv;
+            hBack[H] = back;
+            ++H;
+          } else {
+            overflow = true;
+            break;
+          }
+          // Pivot around vertex B, rotating through killed triangles, until we exit to the next
+          // survivor.
+          const int pivot = B;
+          int rt = tt, arrival = ee, rotGuard = 0;
+          while (true) {
+            const int rv[3] = {t0[rt], t1[rt], t2[rt]};
+            const int lv = (rv[0] == pivot)   ? 0
+                           : (rv[1] == pivot) ? 1
+                                              : 2;  // local index of pivot in rt
+            const int crossSlot = (arrival == lv) ? (lv + 2) % 3 : lv;  // the OTHER B-edge of rt
+            const int rn = adj[rt * 3 + crossSlot];
+            if (rn >= 0 && kill[rn]) {  // still inside the conflict region: keep rotating around B
+              int f = (adj[rn * 3 + 0] == rt) ? 0 : (adj[rn * 3 + 1] == rt) ? 1 : 2;
+              rt = rn;
+              arrival = f;
+              if (++rotGuard > guardMax) {
+                overflow = true;
+                break;
+              }
+              continue;
+            }
+            // rn survives -> edge crossSlot of rt is the next horizon edge, oriented out of the
+            // pivot.
+            const int u = rv[crossSlot], w = rv[(crossSlot + 1) % 3];
+            A = pivot;
+            B = (u == pivot) ? w : u;
+            tt = rt;
+            ee = crossSlot;
+            break;
+          }
+          if (overflow)
+            break;
+          if (++guard > guardMax) {
+            overflow = true;
+            break;
+          }
+        } while (!(tt == t0k && ee == e0));
+      }
+      return H;
+    } else {
+      (void)kill, (void)pi, (void)hA, (void)hB, (void)hSurv, (void)hBack;
+      return 0;
+    }
+  }
+
+  /// Neighbour of triangle t across its edge slot e (slot convention of `adj`).
+  KOKKOS_INLINE_FUNCTION int across(int t, int e) const {
+    if constexpr (TrackAdj) {
+      return adj[t * 3 + e];
+    } else {
+      const int vt[3] = {t0[t], t1[t], t2[t]};
+      return findSharing(t, vt[e], vt[(e + 1) % 3]);
+    }
+  }
+
+  /// Fallback of the clip when the round-off conflict region is not a disk (a cospherical cut
+  /// whose on-plane vertices were split inconsistently): rebuild K inside the sign-based set,
+  /// growing it from the outermost vertex, most-outside first, adding a triangle only when K stays
+  /// a disk with a simple boundary — it shares exactly one edge with K and its third plane is not
+  /// yet on K, or two edges (closing a notch) while the boundary keeps >= 3 edges — and every new
+  /// horizon edge passes inconsistentFan. What is left out lay on the plane to round-off. Never
+  /// reached on generic input; O(nt^2) lookups when it is.
+  KOKKOS_INLINE_FUNCTION void growDisk(bool* kill, int pi) {
+    bool cand[MAXT];
+    Real sv[MAXT];
+    for (int t = 0; t < nt; ++t) {
+      cand[t] = kill[t];
+      kill[t] = false;
+      if (cand[t])
+        sv[t] = n[pi][0] * vx[t] + n[pi][1] * vy[t] + n[pi][2] * vz[t] - nn[pi];
+    }
+    unsigned char touch[MAXP];
+    for (int k = 0; k < MAXP; ++k)
+      touch[k] = 0;
+    int H = 0;  // boundary length of K
+    for (bool first = true;; first = false) {
+      int pick = -1, pickM = 0;
+      for (int t = 0; t < nt; ++t) {
+        if (!cand[t] || (pick >= 0 && sv[t] <= sv[pick]))
+          continue;
+        const int ut[3] = {t0[t], t1[t], t2[t]};
+        int mt = 0, shared = 0;
+        bool fanOk = true;
+        for (int e = 0; e < 3; ++e) {
+          const int o = across(t, e);
+          if (o >= 0 && kill[o]) {
+            ++mt;
+            shared = e;
+          } else if (!(o >= 0 && cand[o]) &&
+                     inconsistentFan(ut[e], ut[(e + 1) % 3], ut[(e + 2) % 3], pi)) {
+            fanOk = false;  // a survivor's edge: horizon for good (edges to candidates may close)
+          }
+        }
+        const bool disk =
+            first ? mt == 0 : (mt == 1 && !touch[ut[(shared + 2) % 3]]) || (mt == 2 && H > 3);
+        if (fanOk && disk) {
+          pick = t;
+          pickM = mt;
+        }
+      }
+      if (pick < 0)
+        return;
+      kill[pick] = true;
+      cand[pick] = false;
+      H += 3 - 2 * pickM;
+      touch[t0[pick]] = touch[t1[pick]] = touch[t2[pick]] = 1;
+    }
   }
 
   KOKKOS_INLINE_FUNCTION bool empty() const {

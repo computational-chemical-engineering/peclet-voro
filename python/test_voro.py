@@ -92,8 +92,9 @@ def test_api_contract():
     t.build(np.random.default_rng(1).random((3000, 3)))
     rep = t.diagnostics.build_report()
     assert set(rep) == {"buried", "reach_exceeded", "empty", "overflow", "incomplete",
-                        "over_buffer_rebuilds"}
+                        "degenerate", "over_buffer_rebuilds"}
     assert rep["over_buffer_rebuilds"] == 0
+    assert rep["degenerate"] == 0     # generic points: no cut meets a cospherical vertex
     t.diagnostics.set_profile(True)   # stderr only; the numerics do not move
     t.build(np.random.default_rng(1).random((3000, 3)))
     assert t.diagnostics.build_report() == rep

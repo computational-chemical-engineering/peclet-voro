@@ -104,6 +104,7 @@ class Tess : public peclet::core::python::Releasable {
     d["empty"] = r.empty;
     d["overflow"] = r.overflow;
     d["incomplete"] = r.incomplete;
+    d["degenerate"] = r.degenerate;
     d["over_buffer_rebuilds"] = r.overBufferRebuilds;
     return d;
   }
