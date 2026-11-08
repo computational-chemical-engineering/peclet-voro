@@ -45,6 +45,7 @@
 #define PECLET_VORO_LAGRANGIAN_INTEGRATOR_HPP
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <Kokkos_Core.hpp>
@@ -119,6 +120,78 @@ peclet::core::solver::HostCsrOp twoPointHost(const CellFacets<Real>& F, Coef coe
   }
   return K;
 }
+
+/// Host CSR of the assembled inertial Schur complement S₀ = C M⁻¹ Cᵀ (the 2-ring stencil), pinned
+/// at DOF 0 like twoPointHost: S₀_ik = Σ_l (1/m_l) C_il·C_kl over the velocity cells l, with column
+/// l of C holding −(Σ_f (A/d) c_f + Σ_w A_w n̂_w) at row l and (A/d)(c_f − d_f) at the row of each
+/// neighbour across facet f of l (applyDivergence / applyDivergenceT).
+template <class Real>
+peclet::core::solver::HostCsrOp schurHost(const CellFacets<Real>& F, const LView<Real>& mass) {
+  const auto off = peclet::core::toVector(F.facetOffset);
+  const auto nbr = peclet::core::toVector(F.nbr);
+  const auto area = peclet::core::toVector(F.area);
+  const auto conn = peclet::core::toVector(F.conn);
+  const auto cen = peclet::core::toVector(F.centroid);
+  const auto woff = peclet::core::toVector(F.wallOffset);
+  const auto warea = peclet::core::toVector(F.wallArea);
+  const auto wn = peclet::core::toVector(F.wallNormal);
+  const auto m = peclet::core::toVector(mass);
+  const int N = F.nCells;
+  // column l of C as (row, 3-vector) pairs
+  std::vector<std::vector<std::pair<int, std::array<double, 3>>>> col(N);
+  for (int l = 0; l < N; ++l) {
+    std::array<double, 3> dl = {0, 0, 0};
+    for (int f = off[l]; f < off[l + 1]; ++f) {
+      const double d = std::sqrt(conn[3 * f] * conn[3 * f] + conn[3 * f + 1] * conn[3 * f + 1] +
+                                 conn[3 * f + 2] * conn[3 * f + 2]);
+      const double sc = area[f] / d;
+      std::array<double, 3> cj;
+      for (int a = 0; a < 3; ++a) {
+        dl[a] -= sc * cen[3 * f + a];
+        cj[a] = sc * (cen[3 * f + a] - conn[3 * f + a]);
+      }
+      col[l].emplace_back(nbr[f], cj);
+    }
+    for (int f = woff[l]; f < woff[l + 1]; ++f)
+      for (int a = 0; a < 3; ++a)
+        dl[a] -= warea[f] * wn[3 * f + a];
+    col[l].emplace_back(l, dl);
+  }
+  std::vector<std::vector<std::pair<int, double>>> rows(N);
+  for (int l = 0; l < N; ++l) {
+    const double im = 1.0 / m[l];
+    for (const auto& [i, ci] : col[l])
+      for (const auto& [k, ck] : col[l])
+        rows[i].emplace_back(k, im * (ci[0] * ck[0] + ci[1] * ck[1] + ci[2] * ck[2]));
+  }
+  peclet::core::solver::HostCsrOp K;
+  K.n = N;
+  K.diag.assign(N, 0.0);
+  K.start.assign(N + 1, 0);
+  for (int i = 0; i < N; ++i) {
+    auto& row = rows[i];
+    std::sort(row.begin(), row.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (std::size_t q = 0; q < row.size(); ++q) {
+      const int k = row[q].first;
+      if (k == i) {
+        K.diag[i] += row[q].second;
+        continue;
+      }
+      if (i == 0 || k == 0)
+        continue;  // pinned
+      if (q > 0 && row[q - 1].first == k)
+        K.coef.back() += row[q].second;
+      else {
+        K.nbr.push_back(k);
+        K.coef.push_back(row[q].second);
+      }
+    }
+    std::vector<std::pair<int, double>>().swap(row);
+    K.start[i + 1] = static_cast<peclet::core::Index>(K.nbr.size());
+  }
+  return K;
+}
 }  // namespace detail
 
 struct SaddleParams {
@@ -126,6 +199,9 @@ struct SaddleParams {
   double innerTol = 1e-10;  ///< relative residual of each inner A-solve
   int maxOuter = 2000, maxInner = 2000;
   double amgSwitch = 0.5;  ///< inner preconditioner: AMG when max ν τ/h² exceeds this, else Jacobi
+  /// Schur preconditioner: false = AMG on the two-point L_ρ (§2.6), true = AMG on the assembled
+  /// S₀ = C M⁻¹ Cᵀ (2-ring stencil; M7 WO4a trial). Cahouet–Chabard's viscous term either way.
+  bool schurAssembled = false;
 };
 
 struct SaddleStats {
@@ -134,6 +210,9 @@ struct SaddleStats {
   double constraint = 0;  ///< ‖C v‖_∞ τ / max V (recomputed from v)
   double viscNumber = 0;  ///< max ν τ / h²
   bool amgInner = false;  ///< inner preconditioner was AMG
+  // wall-clock split (diagnostics; seconds): AMG setups charged to this kick (the L_ρ hierarchy of
+  // the last setup() and the viscous one), inner A-solves, Schur preconditioner applications
+  double tSetup = 0, tInner = 0, tPrecond = 0, tTotal = 0;
 };
 
 /// The Stokes-type saddle of one NHV-W kick (see the file comment).
@@ -184,13 +263,18 @@ class SaddleSolver {
         cc[i] = vh[i] > 0 ? 2.0 * mh[i] / vh[i] : 0.0;
       cc_ = peclet::core::toDevice<Real>(cc, "sd.cc");
     }
-    lrho_.build(detail::twoPointHost(
-                    F,
-                    [&](int i, int j, double A, double d) {
-                      return A / d * 0.5 * (1.0 / rh[i] + 1.0 / rh[j]);
-                    },
-                    [](int) { return 0.0; }, /*pin=*/true),
-                ap);
+    Kokkos::Timer tb;
+    if (assembled_)
+      lrho_.build(detail::schurHost(F, mass), ap);
+    else
+      lrho_.build(detail::twoPointHost(
+                      F,
+                      [&](int i, int j, double A, double d) {
+                        return A / d * 0.5 * (1.0 / rh[i] + 1.0 / rh[j]);
+                      },
+                      [](int) { return 0.0; }, /*pin=*/true),
+                  ap);
+    setupSeconds_ = tb.seconds();
     mh_ = mh;
     if (viscous_) {  // approximate diagonal of ζ: Σ_f μ_f A/(3d)(1 + n_a²) + wall μ A_w/δ_w (1 −
                      // n_wa²)
@@ -235,10 +319,14 @@ class SaddleSolver {
     using Exec = peclet::core::ExecSpace;
     const int N = F_.nCells;
     SaddleStats st;
+    Kokkos::Timer tAll, tPart;
+    st.tSetup = setupSeconds_;  // charged once, to the first solve after setup()
+    setupSeconds_ = 0;
     st.viscNumber = nuH2_ * 2 * halfTau;
     useAmg_ = viscous_ && a > Real(0) && st.viscNumber > prm.amgSwitch;
     st.amgInner = useAmg_;
     if (useAmg_) {
+      tPart.reset();
       peclet::core::solver::AmgParams ap;
       ap.ndofPerNode = 1;
       const auto mh = peclet::core::toVector(mass_);
@@ -253,6 +341,7 @@ class SaddleSolver {
                       },
                       [&](int i) { return mh[i]; }, /*pin=*/false),
                   ap);
+      st.tSetup += tPart.seconds();
     }
     const LView<Real> r = r_, z = z_, zo = zOld_, p = p_, s = s_, q = q_, vv = v, mu = lam;
     {  // warm start: μ₀ = (τ/2) λ_guess (mean removed), v₀ = A⁻¹(b − Cᵀμ₀)
@@ -266,18 +355,27 @@ class SaddleSolver {
           "sd.b0", Kokkos::RangePolicy<Exec>(0, 3 * N),
           KOKKOS_LAMBDA(const int k) { w(k) = B(k) - w(k); });
     }
+    tPart.reset();
     st.inner += solveA(a, w_, v, prm);
+    Kokkos::fence();
+    st.tInner += tPart.seconds();
     applyDivergence(F_, v, r_);
     Real rinf = detail::maxAbsView(r);
     const Real rinit = rinf;
     if (rinf > tolAbs) {
+      tPart.reset();
       schurPrecond(a, r, z);
+      Kokkos::fence();
+      st.tPrecond += tPart.seconds();
       Kokkos::deep_copy(p, z);
       Real rz = detail::dotView(r, z);
       bool done = false;
       for (int k = 0; k < prm.maxOuter; ++k) {
         applyDivergenceT(F_, p, w_);
+        tPart.reset();
         st.inner += solveA(a, w_, q, prm);
+        Kokkos::fence();
+        st.tInner += tPart.seconds();
         applyDivergence(F_, q, s);
         const Real ps = detail::dotView(p, s);
         if (!(ps > Real(0)))
@@ -298,7 +396,10 @@ class SaddleSolver {
           break;
         }
         Kokkos::deep_copy(zo, z);
+        tPart.reset();
         schurPrecond(a, r, z);
+        Kokkos::fence();
+        st.tPrecond += tPart.seconds();
         const Real rzNew = detail::dotView(r, z);
         const Real be = (rzNew - detail::dotView(r, zo)) / rz;
         rz = rzNew;
@@ -326,15 +427,17 @@ class SaddleSolver {
         "sd.lam", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) { mu(i) *= ih; });
     applyDivergence(F_, v, r_);
     st.constraint = detail::maxAbsView(r_);  // absolute; the caller scales by τ / max V
+    Kokkos::fence();
+    st.tTotal = tAll.seconds();
     return st;
   }
 
   bool viscous() const { return viscous_; }
+  void setAssembled(bool on) { assembled_ = on; }  ///< SaddleParams::schurAssembled (next setup)
   const CellFacets<Real>& facets() const { return F_; }
   DissipationScratch<Real>& scratch() { return scr_; }
 
  private:
-  /// z = (L_ρ⁻¹ + a·2μ/V) r (Cahouet–Chabard; the viscous term only with viscosity and a > 0).
   /// z = (L_ρ⁻¹ + a·2μ/V) r (Cahouet–Chabard; the viscous term only with viscosity and a > 0).
   void schurPrecond(Real a, const LView<Real>& r, const LView<Real>& z) {
     lrho_.apply(r, z);
@@ -427,8 +530,8 @@ class SaddleSolver {
   CellFacets<Real> F_;
   LView<Real> mu_, mass_;
   std::vector<double> mh_;
-  bool viscous_ = false, useAmg_ = false;
-  double nuH2_ = 0;
+  bool viscous_ = false, useAmg_ = false, assembled_ = false;
+  double nuH2_ = 0, setupSeconds_ = 0;
   peclet::core::solver::GraphAMGDevice lrho_, visc_;
   LView<Real> cc_, r_, z_, zOld_, p_, s_, w_, q_, ir_, iz_, ip_, iq_, zdiag_, c0_, c1_;
   DissipationScratch<Real> scr_;
@@ -486,6 +589,9 @@ struct StepReport {
   double repairMismatch = 0;  ///< that check's value (max relative volume difference)
   double unmatchedArea = 0;   ///< largest such area
   double tKick1 = 0, tKick2 = 0, tRepair = 0, tWeights = 0, tPotential = 0, tTotal = 0;
+  /// tPotential's split: facet export + match, U and ∂U, the H hierarchy, the π solve (the rest is
+  /// the L_ρ setup, charged to kick2.tSetup)
+  double tFacets = 0, tEnergy = 0, tAmgH = 0, tAdjoint = 0;
   // the gauge (zero when it did not run)
   int gaugeTries = 0;          ///< trials evaluated (0: the gauge did not run this step)
   bool gaugeAccepted = false;  ///< a trial passed the energy guard
@@ -494,12 +600,16 @@ struct StepReport {
   double gaugePotential = 0;   ///< ΔŨ of the accepted trial (≤ 0)
   double gaugeKinetic = 0;     ///< ΔK of the momentum projection (≤ 0)
   double gaugeAlphaB = 0;      ///< α_B used (after the floor)
+  int gaugeSolveFails = 0;     ///< trials whose weight solve failed (diagnostics)
+  int gaugeEnergyRejects = 0;  ///< trials rejected by the energy guard (diagnostics)
+  double gaugeTrialDU = 0;     ///< ΔŨ of the last evaluated trial (diagnostics)
   double tGauge = 0;
 };
 
 /// Result of Integrator::relax (the t = 0 interface relaxation).
 struct RelaxReport {
   int iterations = 0, accepted = 0;
+  int solveFails = 0, energyRejects = 0;  ///< failed trials by cause (diagnostics)
   bool converged = false;
   double potentialChange = 0;  ///< Ũ(end) − Ũ(start)
   std::vector<double> area;    ///< unlike-facet area at iteration 0, window, 2·window, ...
@@ -697,6 +807,8 @@ class Integrator {
       double dU = 0, dK = 0;
       gauge(0.0, true, rep, dU, dK);
       r.accepted += rep.gaugeAccepted ? 1 : 0;
+      r.solveFails += rep.gaugeSolveFails;
+      r.energyRejects += rep.gaugeEnergyRejects;
       r.iterations = it;
       if (it % window == 0) {
         const double A = unlikeArea();
@@ -731,6 +843,13 @@ class Integrator {
 
   void setTheta(double th) { prm_.theta = th; }
   void setMidpointConstraint(bool on) { prm_.midpointConstraint = on; }
+  /// Solver knobs of the M7 WO4a trials (no numerics default changes): the assembled Schur
+  /// preconditioner and the relative tolerance of the π (adjoint) solve.
+  void setSolverOptions(bool schurAssembled, double adjointTol, double saddleTol) {
+    prm_.saddle.schurAssembled = schurAssembled;
+    prm_.adjointTol = adjointTol;
+    prm_.saddle.tol = saddleTol;
+  }
   void setGauge(double alphaI, double alphaB, int every) {
     prm_.alphaI = alphaI;
     prm_.alphaB = alphaB;
@@ -835,20 +954,31 @@ class Integrator {
 
   /// Facets, U and ∇Ũ, π, and the two hierarchies at the current (pos, weight).
   void evalState(double* tPot = nullptr) {
-    Kokkos::Timer t;
+    Kokkos::Timer t, tp;
     F_ = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_, mt_->wall, mt_->xRef,
                                        mt_->vol);
     match_ = matchFacets(F_);
+    Kokkos::fence();
+    evalSplit_[0] = tp.seconds();
+    tp.reset();
     Kokkos::deep_copy(gx_, Real(0));
     Kokkos::deep_copy(gw_, Real(0));
     parts_ = partitionPotential(*mt_, F_, pos_, weight_, L_, spec_, gx_, gw_);
+    Kokkos::fence();
+    evalSplit_[1] = tp.seconds();
+    tp.reset();
     peclet::core::solver::AmgParams ap;
     ap.ndofPerNode = 1;
     hAmg_.build(detail::pinnedHostH(F_), ap);
+    evalSplit_[2] = tp.seconds();
+    tp.reset();
     WeightSolveParams wp;
     wp.pcgTol = prm_.adjointTol;
     wp.amg = &hAmg_;
     adj_ = reducedGradient(F_, gx_, gw_, pi_, grad_, wp);
+    Kokkos::fence();
+    evalSplit_[3] = tp.seconds();
+    saddle_.setAssembled(prm_.saddle.schurAssembled);
     saddle_.setup(F_, rho_, mu_, mass_, h_);
     Kokkos::fence();
     if (tPot)
@@ -935,6 +1065,7 @@ class Integrator {
       F_ = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_, mt_->wall, mt_->xRef,
                                          mt_->vol);
       matchFacets(F_);
+      saddle_.setAssembled(prm_.saddle.schurAssembled);
       saddle_.setup(F_, rho_, mu_, mass_, h_);
       rep.kick1 = kick(tau, vel_, vh_, lam1_, pos0_);
       // kick 1's constraint work (τ/4) λ₁ᵀ C^s v^n (C^s v^{½} = 0, C^s v^n ≠ 0)
@@ -1039,6 +1170,10 @@ class Integrator {
     double tPot = 0;
     evalState(&tPot);
     rep.tPotential = tPot;
+    rep.tFacets = evalSplit_[0];
+    rep.tEnergy = evalSplit_[1];
+    rep.tAmgH = evalSplit_[2];
+    rep.tAdjoint = evalSplit_[3];
     rep.adjIters = adj_.pcgIters;
     rep.unmatched = match_.dropped;
     rep.unmatchedArea = match_.maxArea;
@@ -1114,6 +1249,7 @@ class Integrator {
         Kokkos::deep_copy(gx_, Real(0));
         Kokkos::deep_copy(gw_, Real(0));
         const PotentialParts pt = partitionPotential(*mt_, Ft, pos_, weight_, L_, spec_, gx_, gw_);
+        rep.gaugeTrialDU = pt.total() + wrapOffset_ - wrapJump() - U0;
         if (pt.total() + wrapOffset_ - wrapJump() <= U0) {
           accumulateWrap();
           evalState();
@@ -1121,6 +1257,9 @@ class Integrator {
           rep.gaugeAccepted = true;
           break;
         }
+        ++rep.gaugeEnergyRejects;
+      } else {
+        ++rep.gaugeSolveFails;
       }
       restoreEngine();
     }
@@ -1404,6 +1543,7 @@ class Integrator {
   bool movingWall_ = false;
   long stepCount_ = 0;
   int restoreRebuilds_ = 0;
+  double evalSplit_[4] = {0, 0, 0, 0};  ///< evalState: facets, energy, H AMG setup, adjoint (s)
   double gaugeU_ = 0, gaugeK_ = 0;
   CellFacets<Real> F_;
   PotentialParts parts_;

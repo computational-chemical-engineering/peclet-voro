@@ -449,6 +449,16 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     midpoint_ = mode == "midpoint";
     dirty_ = true;
   }
+  // M7 WO4a solver trials (private): the assembled Schur preconditioner, the π-solve tolerance
+  void set_solver_options(bool schurAssembled, real_t adjointTol, real_t saddleTol) {
+    if (!(adjointTol > 0) || !(saddleTol > 0))
+      throw std::invalid_argument(
+          "voro: LagrangianFlow._set_solver_options(adjoint_tol > 0, saddle_tol > 0)");
+    schurAssembled_ = schurAssembled;
+    adjointTol_ = adjointTol;
+    saddleTol_ = saddleTol;
+    withIntegIfAny([&](auto& I) { I.setSolverOptions(schurAssembled_, adjointTol_, saddleTol_); });
+  }
   void set_gauge(real_t interface, real_t bulk, int every) {
     if (!(interface >= 0) || !(bulk >= 0) || every < 0)
       throw std::invalid_argument(
@@ -482,6 +492,9 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     nb::dict d;
     d["iterations"] = r.iterations;
     d["accepted"] = r.accepted;
+    d["solve_fails"] = r.solveFails;
+    d["energy_rejects"] = r.energyRejects;
+    withInteg([&](auto& I) { d["restore_rebuilds"] = I.restoreRebuilds(); });
     d["converged"] = r.converged;
     d["potential_change"] = r.potentialChange;
     d["unlike_area"] = toNumpy1(std::vector<real_t>(r.area.begin(), r.area.end()));
@@ -596,6 +609,18 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["t_weights"] = col([](const auto& r) { return r.tWeights; });
     d["t_potential"] = col([](const auto& r) { return r.tPotential; });
     d["t_total"] = col([](const auto& r) { return r.tTotal; });
+    d["t_facets"] = col([](const auto& r) { return r.tFacets; });
+    d["t_energy"] = col([](const auto& r) { return r.tEnergy; });
+    d["t_amg_h"] = col([](const auto& r) { return r.tAmgH; });
+    d["t_adjoint"] = col([](const auto& r) { return r.tAdjoint; });
+    d["kick1_t_setup"] = col([](const auto& r) { return r.kick1.tSetup; });
+    d["kick1_t_inner"] = col([](const auto& r) { return r.kick1.tInner; });
+    d["kick1_t_precond"] = col([](const auto& r) { return r.kick1.tPrecond; });
+    d["kick1_t_solve"] = col([](const auto& r) { return r.kick1.tTotal; });
+    d["kick2_t_setup"] = col([](const auto& r) { return r.kick2.tSetup; });
+    d["kick2_t_inner"] = col([](const auto& r) { return r.kick2.tInner; });
+    d["kick2_t_precond"] = col([](const auto& r) { return r.kick2.tPrecond; });
+    d["kick2_t_solve"] = col([](const auto& r) { return r.kick2.tTotal; });
     d["gauge_tries"] = col([](const auto& r) { return r.gaugeTries; });
     d["gauge_accepted"] = col([](const auto& r) { return r.gaugeAccepted ? 1 : 0; });
     d["gauge_normal"] = col([](const auto& r) { return r.gaugeNormal ? 1 : 0; });
@@ -604,6 +629,9 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["gauge_kinetic"] = col([](const auto& r) { return r.gaugeKinetic; });
     d["gauge_bulk_alpha"] = col([](const auto& r) { return r.gaugeAlphaB; });
     d["t_gauge"] = col([](const auto& r) { return r.tGauge; });
+    d["gauge_solve_fails"] = col([](const auto& r) { return r.gaugeSolveFails; });
+    d["gauge_energy_rejects"] = col([](const auto& r) { return r.gaugeEnergyRejects; });
+    d["gauge_trial_dU"] = col([](const auto& r) { return r.gaugeTrialDU; });
     withInteg([&](auto& I) {
       d["gauge_potential_total"] = I.gaugePotential();
       d["gauge_kinetic_total"] = I.gaugeKinetic();
@@ -749,6 +777,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
             I->setTime(time_);
             I->setAccumulators(acc_[0], acc_[1], acc_[2], acc_[3], acc_[4], acc_[5]);
             I->setGauge(alphaI_, alphaB_, gaugeEvery_);
+            if (adjointTol_ > 0)
+              I->setSolverOptions(schurAssembled_, adjointTol_, saddleTol_);
             if constexpr (T::kHasSdf)
               i1_ = std::move(I);
             else
@@ -768,7 +798,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   std::vector<double> V0_, rho_, mu_, tension_, sigmaWall_;
   std::vector<real_t> vel_;
   std::array<real_t, 3> gravity_{0, 0, 0}, bodyAmp_{0, 0, 0}, bodyWave_{0, 0, 0};
-  bool hasGravity_ = false, midpoint_ = true;
+  bool hasGravity_ = false, midpoint_ = true, schurAssembled_ = false;
+  real_t adjointTol_ = 0, saddleTol_ = 0;  // 0: not set (the integrator's defaults)
   std::optional<real_t> rhoRef_;
   real_t dtUser_ = 0, cfl_ = 0.2, cap_ = 0.5, time_ = 0, lastDt_ = 0, theta_ = 0.5;
   std::array<double, 6> acc_{0, 0, 0, 0, 0, 0};
@@ -851,6 +882,11 @@ void bindLagrangian(nb::module_& m) {
            "Where kick 1's velocity constraint is taken: 'midpoint' (x^n + dt/2 v^n with the\n"
            "weights solved there; DESIGN_NOTE option S; the default: second order in the energy)\n"
            "or 'start' (x^n; first order).")
+      .def("_set_solver_options", &LagrangianFlow::set_solver_options, nb::arg("schur_assembled"),
+           nb::arg("adjoint_tol"), nb::arg("saddle_tol") = 1e-12,
+           "M7 WO4a solver trials (not public API): AMG on the assembled C M^-1 C^T as the Schur\n"
+           "preconditioner, the relative tolerance of the pi (adjoint) solve, and the saddle's\n"
+           "constraint tolerance |C v|_inf <= saddle_tol max V / dt.")
       .def("set_gauge", &LagrangianFlow::set_gauge, nb::arg("interface") = 0.2,
            nb::arg("bulk") = 0.1, nb::arg("every") = 1,
            "The NHV-W gauge after kick 2 every `every` steps (0: off): interface cells descend\n"
