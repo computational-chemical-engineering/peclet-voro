@@ -886,7 +886,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   std::array<real_t, 3> gravity_{0, 0, 0}, bodyAmp_{0, 0, 0}, bodyWave_{0, 0, 0};
   bool hasGravity_ = false, midpoint_ = true, schurAssembled_ = false;
   real_t adjointTol_ = 0, saddleTol_ = 0;  // 0: not set (the integrator's defaults)
-  peclet::voro::lagrangian::SaddleMethod method_ = peclet::voro::lagrangian::SaddleMethod::kSchurCG;
+  peclet::voro::lagrangian::SaddleMethod method_ = peclet::voro::lagrangian::SaddleMethod::kCoupled;
   real_t rotational_ = 1;
   int amgReuse_ = 10;
   real_t warmTol_ = 1e-4, newtonTol_ = 1e-3;
@@ -978,7 +978,7 @@ void bindLagrangian(nb::module_& m) {
            "Where kick 1's velocity constraint is taken: 'midpoint' (x^n + dt/2 v^n with the\n"
            "weights solved there; DESIGN_NOTE option S; the default: second order in the energy)\n"
            "or 'start' (x^n; first order).")
-      .def("_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "schur",
+      .def("_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "coupled",
            nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 10, nb::arg("warm_tol") = 1e-4,
            nb::arg("newton_tol") = 1e-3,
            "M7 WO-PERF solver trials (not public API): the kick's saddle method ('schur' nested\n"

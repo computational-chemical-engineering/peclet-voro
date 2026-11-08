@@ -215,7 +215,8 @@ struct SaddleParams {
   /// on): outer iterations per kick 96 → 25 and s/step 136 → 35 at N = 32768 (7.7 → 3.0 at
   /// 4096); inviscid 113 → 23 outer, but its 4× dearer setup makes the step ~7 % slower.
   bool schurAssembled = true;
-  SaddleMethod method = SaddleMethod::kSchurCG;
+  /// default kCoupled since M7 WO-PERF (the fastest method that passes every gate; B fails rest)
+  SaddleMethod method = SaddleMethod::kCoupled;
   /// B: χ of the rotational multiplier update μ += φ + χ a (μ_min / V_i) (C v*)_i — flow's
   /// rotational term −χ μ_min ∇·u* (its default mode "min", χ = 1: the least cell viscosity, stable
   /// at any contrast); χ = 2 is the whole gradient part of the stress-form ζ (the Cahouet–Chabard
