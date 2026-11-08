@@ -449,6 +449,44 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     midpoint_ = mode == "midpoint";
     dirty_ = true;
   }
+  void set_gauge(real_t interface, real_t bulk, int every) {
+    if (!(interface >= 0) || !(bulk >= 0) || every < 0)
+      throw std::invalid_argument(
+          "voro: LagrangianFlow.set_gauge() takes interface >= 0, bulk >= 0, every >= 0");
+    alphaI_ = interface;
+    alphaB_ = bulk;
+    gaugeEvery_ = every;
+    withIntegIfAny([&](auto& I) { I.setGauge(alphaI_, alphaB_, gaugeEvery_); });
+  }
+  void set_wall_velocity(std::array<real_t, 3> offset,
+                         std::optional<nb::ndarray<real_t, nb::c_contig>> gradient) {
+    wallU_ = offset;
+    wallG_.fill(0);
+    if (gradient) {
+      if (gradient->size() != 9)
+        throw std::runtime_error("voro: LagrangianFlow.set_wall_velocity(gradient) must be (3,3)");
+      std::copy(gradient->data(), gradient->data() + 9, wallG_.begin());
+    }
+    dirty_ = true;
+  }
+  /// The t = 0 interface relaxation (Integrator::relax).
+  nb::dict relax(real_t tol, int window, int max_iterations) {
+    if (!(tol > 0) || window < 1 || max_iterations < 1)
+      throw std::invalid_argument(
+          "voro: LagrangianFlow.relax() takes tol > 0, window >= 1, max_iterations >= 1");
+    prepare();
+    lag::RelaxReport r;
+    withInteg([&](auto& I) { r = I.relax(tol, window, max_iterations); });
+    t_->wHost_ = peclet::core::toVector(t_->weight_);
+    t_->wDirty_ = false;
+    nb::dict d;
+    d["iterations"] = r.iterations;
+    d["accepted"] = r.accepted;
+    d["converged"] = r.converged;
+    d["potential_change"] = r.potentialChange;
+    d["unlike_area"] = toNumpy1(std::vector<real_t>(r.area.begin(), r.area.end()));
+    return d;
+  }
   void set_velocities(nb::ndarray<real_t, nb::c_contig> v) {
     std::vector<real_t> h = flatten3(v);
     if (h.size() != vel_.size())
@@ -488,6 +526,9 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       d["constraint_work"] = I.constraintWork();
       d["body_work"] = I.bodyWork();
       d["wrap_offset"] = I.wrapOffset();
+      d["gauge_potential"] = I.gaugePotential();
+      d["gauge_kinetic"] = I.gaugeKinetic();
+      d["unlike_area"] = I.unlikeArea();
     });
     return d;
   }
@@ -555,6 +596,18 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["t_weights"] = col([](const auto& r) { return r.tWeights; });
     d["t_potential"] = col([](const auto& r) { return r.tPotential; });
     d["t_total"] = col([](const auto& r) { return r.tTotal; });
+    d["gauge_tries"] = col([](const auto& r) { return r.gaugeTries; });
+    d["gauge_accepted"] = col([](const auto& r) { return r.gaugeAccepted ? 1 : 0; });
+    d["gauge_normal"] = col([](const auto& r) { return r.gaugeNormal ? 1 : 0; });
+    d["gauge_interface_cells"] = col([](const auto& r) { return r.gaugeInterface; });
+    d["gauge_potential"] = col([](const auto& r) { return r.gaugePotential; });
+    d["gauge_kinetic"] = col([](const auto& r) { return r.gaugeKinetic; });
+    d["gauge_bulk_alpha"] = col([](const auto& r) { return r.gaugeAlphaB; });
+    d["t_gauge"] = col([](const auto& r) { return r.tGauge; });
+    withInteg([&](auto& I) {
+      d["gauge_potential_total"] = I.gaugePotential();
+      d["gauge_kinetic_total"] = I.gaugeKinetic();
+    });
     return d;
   }
 
@@ -589,6 +642,13 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       throw std::logic_error("voro: LagrangianFlow has no integrator");
   }
   template <class F>
+  void withIntegIfAny(F&& f) {
+    if (i0_)
+      f(*i0_);
+    else if (i1_)
+      f(*i1_);
+  }
+  template <class F>
   std::vector<real_t> fromInteg(F&& f) {
     prepare();
     std::vector<real_t> out;
@@ -603,7 +663,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     withInteg([&](auto& I) {
       vel_ = peclet::core::toVector(I.velocity());
       time_ = I.time();
-      acc_ = {I.heat(), I.constraintWork(), I.bodyWork(), I.wrapOffset()};
+      acc_ = {I.heat(), I.constraintWork(), I.bodyWork(), I.wrapOffset(), I.gaugePotential(),
+              I.gaugeKinetic()};
     });
   }
 
@@ -651,7 +712,10 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     for (int a = 0; a < 3; ++a) {
       fp.bodyAmp[a] = bodyAmp_[a];
       fp.bodyWave[a] = bodyWave_[a];
+      fp.wallVelocity[a] = wallU_[a];
     }
+    for (int e = 0; e < 9; ++e)
+      fp.wallGradient[e] = wallG_[e];
     const real_t Larr[3] = {t.L_[0], t.L_[1], t.L_[2]};
     i0_.reset();
     i1_.reset();
@@ -683,7 +747,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
             I->setTheta(theta_);
             I->setMidpointConstraint(midpoint_);
             I->setTime(time_);
-            I->setAccumulators(acc_[0], acc_[1], acc_[2], acc_[3]);
+            I->setAccumulators(acc_[0], acc_[1], acc_[2], acc_[3], acc_[4], acc_[5]);
+            I->setGauge(alphaI_, alphaB_, gaugeEvery_);
             if constexpr (T::kHasSdf)
               i1_ = std::move(I);
             else
@@ -706,7 +771,11 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   bool hasGravity_ = false, midpoint_ = true;
   std::optional<real_t> rhoRef_;
   real_t dtUser_ = 0, cfl_ = 0.2, cap_ = 0.5, time_ = 0, lastDt_ = 0, theta_ = 0.5;
-  std::array<double, 4> acc_{0, 0, 0, 0};
+  std::array<double, 6> acc_{0, 0, 0, 0, 0, 0};
+  std::array<real_t, 3> wallU_{0, 0, 0};
+  std::array<real_t, 9> wallG_{0, 0, 0, 0, 0, 0, 0, 0, 0};
+  real_t alphaI_ = 0.2, alphaB_ = 0.1;
+  int gaugeEvery_ = 1;
   bool dirty_ = true;
   const real_t* posData_ = nullptr;
   std::unique_ptr<Integ<NoSdfT>> i0_;
@@ -782,6 +851,23 @@ void bindLagrangian(nb::module_& m) {
            "Where kick 1's velocity constraint is taken: 'midpoint' (x^n + dt/2 v^n with the\n"
            "weights solved there; DESIGN_NOTE option S; the default: second order in the energy)\n"
            "or 'start' (x^n; first order).")
+      .def("set_gauge", &LagrangianFlow::set_gauge, nb::arg("interface") = 0.2,
+           nb::arg("bulk") = 0.1, nb::arg("every") = 1,
+           "The NHV-W gauge after kick 2 every `every` steps (0: off): interface cells descend\n"
+           "Ũ tangentially, delta = -interface P grad_i Ũ / sigma_i; bulk cells move\n"
+           "bulk (b_i - x_i) to their power-cell centroid (floored at 1.5 dt max|grad v|);\n"
+           "weights re-solved, energy guard (Ũ must not rise; 3 halvings), then v projected\n"
+           "onto C v = 0 in the M-metric. Its dU, dK are counted separately (energies()).")
+      .def("set_wall_velocity", &LagrangianFlow::set_wall_velocity, nb::arg("offset"),
+           nb::arg("gradient") = nb::none(),
+           "No-slip wall velocity u_w(y) = offset + gradient @ y at the wall facets (tangential\n"
+           "part; e.g. Couette between z-walls: gradient[0, 2] = shear rate). Default 0.")
+      .def("relax", &LagrangianFlow::relax, nb::arg("tol") = 1e-4, nb::arg("window") = 100,
+           nb::arg("max_iterations") = 20000,
+           "The t = 0 interface relaxation: the gauge with the full descent (no tangential\n"
+           "projection) until the unlike-facet area changes by < tol (relative) per `window`\n"
+           "iterations. Returns iterations, accepted, converged, potential_change and the\n"
+           "unlike_area history (one value per window).")
       .def("set_velocities", &LagrangianFlow::set_velocities, nb::arg("velocities"))
       .def("get_velocities", &LagrangianFlow::get_velocities)
       .def("get_positions", &LagrangianFlow::get_positions)

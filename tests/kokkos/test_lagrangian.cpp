@@ -273,6 +273,7 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     fp.viscosity = {0.1, 0.3};
     lag::IntegratorParams ip;
     ip.midpointConstraint = true;
+    ip.gaugeEvery = 0;  // the integrator's own order (the gauge is checked in (F))
     double err[2] = {0, 0}, worstV = 0, worstCold = 0;
     int fallbacks = 0;
     for (int run = 0; run < 2; ++run) {
@@ -309,7 +310,73 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     rc |= (worstV <= 1e-12 && worstCold <= 1e-9 && err[0] / err[1] >= 3.0) ? 0 : 1;
   }
 
-  // --- rest: one phase, no forces, v = 0 stays exactly 0 ---
+  // --- (F) the gauge: relax() descends Ũ at held volumes; one gauged inviscid step keeps Σ m v
+  // and C v = 0, with ΔŨ, ΔK ≤ 0 ---
+  {
+    lag::PotentialSpec<real_t> spec;
+    spec.types = dty;
+    spec.nTypes = 2;
+    spec.tension = toDev({0.0, 1.0, 1.0, 0.0}, "f.ten");
+    lag::FlowParams fp;
+    fp.density = {1.0, 10.0};
+    fp.viscosity = {0.0, 0.0};
+    DV p2 = toDev(x, "f.pos"), w2 = toDev(w0, "f.w");
+    MT m2;
+    m2.alloc(N, Larr, real_t(1e-10) * h, real_t(0.25) * h, 4, N);
+    m2.setWeights(w2);
+    m2.rebuild(p2);
+    double A0 = 0, A1 = 0, dU = 0, worstV = 0;
+    int iters = 0, acc = 0, rebuilds = 0;
+    {
+      lag::Integrator<MT> I(m2, p2, w2, Larr, V0, spec, fp, std::vector<real_t>(3 * N, 0.0));
+      A0 = I.unlikeArea();
+      const auto rr = I.relax(1e-4, 10, 100);
+      A1 = I.unlikeArea();
+      dU = rr.potentialChange;
+      iters = rr.iterations;
+      acc = rr.accepted;
+      rebuilds = I.restoreRebuilds();
+      const auto Vh = toHost(Kokkos::subview(m2.vol, std::make_pair(0, N)));
+      for (int i = 0; i < N; ++i)
+        worstV = std::max(worstV, std::fabs(Vh[i] - V0[i]) / V0[i]);
+    }
+    lag::Integrator<MT> I(m2, p2, w2, Larr, V0, spec, fp, v);
+    double P0[3] = {0, 0, 0}, P1[3] = {0, 0, 0}, pn = 0, maxV = 0;
+    for (int i = 0; i < N; ++i) {
+      const double m = (ty[i] ? 10.0 : 1.0) * V0[i];
+      maxV = std::max(maxV, V0[i]);
+      for (int a = 0; a < 3; ++a) {
+        P0[a] += m * v[3 * i + a];
+        pn += m * std::fabs(v[3 * i + a]);
+      }
+    }
+    const double tau = 2e-3;
+    const auto r = I.step(tau);
+    const auto vh = toHost(I.velocity());
+    for (int i = 0; i < N; ++i)
+      for (int a = 0; a < 3; ++a)
+        P1[a] += (ty[i] ? 10.0 : 1.0) * V0[i] * vh[3 * i + a];
+    double dP = 0;
+    for (int a = 0; a < 3; ++a)
+      dP = std::max(dP, std::fabs(P1[a] - P0[a]) / pn);
+    DV cv("f.cv", N);
+    lag::applyDivergence(I.facets(), I.velocity(), cv);
+    double cmax = 0;
+    for (double c : toHost(cv))
+      cmax = std::max(cmax, std::fabs(c) * tau / maxV);
+    std::printf(
+        "  (F) gauge: relax %d it (%d accepted, %d restore rebuilds) area %.4f -> %.4f dU=%.2e "
+        "max|V-V0|/V0=%.1e; step: tries=%d accepted=%d dU=%.2e dK=%.2e |dP|/sum m|v|=%.1e |Cv| "
+        "tau/maxV=%.1e\n",
+        iters, acc, rebuilds, A0, A1, dU, worstV, r.gaugeTries, int(r.gaugeAccepted), r.gaugePotential,
+        r.gaugeKinetic, dP, cmax);
+    rc |= (dU <= 0 && A1 < A0 && acc > 0 && worstV <= 1e-12 && r.gaugeTries > 0 &&
+           r.gaugePotential <= 0 && r.gaugeKinetic <= 0 && dP <= 1e-12 && cmax <= 1e-11)
+              ? 0
+              : 1;
+  }
+
+  // --- rest: one phase, no forces, v = 0 stays exactly 0 (the gauge on: Ũ ≡ 0, v ≡ 0) ---
   {
     Kokkos::deep_copy(dty, 0);
     lag::PotentialSpec<real_t> spec;

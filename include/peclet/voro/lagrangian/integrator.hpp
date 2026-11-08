@@ -16,8 +16,14 @@
  *      constraint work Q_c += (τ/4) λ₂ᵀ C^{n+1} v^{½} (kick 2's; kick 1 does none), the body-force
  *      work W += (τ/2) (M a)ᵀ(v_old + v_new)/2 per kick, so that K + Ũ + Q + Q_c − W is conserved
  *      to the integrator's O(τ²);
- *   5. step size τ = min(C_cfl min_i h_i/|v_i|, C_σ √(ρ_σ h_min³/σ_max), τ_user) (stableStep).
- * No gauge (WO4′) and no topology bookkeeping beyond the repair's.
+ *   5. step size τ = min(C_cfl min_i h_i/|v_i|, C_σ √(ρ_σ h_min³/σ_max), τ_user) (stableStep);
+ *   6. the gauge (DESIGN_NOTE §2.8 as simplified by §10.3 item 4) after kick 2, every
+ *      IntegratorParams::gaugeEvery steps (see gauge()); its ΔŨ and ΔK go to their own counters, so
+ *      K + Ũ + Q + Q_c − W − ΔŨ_G − ΔK_G is what the integrator conserves to O(τ²).
+ * Moving no-slip walls: the wall term of R becomes ½ Σ_w μ_i A^w |P_w(v_i − u_w)|²/δ_w with u_w a
+ * linear field (FlowParams::wallVelocity/wallGradient) at the wall-facet centroid; the affine part
+ * −f_w enters the kick's right-hand side and its work f_wᵀv̄ goes to the body work W (C is
+ * unchanged: u_w is taken tangential, P_w u_w). No topology bookkeeping beyond the repair's.
  *
  * The saddle [M + θ(τ/2)ζ, (τ/2)Cᵀ; C, 0] is solved by preconditioned CG on the Schur complement
  * S = C A⁻¹ Cᵀ (A = M + θ(τ/2)ζ) for μ = (τ/2)λ, preconditioned by AMG on the two-point
@@ -435,6 +441,10 @@ struct FlowParams {
   std::vector<double> density;    ///< nTypes (ρ > 0; the mass is ρ V⁰)
   double bodyAmp[3] = {0, 0, 0};
   double bodyWave[3] = {0, 0, 0};
+  /// no-slip wall velocity u_w(y) = wallVelocity + wallGradient·y (row-major ∂u_a/∂y_b) at the
+  /// wall-facet centroid y, tangential part only; zero: fixed walls
+  double wallVelocity[3] = {0, 0, 0};
+  double wallGradient[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
 };
 
 struct IntegratorParams {
@@ -449,6 +459,14 @@ struct IntegratorParams {
   /// energy, ×4.2 per τ halving vs ×2.4 at x^n): kick 1's C at x^n + (τ/2) v^n; false: at x^n
   bool midpointConstraint = true;
   double repairTol = 1e-10;  ///< repaired-topology volume check (cone fan vs engine), relative
+  // ---- the gauge (DESIGN_NOTE §2.8, §10.3 item 4) ----
+  int gaugeEvery = 1;      ///< the gauge after kick 2 every this many steps (0: off)
+  double alphaI = 0.2;     ///< interface: δ_i = −α_I P_i ∇_iŨ / σ_i (tangential descent)
+  double alphaB = 0.1;     ///< bulk: δ_i = α_B (b_i − x_i), b_i the power-cell centroid
+  double alphaBRule = 1.5; ///< automatic floor α_B ≥ alphaBRule · τ max_i |∇v|_i (§10.3 item 4)
+  int gaugeRetries = 3;    ///< energy-guard halvings of α_I, α_B before the gauge is skipped
+  double kernelLength = 2; ///< ℓ/h_i of the interface-normal kernel (§2.2; support 3ℓ)
+  double normalLloydShift = 0.25;  ///< W-Q2: above this max unlike |s|/d, a normal Lloyd part on I
 };
 
 /// Per-step record (energies are the values AFTER the step).
@@ -468,6 +486,23 @@ struct StepReport {
   double repairMismatch = 0;  ///< that check's value (max relative volume difference)
   double unmatchedArea = 0;   ///< largest such area
   double tKick1 = 0, tKick2 = 0, tRepair = 0, tWeights = 0, tPotential = 0, tTotal = 0;
+  // the gauge (zero when it did not run)
+  int gaugeTries = 0;          ///< trials evaluated (0: the gauge did not run this step)
+  bool gaugeAccepted = false;  ///< a trial passed the energy guard
+  bool gaugeNormal = false;    ///< the W-Q2 normal Lloyd component was on
+  int gaugeInterface = 0;      ///< |I|
+  double gaugePotential = 0;   ///< ΔŨ of the accepted trial (≤ 0)
+  double gaugeKinetic = 0;     ///< ΔK of the momentum projection (≤ 0)
+  double gaugeAlphaB = 0;      ///< α_B used (after the floor)
+  double tGauge = 0;
+};
+
+/// Result of Integrator::relax (the t = 0 interface relaxation).
+struct RelaxReport {
+  int iterations = 0, accepted = 0;
+  bool converged = false;
+  double potentialChange = 0;  ///< Ũ(end) − Ũ(start)
+  std::vector<double> area;    ///< unlike-facet area at iteration 0, window, 2·window, ...
 };
 
 /// NHV-W on a resident POWER MovingTessellation `MT`. Holds the velocity, the reference volumes
@@ -526,6 +561,17 @@ class Integrator {
     pos0_ = LView<Real>("nhvw.pos0", n3);
     w0_ = LView<Real>("nhvw.w0", n);
     wrapS_ = LView<Real>("nhvw.wrap", n3);
+    gd_ = LView<Real>("nhvw.gaugeDelta", n3);
+    aI_ = LView<Real>("nhvw.areaVec", n3);
+    lamG_ = LView<Real>("nhvw.lamGauge", n);
+    gs_ = LView<Real>("nhvw.gradV", 9 * n);
+    cls_ = Kokkos::View<int*, Mem>("nhvw.gaugeClass", n);
+    iList_ = Kokkos::View<int*, Mem>("nhvw.iList", n);
+    const double* ug = fp_.wallGradient;
+    movingWall_ = fp_.wallVelocity[0] != 0 || fp_.wallVelocity[1] != 0 ||
+                  fp_.wallVelocity[2] != 0 || std::any_of(ug, ug + 9, [](double x) { return x != 0; });
+    if (movingWall_)
+      fw_ = LView<Real>("nhvw.wallForce", n3);
     evalState();
     kinetic_ = kineticEnergy();
   }
@@ -543,15 +589,18 @@ class Integrator {
         throw std::runtime_error(
             "voro: NHV-W: the weight solve failed after " + std::to_string(att) +
             " step halvings (max |V - V0|/V0 = " + std::to_string(rep.weightErr) + ")");
-      // restore x^n, w^n and repair the engine back to them; the state at x^n is untouched
-      Kokkos::deep_copy(pos_, pos0_);
-      Kokkos::deep_copy(weight_, w0_);
-      mt_->setWeights(weight_);
-      mt_->step(pos_);
+      // restore x^n, w^n and the engine; the state at x^n is untouched
+      restoreEngine();
       tau *= 0.5;
       ++rep.halvings;
     }
     time_ += tau;
+    if (prm_.gaugeEvery > 0 && ++stepCount_ % prm_.gaugeEvery == 0) {
+      double dU = 0, dK = 0;
+      gauge(tau, false, rep, dU, dK);
+      gaugeU_ += dU;
+      gaugeK_ += dK;
+    }
     Kokkos::fence();
     rep.tTotal = total.seconds();
     rep.dt = tau;
@@ -634,18 +683,75 @@ class Integrator {
     return x;
   }
 
+  /// The t = 0 interface relaxation (DESIGN_NOTE §2.8 "Initialisation"): the gauge with P_i = I
+  /// (full Ũ descent of the interface cells, the bulk Lloyd step unchanged), repeated until the
+  /// unlike-facet area changes by less than `tol` (relative) over `window` iterations, or
+  /// `maxIter`. Its ΔŨ is NOT added to the gauge counter (it precedes the run); call at t = 0 only.
+  RelaxReport relax(double tol, int window, int maxIter) {
+    RelaxReport r;
+    const double U0 = parts_.total() + wrapOffset_;
+    double last = unlikeArea();
+    r.area.push_back(last);
+    for (int it = 1; it <= maxIter; ++it) {
+      StepReport rep;
+      double dU = 0, dK = 0;
+      gauge(0.0, true, rep, dU, dK);
+      r.accepted += rep.gaugeAccepted ? 1 : 0;
+      r.iterations = it;
+      if (it % window == 0) {
+        const double A = unlikeArea();
+        r.area.push_back(A);
+        const bool done = !(last > 0) || std::fabs(A - last) <= tol * last;
+        last = A;
+        if (done) {
+          r.converged = true;
+          break;
+        }
+      }
+    }
+    r.potentialChange = parts_.total() + wrapOffset_ - U0;
+    return r;
+  }
+
+  /// Σ of the unlike-facet areas (each facet once).
+  double unlikeArea() const {
+    const CellFacets<Real> G = F_;
+    const auto T = spec_.types;
+    Real a = 0;
+    Kokkos::parallel_reduce(
+        "nhvw.unlikeArea", Kokkos::RangePolicy<Exec>(0, N_),
+        KOKKOS_LAMBDA(const int i, Real& acc) {
+          for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f)
+            if (T(G.nbr(f)) != T(i))
+              acc += G.area(f);
+        },
+        a);
+    return 0.5 * a;
+  }
+
   void setTheta(double th) { prm_.theta = th; }
   void setMidpointConstraint(bool on) { prm_.midpointConstraint = on; }
+  void setGauge(double alphaI, double alphaB, int every) {
+    prm_.alphaI = alphaI;
+    prm_.alphaB = alphaB;
+    prm_.gaugeEvery = every;
+  }
   double theta() const { return prm_.theta; }
   double time() const { return time_; }
   void setTime(double t) { time_ = t; }
   /// Restore the energy accumulators (a re-prepared integrator continues the old run's totals).
-  void setAccumulators(double heat, double qc, double work, double wrap) {
+  void setAccumulators(double heat, double qc, double work, double wrap, double gaugeU = 0,
+                       double gaugeK = 0) {
     heat_ = heat;
     qc_ = qc;
     work_ = work;
     wrapOffset_ = wrap;
+    gaugeU_ = gaugeU;
+    gaugeK_ = gaugeK;
   }
+  double gaugePotential() const { return gaugeU_; }  ///< Σ ΔŨ of the accepted gauge trials
+  double gaugeKinetic() const { return gaugeK_; }    ///< Σ ΔK of the gauge's projections
+  int restoreRebuilds() const { return restoreRebuilds_; }  ///< cold rebuilds by restoreEngine
   double kinetic() const { return kinetic_; }
   double heat() const { return heat_; }
   double constraintWork() const { return qc_; }
@@ -680,7 +786,7 @@ class Integrator {
     wp.amg = &hAmg_;
     solvePinnedH(F_, tmpN_, dw_, wp);
     {
-      const LView<Real> w = weight_, w0 = w0_, dw = dw_, P = pos_, P0 = pos0_, U = u;
+      const LView<Real> w = weight_, w0 = w0_, dw = dw_, P = pos_, P0 = pos0_, U = u, S = wrapS_;
       const Kokkos::Array<Real, 3> L3 = {L_[0], L_[1], L_[2]};
       const Real ss = s;
       Kokkos::parallel_for(
@@ -690,7 +796,9 @@ class Integrator {
           "nhvw.msX", Kokkos::RangePolicy<Exec>(0, 3 * N_), KOKKOS_LAMBDA(const int k) {
             const Real Lk = L3[k % 3];
             const Real x = P0(k) + ss * U(k);
-            P(k) = x - Lk * Kokkos::floor(x / Lk);
+            const Real sh = Lk * Kokkos::floor(x / Lk);
+            P(k) = x - sh;
+            S(k) = sh;  // read only by the gauge's accumulateWrap (the drift rewrites it)
           });
     }
     wp.tol = prm_.weightTol;
@@ -760,7 +868,11 @@ class Integrator {
     const Kokkos::Array<Real, 3> amp = {fp_.bodyAmp[0], fp_.bodyAmp[1], fp_.bodyAmp[2]},
                                  kw = {fp_.bodyWave[0], fp_.bodyWave[1], fp_.bodyWave[2]};
     const bool body = amp[0] != 0 || amp[1] != 0 || amp[2] != 0;
-    // b = M v − (1−θ)(τ/2) ζ v − (τ/2)(∇Ũ − M a(x))
+    const bool mw = movingWall_ && visc;
+    if (mw)
+      wallForce();
+    const LView<Real> fw = fw_;
+    // b = M v − (1−θ)(τ/2) ζ v − (τ/2)(∇Ũ − M a(x) − f_w)
     Kokkos::parallel_for(
         "nhvw.rhs", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
           const Real s =
@@ -769,6 +881,8 @@ class Integrator {
           for (int c = 0; c < 3; ++c) {
             const int k = 3 * i + c;
             b(k) = m(i) * vo(k) - (Real(1) - th) * ht * zo(k) - ht * (g(k) - m(i) * amp[c] * s);
+            if (mw)
+              b(k) += ht * fw(k);
           }
         });
     const Real tolAbs = prm_.saddle.tol * maxV0_ / tau;
@@ -791,6 +905,8 @@ class Integrator {
             const int k = 3 * i + c;
             aq += (th * vn(k) + (Real(1) - th) * vo(k)) * Real(0.5) * (zo(k) + zn(k));
             aw += m(i) * amp[c] * s * Real(0.5) * (vo(k) + vn(k));
+            if (mw)
+              aw += fw(k) * Real(0.5) * (vo(k) + vn(k));
           }
         },
         dq, dw);
@@ -939,9 +1055,271 @@ class Integrator {
     return true;
   }
 
-  void accumulateWrap() {
+  /// The gauge G (DESIGN_NOTE §2.8 as simplified by §10.3 item 4) at the current state x:
+  ///  sets     I = the cells with an unlike facet; B_U \ I = the cells with a tensioned wall facet
+  ///           (no contact lines yet); Bulk = the rest. A cell whose plane bounds an unlike facet
+  ///           (i, j) neighbours both i and j, so a cell of another type: it is in I already.
+  ///  trial    Bulk: δ_i = α_B (b_i − x_i), b_i the centroid of the (wall-clipped) power cell.
+  ///           I: δ_i = −α_I P_i ∇_iŨ / σ_i, σ_i the largest tension of i's unlike facets,
+  ///           P_i = I − m̂_i m̂_iᵀ, m_i = Σ_{k∈I, t_k=t_i, r<3ℓ} w(r) a_k (a_k = Σ_unlike A n̂,
+  ///           w the §2.2 kernel, ℓ = kernelLength·h_i, minimum image; â_i if |m_i| < 0.1|a_i|);
+  ///           P_i = I for `descent` (the t = 0 relaxation). B_U \ I: 0. The note's h_i²/σ_i is
+  ///           read as the stiffness scale of a facet-area energy, ∇_iŨ/h_i² · h_i²/σ_i, so that δ
+  ///           is a length (M7 WO4′ DECISION, reported). W-Q2: when the max unlike |s|/d exceeds
+  ///           normalLloydShift, I also gets the normal Lloyd part α_B m̂ m̂ᵀ(b_i − x_i).
+  ///           α_B is floored at alphaBRule·τ max_i|G^s_i|_F (capped at 1, a full Lloyd step).
+  ///  volume   x̃ = x + δ, w̃ = w*(x̃) by the warm-started, repaired OT Newton (no SHAKE, no
+  ///           J-projection: shape and weights reset together).
+  ///  guard    accept iff Ũ(x̃) ≤ Ũ(x) (with the periodic-in-g wrap jump), else halve α_I and α_B
+  ///           together, at most gaugeRetries times, else skip (x, w and the engine restored).
+  ///  momentum v_i travels with its cell; then the M-projection onto C(x̃)v = 0 (one saddle with
+  ///           A = M); ΔK ≤ 0, Σ m_i v_i kept (1ᵀC = 0 without walls).
+  /// dU, dK: the accepted trial's ΔŨ ≤ 0 and ΔK ≤ 0 (0 when skipped).
+  void gauge(double tau, bool descent, StepReport& rep, double& dU, double& dK) {
+    Kokkos::Timer t;
+    dU = dK = 0;
+    double alphaB = prm_.alphaB;
+    if (tau > 0 && prm_.alphaBRule > 0) {
+      cellGradient(F_, vel_, gs_);
+      const LView<Real> gs = gs_;
+      Real gm = 0;
+      Kokkos::parallel_reduce(
+          "nhvw.gradVmax", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i, Real& acc) {
+            Real q = 0;
+            for (int e = 0; e < 9; ++e)
+              q += gs(9 * i + e) * gs(9 * i + e);
+            q = Kokkos::sqrt(q);
+            acc = q > acc ? q : acc;
+          },
+          Kokkos::Max<Real>(gm));
+      alphaB = std::min(1.0, std::max(alphaB, prm_.alphaBRule * tau * gm));
+    }
+    double sAll = 0, sUnlike = 0;
+    shifts(sAll, sUnlike);
+    const bool normal = sUnlike > prm_.normalLloydShift;
+    rep.gaugeNormal = normal;
+    rep.gaugeAlphaB = alphaB;
+    rep.gaugeInterface = gaugeDisplacement(alphaB, descent, normal);
+    Kokkos::deep_copy(pos0_, pos_);
+    Kokkos::deep_copy(w0_, weight_);
+    const double U0 = parts_.total() + wrapOffset_;
+    double s = 1;
+    for (int k = 0; k <= prm_.gaugeRetries; ++k, s *= 0.5) {
+      ++rep.gaugeTries;
+      if (moveAndSolve(s, gd_, rep)) {
+        CellFacets<Real> Ft = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_,
+                                                            mt_->wall, mt_->xRef, mt_->vol);
+        matchFacets(Ft);
+        Kokkos::deep_copy(gx_, Real(0));
+        Kokkos::deep_copy(gw_, Real(0));
+        const PotentialParts pt = partitionPotential(*mt_, Ft, pos_, weight_, L_, spec_, gx_, gw_);
+        if (pt.total() + wrapOffset_ - wrapJump() <= U0) {
+          accumulateWrap();
+          evalState();
+          dU = parts_.total() + wrapOffset_ - U0;
+          rep.gaugeAccepted = true;
+          break;
+        }
+      }
+      restoreEngine();
+    }
+    if (rep.gaugeAccepted && maxSpeed() > 0) {
+      const double K0 = kinetic_;
+      const LView<Real> b = b_, v = vel_, m = mass_;
+      Kokkos::parallel_for(
+          "nhvw.gaugeMv", Kokkos::RangePolicy<Exec>(0, 3 * N_),
+          KOKKOS_LAMBDA(const int k) { b(k) = m(k / 3) * v(k); });
+      Kokkos::deep_copy(lamG_, Real(0));
+      const double tp = tau > 0 ? tau : 1.0;
+      saddle_.solve(Real(0), Real(0.5 * tp), Real(prm_.saddle.tol * maxV0_ / tp), b_, vel_, lamG_,
+                    prm_.saddle);
+      kinetic_ = kineticEnergy();
+      dK = kinetic_ - K0;
+    }
+    rep.gaugePotential = dU;
+    rep.gaugeKinetic = dK;
+    Kokkos::fence();
+    rep.tGauge = t.seconds();
+  }
+
+  /// The gauge's trial displacement at the full α into gd_ (see gauge()); returns |I|.
+  int gaugeDisplacement(double alphaB, bool descent, bool normalLloyd) {
+    const CellFacets<Real> G = F_;
+    const auto T = spec_.types;
+    const int nT = spec_.nTypes;
+    const LView<Real> ten = spec_.tension, sw = spec_.sigmaWall, a = aI_, g = grad_, d = gd_,
+                      h = h_, P = pos_;
+    const bool hasTen = ten.extent(0) > 0, hasSw = sw.extent(0) > 0;
+    const Kokkos::View<int*, Mem> cls = cls_, list = iList_;
+    Kokkos::parallel_for(
+        "nhvw.gaugeSets", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
+          Real ai[3] = {0, 0, 0};
+          bool iface = false;
+          for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+            if (T(G.nbr(f)) == T(i))
+              continue;
+            iface = true;
+            Real d2 = 0;
+            for (int c = 0; c < 3; ++c)
+              d2 += G.conn(3 * f + c) * G.conn(3 * f + c);
+            const Real sc = G.area(f) / Kokkos::sqrt(d2);
+            for (int c = 0; c < 3; ++c)
+              ai[c] += sc * G.conn(3 * f + c);
+          }
+          int c = iface ? 1 : 0;
+          if (!iface && hasSw && sw(T(i)) != Real(0) && G.wallOffset(i + 1) > G.wallOffset(i))
+            c = 2;
+          cls(i) = c;
+          for (int e = 0; e < 3; ++e)
+            a(3 * i + e) = ai[e];
+        });
+    int nI = 0;
+    Kokkos::parallel_scan(
+        "nhvw.gaugeList", Kokkos::RangePolicy<Exec>(0, N_),
+        KOKKOS_LAMBDA(const int i, int& upd, const bool fin) {
+          if (cls(i) == 1) {
+            if (fin)
+              list(upd) = i;
+            ++upd;
+          }
+        },
+        nI);
+    const int n = nI;
+    const Kokkos::Array<Real, 3> L3 = {L_[0], L_[1], L_[2]};
+    const Real aI = prm_.alphaI, aB = alphaB, kl = prm_.kernelLength;
+    // the kernel sum is a brute-force loop over I (|I| ~ N^{2/3}); a cell list is the upgrade
+    Kokkos::parallel_for(
+        "nhvw.gaugeDelta", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
+          Real di[3] = {0, 0, 0};
+          if (cls(i) == 0) {
+            for (int c = 0; c < 3; ++c)
+              di[c] = aB * G.cellCentroid(3 * i + c);
+          } else if (cls(i) == 1 && hasTen) {
+            Real sig = 0;
+            for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+              const int j = G.nbr(f);
+              if (T(j) != T(i)) {
+                const Real sf = ten(T(i) * nT + T(j));
+                sig = sf > sig ? sf : sig;
+              }
+            }
+            if (sig > Real(0)) {
+              const Real ell2 = kl * h(i) * kl * h(i), rc2 = Real(9) * ell2;
+              Real m[3] = {0, 0, 0};
+              for (int q = 0; q < n; ++q) {
+                const int k = list(q);
+                if (T(k) != T(i))
+                  continue;
+                Real r2 = 0;
+                for (int c = 0; c < 3; ++c) {
+                  Real dx = P(3 * k + c) - P(3 * i + c);
+                  dx -= L3[c] * Kokkos::floor(dx / L3[c] + Real(0.5));
+                  r2 += dx * dx;
+                }
+                if (r2 >= rc2)
+                  continue;
+                const Real u = Real(1) - r2 / rc2;
+                const Real wgt = Kokkos::exp(-r2 / ell2) * u * u * u;
+                for (int c = 0; c < 3; ++c)
+                  m[c] += wgt * a(3 * k + c);
+              }
+              Real mn = Kokkos::sqrt(m[0] * m[0] + m[1] * m[1] + m[2] * m[2]);
+              const Real an = Kokkos::sqrt(a(3 * i) * a(3 * i) + a(3 * i + 1) * a(3 * i + 1) +
+                                           a(3 * i + 2) * a(3 * i + 2));
+              if (mn < Real(0.1) * an) {  // thin film: the cell's own vector area
+                for (int c = 0; c < 3; ++c)
+                  m[c] = a(3 * i + c);
+                mn = an;
+              }
+              Real nh[3] = {0, 0, 0};
+              const bool hasN = mn > Real(0);
+              if (hasN)
+                for (int c = 0; c < 3; ++c)
+                  nh[c] = m[c] / mn;
+              Real gi[3] = {g(3 * i), g(3 * i + 1), g(3 * i + 2)};
+              if (!descent && hasN) {
+                const Real gn = nh[0] * gi[0] + nh[1] * gi[1] + nh[2] * gi[2];
+                for (int c = 0; c < 3; ++c)
+                  gi[c] -= gn * nh[c];
+              }
+              for (int c = 0; c < 3; ++c)
+                di[c] = -aI * gi[c] / sig;
+              if (normalLloyd && hasN) {
+                const Real bn = nh[0] * G.cellCentroid(3 * i) + nh[1] * G.cellCentroid(3 * i + 1) +
+                                nh[2] * G.cellCentroid(3 * i + 2);
+                for (int c = 0; c < 3; ++c)
+                  di[c] += aB * bn * nh[c];
+              }
+            }
+          }
+          for (int c = 0; c < 3; ++c)
+            d(3 * i + c) = di[c];
+        });
+    return n;
+  }
+
+  /// pos ← pos0_, weight ← w0_ and the engine back to them: a repair, or a cold rebuild when the
+  /// repaired volumes miss V⁰ by more than repairTol (a repair cannot revive a cell the failed trial
+  /// buried; measured after the t = 0 relaxation, M7 WO4′).
+  void restoreEngine() {
+    Kokkos::deep_copy(pos_, pos0_);
+    Kokkos::deep_copy(weight_, w0_);
+    mt_->setWeights(weight_);
+    mt_->step(pos_);
+    const LView<Real> ve = mt_->vol, v0 = V0_;
+    Real m = 0;
+    Kokkos::parallel_reduce(
+        "nhvw.restoreCheck", Kokkos::RangePolicy<Exec>(0, N_),
+        KOKKOS_LAMBDA(const int i, Real& acc) {
+          const Real e = Kokkos::fabs(ve(i) - v0(i)) / v0(i);
+          acc = e > acc ? e : acc;
+        },
+        Kokkos::Max<Real>(m));
+    if (!(m <= prm_.repairTol)) {
+      ++restoreRebuilds_;
+      mt_->rebuild(pos_);
+    }
+  }
+
+  /// f_w (3N) = Σ_w (μ_i A^w/δ_w) P_w u_w(y_w), y_w = x_i + c^w (moving no-slip walls).
+  void wallForce() {
+    const CellFacets<Real> G = F_;
+    const LView<Real> f = fw_, mu = mu_, P = pos_;
+    const Kokkos::Array<Real, 3> u0 = {fp_.wallVelocity[0], fp_.wallVelocity[1],
+                                       fp_.wallVelocity[2]};
+    Kokkos::Array<Real, 9> ug;
+    for (int e = 0; e < 9; ++e)
+      ug[e] = fp_.wallGradient[e];
+    Kokkos::parallel_for(
+        "nhvw.wallForce", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
+          Real o[3] = {0, 0, 0};
+          for (int w = G.wallOffset(i); w < G.wallOffset(i + 1); ++w) {
+            const Real nw[3] = {G.wallNormal(3 * w), G.wallNormal(3 * w + 1),
+                                G.wallNormal(3 * w + 2)};
+            const Real dw = nw[0] * G.wallCentroid(3 * w) + nw[1] * G.wallCentroid(3 * w + 1) +
+                            nw[2] * G.wallCentroid(3 * w + 2);
+            if (!(dw > Real(0)))
+              continue;
+            const Real kw = mu(i) * G.wallArea(w) / dw;
+            Real y[3], u[3];
+            for (int c = 0; c < 3; ++c)
+              y[c] = P(3 * i + c) + G.wallCentroid(3 * w + c);
+            for (int c = 0; c < 3; ++c)
+              u[c] = u0[c] + ug[3 * c] * y[0] + ug[3 * c + 1] * y[1] + ug[3 * c + 2] * y[2];
+            const Real un = nw[0] * u[0] + nw[1] * u[1] + nw[2] * u[2];
+            for (int c = 0; c < 3; ++c)
+              o[c] += kw * (u[c] - un * nw[c]);
+          }
+          for (int c = 0; c < 3; ++c)
+            f(3 * i + c) = o[c];
+        });
+  }
+
+  /// Σ_i (ρ_i − ρ_ref) V⁰_i g·S_i of the last wrap shifts S (wrapS_); 0 without gravity.
+  double wrapJump() const {
     if (spec_.density.extent(0) == 0)
-      return;
+      return 0;
     const LView<Real> S = wrapS_, rho = rho_;
     const Kokkos::Array<Real, 3> g = {spec_.gravity[0], spec_.gravity[1], spec_.gravity[2]};
     const Real rr = spec_.rhoRef;
@@ -954,8 +1332,10 @@ class Integrator {
           acc += (rho(i) - rr) * v0(i) * gs;
         },
         j);
-    wrapOffset_ -= j;
+    return j;
   }
+
+  void accumulateWrap() { wrapOffset_ -= wrapJump(); }
 
   double kineticEnergy() const {
     const LView<Real> v = vel_, m = mass_;
@@ -1019,7 +1399,12 @@ class Integrator {
   Real L_[3] = {1, 1, 1};
   double maxV0_ = 0;
   LView<Real> V0_, rho_, mu_, mass_, h_, vel_, vh_, b_, zo_, zn_, grad_, gx_, gw_, pi_, lam1_,
-      lam2_, tmpN_, dw_, pos0_, w0_, wrapS_;
+      lam2_, tmpN_, dw_, pos0_, w0_, wrapS_, gd_, aI_, lamG_, gs_, fw_;
+  Kokkos::View<int*, Mem> cls_, iList_;
+  bool movingWall_ = false;
+  long stepCount_ = 0;
+  int restoreRebuilds_ = 0;
+  double gaugeU_ = 0, gaugeK_ = 0;
   CellFacets<Real> F_;
   PotentialParts parts_;
   FacetMatch match_;
