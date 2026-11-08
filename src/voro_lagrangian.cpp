@@ -2,9 +2,13 @@
 /// @brief The Lagrangian power-cell method's surface (M7 NHV-W): the Tessellation's facet export
 /// and weight solve (Tess members declared in voro_bindings_tess.hpp, defined here so the export,
 /// the operators and the weight solve instantiate in this TU only) and `FacetOperators`.
+#include <cmath>
+#include <limits>
+#include <memory>
 #include <optional>
 
 #include "peclet/voro/lagrangian/facets.hpp"
+#include "peclet/voro/lagrangian/integrator.hpp"
 #include "peclet/voro/lagrangian/operators.hpp"
 #include "peclet/voro/lagrangian/potential.hpp"
 #include "peclet/voro/lagrangian/weight_solve.hpp"
@@ -217,43 +221,35 @@ nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
   Kokkos::View<int*, Mem> dtype("rp.type", N);
   Kokkos::deep_copy(dtype, Kokkos::View<const int*, Kokkos::HostSpace>(types.data(), N));
   DView gx("rp.dUdx", 3 * static_cast<std::size_t>(N)), gw("rp.dUdw", N);
-  real_t eIf = 0, eWall = 0, eG = 0;
+  lag::PotentialSpec<real_t> spec;
+  spec.types = dtype;
+  spec.nTypes = nT;
+  spec.tension = dten;
+  spec.sigmaWall = dsw;
+  spec.density = drho;
+  if (gravity)
+    for (int a = 0; a < 3; ++a)
+      spec.gravity[a] = (*gravity)[a];
+  spec.rhoRef = reference_density;
   const real_t Larr[3] = {L_[0], L_[1], L_[2]};
-  std::visit(
-      [&](auto& mt) {
+  const lag::PotentialParts e = std::visit(
+      [&](auto& mt) -> lag::PotentialParts {
         using T = std::decay_t<decltype(mt)>;
-        using Policy = typename T::PlanePolicy;
-        if constexpr (std::is_same_v<Policy, peclet::voro::Power>) {
-          if (dten.extent(0) == 0 && dsw.extent(0) == 0)
-            return;
-          auto view = peclet::voro::reevalPublish<real_t, defaults::kMaxPlanes,
-                                                  defaults::kMaxTriangles, Policy>(
-              mt.store, pos_, mt.vol, N, Larr, mt.wall, mt.xRef, /*withAreaGrad=*/true,
-              /*withMoments=*/false, weight_);
-          if (dten.extent(0) > 0)
-            eIf = peclet::voro::energy::interfaceEnergyForce<real_t, Policy>(
-                view, dtype, dten, nT, pos_, weight_, L_[0], gx, gw, mt.sdf);
-          if (dsw.extent(0) > 0)
-            eWall = peclet::voro::energy::wallEnergyForce<real_t, Policy>(
-                view, dtype, dsw, mt.sdf, pos_, weight_, L_[0], gx, gw);
-        } else {
+        if constexpr (std::is_same_v<typename T::PlanePolicy, peclet::voro::Power>)
+          return lag::partitionPotential(mt, F, pos_, weight_, Larr, spec, gx, gw);
+        else
           throw std::logic_error("voro: weighted Tessellation without a power engine");
-        }
       },
       mt_);
-  if (drho.extent(0) > 0) {
-    const real_t g[3] = {(*gravity)[0], (*gravity)[1], (*gravity)[2]};
-    eG = lag::facetGravity(F, pos_, dtype, drho, g, reference_density, Larr, gx, gw);
-  }
   lag::WeightSolveParams prm;
   prm.pcgTol = tol;
   DView pi("rp.pi", N), grad("rp.grad", 3 * static_cast<std::size_t>(N));
   const lag::AdjointResult R = lag::reducedGradient(F, gx, gw, pi, grad, prm);
   nb::dict d;
-  d["interface_energy"] = eIf;
-  d["wall_energy"] = eWall;
-  d["gravity_energy"] = eG;
-  d["energy"] = eIf + eWall + eG;
+  d["interface_energy"] = e.interface;
+  d["wall_energy"] = e.wall;
+  d["gravity_energy"] = e.gravity;
+  d["energy"] = e.total();
   d["gradient"] = toNumpy3(peclet::core::toVector(grad));
   d["gradient_x"] = toNumpy3(peclet::core::toVector(gx));
   d["gradient_w"] = toNumpy1(peclet::core::toVector(gw));
@@ -346,6 +342,377 @@ class FacetOperators : public peclet::core::python::Releasable {
   lag::DissipationScratch<real_t> scr_;
 };
 
+// --------------------------------------------------------------------------------------------------
+// LagrangianFlow: the NHV-W time integrator (lagrangian/integrator.hpp) driving a built POWER
+// Tessellation in place (its positions, weights and resident cells move with the flow).
+// --------------------------------------------------------------------------------------------------
+class LagrangianFlow : public peclet::core::python::Releasable {
+  template <class S>
+  using Integ = lag::Integrator<MT<true, S>>;
+
+ public:
+  LagrangianFlow(Tess& t, nb::ndarray<int, nb::c_contig> types,
+                 std::optional<nb::ndarray<real_t, nb::c_contig>> volumes)
+      : t_(&t) {
+    if (t.N_ == 0 || !t.weighted_)
+      throw std::runtime_error(
+          "voro: LagrangianFlow needs a built POWER Tessellation (set_weights, e.g. zeros, then "
+          "build(positions)).");
+    const int N = t.N_;
+    if (static_cast<int>(types.size()) != N)
+      throw std::runtime_error("voro: LagrangianFlow(types) must be (N,)");
+    types_.assign(types.data(), types.data() + N);
+    nT_ = 0;
+    for (int ty : types_) {
+      if (ty < 0)
+        throw std::invalid_argument("voro: LagrangianFlow(types) must be >= 0");
+      nT_ = std::max(nT_, ty + 1);
+    }
+    if (volumes) {
+      V0_ = flatten1(*volumes);
+      if (static_cast<int>(V0_.size()) != N)
+        throw std::runtime_error("voro: LagrangianFlow(volumes) must be (N,)");
+    } else {
+      DView vol = std::visit([](auto& mt) { return mt.vol; }, t.mt_);
+      V0_ = peclet::core::toVector(Kokkos::subview(vol, std::make_pair(0, N)));
+    }
+    double s0 = 0, s = 0;
+    for (real_t v : V0_) {
+      if (!(v > 0))
+        throw std::invalid_argument("voro: LagrangianFlow(volumes) must be positive");
+      s0 += v;
+    }
+    DView vol = std::visit([](auto& mt) { return mt.vol; }, t.mt_);
+    for (real_t v : peclet::core::toVector(Kokkos::subview(vol, std::make_pair(0, N))))
+      s += v;
+    if (std::fabs(s0 / s - 1.0) > 1e-10)
+      throw std::invalid_argument(
+          "voro: LagrangianFlow(volumes) must sum to the tessellated volume");
+    rho_.assign(nT_, 1.0);
+    mu_.assign(nT_, 0.0);
+    vel_.assign(3 * static_cast<std::size_t>(N), 0.0);
+  }
+
+  // ---- physical inputs (per type; marking the state for a re-preparation) ----
+  void set_density(nb::ndarray<real_t, nb::c_contig> v) {
+    rho_ = perType(v, "density");
+    for (double r : rho_)
+      if (!(r > 0))
+        throw std::invalid_argument("voro: LagrangianFlow.set_density() must be positive");
+    dirty_ = true;
+  }
+  void set_viscosity(nb::ndarray<real_t, nb::c_contig> v) {
+    mu_ = perType(v, "viscosity");
+    for (double m : mu_)
+      if (!(m >= 0))
+        throw std::invalid_argument("voro: LagrangianFlow.set_viscosity() must be >= 0");
+    dirty_ = true;
+  }
+  void set_tension(nb::ndarray<real_t, nb::c_contig> v) {
+    if (v.size() != static_cast<std::size_t>(nT_ * nT_))
+      throw std::runtime_error("voro: LagrangianFlow.set_tension() must be (nTypes, nTypes)");
+    tension_.assign(v.data(), v.data() + v.size());
+    dirty_ = true;
+  }
+  void set_wall_tension(nb::ndarray<real_t, nb::c_contig> v) {
+    sigmaWall_ = perType(v, "wall_tension");
+    dirty_ = true;
+  }
+  void set_gravity(std::array<real_t, 3> g, std::optional<real_t> reference_density) {
+    gravity_ = g;
+    hasGravity_ = g[0] != 0 || g[1] != 0 || g[2] != 0;
+    rhoRef_ = reference_density;
+    dirty_ = true;
+  }
+  void set_body_force(std::array<real_t, 3> amplitude, std::array<real_t, 3> wavevector) {
+    bodyAmp_ = amplitude;
+    bodyWave_ = wavevector;
+    dirty_ = true;
+  }
+  void set_dt(real_t dt) {
+    if (!(dt >= 0))
+      throw std::invalid_argument("voro: LagrangianFlow.set_dt() must be >= 0 (0: no cap)");
+    dtUser_ = dt;
+  }
+  void set_cfl(real_t advective, real_t capillary) {
+    if (!(advective >= 0) || !(capillary >= 0))
+      throw std::invalid_argument("voro: LagrangianFlow.set_cfl() constants must be >= 0");
+    cfl_ = advective;
+    cap_ = capillary;
+    dirty_ = true;  // the θ rule reads the step bound
+  }
+  void set_kick_constraint(const std::string& mode) {
+    if (mode != "start" && mode != "midpoint")
+      throw std::invalid_argument(
+          "voro: LagrangianFlow.set_kick_constraint(mode) takes 'start' (C of kick 1 at x^n, the "
+          "default) or 'midpoint' (at x^n + dt/2 v^n, option S)");
+    midpoint_ = mode == "midpoint";
+    dirty_ = true;
+  }
+  void set_velocities(nb::ndarray<real_t, nb::c_contig> v) {
+    std::vector<real_t> h = flatten3(v);
+    if (h.size() != vel_.size())
+      throw std::runtime_error("voro: LagrangianFlow.set_velocities() must be (N,3)");
+    pull();
+    vel_ = std::move(h);
+    dirty_ = true;
+  }
+
+  nb::ndarray<nb::numpy, real_t> get_velocities() {
+    pull();
+    return toNumpy3(vel_);
+  }
+  nb::ndarray<nb::numpy, real_t> get_positions() {
+    return toNumpy3(peclet::core::toVector(t_->pos_));
+  }
+  nb::ndarray<nb::numpy, real_t> get_pi() {
+    return toNumpy1(fromInteg([](auto& I) { return I.pi(); }));
+  }
+  nb::ndarray<nb::numpy, real_t> get_lambda() {
+    return toNumpy1(fromInteg([](auto& I) { return I.lambda(); }));
+  }
+  nb::ndarray<nb::numpy, real_t> get_potential_gradient() {
+    return toNumpy3(fromInteg([](auto& I) { return I.gradient(); }));
+  }
+
+  nb::dict energies() {
+    prepare();
+    nb::dict d;
+    withInteg([&](auto& I) {
+      d["kinetic"] = I.kinetic();
+      d["potential"] = I.potential().total();
+      d["interface"] = I.potential().interface;
+      d["wall"] = I.potential().wall;
+      d["gravity"] = I.potential().gravity;
+      d["heat"] = I.heat();
+      d["constraint_work"] = I.constraintWork();
+      d["body_work"] = I.bodyWork();
+      d["wrap_offset"] = I.wrapOffset();
+    });
+    return d;
+  }
+
+  /// n steps; per-step records as arrays.
+  nb::dict step(int n) {
+    prepare();
+    std::vector<lag::StepReport> reps;
+    reps.reserve(n);
+    withInteg([&](auto& I) {
+      for (int k = 0; k < n; ++k) {
+        const double tau = I.stableStep(cfl_, cap_, dtUser_);
+        if (!std::isfinite(tau))
+          throw std::runtime_error(
+              "voro: LagrangianFlow.step(): nothing limits the step (no velocity, no tension) "
+              "— call set_dt().");
+        reps.push_back(I.step(tau));
+      }
+      time_ = I.time();
+    });
+    t_->wHost_ = peclet::core::toVector(t_->weight_);
+    t_->wDirty_ = false;
+    lastDt_ = reps.empty() ? lastDt_ : reps.back().dt;
+    auto col = [&](auto get) {
+      std::vector<real_t> c;
+      c.reserve(reps.size());
+      for (const auto& r : reps)
+        c.push_back(static_cast<real_t>(get(r)));
+      return toNumpy1(std::move(c));
+    };
+    nb::dict d;
+    d["dt"] = col([](const auto& r) { return r.dt; });
+    d["time"] = col([](const auto& r) { return r.time; });
+    d["kinetic"] = col([](const auto& r) { return r.kinetic; });
+    d["potential"] = col([](const auto& r) { return r.potential; });
+    d["heat"] = col([](const auto& r) { return r.heat; });
+    d["constraint_work"] = col([](const auto& r) { return r.constraintWork; });
+    d["body_work"] = col([](const auto& r) { return r.bodyWork; });
+    d["wrap_offset"] = col([](const auto& r) { return r.wrapOffset; });
+    d["max_speed"] = col([](const auto& r) { return r.maxSpeed; });
+    d["max_shift"] = col([](const auto& r) { return r.maxShift; });
+    d["max_shift_unlike"] = col([](const auto& r) { return r.maxShiftUnlike; });
+    d["kick1_outer"] = col([](const auto& r) { return r.kick1.outer; });
+    d["kick1_inner"] = col([](const auto& r) { return r.kick1.inner; });
+    d["kick2_outer"] = col([](const auto& r) { return r.kick2.outer; });
+    d["kick2_inner"] = col([](const auto& r) { return r.kick2.inner; });
+    d["constraint_residual"] =
+        col([](const auto& r) { return std::max(r.kick1.constraint, r.kick2.constraint); });
+    d["visc_number"] = col([](const auto& r) { return r.kick2.viscNumber; });
+    d["warm_iterations"] = col([](const auto& r) { return r.warmIters; });
+    d["newton_iterations"] = col([](const auto& r) { return r.newtonIters; });
+    d["repairs"] = col([](const auto& r) { return r.evaluations; });
+    d["cold_rebuilds"] = col([](const auto& r) { return r.coldRebuilds; });
+    d["weight_error"] = col([](const auto& r) { return r.weightErr; });
+    d["adjoint_iterations"] = col([](const auto& r) { return r.adjIters; });
+    d["halvings"] = col([](const auto& r) { return r.halvings; });
+    d["unmatched_facets"] = col([](const auto& r) { return r.unmatched; });
+    d["repair_fallbacks"] = col([](const auto& r) { return r.repairFallbacks; });
+    d["weight_restarts"] = col([](const auto& r) { return r.coldStarts; });
+    d["repair_mismatch"] = col([](const auto& r) { return r.repairMismatch; });
+    d["unmatched_area"] = col([](const auto& r) { return r.unmatchedArea; });
+    d["t_kick1"] = col([](const auto& r) { return r.tKick1; });
+    d["t_kick2"] = col([](const auto& r) { return r.tKick2; });
+    d["t_repair"] = col([](const auto& r) { return r.tRepair; });
+    d["t_weights"] = col([](const auto& r) { return r.tWeights; });
+    d["t_potential"] = col([](const auto& r) { return r.tPotential; });
+    d["t_total"] = col([](const auto& r) { return r.tTotal; });
+    return d;
+  }
+
+  real_t time() const { return time_; }
+  real_t dt() const { return lastDt_; }
+  real_t theta() {
+    prepare();
+    return theta_;
+  }
+  int num_cells() const { return static_cast<int>(types_.size()); }
+
+  void release() noexcept override {
+    i0_.reset();
+    i1_.reset();
+  }
+
+ private:
+  std::vector<double> perType(nb::ndarray<real_t, nb::c_contig> v, const char* what) const {
+    if (v.size() != static_cast<std::size_t>(nT_))
+      throw std::runtime_error(std::string("voro: LagrangianFlow.set_") + what +
+                               "() takes one value per type (" + std::to_string(nT_) + ")");
+    return std::vector<double>(v.data(), v.data() + v.size());
+  }
+
+  template <class F>
+  void withInteg(F&& f) {
+    if (i0_)
+      f(*i0_);
+    else if (i1_)
+      f(*i1_);
+    else
+      throw std::logic_error("voro: LagrangianFlow has no integrator");
+  }
+  template <class F>
+  std::vector<real_t> fromInteg(F&& f) {
+    prepare();
+    std::vector<real_t> out;
+    withInteg([&](auto& I) { out = peclet::core::toVector(f(I)); });
+    return out;
+  }
+
+  /// Copy the integrator's velocity (and the run's accumulators) to the host.
+  void pull() {
+    if (!i0_ && !i1_)
+      return;
+    withInteg([&](auto& I) {
+      vel_ = peclet::core::toVector(I.velocity());
+      time_ = I.time();
+      acc_ = {I.heat(), I.constraintWork(), I.bodyWork(), I.wrapOffset()};
+    });
+  }
+
+  /// (Re)build the integrator when an input, the tessellation's positions or its weights changed.
+  void prepare() {
+    Tess& t = *t_;
+    if ((i0_ || i1_) && !dirty_ && !t.wDirty_ && t.pos_.data() == posData_)
+      return;
+    pull();
+    if (t.wDirty_) {
+      Kokkos::deep_copy(t.weight_, Kokkos::View<const real_t*, Kokkos::HostSpace>(t.wHost_.data(),
+                                                                                  t.wHost_.size()));
+      t.wDirty_ = false;
+    }
+    const int N = t.N_;
+    lag::PotentialSpec<real_t> spec;
+    Kokkos::View<int*, Mem> dtype("lf.type", N);
+    Kokkos::deep_copy(dtype, Kokkos::View<const int*, Kokkos::HostSpace>(types_.data(), N));
+    spec.types = dtype;
+    spec.nTypes = nT_;
+    if (!tension_.empty())
+      spec.tension = peclet::core::toDevice<real_t>(tension_, "lf.tension");
+    if (!sigmaWall_.empty())
+      spec.sigmaWall = peclet::core::toDevice<real_t>(sigmaWall_, "lf.sigmaWall");
+    if (hasGravity_) {
+      spec.density = peclet::core::toDevice<real_t>(rho_, "lf.density");
+      for (int a = 0; a < 3; ++a)
+        spec.gravity[a] = gravity_[a];
+      if (rhoRef_)
+        spec.rhoRef = *rhoRef_;
+      else if (t.scene_.set)
+        spec.rhoRef = 0;  // walls ⟂ g: the partition potential
+      else {              // periodic in g: ρ̄ = Σ m / |Ω|
+        double m = 0, v = 0;
+        for (int i = 0; i < N; ++i) {
+          m += rho_[types_[i]] * V0_[i];
+          v += V0_[i];
+        }
+        spec.rhoRef = m / v;
+      }
+    }
+    lag::FlowParams fp;
+    fp.density = rho_;
+    fp.viscosity = mu_;
+    for (int a = 0; a < 3; ++a) {
+      fp.bodyAmp[a] = bodyAmp_[a];
+      fp.bodyWave[a] = bodyWave_[a];
+    }
+    const real_t Larr[3] = {t.L_[0], t.L_[1], t.L_[2]};
+    i0_.reset();
+    i1_.reset();
+    std::visit(
+        [&](auto& mt) {
+          using T = std::decay_t<decltype(mt)>;
+          if constexpr (std::is_same_v<typename T::PlanePolicy, peclet::voro::Power>) {
+            // hold the reference volumes first (a cold weight solve) if they are not held yet
+            const auto V = peclet::core::toVector(Kokkos::subview(mt.vol, std::make_pair(0, N)));
+            double err = 0;
+            for (int i = 0; i < N; ++i)
+              err = std::max(err, std::fabs(V[i] - V0_[i]) / V0_[i]);
+            if (err > 1e-12) {
+              const auto R = lag::solveWeights(mt, t.pos_, t.weight_, V0_, Larr);
+              if (!R.converged)
+                throw std::runtime_error(
+                    "voro: LagrangianFlow: the weight solve for the reference volumes failed "
+                    "(max |V - V0|/V0 = " +
+                    std::to_string(R.maxRelErr) + ")");
+              t.wHost_ = peclet::core::toVector(t.weight_);
+            }
+            auto I = std::make_unique<lag::Integrator<T>>(mt, t.pos_, t.weight_, Larr, V0_, spec,
+                                                          fp, vel_);
+            // θ = 1 for the whole run if max ν τ/h² > 1 at the step bound (DESIGN_NOTE §2.7)
+            double tauMax = dtUser_ > 0 ? dtUser_ : std::numeric_limits<double>::infinity();
+            if (cap_ > 0)
+              tauMax = std::min(tauMax, I->capillaryStep(cap_));
+            theta_ = (std::isfinite(tauMax) && I->maxNuOverH2() * tauMax > 1.0) ? 1.0 : 0.5;
+            I->setTheta(theta_);
+            I->setMidpointConstraint(midpoint_);
+            I->setTime(time_);
+            I->setAccumulators(acc_[0], acc_[1], acc_[2], acc_[3]);
+            if constexpr (T::kHasSdf)
+              i1_ = std::move(I);
+            else
+              i0_ = std::move(I);
+          } else {
+            throw std::logic_error("voro: weighted Tessellation without a power engine");
+          }
+        },
+        t.mt_);
+    posData_ = t.pos_.data();
+    dirty_ = false;
+  }
+
+  Tess* t_;
+  std::vector<int> types_;
+  int nT_ = 0;
+  std::vector<double> V0_, rho_, mu_, tension_, sigmaWall_;
+  std::vector<real_t> vel_;
+  std::array<real_t, 3> gravity_{0, 0, 0}, bodyAmp_{0, 0, 0}, bodyWave_{0, 0, 0};
+  bool hasGravity_ = false, midpoint_ = false;
+  std::optional<real_t> rhoRef_;
+  real_t dtUser_ = 0, cfl_ = 0.2, cap_ = 0.5, time_ = 0, lastDt_ = 0, theta_ = 0.5;
+  std::array<double, 4> acc_{0, 0, 0, 0};
+  bool dirty_ = true;
+  const real_t* posData_ = nullptr;
+  std::unique_ptr<Integ<NoSdfT>> i0_;
+  std::unique_ptr<Integ<SceneT>> i1_;
+};
+
 void bindLagrangian(nb::module_& m) {
   nb::class_<FacetOperators>(
       m, "FacetOperators",
@@ -373,5 +740,63 @@ void bindLagrangian(nb::module_& m) {
       .def_prop_ro("num_cells", &FacetOperators::num_cells)
       .def_prop_ro("num_facets", &FacetOperators::num_facets,
                    "Directed interior facets (each interior facet counted from both cells).");
+
+  nb::class_<LagrangianFlow>(
+      m, "LagrangianFlow",
+      "The NHV-W time integrator of the Lagrangian power-cell two-phase method (M7): drives a\n"
+      "built POWER Tessellation in place. Each cell carries the mass rho_t V0 of its type t,\n"
+      "the velocity v and keeps its volume V0 (weights solved every step, each Newton iterate an\n"
+      "incremental repair). One step: kick 1 (friction fused, theta-midpoint; velocity\n"
+      "constraint C v = 0 by Schur-complement CG with AMG on the two-point Laplacian), drift,\n"
+      "weight solve, pi and grad U~ (the reduced potential: interface tension, wetting, facet\n"
+      "gravity), kick 2. Energy bookkeeping: kinetic K, potential U~, heat Q, constraint work "
+      "Q_c,\n"
+      "body-force work W; K + U~ + Q + Q_c - W is conserved to O(dt^2). Physical inputs only:\n"
+      "per-type density / viscosity, the tension table, wall tension, gravity, a body\n"
+      "acceleration amp*sin(k.x), and the step: dt = min(cfl*min h/|v|, capillary*sqrt(rho\n"
+      "h^3/sigma), set_dt cap). No gauge, no topology bookkeeping beyond the repair.\n"
+      "`volumes` (N,): the reference volumes (default: the current ones).")
+      .def(nb::init<Tess&, nb::ndarray<int, nb::c_contig>,
+                    std::optional<nb::ndarray<real_t, nb::c_contig>>>(),
+           nb::arg("tessellation"), nb::arg("types"), nb::arg("volumes") = nb::none(),
+           nb::keep_alive<1, 2>())
+      .def("set_density", &LagrangianFlow::set_density, nb::arg("density"),
+           "Density per type (nTypes,), > 0 (default 1).")
+      .def("set_viscosity", &LagrangianFlow::set_viscosity, nb::arg("viscosity"),
+           "Dynamic viscosity per type (nTypes,), >= 0 (default 0: inviscid).")
+      .def("set_tension", &LagrangianFlow::set_tension, nb::arg("tension"),
+           "Interface tension table (nTypes, nTypes) on unlike facets.")
+      .def("set_wall_tension", &LagrangianFlow::set_wall_tension, nb::arg("wall_tension"),
+           "Solid-fluid tension per type (nTypes,) on wall facets (wetting).")
+      .def("set_gravity", &LagrangianFlow::set_gravity, nb::arg("gravity"),
+           nb::arg("reference_density") = nb::none(),
+           "Facet gravity (the partition potential). reference_density default: 0 with walls\n"
+           "(walls perpendicular to g), the mean density in a periodic box.")
+      .def("set_body_force", &LagrangianFlow::set_body_force, nb::arg("amplitude"),
+           nb::arg("wavevector"), "Body acceleration a(x) = amplitude * sin(wavevector . x).")
+      .def("set_dt", &LagrangianFlow::set_dt, nb::arg("dt"), "Upper bound of the step (0: none).")
+      .def("set_cfl", &LagrangianFlow::set_cfl, nb::arg("advective") = 0.2,
+           nb::arg("capillary") = 0.5,
+           "Step-size constants C_cfl, C_sigma (0 switches a limit off).")
+      .def("set_kick_constraint", &LagrangianFlow::set_kick_constraint, nb::arg("mode"),
+           "Where kick 1's velocity constraint is taken: 'start' (x^n, default) or 'midpoint'\n"
+           "(x^n + dt/2 v^n with the weights solved there; DESIGN_NOTE option S).")
+      .def("set_velocities", &LagrangianFlow::set_velocities, nb::arg("velocities"))
+      .def("get_velocities", &LagrangianFlow::get_velocities)
+      .def("get_positions", &LagrangianFlow::get_positions)
+      .def("get_pi", &LagrangianFlow::get_pi,
+           "pi of the current state (H pi = -dU/dw; the Laplace and hydrostatic part).")
+      .def("get_lambda", &LagrangianFlow::get_lambda,
+           "lambda of the last kick 2 (the dynamic pressure multiplier); p = -(pi + lambda).")
+      .def("get_potential_gradient", &LagrangianFlow::get_potential_gradient,
+           "grad U~ of the current state (N,3).")
+      .def("energies", &LagrangianFlow::energies, "The current energies and accumulators (dict).")
+      .def("step", &LagrangianFlow::step, nb::arg("n") = 1,
+           "Advance n steps; returns per-step records as arrays (energies after the step,\n"
+           "solver iterations, residuals, max facet shift |s|/d, timings).")
+      .def_prop_ro("time", &LagrangianFlow::time)
+      .def_prop_ro("dt", &LagrangianFlow::dt, "The last step's size.")
+      .def_prop_ro("theta", &LagrangianFlow::theta)
+      .def_prop_ro("num_cells", &LagrangianFlow::num_cells);
 }
 }  // namespace peclet::voro::pybind

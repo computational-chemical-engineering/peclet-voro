@@ -15,6 +15,11 @@
  *       power cells: ∂_xU and ∂_wU against central differences at fixed w, Σ ∂_wU = 0, and the
  *       adjoint ∇Ũ = ∂_xU + J_xᵀπ against central differences of Ũ(x) = U(x, w*(x)) with the
  *       weight solve re-run per evaluation (DESIGN_NOTE §10.2, gate W0), all ≤ 1e-6 relative.
+ *   (E) NHV-W (lagrangian/integrator.hpp): the saddle solve meets ‖Cv‖_∞ ≤ 1e-12·max V/τ and its
+ *       momentum equation to 1e-8; a viscous two-phase drop with tension, integrated at τ and τ/2
+ *       with option S, holds every volume to 1e-12 (each Newton iterate a REPAIR, checked against
+ *       a cold rebuild to 1e-9) and its K + Ũ + Q + Q_c error falls ≥ 3× at τ/2 (second order);
+ *       a force-free state stays exactly at rest.
  */
 #include <algorithm>
 #include <cmath>
@@ -25,6 +30,7 @@
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/lagrangian/facets.hpp"
+#include "peclet/voro/lagrangian/integrator.hpp"
 #include "peclet/voro/lagrangian/operators.hpp"
 #include "peclet/voro/lagrangian/potential.hpp"
 #include "peclet/voro/lagrangian/weight_solve.hpp"
@@ -187,6 +193,141 @@ double checkOperators(const lag::CellFacets<real_t>& F, std::mt19937& rng) {
   return e;
 }
 
+// (E) the NHV-W saddle and integrator on a solved power tessellation (x, weights w0, volumes V0)
+int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
+                    const std::vector<double>& V0, real_t L, real_t h) {
+  using MT = peclet::voro::MovingTessellation<real_t, kP, kT, true>;
+  const int N = static_cast<int>(V0.size());
+  const real_t Larr[3] = {L, L, L};
+  int rc = 0;
+  DV pos = toDev(x, "e.pos"), w = toDev(w0, "e.w");
+  MT mt;
+  mt.alloc(N, Larr, real_t(1e-4) * h, real_t(0.25) * h, 4, N);
+  mt.setWeights(w);
+  mt.rebuild(pos);
+  std::vector<int> ty(N);
+  for (int i = 0; i < N; ++i) {
+    const real_t dx = x[3 * i] - 0.5, dy = x[3 * i + 1] - 0.5, dz = x[3 * i + 2] - 0.5;
+    ty[i] = dx * dx + dy * dy + dz * dz < 0.09 ? 1 : 0;
+  }
+  Kokkos::View<int*, Mem> dty("e.ty", N);
+  Kokkos::deep_copy(dty, Kokkos::View<const int*, Kokkos::HostSpace>(ty.data(), N));
+  std::mt19937 rng(5);
+  std::normal_distribution<real_t> G(0, 1);
+  std::vector<real_t> v(3 * N);
+  for (auto& q : v)
+    q = real_t(0.01) * G(rng);
+
+  // --- saddle: constraint to the outer bound, momentum to the inner tolerance ---
+  {
+    const auto F = lag::exportCellFacets<real_t, peclet::voro::Power>(mt.store, pos, w, N, Larr);
+    std::vector<real_t> rho(N), mu(N), mass(N), hh(N);
+    for (int i = 0; i < N; ++i) {
+      rho[i] = ty[i] ? 10.0 : 1.0;
+      mu[i] = ty[i] ? 0.3 : 0.1;
+      mass[i] = rho[i] * V0[i];
+      hh[i] = std::cbrt(V0[i]);
+    }
+    const DV drho = toDev(rho, "e.rho"), dmu = toDev(mu, "e.mu"), dm = toDev(mass, "e.m"),
+             dh = toDev(hh, "e.h");
+    lag::SaddleSolver<real_t> S;
+    S.setup(F, drho, dmu, dm, dh);
+    const real_t tau = 0.2 * h, a = 0.5 * 0.5 * tau, ht = 0.5 * tau;
+    std::vector<real_t> b(3 * N);
+    for (auto& q : b)
+      q = G(rng) * 1e-4;
+    const DV db = toDev(b, "e.b"), dv("e.v", 3 * N), dl("e.l", N);
+    double maxV = 0;
+    for (double q : V0)
+      maxV = std::max(maxV, q);
+    const lag::SaddleParams prm;
+    const auto st = S.solve(a, ht, real_t(prm.tol * maxV / tau), db, dv, dl, prm);
+    // momentum residual (M + aζ) v + (τ/2) Cᵀλ − b
+    DV zv("e.zv", 3 * N), cl("e.cl", 3 * N);
+    lag::DissipationScratch<real_t> scr(N);
+    lag::applyDissipation(F, dmu, dv, zv, scr);
+    lag::applyDivergenceT(F, dl, cl);
+    const auto vh = toHost(dv), zh = toHost(zv), ch = toHost(cl);
+    double rn = 0, bn = 0;
+    for (int k = 0; k < 3 * N; ++k) {
+      const double r = mass[k / 3] * vh[k] + a * zh[k] + ht * ch[k] - b[k];
+      rn += r * r;
+      bn += b[k] * b[k];
+    }
+    const double cons = st.constraint * tau / maxV, mom = std::sqrt(rn / bn);
+    std::printf("  (E) saddle: outer=%d inner=%d |Cv|_inf tau/maxV=%.1e momentum resid=%.1e\n",
+                st.outer, st.inner, cons, mom);
+    rc |= (cons <= 1e-12 && mom <= 1e-8) ? 0 : 1;
+  }
+
+  // --- a viscous drop with tension over T = 8e-3 at τ and τ/2 (option S: kick 1 constrained at
+  // the midpoint): volumes held, the repair against a cold rebuild, K + Ũ + Q + Q_c second order
+  // ---
+  {
+    lag::PotentialSpec<real_t> spec;
+    spec.types = dty;
+    spec.nTypes = 2;
+    spec.tension = toDev({0.0, 1.0, 1.0, 0.0}, "e.ten");
+    lag::FlowParams fp;
+    fp.density = {1.0, 10.0};
+    fp.viscosity = {0.1, 0.3};
+    lag::IntegratorParams ip;
+    ip.midpointConstraint = true;
+    double err[2] = {0, 0}, worstV = 0, worstCold = 0;
+    int fallbacks = 0;
+    for (int run = 0; run < 2; ++run) {
+      DV p2 = toDev(x, "e.pos2"), w2 = toDev(w0, "e.w2");
+      MT m2;
+      m2.alloc(N, Larr, real_t(1e-10) * h, real_t(0.25) * h, 4, N);  // tight certificate (M7)
+      m2.setWeights(w2);
+      m2.rebuild(p2);
+      lag::Integrator<MT> I(m2, p2, w2, Larr, V0, spec, fp, v, ip);
+      const double E0 = I.kinetic() + I.potential().total();
+      const int n = 4 << run;
+      const double tau = 8e-3 / n;
+      for (int s = 0; s < n; ++s) {
+        const auto r = I.step(tau);
+        fallbacks += r.repairFallbacks;
+        const double E = r.kinetic + r.potential + r.heat + r.constraintWork;
+        err[run] = std::max(err[run], std::fabs(E - E0) / E0);
+        const auto Vh = toHost(Kokkos::subview(m2.vol, std::make_pair(0, N)));
+        for (int i = 0; i < N; ++i)
+          worstV = std::max(worstV, std::fabs(Vh[i] - V0[i]) / V0[i]);
+        MT mc;
+        mc.alloc(N, Larr, real_t(1e-4) * h, real_t(0.25) * h, 4, N);
+        mc.setWeights(w2);
+        mc.rebuild(p2);
+        const auto Vc = toHost(Kokkos::subview(mc.vol, std::make_pair(0, N)));
+        for (int i = 0; i < N; ++i)
+          worstCold = std::max(worstCold, std::fabs(Vc[i] - Vh[i]) / V0[i]);
+      }
+    }
+    std::printf(
+        "  (E) drop, option S: max|V-V0|/V0=%.1e repair vs cold=%.1e fallbacks=%d |dE|/E0 at tau, "
+        "tau/2 = %.2e, %.2e (ratio %.2f)\n",
+        worstV, worstCold, fallbacks, err[0], err[1], err[0] / err[1]);
+    rc |= (worstV <= 1e-12 && worstCold <= 1e-9 && err[0] / err[1] >= 3.0) ? 0 : 1;
+  }
+
+  // --- rest: one phase, no forces, v = 0 stays exactly 0 ---
+  {
+    Kokkos::deep_copy(dty, 0);
+    lag::PotentialSpec<real_t> spec;
+    spec.types = dty;
+    spec.nTypes = 1;
+    lag::FlowParams fp;
+    fp.density = {1.0};
+    fp.viscosity = {0.1};
+    lag::Integrator<MT> I(mt, pos, w, Larr, V0, spec, fp, std::vector<real_t>(3 * N, 0.0));
+    double vmax = 0;
+    for (int s = 0; s < 3; ++s)
+      vmax = std::max(vmax, I.step(0.01).maxSpeed);
+    std::printf("  (E) rest: max|v| after 3 steps = %.1e (exactly 0 expected)\n", vmax);
+    rc |= vmax == 0.0 ? 0 : 1;
+  }
+  return rc;
+}
+
 // (D) facet gravity + adjoint by finite differences; returns the worst relative error
 template <class MT>
 double checkPotential(MT& mp, const std::vector<real_t>& x, const DV& w,
@@ -341,7 +482,9 @@ int run(int n, unsigned seed) {
     std::printf("      exported V vs targets: %.1e\n", e);
     rc |= e <= 1e-11 ? 0 : 1;
   }
+  const auto wSolved = toHost(w);
   rc |= checkPotential(mp, x, w, V0, L, h) <= 1e-6 ? 0 : 1;
+  rc |= checkIntegrator(x, wSolved, V0, L, h);
   return rc;
 }
 

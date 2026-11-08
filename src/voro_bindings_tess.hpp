@@ -50,7 +50,11 @@ inline nb::dict repairStatsDict(const peclet::voro::RepairStats& st) {
   return d;
 }
 
+class LagrangianFlow;  // voro_lagrangian.cpp: drives the resident power engine in place
+
 class Tess : public peclet::core::python::Releasable {
+  friend class LagrangianFlow;
+
  public:
   Tess() = default;
 

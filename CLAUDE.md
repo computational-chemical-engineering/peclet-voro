@@ -6,7 +6,7 @@ core's zero-copy bridge — ONE translation unit per subsystem, see "Why the mod
 files" below). Names follow `../docs/NAMING.md`: `set_domain(extent=)` (origin (0,0,0) and
 all-periodic are CHECKED), `set_dt` + `dt` + `step(n)`, scalars/counts bare, copied-out arrays `get_*`.
 Two API tiers (QUALITY_PLAN D2, package F done 2026-09-10): the public surface is `Tessellation`,
-`FacetOperators`, `FlowSolver`, `Simulation`, `optimize_volume_mesh`, `minimize_interface`, the lazily imported
+`FacetOperators`, `LagrangianFlow`, `FlowSolver`, `Simulation`, `optimize_volume_mesh`, `minimize_interface`, the lazily imported
 `peclet.voro.pore_mesh` / `peclet.voro.scenes` submodules (`packaging/voro_pore_mesh.py`,
 `voro_scenes.py` — staged + installed by the `PECLET_VORO_PY_FILES` loop in CMakeLists.txt) and,
 under MPI, `VoronoiHalo` + `DistributedTessellation`; every instrument/ablation is
@@ -56,7 +56,7 @@ The seams are the classes themselves:
 |---|---|
 | `voro_bindings.cpp` | `NB_MODULE` + the typed results. No engine. |
 | `voro_tessellation.cpp` | `Tessellation` — the four `MovingTessellation<..,W,S>` variants |
-| `voro_lagrangian.cpp` | `FacetOperators` + the `Tessellation` facet export / `solve_weights` / `reduced_potential` members (M7 power-cell method, `lagrangian/`) |
+| `voro_lagrangian.cpp` | `FacetOperators`, `LagrangianFlow` (the NHV-W integrator) + the `Tessellation` facet export / `solve_weights` / `reduced_potential` members (M7 power-cell method, `lagrangian/`) |
 | `voro_flow.cpp` | `FlowSolver` — collocated + covolume |
 | `voro_simulation.cpp` | `Simulation` — the two `ExplicitEuler<S>` variants |
 | `voro_optimizers.cpp` | `optimize_volume_mesh`, `minimize_interface` |
@@ -146,7 +146,7 @@ judgement call in the moment.
 | 1 | `sdf` | SDF half-space clipping (tangent + sagitta), wall store |
 | 2 | `tessellator`, `subset_gather`, `pore_cells` | cold build: grid + worklist gather + clip + publish; the pore-space polyhedra / section export on the same gather |
 | 3 | `repair`, `reeval_tessellation`, `dynamic_validate` | `MovingTessellation` two-pass repair, geometry re-publish, validators |
-| 4 | `physics/`, `energy/`, `fv/`, `mpi/`, `lagrangian/`, `mesh_optimizer`, `ot_optimizer` | moving-cell Euler/NS, energies + gradients, face-mesh FV solvers (covolume, collocated, distributed), halo, the M7 power-cell facet export / operators / OT weight solve / facet gravity + adjoint, optimisers |
+| 4 | `physics/`, `energy/`, `fv/`, `mpi/`, `lagrangian/`, `mesh_optimizer`, `ot_optimizer` | moving-cell Euler/NS, energies + gradients, face-mesh FV solvers (covolume, collocated, distributed), halo, the M7 power-cell facet export / operators / OT weight solve / facet gravity + adjoint / NHV-W integrator, optimisers |
 
 A header may include its own layer or a lower one, never a higher one. Adding a header means
 assigning it a layer in the script, or the test fails.

@@ -13,6 +13,8 @@ The public surface (suite/docs/QUALITY_PLAN.md D2 — everything else is on each
   and wall counts, the energy layer (``energy_forces``).
 * :class:`FacetOperators` — the cell operators of the Lagrangian power-cell method (volume
   Jacobian, weight Hessian, FV divergence, face-gradient dissipation) on a built Tessellation.
+* :class:`LagrangianFlow` — the NHV-W time integrator of that method (two-phase incompressible flow
+  on power cells of fixed volume), driving a built power Tessellation in place.
 * :class:`FlowSolver` — the static collocated / covolume Navier–Stokes solvers on the face mesh.
 * :class:`Simulation` — the moving-cell compressible-Euler / Navier–Stokes fluid.
 * :func:`optimize_volume_mesh`, :func:`minimize_interface` — mesh optimisers on a periodic box.
@@ -33,6 +35,7 @@ from ._voro import (  # noqa: F401
     FacetOperators,
     FlowSolver,
     InterfaceResult,
+    LagrangianFlow,
     OptimizeResult,
     Simulation,
     Tessellation,
@@ -46,6 +49,7 @@ from ._voro import (  # noqa: F401
 __all__ = [
     "Tessellation",
     "FacetOperators",
+    "LagrangianFlow",
     "FlowSolver",
     "Simulation",
     "optimize_volume_mesh",

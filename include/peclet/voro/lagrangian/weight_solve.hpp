@@ -49,6 +49,14 @@ struct WeightSolveParams {
   double pcgTol = 1e-10;  ///< relative residual of the inner H solve
   int pcgMaxIter = 1000;
   double minAlpha = 1e-6;  ///< give up halving below this step
+  /// Evaluate each iterate by the incremental repair of the resident engine
+  /// (MovingTessellation::step at the trial weights) instead of a cold rebuild — the per-step path
+  /// of the integrator (lagrangian/integrator.hpp). A cell is then rejected as buried when its
+  /// volume is not positive (the repair keeps no build report).
+  bool repair = false;
+  /// A prebuilt AMG hierarchy to precondition the H solves with (e.g. built on a nearby
+  /// geometry); null: build one on the current H per solve.
+  const peclet::core::solver::GraphAMGDevice* amg = nullptr;
 };
 
 struct WeightSolveStep {
@@ -64,6 +72,9 @@ struct WeightSolveResult {
   double maxRelErr = 0;
   bool converged = false;
   bool roundoffFloor = false;  ///< stalled with maxRelErr ≤ 1e3·tol (step at the round-off floor)
+  int coldRebuilds = 0;        ///< repair mode: evaluations the repair routed to a cold rebuild
+  int evaluations = 0;         ///< tessellation updates (repairs or rebuilds)
+  double evalSeconds = 0;      ///< wall time of those updates
   std::vector<WeightSolveStep> history;
 };
 
@@ -132,10 +143,13 @@ std::pair<int, double> solvePinnedH(const CellFacets<Real>& F, const LView<Real>
                                     const LView<Real>& x, const WeightSolveParams& prm) {
   static_assert(std::is_same_v<Real, double>, "the weight solve runs in double (GraphAMG)");
   const int N = F.nCells;
-  peclet::core::solver::GraphAMGDevice amg;
-  peclet::core::solver::AmgParams ap;
-  ap.ndofPerNode = 1;
-  amg.build(detail::pinnedHostH(F), ap);
+  peclet::core::solver::GraphAMGDevice own;
+  if (!prm.amg) {
+    peclet::core::solver::AmgParams ap;
+    ap.ndofPerNode = 1;
+    own.build(detail::pinnedHostH(F), ap);
+  }
+  const peclet::core::solver::GraphAMGDevice& amg = prm.amg ? *prm.amg : own;
   LView<Real> res("ws.r", N), z("ws.z", N), p("ws.p", N), q("ws.q", N), tmp("ws.tmp", N);
   Kokkos::deep_copy(x, Real(0));
   Kokkos::deep_copy(res, r);
@@ -199,10 +213,23 @@ WeightSolveResult solveWeights(MT& mt, const LView<Real>& pos, const LView<Real>
         "ws.gauge", Kokkos::RangePolicy<Exec>(0, N),
         KOKKOS_LAMBDA(const int i) { weight(i) -= m; });
   }
-  // rebuild at weights `w`; return the host volumes and whether the build buried a cell
+  WeightSolveResult R;
+  // rebuild (or repair) at weights `w`; return the host volumes and whether a cell was buried
   auto evaluate = [&](const LView<Real>& w, std::vector<double>& V) {
     mt.setWeights(w);
+    ++R.evaluations;
+    Kokkos::Timer tm;
+    if (prm.repair) {
+      const auto st = mt.step(pos);
+      Kokkos::fence();
+      R.evalSeconds += tm.seconds();
+      R.coldRebuilds += (st.fellBack || st.route == decltype(st)::kRebuildGate) ? 1 : 0;
+      V = peclet::core::toVector(Kokkos::subview(mt.vol, std::make_pair(0, N)));
+      return *std::min_element(V.begin(), V.end()) > 0.0;
+    }
     mt.rebuild(pos);
+    Kokkos::fence();
+    R.evalSeconds += tm.seconds();
     V = peclet::core::toVector(Kokkos::subview(mt.vol, std::make_pair(0, N)));
     return mt.report().buried == 0;
   };
@@ -219,7 +246,6 @@ WeightSolveResult solveWeights(MT& mt, const LView<Real>& pos, const LView<Real>
     l2 = std::sqrt(l2);
   };
 
-  WeightSolveResult R;
   std::vector<double> V, Vt;
   evaluate(weight, V);
   double maxRel, nr, minV;
