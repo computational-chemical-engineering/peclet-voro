@@ -500,7 +500,8 @@ class SaddleSolver {
     }
     if (proj && viscous_ && a > Real(0) && prm.rotational > 0) {
       // rotational update: μ += χ a (μ_min / V) C v* — the viscous part of the multiplier
-      // increment the S₀ projection leaves out (S⁻¹ ≈ S₀⁻¹ + a·2μ/V, Cahouet–Chabard; flow's −μ∇·u*)
+      // increment the S₀ projection leaves out (S⁻¹ ≈ S₀⁻¹ + a·2μ/V, Cahouet–Chabard; flow's
+      // −μ∇·u*)
       const LView<Real> rs = rStar_, cm = ccMin_;
       const Real ca = Real(prm.rotational) * a;
       Kokkos::parallel_for(
@@ -886,10 +887,13 @@ struct IntegratorParams {
   /// AMG reuse (M7 WO-PERF): the S₀ (L_ρ) and H hierarchies are kept as preconditioners for at most
   /// this many further setups, and rebuilt early when their solve needs more than 1.5× (+2) the
   /// iterations it took right after the build. 0: rebuilt at every setup (the WO4 behaviour).
-  int amgReuse = 0;
+  /// Default 10 since M7 WO-PERF (orchestrator WO, measured: N 32768 setups 1.1-6 s/step -> ~0.5).
+  int amgReuse = 10;
   /// relative residual of the linear warm-start H solves (x^{n+1} and the option-S midpoint) and
   /// of the Newton H solves (the inexact-Newton forcing; the volumes still close to weightTol)
-  double warmTol = 1e-10, newtonTol = 1e-10;
+  /// (WO4: 1e-10 both; WO-PERF defaults 1e-4 / 1e-3: H V-cycles per solve ~20 -> 6, Newton 3 -> 4
+  /// iterations, volumes still to weightTol)
+  double warmTol = 1e-4, newtonTol = 1e-3;
   // ---- the gauge G″ (DESIGN_NOTE §12.3.2) ----
   int gaugeEvery = 1;              ///< the gauge after kick 2 every this many steps (0: off)
   double gaugeStrain = 3;          ///< c_g: α_i = min(α_max, c_g τ ε̂_i)

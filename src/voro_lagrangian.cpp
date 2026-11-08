@@ -888,8 +888,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   real_t adjointTol_ = 0, saddleTol_ = 0;  // 0: not set (the integrator's defaults)
   peclet::voro::lagrangian::SaddleMethod method_ = peclet::voro::lagrangian::SaddleMethod::kSchurCG;
   real_t rotational_ = 1;
-  int amgReuse_ = 0;
-  real_t warmTol_ = 1e-10, newtonTol_ = 1e-10;
+  int amgReuse_ = 10;
+  real_t warmTol_ = 1e-4, newtonTol_ = 1e-3;
   bool perfSet_ = false;  // false: the integrator's defaults
   std::optional<real_t> rhoRef_;
   real_t dtUser_ = 0, cfl_ = 0.2, cap_ = 0.5, time_ = 0, lastDt_ = 0, theta_ = 0.5;
@@ -979,8 +979,8 @@ void bindLagrangian(nb::module_& m) {
            "weights solved there; DESIGN_NOTE option S; the default: second order in the energy)\n"
            "or 'start' (x^n; first order).")
       .def("_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "schur",
-           nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 0, nb::arg("warm_tol") = 1e-10,
-           nb::arg("newton_tol") = 1e-10,
+           nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 10, nb::arg("warm_tol") = 1e-4,
+           nb::arg("newton_tol") = 1e-3,
            "M7 WO-PERF solver trials (not public API): the kick's saddle method ('schur' nested\n"
            "Schur CG, 'coupled' block-preconditioned FGMRES, 'projection' rotational incremental\n"
            "pressure correction with chi = `rotational`), and AMG hierarchy reuse over at most\n"
