@@ -197,6 +197,13 @@ peclet::core::solver::HostCsrOp schurHost(const CellFacets<Real>& F, const LView
 }
 }  // namespace detail
 
+/// The kick's saddle solver (M7 WO-PERF).
+enum class SaddleMethod {
+  kSchurCG,  ///< Schur-complement CG with an exact inner A-solve per iteration (WO4 default)
+  kCoupled,  ///< A: one FGMRES on [A, Cᵀ; C, 0], block-triangular preconditioner (exact saddle)
+  kProjection,  ///< B: rotational incremental pressure correction (one A-solve + one S₀ projection)
+};
+
 struct SaddleParams {
   double tol = 1e-12;       ///< outer: ‖C v‖_∞ ≤ tol · max_i V_i / τ (DESIGN_NOTE §2.6)
   double innerTol = 1e-10;  ///< relative residual of each inner A-solve
@@ -208,6 +215,13 @@ struct SaddleParams {
   /// on): outer iterations per kick 96 → 25 and s/step 136 → 35 at N = 32768 (7.7 → 3.0 at
   /// 4096); inviscid 113 → 23 outer, but its 4× dearer setup makes the step ~7 % slower.
   bool schurAssembled = true;
+  SaddleMethod method = SaddleMethod::kSchurCG;
+  /// B: χ of the rotational multiplier update μ += φ + χ a (2 μ_min / V_i) (C v*)_i (the
+  /// Cahouet–Chabard term at flow's "min" coefficient: μ_min the least cell viscosity); 0: plain
+  /// incremental
+  double rotational = 1.0;
+  int restart = 40;      ///< A: FGMRES restart length
+  int coupledInner = 2;  ///< A: Jacobi-PCG iterations of Â⁻¹ in the preconditioner (0: Jacobi)
 };
 
 struct SaddleStats {
@@ -228,8 +242,10 @@ class SaddleSolver {
  public:
   /// Geometry setup at the facets `F`: the L_ρ AMG and the approximate ζ diagonal. `rho`, `mu`,
   /// `mass`, `h` (N): cell density, viscosity, mass and length h_i = V⁰_i^{1/3}.
+  /// `rebuildAmg` false keeps the L_ρ / S₀ hierarchy of an earlier setup as the preconditioner (it
+  /// only preconditions: the Schur operator is applied matrix-free at F; a kind change forces it).
   void setup(const CellFacets<Real>& F, const LView<Real>& rho, const LView<Real>& mu,
-             const LView<Real>& mass, const LView<Real>& h) {
+             const LView<Real>& mass, const LView<Real>& h, bool rebuildAmg = true) {
     F_ = F;
     mu_ = mu;
     mass_ = mass;
@@ -250,7 +266,9 @@ class SaddleSolver {
       zdiag_ = LView<Real>("sd.zdiag", n3);
       c0_ = LView<Real>("sd.c0", n);
       c1_ = LView<Real>("sd.c1", n);
+      rStar_ = LView<Real>("sd.rStar", n);
       scr_ = DissipationScratch<Real>(N);
+      kv_.clear();
     }
     const auto rh = peclet::core::toVector(rho);
     const auto mh = peclet::core::toVector(mu);
@@ -269,9 +287,15 @@ class SaddleSolver {
       for (int i = 0; i < N; ++i)
         cc[i] = vh[i] > 0 ? 2.0 * mh[i] / vh[i] : 0.0;
       cc_ = peclet::core::toDevice<Real>(cc, "sd.cc");
+      const double muMin = N > 0 ? *std::min_element(mh.begin(), mh.end()) : 0.0;
+      for (int i = 0; i < N; ++i)
+        cc[i] = vh[i] > 0 ? 2.0 * muMin / vh[i] : 0.0;
+      ccMin_ = peclet::core::toDevice<Real>(cc, "sd.ccMin");
     }
     Kokkos::Timer tb;
-    if (assembled_)
+    if (!rebuildAmg && lrho_.numLevels() > 0 && builtAssembled_ == assembled_) {
+      // the lagged hierarchy (no setup charged)
+    } else if (assembled_)
       lrho_.build(detail::schurHost(F, mass), ap);
     else
       lrho_.build(detail::twoPointHost(
@@ -281,6 +305,7 @@ class SaddleSolver {
                       },
                       [](int) { return 0.0; }, /*pin=*/true),
                   ap);
+    builtAssembled_ = assembled_;
     setupSeconds_ = tb.seconds();
     mh_ = mh;
     {  // ‖C‖ per unit velocity: max_i Σ_f (A/d)|c_f| + Σ_w A_w (the physically scaled stop in
@@ -409,7 +434,12 @@ class SaddleSolver {
     st.inner += solveA(a, w_, v, prm);
     Kokkos::fence();
     st.tInner += tPart.seconds();
+    if (prm.method == SaddleMethod::kCoupled && viscous_ && a > Real(0))
+      return solveCoupled(a, halfTau, tolAbs, b, v, lam, prm, st, tAll);
+    const bool proj = prm.method == SaddleMethod::kProjection;
     applyDivergence(F_, v, r_);
+    if (proj)
+      Kokkos::deep_copy(rStar_, r_);  // C v* for the rotational update
     Real rinf = detail::maxAbsView(r);
     const Real rinit = rinf;
     if (rinf > tolAbs) {
@@ -423,7 +453,8 @@ class SaddleSolver {
       for (int k = 0; k < prm.maxOuter; ++k) {
         applyDivergenceT(F_, p, w_);
         tPart.reset();
-        st.inner += solveA(a, w_, q, prm);
+        // B projects with S₀ = C M⁻¹ Cᵀ: v = v* − M⁻¹Cᵀφ (the A-solve only in the predictor)
+        st.inner += proj ? solveA(Real(0), w_, q, prm) : solveA(a, w_, q, prm);
         Kokkos::fence();
         st.tInner += tPart.seconds();
         applyDivergence(F_, q, s);
@@ -465,6 +496,15 @@ class SaddleSolver {
                       prm.maxOuter, double(rinf), double(tolAbs), double(rinit));
         throw std::runtime_error(msg);
       }
+    }
+    if (proj && viscous_ && a > Real(0) && prm.rotational > 0) {
+      // rotational update: μ += χ a (2 μ_min / V) C v* — S⁻¹ ≈ S₀⁻¹ + a·2μ/V (Cahouet–Chabard)
+      // carries the viscous part of the multiplier increment that the S₀ projection leaves out
+      const LView<Real> rs = rStar_, cm = ccMin_;
+      const Real ca = Real(prm.rotational) * a;
+      Kokkos::parallel_for(
+          "sd.rot", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i) { mu(i) += ca * cm(i) * rs(i); });
     }
     // The constant is the exact null space of Cᵀ (Cᵀ1 = 0, walls included); the CG picks up a
     // component along it from the preconditioner. It is harmless to v, but it enters the
@@ -509,6 +549,229 @@ class SaddleSolver {
     Kokkos::parallel_for(
         "sd.demean", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, n),
         KOKKOS_LAMBDA(const int i) { x(i) -= m; });
+  }
+
+  /// A (SaddleMethod::kCoupled): right-preconditioned restarted FGMRES on K = [A, Cᵀ; C, 0] from
+  /// the predictor (v = A⁻¹(b − Cᵀμ₀), μ₀) the caller computed. Block upper-triangular
+  /// preconditioner P = [Â, Cᵀ; 0, −Ŝ]: z_μ = −Ŝ⁻¹ r_μ, z_v = Â⁻¹(r_v − Cᵀ z_μ), Ŝ⁻¹ = the Schur
+  /// preconditioner (AMG on S₀ + Cahouet–Chabard), Â⁻¹ = prm.coupledInner Jacobi-PCG iterations.
+  /// The constraint rows are scaled by ς = ε_m / tolAbs (ε_m = innerTol ‖b‖₂) so that the 2-norm
+  /// target ε_m bounds ‖C v‖_∞ ≤ tolAbs; converged on the true residuals ‖C v‖_∞ ≤ tolAbs and
+  /// ‖b − A v − Cᵀμ‖₂ ≤ 10 ε_m. The exact saddle solution to that tolerance.
+  SaddleStats solveCoupled(Real a, Real halfTau, Real tolAbs, const LView<Real>& b,
+                           const LView<Real>& v, const LView<Real>& mu, const SaddleParams& prm,
+                           SaddleStats st, Kokkos::Timer& tAll) {
+    using Exec = peclet::core::ExecSpace;
+    const int N = F_.nCells, n3 = 3 * N, m = prm.restart;
+    if (static_cast<int>(kv_.size()) != m + 1) {
+      kv_.clear();
+      km_.clear();
+      zv_.clear();
+      zm_.clear();
+      for (int j = 0; j <= m; ++j) {
+        kv_.emplace_back("sd.kv", n3);
+        km_.emplace_back("sd.km", N);
+        if (j < m) {
+          zv_.emplace_back("sd.zv", n3);
+          zm_.emplace_back("sd.zm", N);
+        }
+      }
+    }
+    const LView<Real> M = mass_;
+    const Real em = Real(prm.innerTol) * std::sqrt(detail::dotView(b, b));
+    if (!(em > Real(0)) || !(tolAbs > Real(0)))
+      return finishCoupled(halfTau, v, mu, st, tAll);
+    const Real sc = em / tolAbs;
+    Kokkos::Timer tPart;
+    // out = K' (xv, xm): (M + aζ) xv + Cᵀxm, ς C xv
+    auto applyK = [&](const LView<Real>& xv, const LView<Real>& xm, const LView<Real>& ov,
+                      const LView<Real>& om) {
+      applyDissipation(F_, mu_, xv, ov, scr_);
+      applyDivergenceT(F_, xm, w_);
+      const LView<Real> W = w_;
+      Kokkos::parallel_for(
+          "sd.Kv", Kokkos::RangePolicy<Exec>(0, n3),
+          KOKKOS_LAMBDA(const int k) { ov(k) = M(k / 3) * xv(k) + a * ov(k) + W(k); });
+      applyDivergence(F_, xv, om);
+      Kokkos::parallel_for(
+          "sd.Km", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) { om(i) *= sc; });
+    };
+    // the true residual (b − A v − Cᵀμ, −ς C v) into (kv_[0], km_[0]); returns ‖C v‖_∞, ‖r_v‖₂
+    auto residual = [&](Real& cinf, Real& rv2) {
+      applyK(v, mu, kv_[0], km_[0]);
+      const LView<Real> rv = kv_[0], rm = km_[0];
+      Kokkos::parallel_for(
+          "sd.Rv", Kokkos::RangePolicy<Exec>(0, n3),
+          KOKKOS_LAMBDA(const int k) { rv(k) = b(k) - rv(k); });
+      Kokkos::parallel_for(
+          "sd.Rm", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) { rm(i) = -rm(i); });
+      cinf = detail::maxAbsView(rm) / sc;
+      rv2 = std::sqrt(detail::dotView(rv, rv));
+    };
+    std::vector<double> H(static_cast<std::size_t>((m + 1) * m)), cs(m), sn(m), g(m + 1), y(m);
+    auto Hij = [&](int i, int j) -> double& {
+      return H[static_cast<std::size_t>(j * (m + 1) + i)];
+    };
+    Real cinf = 0, rv2 = 0;
+    for (int cycle = 0;; ++cycle) {
+      residual(cinf, rv2);
+      if (cinf <= tolAbs && rv2 <= Real(10) * em)
+        break;
+      if (st.outer >= prm.maxOuter) {
+        char msg[256];
+        std::snprintf(msg, sizeof msg,
+                      "voro: NHV-W saddle: coupled FGMRES did not converge in %d iterations "
+                      "(|Cv|_inf = %.3e, bound %.3e; |r_v| = %.3e, bound %.3e)",
+                      st.outer, double(cinf), double(tolAbs), double(rv2), double(10 * em));
+        throw std::runtime_error(msg);
+      }
+      const double beta =
+          std::sqrt(detail::dotView(kv_[0], kv_[0]) + detail::dotView(km_[0], km_[0]));
+      scaleBlk(kv_[0], km_[0], Real(1.0 / beta));
+      std::fill(g.begin(), g.end(), 0.0);
+      g[0] = beta;
+      int j = 0;
+      for (; j < m; ++j) {
+        // z_j = P⁻¹ v_j
+        tPart.reset();
+        {
+          const LView<Real> vm = km_[j], zmj = zm_[j], z = z_, S = s_;
+          Kokkos::parallel_for(
+              "sd.Pm", Kokkos::RangePolicy<Exec>(0, N),
+              KOKKOS_LAMBDA(const int i) { S(i) = vm(i) / sc; });
+          schurPrecond(a, S, z);
+          Kokkos::parallel_for(
+              "sd.Pz", Kokkos::RangePolicy<Exec>(0, N),
+              KOKKOS_LAMBDA(const int i) { zmj(i) = -z(i); });
+          applyDivergenceT(F_, zmj, w_);
+          const LView<Real> vv = kv_[j], W = w_, q = q_;
+          Kokkos::parallel_for(
+              "sd.Pv", Kokkos::RangePolicy<Exec>(0, n3),
+              KOKKOS_LAMBDA(const int k) { q(k) = vv(k) - W(k); });
+        }
+        Kokkos::fence();
+        st.tPrecond += tPart.seconds();
+        tPart.reset();
+        st.inner += solveAcap(a, q_, zv_[j], prm.coupledInner);
+        Kokkos::fence();
+        st.tInner += tPart.seconds();
+        applyK(zv_[j], zm_[j], kv_[j + 1], km_[j + 1]);
+        for (int i = 0; i <= j; ++i) {  // modified Gram–Schmidt
+          const double hij =
+              detail::dotView(kv_[j + 1], kv_[i]) + detail::dotView(km_[j + 1], km_[i]);
+          Hij(i, j) = hij;
+          axpyBlk(kv_[j + 1], km_[j + 1], kv_[i], km_[i], Real(-hij));
+        }
+        const double hn = std::sqrt(detail::dotView(kv_[j + 1], kv_[j + 1]) +
+                                    detail::dotView(km_[j + 1], km_[j + 1]));
+        Hij(j + 1, j) = hn;
+        if (hn > 0)
+          scaleBlk(kv_[j + 1], km_[j + 1], Real(1.0 / hn));
+        for (int i = 0; i < j; ++i) {  // the earlier Givens rotations
+          const double t = cs[i] * Hij(i, j) + sn[i] * Hij(i + 1, j);
+          Hij(i + 1, j) = -sn[i] * Hij(i, j) + cs[i] * Hij(i + 1, j);
+          Hij(i, j) = t;
+        }
+        const double den = std::hypot(Hij(j, j), Hij(j + 1, j));
+        cs[j] = den > 0 ? Hij(j, j) / den : 1.0;
+        sn[j] = den > 0 ? Hij(j + 1, j) / den : 0.0;
+        Hij(j, j) = den;
+        Hij(j + 1, j) = 0;
+        g[j + 1] = -sn[j] * g[j];
+        g[j] = cs[j] * g[j];
+        ++st.outer;
+        if (std::fabs(g[j + 1]) <= 0.5 * em || hn == 0 || st.outer >= prm.maxOuter) {
+          ++j;
+          break;
+        }
+      }
+      for (int i = j - 1; i >= 0; --i) {  // y = H⁻¹ g, x += Z y
+        double t = g[i];
+        for (int k = i + 1; k < j; ++k)
+          t -= Hij(i, k) * y[k];
+        y[i] = t / Hij(i, i);
+        axpyBlk(v, mu, zv_[i], zm_[i], Real(y[i]));
+      }
+    }
+    return finishCoupled(halfTau, v, mu, st, tAll);
+  }
+
+  SaddleStats finishCoupled(Real halfTau, const LView<Real>& v, const LView<Real>& mu,
+                            SaddleStats st, Kokkos::Timer& tAll) {
+    removeMean(mu);
+    const Real ih = Real(1) / halfTau;
+    Kokkos::parallel_for(
+        "sd.lamA", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, F_.nCells),
+        KOKKOS_LAMBDA(const int i) { mu(i) *= ih; });
+    applyDivergence(F_, v, r_);
+    st.constraint = detail::maxAbsView(r_);
+    Kokkos::fence();
+    st.tTotal = tAll.seconds();
+    return st;
+  }
+
+  static void scaleBlk(const LView<Real>& xv, const LView<Real>& xm, Real c) {
+    Kokkos::parallel_for(
+        "sd.scv", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, xv.extent(0)),
+        KOKKOS_LAMBDA(const int k) { xv(k) *= c; });
+    Kokkos::parallel_for(
+        "sd.scm", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, xm.extent(0)),
+        KOKKOS_LAMBDA(const int k) { xm(k) *= c; });
+  }
+  /// (xv, xm) += c (yv, ym)
+  static void axpyBlk(const LView<Real>& xv, const LView<Real>& xm, const LView<Real>& yv,
+                      const LView<Real>& ym, Real c) {
+    Kokkos::parallel_for(
+        "sd.axv", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, xv.extent(0)),
+        KOKKOS_LAMBDA(const int k) { xv(k) += c * yv(k); });
+    Kokkos::parallel_for(
+        "sd.axm", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, xm.extent(0)),
+        KOKKOS_LAMBDA(const int k) { xm(k) += c * ym(k); });
+  }
+
+  /// x ≈ A⁻¹ rhs by exactly `iters` Jacobi-PCG iterations from x = 0 (0: one Jacobi apply), the
+  /// variable preconditioner block Â⁻¹ of A. Returns the iterations.
+  int solveAcap(Real a, const LView<Real>& rhs, const LView<Real>& x, int iters) {
+    using Exec = peclet::core::ExecSpace;
+    const int n3 = 3 * F_.nCells;
+    const LView<Real> m = mass_, X = x, B = rhs, r = ir_, z = iz_, p = ip_, q = iq_, zd = zdiag_;
+    Kokkos::parallel_for(
+        "sd.capJ", Kokkos::RangePolicy<Exec>(0, n3), KOKKOS_LAMBDA(const int k) {
+          const Real dk = m(k / 3) + a * zd(k);
+          X(k) = B(k) / dk;
+          r(k) = B(k);
+          z(k) = X(k);
+          p(k) = X(k);
+        });
+    if (iters <= 0)
+      return 0;
+    Kokkos::deep_copy(X, Real(0));
+    Real rz = detail::dotView(r, z);
+    for (int it = 0; it < iters; ++it) {
+      applyDissipation(F_, mu_, p, q, scr_);
+      Kokkos::parallel_for(
+          "sd.capAp", Kokkos::RangePolicy<Exec>(0, n3),
+          KOKKOS_LAMBDA(const int k) { q(k) = m(k / 3) * p(k) + a * q(k); });
+      const Real pq = detail::dotView(p, q);
+      if (!(pq > Real(0)) || !(rz > Real(0)))
+        return it;
+      const Real al = rz / pq;
+      Kokkos::parallel_for(
+          "sd.capUpd", Kokkos::RangePolicy<Exec>(0, n3), KOKKOS_LAMBDA(const int k) {
+            X(k) += al * p(k);
+            r(k) -= al * q(k);
+            z(k) = r(k) / (m(k / 3) + a * zd(k));
+          });
+      if (it + 1 == iters)
+        return iters;
+      const Real rzNew = detail::dotView(r, z);
+      const Real be = rzNew / rz;
+      rz = rzNew;
+      Kokkos::parallel_for(
+          "sd.capDir", Kokkos::RangePolicy<Exec>(0, n3),
+          KOKKOS_LAMBDA(const int k) { p(k) = z(k) + be * p(k); });
+    }
+    return iters;
   }
 
   /// x = A⁻¹ rhs, A = M + a ζ, by PCG to the relative residual prm.innerTol. Returns iterations.
@@ -580,11 +843,14 @@ class SaddleSolver {
   CellFacets<Real> F_;
   LView<Real> mu_, mass_;
   std::vector<double> mh_;
-  bool viscous_ = false, useAmg_ = false, assembled_ = false;
+  bool viscous_ = false, useAmg_ = false, assembled_ = false, builtAssembled_ = false;
   double nuH2_ = 0, setupSeconds_ = 0;
   Real cScale_ = 0;
   peclet::core::solver::GraphAMGDevice lrho_, visc_;
-  LView<Real> cc_, r_, z_, zOld_, p_, s_, w_, q_, ir_, iz_, ip_, iq_, zdiag_, c0_, c1_;
+  LView<Real> cc_, ccMin_, r_, z_, zOld_, p_, s_, w_, q_, ir_, iz_, ip_, iq_, zdiag_, c0_, c1_,
+      rStar_;
+  /// A: FGMRES bases, Krylov (V) and preconditioned (Z), velocity (3N) and multiplier (N) blocks
+  std::vector<LView<Real>> kv_, km_, zv_, zm_;
   DissipationScratch<Real> scr_;
 };
 
@@ -616,6 +882,10 @@ struct IntegratorParams {
   /// energy, ×4.2 per τ halving vs ×2.4 at x^n): kick 1's C at x^n + (τ/2) v^n; false: at x^n
   bool midpointConstraint = true;
   double repairTol = 1e-10;  ///< repaired-topology volume check (cone fan vs engine), relative
+  /// AMG reuse (M7 WO-PERF): the S₀ (L_ρ) and H hierarchies are kept as preconditioners for at most
+  /// this many further setups, and rebuilt early when their solve needs more than 1.5× (+2) the
+  /// iterations it took right after the build. 0: rebuilt at every setup (the WO4 behaviour).
+  int amgReuse = 0;
   // ---- the gauge G″ (DESIGN_NOTE §12.3.2) ----
   int gaugeEvery = 1;              ///< the gauge after kick 2 every this many steps (0: off)
   double gaugeStrain = 3;          ///< c_g: α_i = min(α_max, c_g τ ε̂_i)
@@ -1044,6 +1314,12 @@ class Integrator {
     prm_.adjointTol = adjointTol;
     prm_.saddle.tol = saddleTol;
   }
+  /// M7 WO-PERF knobs: the saddle method, B's rotational χ, A-solve tolerances and AMG reuse.
+  void setPerfOptions(SaddleMethod method, double rotational, int amgReuse) {
+    prm_.saddle.method = method;
+    prm_.saddle.rotational = rotational;
+    prm_.amgReuse = amgReuse;
+  }
   void setGauge(int every, double strain, double alphaMax) {
     prm_.gaugeEvery = every;
     prm_.gaugeStrain = strain;
@@ -1160,6 +1436,20 @@ class Integrator {
                                          mt_->vol);
   }
 
+  /// saddle_.setup at F_, the S₀ hierarchy rebuilt or lagged per IntegratorParams::amgReuse.
+  void setupSaddle() {
+    const bool fresh = prm_.amgReuse <= 0 || sAge_ >= prm_.amgReuse || sStale_;
+    saddle_.setAssembled(prm_.saddle.schurAssembled);
+    saddle_.setup(F_, rho_, mu_, mass_, h_, fresh);
+    if (fresh) {
+      sAge_ = 0;
+      sStale_ = false;
+      sRef_ = -1;  // the next kick's outer count is the reference
+    } else {
+      ++sAge_;
+    }
+  }
+
   /// Facets, U and ∇Ũ, π, and the two hierarchies at the current (pos, weight).
   void evalState(double* tPot = nullptr) {
     Kokkos::Timer t, tp;
@@ -1176,17 +1466,28 @@ class Integrator {
     tp.reset();
     peclet::core::solver::AmgParams ap;
     ap.ndofPerNode = 1;
-    hAmg_.build(detail::pinnedHostH(F_), ap);
+    const bool hFresh =
+        prm_.amgReuse <= 0 || hAge_ >= prm_.amgReuse || hStale_ || hAmg_.numLevels() == 0;
+    if (hFresh) {
+      hAmg_.build(detail::pinnedHostH(F_), ap);
+      hAge_ = 0;
+      hStale_ = false;
+    } else {
+      ++hAge_;
+    }
     evalSplit_[2] = tp.seconds();
     tp.reset();
     WeightSolveParams wp;
     wp.pcgTol = prm_.adjointTol;
     wp.amg = &hAmg_;
     adj_ = reducedGradient(F_, gx_, gw_, pi_, grad_, wp);
+    if (hFresh)
+      hRef_ = adj_.pcgIters;
+    else if (adj_.pcgIters > 1.5 * hRef_ + 2)
+      hStale_ = true;
     Kokkos::fence();
     evalSplit_[3] = tp.seconds();
-    saddle_.setAssembled(prm_.saddle.schurAssembled);
-    saddle_.setup(F_, rho_, mu_, mass_, h_);
+    setupSaddle();
     Kokkos::fence();
     if (tPot)
       *tPot = t.seconds();
@@ -1224,6 +1525,10 @@ class Integrator {
         });
     const Real tolAbs = prm_.saddle.tol * maxV0_ / tau;
     SaddleStats st = saddle_.solve(th * ht, ht, tolAbs, b_, vNew, lam, prm_.saddle);
+    if (sRef_ < 0)
+      sRef_ = st.outer;
+    else if (st.outer > 1.5 * sRef_ + 2)
+      sStale_ = true;
     st.constraint *= tau / maxV0_;
     // heat (τ/2) v̄_θᵀ ζ (v_old + v_new)/2 and body work (τ/2) (M a)ᵀ (v_old + v_new)/2
     const LView<Real> vn = vNew, zn = zn_;
@@ -1273,8 +1578,7 @@ class Integrator {
       F_ = currentFacets();
       fcValid_ = false;  // pos/weight return to x^n below
       matchFacets(F_);
-      saddle_.setAssembled(prm_.saddle.schurAssembled);
-      saddle_.setup(F_, rho_, mu_, mass_, h_);
+      setupSaddle();
       rep.kick1 = kick(tau, vel_, vh_, lam1_, pos0_);
       // kick 1's constraint work (τ/4) λ₁ᵀ C^s v^n (C^s v^{½} = 0, C^s v^n ≠ 0)
       applyDivergence(F_, vel_, tmpN_);
@@ -1804,6 +2108,10 @@ class Integrator {
   bool movingWall_ = false;
   long stepCount_ = 0;
   int restoreRebuilds_ = 0;
+  // AMG reuse (IntegratorParams::amgReuse): setups since the build, the iteration reference of the
+  // first solve after it, and the stale flag (iterations grew past 1.5× + 2)
+  int sAge_ = 0, hAge_ = 0, sRef_ = -1, hRef_ = 0;
+  bool sStale_ = false, hStale_ = false;
   double evalSplit_[4] = {0, 0, 0, 0};  ///< evalState: facets, energy, H AMG setup, adjoint (s)
   double gaugeU_ = 0, gaugeK_ = 0;
   CellFacets<Real> F_;
