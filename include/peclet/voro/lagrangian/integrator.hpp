@@ -26,16 +26,18 @@
  * unchanged: u_w is taken tangential, P_w u_w). No topology bookkeeping beyond the repair's.
  *
  * The saddle [M + θ(τ/2)ζ, (τ/2)Cᵀ; C, 0] is solved by preconditioned CG on the Schur complement
- * S = C A⁻¹ Cᵀ (A = M + θ(τ/2)ζ) for μ = (τ/2)λ, preconditioned by AMG on the two-point
- * Laplacian L_ρ, (L_ρ p)_i = Σ_f (A_f/d_f) ½(1/ρ_i + 1/ρ_j)(p_i − p_j) (§2.6; pinned at DOF 0,
- * diagonal kept), plus the viscous diagonal of Cahouet–Chabard: P⁻¹ = L_ρ⁻¹ + θ(τ/2)·2μ_i/V_i.
- * L_ρ alone is the Schur complement's inertial limit (A ≈ M); when θ(τ/2)ζ dominates M (ν τ/h² ≫ 1)
- * S tends to C(θ(τ/2)ζ)⁻¹Cᵀ ≈ V/(2θ(τ/2)μ), a mass-matrix-like operator L_ρ⁻¹ cannot precondition;
- * the sum covers both limits (Cahouet & Chabard 1988). The velocity is carried by the same
- * recurrence as the residual, v ← v − α A⁻¹Cᵀp,   r ← r − α C (A⁻¹Cᵀp), with the SAME vector A⁻¹Cᵀp
- * in both, so r = C v holds to round-off whatever the inner accuracy: the constraint is met to the
- * outer tolerance ‖C v‖_∞ ≤ tol·max V/τ, and the inner tolerance (1e-10, §2.6) bounds only the
- * momentum residual. The outer CG is the flexible (Polak–Ribière) form, since inexact inner solves
+ * S = C A⁻¹ Cᵀ (A = M + θ(τ/2)ζ) for μ = (τ/2)λ, preconditioned by AMG on the assembled
+ * inertial Schur complement S₀ = C M⁻¹ Cᵀ (2-ring stencil, detail::schurHost; pinned at DOF 0,
+ * diagonal kept; SaddleParams::schurAssembled, M7 WO4a) or on the two-point Laplacian L_ρ,
+ * (L_ρ p)_i = Σ_f (A_f/d_f) ½(1/ρ_i + 1/ρ_j)(p_i − p_j) (§2.6, its compact approximation), plus
+ * the viscous diagonal of Cahouet–Chabard: P⁻¹ = S₀⁻¹ (or L_ρ⁻¹) + θ(τ/2)·2μ_i/V_i.
+ * S₀ (and its approximation L_ρ) is the Schur complement's inertial limit (A = M); when θ(τ/2)ζ
+ * dominates M (ν τ/h² ≫ 1) S tends to C(θ(τ/2)ζ)⁻¹Cᵀ ≈ V/(2θ(τ/2)μ), a mass-matrix-like operator
+ * S₀⁻¹ cannot precondition; the sum covers both limits (Cahouet & Chabard 1988). The velocity is
+ * carried by the same recurrence as the residual, v ← v − α A⁻¹Cᵀp,   r ← r − α C (A⁻¹Cᵀp), with
+ * the SAME vector A⁻¹Cᵀp in both, so r = C v holds to round-off whatever the inner accuracy: the
+ * constraint is met to the outer tolerance ‖C v‖_∞ ≤ min(tol·max V/τ, tol·‖C‖·v_ref) (see solve),
+ * and the inner tolerance (1e-10, §2.6) bounds only the momentum residual. The outer CG is the flexible (Polak–Ribière) form, since inexact inner solves
  * make S vary slightly between iterations. Inner A-solves: PCG with Jacobi on the approximate
  * diagonal m + θ(τ/2) Σ_f μ_f A/(3d)(1 + n_a²) (+ the wall term), or, when max ν τ/h² exceeds 0.5
  * (§2.6), AMG on the scalar two-point operator m + θ(τ/2)·(4/9) Σ_f μ_f A/d (n̂_a² averaged to 1/3)
@@ -199,9 +201,12 @@ struct SaddleParams {
   double innerTol = 1e-10;  ///< relative residual of each inner A-solve
   int maxOuter = 2000, maxInner = 2000;
   double amgSwitch = 0.5;  ///< inner preconditioner: AMG when max ν τ/h² exceeds this, else Jacobi
-  /// Schur preconditioner: false = AMG on the two-point L_ρ (§2.6), true = AMG on the assembled
-  /// S₀ = C M⁻¹ Cᵀ (2-ring stencil; M7 WO4a trial). Cahouet–Chabard's viscous term either way.
-  bool schurAssembled = false;
+  /// Schur preconditioner: true (default since M7 WO4a) = AMG on the assembled inertial Schur
+  /// complement S₀ = C M⁻¹ Cᵀ (2-ring stencil); false = AMG on the two-point L_ρ (§2.6).
+  /// Cahouet–Chabard's viscous term either way. Measured (Lloyd drop, ρ 1:10, σ 1, μ 0.1, gauge
+  /// on): outer iterations per kick 96 → 25 and s/step 136 → 35 at N = 32768 (7.7 → 3.0 at
+  /// 4096); inviscid 113 → 23 outer, but its 4× dearer setup makes the step ~7 % slower.
+  bool schurAssembled = true;
 };
 
 struct SaddleStats {
