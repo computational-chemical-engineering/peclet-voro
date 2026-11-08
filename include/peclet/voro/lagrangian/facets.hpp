@@ -94,6 +94,33 @@ KOKKOS_INLINE_FUNCTION bool faceMoments(const Cell& c, int k, Real& area, Real c
   cen[0] = cx / (Real(3) * A);
   cen[1] = cy / (Real(3) * A);
   cen[2] = cz / (Real(3) * A);
+  {
+    // A degenerate face (a lattice vertex or edge split by round-off: A ≈ 0 by cancellation of
+    // signed fan triangles) has no meaningful centroid: Σ a_t y_t / Σ a_t is unbounded as
+    // Σ a_t → 0, and the second moment about it with it (measured: |S| up to 1.7e11 at A = 8e-20
+    // on the perturbed 16³ lattice, a 1.8e-5 jump in ∇Ũ when such faces appear). The centroid of a
+    // valid (convex) face lies in its vertex hull, |c − m| ≤ max_v |v − m| with m the vertex
+    // mean; outside it, take c = m, so that A c, A c cᵀ and S stay O(A · diam²) and vanish with A.
+    // Never triggers on a convex face (bit-identical there).
+    Real vm[3] = {0, 0, 0};
+    for (int q = 0; q < m; ++q) {
+      vm[0] += fx[q];
+      vm[1] += fy[q];
+      vm[2] += fz[q];
+    }
+    for (int a = 0; a < 3; ++a)
+      vm[a] /= Real(m);
+    Real r2 = 0;
+    for (int q = 0; q < m; ++q) {
+      const Real dx = fx[q] - vm[0], dy = fy[q] - vm[1], dz = fz[q] - vm[2];
+      const Real d2 = dx * dx + dy * dy + dz * dz;
+      r2 = d2 > r2 ? d2 : r2;
+    }
+    const Real ex = cen[0] - vm[0], ey = cen[1] - vm[1], ez = cen[2] - vm[2];
+    if (!(ex * ex + ey * ey + ez * ez <= r2))
+      for (int a = 0; a < 3; ++a)
+        cen[a] = vm[a];
+  }
   area = A;
   // second moment about the centroid: a triangle (p, q, r) has ∫ y yᵀ dA =
   // (A_t/12)(p pᵀ + q qᵀ + r rᵀ + s sᵀ), s = p + q + r (vertices relative to the centroid)
