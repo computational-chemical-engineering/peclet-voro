@@ -4,9 +4,9 @@
  * with §2.6 for the linear solves and §2.7 steps 3 and 5 for the heat and the step size):
  *
  *   1. kick 1 at x^n, friction fused (θ-midpoint), velocity constraint C^n v^{½} = 0 (by default
- *      C and ζ of kick 1 at x^n + (τ/2) v^n instead, option S, IntegratorParams::midpointConstraint):
- *        (M + θ(τ/2)ζ^n) v^{½} + (τ/2) C^{nᵀ} λ₁ = (M − (1−θ)(τ/2)ζ^n) v^n − (τ/2)(∇Ũ^n − M
- * a(x^n));
+ *      C and ζ of kick 1 at x^n + (τ/2) v^n instead, option S,
+ * IntegratorParams::midpointConstraint): (M + θ(τ/2)ζ^n) v^{½} + (τ/2) C^{nᵀ} λ₁ = (M −
+ * (1−θ)(τ/2)ζ^n) v^n − (τ/2)(∇Ũ^n − M a(x^n));
  *   2. drift x^{n+1} = x^n + τ v^{½} (wrapped into the box); weights warm-started by
  *      H δw = −τ J_x v^{½} (at x^n) and solved by the damped Newton of weight_solve.hpp, every
  *      iterate an incremental REPAIR of the resident engine (no cold rebuild); then π^{n+1} and
@@ -37,11 +37,12 @@
  * carried by the same recurrence as the residual, v ← v − α A⁻¹Cᵀp,   r ← r − α C (A⁻¹Cᵀp), with
  * the SAME vector A⁻¹Cᵀp in both, so r = C v holds to round-off whatever the inner accuracy: the
  * constraint is met to the outer tolerance ‖C v‖_∞ ≤ min(tol·max V/τ, tol·‖C‖·v_ref) (see solve),
- * and the inner tolerance (1e-10, §2.6) bounds only the momentum residual. The outer CG is the flexible (Polak–Ribière) form, since inexact inner solves
- * make S vary slightly between iterations. Inner A-solves: PCG with Jacobi on the approximate
- * diagonal m + θ(τ/2) Σ_f μ_f A/(3d)(1 + n_a²) (+ the wall term), or, when max ν τ/h² exceeds 0.5
- * (§2.6), AMG on the scalar two-point operator m + θ(τ/2)·(4/9) Σ_f μ_f A/d (n̂_a² averaged to 1/3)
- * applied per component. Inviscid (θτζ = 0): A = M, solved exactly. Any non-convergence throws.
+ * and the inner tolerance (1e-10, §2.6) bounds only the momentum residual. The outer CG is the
+ * flexible (Polak–Ribière) form, since inexact inner solves make S vary slightly between
+ * iterations. Inner A-solves: PCG with Jacobi on the approximate diagonal m + θ(τ/2) Σ_f μ_f
+ * A/(3d)(1 + n_a²) (+ the wall term), or, when max ν τ/h² exceeds 0.5 (§2.6), AMG on the scalar
+ * two-point operator m + θ(τ/2)·(4/9) Σ_f μ_f A/d (n̂_a² averaged to 1/3) applied per component.
+ * Inviscid (θτζ = 0): A = M, solved exactly. Any non-convergence throws.
  */
 #ifndef PECLET_VORO_LAGRANGIAN_INTEGRATOR_HPP
 #define PECLET_VORO_LAGRANGIAN_INTEGRATOR_HPP
@@ -282,7 +283,8 @@ class SaddleSolver {
                   ap);
     setupSeconds_ = tb.seconds();
     mh_ = mh;
-    {  // ‖C‖ per unit velocity: max_i Σ_f (A/d)|c_f| + Σ_w A_w (the physically scaled stop in solve)
+    {  // ‖C‖ per unit velocity: max_i Σ_f (A/d)|c_f| + Σ_w A_w (the physically scaled stop in
+       // solve)
       const CellFacets<Real> G = F;
       Real sc = 0;
       Kokkos::parallel_reduce(
@@ -382,8 +384,8 @@ class SaddleSolver {
       Kokkos::parallel_reduce(
           "sd.vref", Kokkos::RangePolicy<Exec>(0, N),
           KOKKOS_LAMBDA(const int i, Real& acc) {
-            const Real q2 = B(3 * i) * B(3 * i) + B(3 * i + 1) * B(3 * i + 1) +
-                            B(3 * i + 2) * B(3 * i + 2);
+            const Real q2 =
+                B(3 * i) * B(3 * i) + B(3 * i + 1) * B(3 * i + 1) + B(3 * i + 2) * B(3 * i + 2);
             const Real u = Kokkos::sqrt(q2) / m(i);
             acc = u > acc ? u : acc;
           },
@@ -604,23 +606,23 @@ struct IntegratorParams {
   SaddleParams saddle;
   double weightTol = 1e-12;  ///< max |V − V⁰|/V⁰ of the per-step weight solve
   int weightMaxIter = 50;
-  double hTol = 1e-10;              ///< relative residual of the warm-start and Newton H solves
+  double hTol = 1e-10;  ///< relative residual of the warm-start and Newton H solves
   /// relative residual of the π solve: ∇Ũ = ∂_xU + J_xᵀπ cancels O(ρ g z A) terms to its round-off,
   /// and at 1e-12 the π error was its floor (rest: 3e-13 vs 9e-16 at 1e-15, +3 PCG iterations;
   /// M7 WO4a)
   double adjointTol = 1e-14;
-  int maxHalvings = 4;              ///< τ halvings when the weight solve fails (W-Q7)
+  int maxHalvings = 4;  ///< τ halvings when the weight solve fails (W-Q7)
   /// option S (the default since M7 WO4′, orchestrator decision 2026-11-08: second order in the
   /// energy, ×4.2 per τ halving vs ×2.4 at x^n): kick 1's C at x^n + (τ/2) v^n; false: at x^n
   bool midpointConstraint = true;
   double repairTol = 1e-10;  ///< repaired-topology volume check (cone fan vs engine), relative
   // ---- the gauge (DESIGN_NOTE §2.8, §10.3 item 4) ----
-  int gaugeEvery = 1;      ///< the gauge after kick 2 every this many steps (0: off)
-  double alphaI = 0.2;     ///< interface: δ_i = −α_I P_i ∇_iŨ / σ_i (tangential descent)
-  double alphaB = 0.1;     ///< bulk: δ_i = α_B (b_i − x_i), b_i the power-cell centroid
-  double alphaBRule = 1.5; ///< automatic floor α_B ≥ alphaBRule · τ max_i |∇v|_i (§10.3 item 4)
-  int gaugeRetries = 3;    ///< energy-guard halvings of α_I, α_B before the gauge is skipped
-  double kernelLength = 2; ///< ℓ/h_i of the interface-normal kernel (§2.2; support 3ℓ)
+  int gaugeEvery = 1;   ///< the gauge after kick 2 every this many steps (0: off)
+  double alphaI = 0.2;  ///< interface: δ_i = −α_I P_i ∇_iŨ / σ_i (tangential descent)
+  double alphaB = 0.1;  ///< bulk: δ_i = α_B (b_i − x_i), b_i the power-cell centroid
+  double alphaBRule = 1.5;  ///< automatic floor α_B ≥ alphaBRule · τ max_i |∇v|_i (§10.3 item 4)
+  int gaugeRetries = 3;     ///< energy-guard halvings of α_I, α_B before the gauge is skipped
+  double kernelLength = 2;  ///< ℓ/h_i of the interface-normal kernel (§2.2; support 3ℓ)
   double normalLloydShift = 0.25;  ///< W-Q2: above this max unlike |s|/d, a normal Lloyd part on I
 };
 
@@ -731,7 +733,8 @@ class Integrator {
     iList_ = Kokkos::View<int*, Mem>("nhvw.iList", n);
     const double* ug = fp_.wallGradient;
     movingWall_ = fp_.wallVelocity[0] != 0 || fp_.wallVelocity[1] != 0 ||
-                  fp_.wallVelocity[2] != 0 || std::any_of(ug, ug + 9, [](double x) { return x != 0; });
+                  fp_.wallVelocity[2] != 0 ||
+                  std::any_of(ug, ug + 9, [](double x) { return x != 0; });
     if (movingWall_)
       fw_ = LView<Real>("nhvw.wallForce", n3);
     evalState();
@@ -1451,8 +1454,8 @@ class Integrator {
   }
 
   /// pos ← pos0_, weight ← w0_ and the engine back to them: a repair, or a cold rebuild when the
-  /// repaired volumes miss V⁰ by more than repairTol (a repair cannot revive a cell the failed trial
-  /// buried; measured after the t = 0 relaxation, M7 WO4′).
+  /// repaired volumes miss V⁰ by more than repairTol (a repair cannot revive a cell the failed
+  /// trial buried; measured after the t = 0 relaxation, M7 WO4′).
   void restoreEngine() {
     Kokkos::deep_copy(pos_, pos0_);
     Kokkos::deep_copy(weight_, w0_);

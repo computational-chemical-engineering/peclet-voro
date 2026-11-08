@@ -368,8 +368,8 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
         "  (F) gauge: relax %d it (%d accepted, %d restore rebuilds) area %.4f -> %.4f dU=%.2e "
         "max|V-V0|/V0=%.1e; step: tries=%d accepted=%d dU=%.2e dK=%.2e |dP|/sum m|v|=%.1e |Cv| "
         "tau/maxV=%.1e\n",
-        iters, acc, rebuilds, A0, A1, dU, worstV, r.gaugeTries, int(r.gaugeAccepted), r.gaugePotential,
-        r.gaugeKinetic, dP, cmax);
+        iters, acc, rebuilds, A0, A1, dU, worstV, r.gaugeTries, int(r.gaugeAccepted),
+        r.gaugePotential, r.gaugeKinetic, dP, cmax);
     rc |= (dU <= 0 && A1 < A0 && acc > 0 && worstV <= 1e-12 && r.gaugeTries > 0 &&
            r.gaugePotential <= 0 && r.gaugeKinetic <= 0 && dP <= 1e-12 && cmax <= 1e-11)
               ? 0

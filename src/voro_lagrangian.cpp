@@ -691,8 +691,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     withInteg([&](auto& I) {
       vel_ = peclet::core::toVector(I.velocity());
       time_ = I.time();
-      acc_ = {I.heat(), I.constraintWork(), I.bodyWork(), I.wrapOffset(), I.gaugePotential(),
-              I.gaugeKinetic()};
+      acc_ = {I.heat(),       I.constraintWork(), I.bodyWork(),
+              I.wrapOffset(), I.gaugePotential(), I.gaugeKinetic()};
     });
   }
 
