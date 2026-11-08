@@ -888,6 +888,7 @@ class Integrator {
   ///     maxShift, min_i m_i > 0 (minMargin()). Call at t = 0 only; no energy counter is touched.
   RelaxReport relax(const RelaxParams& rp = {}) {
     RelaxReport r;
+    fcValid_ = false;
     double sigma = 0;
     if (spec_.tension.extent(0) > 0)
       for (double s : peclet::core::toVector(spec_.tension))
@@ -1081,6 +1082,7 @@ class Integrator {
   /// From (pos0_, w0_) at the state x^n held in F_: x ← x^n + s·u (wrapped), weights warm-started
   /// by H δw = −s J_x u and solved by the repaired Newton. False if the weight solve failed.
   bool moveAndSolve(double s, const LView<Real>& u, StepReport& rep) {
+    fcValid_ = false;
     applyVolumeJacobian(F_, u, tmpN_);
     {
       const LView<Real> r = tmpN_;
@@ -1121,6 +1123,7 @@ class Integrator {
     rep.evaluations += ws.evaluations;
     if (ws.converged && repairMismatch() > prm_.repairTol) {
       ++rep.repairFallbacks;
+      fcValid_ = false;
       mt_->rebuild(pos_);
       WeightSolveParams wc = wp;
       wc.repair = false;
@@ -1129,10 +1132,13 @@ class Integrator {
     return ws.converged;
   }
 
-  /// max_i |V_i(export) − V_i(engine)| / V⁰_i of the resident topology at (pos, weight).
-  double repairMismatch() const {
-    const CellFacets<Real> F = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_,
-                                                             mt_->wall, mt_->xRef, mt_->vol);
+  /// max_i |V_i(export) − V_i(engine)| / V⁰_i of the resident topology at (pos, weight). The
+  /// export is kept (fc_) for the next consumer at the same state (currentFacets()).
+  double repairMismatch() {
+    fc_ = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_, mt_->wall, mt_->xRef,
+                                        mt_->vol);
+    fcValid_ = true;
+    const CellFacets<Real> F = fc_;
     const LView<Real> ve = mt_->vol, v0 = V0_, vf = F.volume;
     Real m = 0;
     Kokkos::parallel_reduce(
@@ -1145,11 +1151,19 @@ class Integrator {
     return m;
   }
 
+  /// The facets at the current (pos, weight): the export repairMismatch() made at this state if it
+  /// is still valid (every change of pos/weight/engine after it clears fcValid_), else a new one.
+  CellFacets<Real> currentFacets() {
+    if (fcValid_)
+      return fc_;
+    return exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_, mt_->wall, mt_->xRef,
+                                         mt_->vol);
+  }
+
   /// Facets, U and ∇Ũ, π, and the two hierarchies at the current (pos, weight).
   void evalState(double* tPot = nullptr) {
     Kokkos::Timer t, tp;
-    F_ = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_, mt_->wall, mt_->xRef,
-                                       mt_->vol);
+    F_ = currentFacets();
     match_ = matchFacets(F_);
     Kokkos::fence();
     evalSplit_[0] = tp.seconds();
@@ -1242,6 +1256,7 @@ class Integrator {
   /// and the engine, which the caller restores).
   bool attempt(double tau, StepReport& rep) {
     Kokkos::Timer t;
+    fcValid_ = false;
     const double heat0 = heat_, work0 = work_, qc0 = qc_;  // kick 1's increments undone on a retry
     // ---- kick 1 at x^n (λ₁ warm-started from the last λ₂, same geometry) ----
     Kokkos::deep_copy(lam1_, lam2_);
@@ -1255,8 +1270,8 @@ class Integrator {
         qc_ = qc0;
         return false;
       }
-      F_ = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_, mt_->wall, mt_->xRef,
-                                         mt_->vol);
+      F_ = currentFacets();
+      fcValid_ = false;  // pos/weight return to x^n below
       matchFacets(F_);
       saddle_.setAssembled(prm_.saddle.schurAssembled);
       saddle_.setup(F_, rho_, mu_, mass_, h_);
@@ -1346,6 +1361,7 @@ class Integrator {
     rep.repairMismatch = repairMismatch();
     if (rep.repairMismatch > prm_.repairTol) {
       ++rep.repairFallbacks;
+      fcValid_ = false;
       mt_->rebuild(pos_);
       WeightSolveParams wc = wp;
       wc.repair = false;
@@ -1456,8 +1472,7 @@ class Integrator {
     for (int k = 0; k <= prm_.gaugeRetries; ++k, s *= 0.5) {
       ++rep.gaugeTries;
       if (moveAndSolve(s, gd_, rep)) {
-        CellFacets<Real> Ft = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_,
-                                                            mt_->wall, mt_->xRef, mt_->vol);
+        CellFacets<Real> Ft = currentFacets();
         matchFacets(Ft);
         cellMargins(Ft, mG_);
         const LView<Real> mg = mG_;
@@ -1647,6 +1662,7 @@ class Integrator {
   /// repaired volumes miss V⁰ by more than repairTol (a repair cannot revive a cell the failed
   /// trial buried; measured after the t = 0 relaxation, M7 WO4′).
   void restoreEngine() {
+    fcValid_ = false;
     Kokkos::deep_copy(pos_, pos0_);
     Kokkos::deep_copy(weight_, w0_);
     mt_->setWeights(weight_);
@@ -1791,6 +1807,8 @@ class Integrator {
   double evalSplit_[4] = {0, 0, 0, 0};  ///< evalState: facets, energy, H AMG setup, adjoint (s)
   double gaugeU_ = 0, gaugeK_ = 0;
   CellFacets<Real> F_;
+  CellFacets<Real> fc_;   ///< repairMismatch()'s export, reused at the same state (currentFacets)
+  bool fcValid_ = false;  ///< fc_ describes the current (pos, weight, engine)
   PotentialParts parts_;
   FacetMatch match_;
   AdjointResult adj_;
