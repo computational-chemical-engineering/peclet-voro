@@ -310,6 +310,105 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
   return F;
 }
 
+/// Result of matchFacets: directed facets dropped for want of a reciprocal.
+struct FacetMatch {
+  int dropped = 0;
+  double maxArea = 0;  ///< largest dropped area
+};
+
+/// Keep only RECIPROCATED interior facets: a facet of cell i toward j survives iff j holds a facet
+/// toward i with the opposite connector (the same periodic image). The resident topology of a
+/// repaired engine can hold a sliver facet on one side only (an incomplete neighbour set at a
+/// near-degenerate event — measured areas ≤ 1e-12 h², volumes still exact to 1e-12); one-sided
+/// facets break the pairing every gather in lagrangian/operators.hpp relies on (1ᵀC = 0, Cᵀ the
+/// transpose of C, H symmetric). Dropping the sliver changes cell i's closure by its area only.
+/// Returns the count and the largest area dropped; F is compacted in place when any is.
+template <class Real>
+FacetMatch matchFacets(CellFacets<Real>& F) {
+  using Mem = peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
+  const int N = F.nCells, nF = F.nFacets;
+  const CellFacets<Real> G = F;
+  Kokkos::View<int*, Mem> keep("lag.keep", static_cast<std::size_t>(nF));
+  Kokkos::View<int*, Mem> off("lag.offKeep", static_cast<std::size_t>(N) + 1);
+  FacetMatch res;
+  int dropped = 0;
+  Real amax = 0;
+  Kokkos::parallel_reduce(
+      "lagrangian.facets.match", Kokkos::RangePolicy<Exec>(0, N),
+      KOKKOS_LAMBDA(const int i, int& nd, Real& am) {
+        int nk = 0;
+        for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+          const int j = G.nbr(f);
+          Real d2 = 0;
+          for (int a = 0; a < 3; ++a)
+            d2 += G.conn(3 * f + a) * G.conn(3 * f + a);
+          bool found = false;
+          for (int g = G.facetOffset(j); g < G.facetOffset(j + 1) && !found; ++g) {
+            if (G.nbr(g) != i)
+              continue;
+            Real e2 = 0;
+            for (int a = 0; a < 3; ++a) {
+              const Real e = G.conn(3 * g + a) + G.conn(3 * f + a);
+              e2 += e * e;
+            }
+            found = e2 <= Real(1e-18) * d2;
+          }
+          keep(f) = found ? 1 : 0;
+          nk += found ? 1 : 0;
+          if (!found) {
+            ++nd;
+            am = G.area(f) > am ? G.area(f) : am;
+          }
+        }
+        off(i + 1) = nk;
+      },
+      dropped, Kokkos::Max<Real>(amax));
+  res.dropped = dropped;
+  res.maxArea = dropped > 0 ? amax : 0.0;
+  if (dropped == 0)
+    return res;
+  int nK = 0;
+  Kokkos::parallel_scan(
+      "lagrangian.facets.matchScan", N + 1,
+      KOKKOS_LAMBDA(const int i, int& upd, const bool fin) {
+        const int v = off(i);
+        upd += v;
+        if (fin)
+          off(i) = upd;
+      },
+      nK);
+  const std::size_t sK = static_cast<std::size_t>(nK);
+  Kokkos::View<int*, Mem> nbr("lag.nbr", sK);
+  Kokkos::View<Real*, Mem> area("lag.area", sK), cen("lag.cen", 3 * sK), conn("lag.conn", 3 * sK),
+      sec("lag.sec", 9 * sK);
+  Kokkos::parallel_for(
+      "lagrangian.facets.matchFill", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        int o = off(i);
+        for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+          if (!keep(f))
+            continue;
+          nbr(o) = G.nbr(f);
+          area(o) = G.area(f);
+          for (int a = 0; a < 3; ++a) {
+            cen(3 * o + a) = G.centroid(3 * f + a);
+            conn(3 * o + a) = G.conn(3 * f + a);
+          }
+          for (int e = 0; e < 9; ++e)
+            sec(9 * o + e) = G.second(9 * f + e);
+          ++o;
+        }
+      });
+  F.nFacets = nK;
+  F.facetOffset = off;
+  F.nbr = nbr;
+  F.area = area;
+  F.centroid = cen;
+  F.conn = conn;
+  F.second = sec;
+  return res;
+}
+
 }  // namespace peclet::voro::lagrangian
 
 #endif  // PECLET_VORO_LAGRANGIAN_FACETS_HPP

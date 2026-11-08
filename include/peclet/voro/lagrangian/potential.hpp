@@ -40,9 +40,12 @@
 #include <utility>
 
 #include "peclet/core/common/view.hpp"
+#include "peclet/voro/energy/interface.hpp"
+#include "peclet/voro/energy/wall.hpp"
 #include "peclet/voro/lagrangian/facets.hpp"
 #include "peclet/voro/lagrangian/operators.hpp"
 #include "peclet/voro/lagrangian/weight_solve.hpp"
+#include "peclet/voro/reeval_tessellation.hpp"
 
 namespace peclet::voro::lagrangian {
 
@@ -105,6 +108,64 @@ Real facetGravity(const CellFacets<Real>& F, const LView<Real>& pos,
       },
       U);
   return U;
+}
+
+/// The physical inputs of U(x, w) = E_σ + E_w + U_g (DESIGN_NOTE §2.2 items 1–3) as device
+/// tables indexed by the cell type: `tension` (nTypes², σ_ab; empty: no interface energy),
+/// `sigmaWall` (nTypes, σ_s; empty: no wetting), `density` (nTypes; empty: no gravity) with the
+/// gravity vector and the reference density of facetGravity.
+template <class Real>
+struct PotentialSpec {
+  Kokkos::View<int*, peclet::core::MemSpace> types;  ///< N
+  int nTypes = 0;
+  LView<Real> tension, sigmaWall, density;
+  Real gravity[3] = {0, 0, 0};
+  Real rhoRef = 0;
+};
+
+struct PotentialParts {
+  double interface = 0, wall = 0, gravity = 0;
+  double total() const { return interface + wall + gravity; }
+};
+
+namespace detail {
+template <class Real, class Policy, int MAXP, int MAXT>
+TessellationView<Real> publishPower(const TopologyStore<MAXP, MAXT>& st, const LView<Real>& pos,
+                                    const LView<Real>& vol, int N, const Real L[3],
+                                    const WallStore<Real>& wall, const LView<Real>& xRef,
+                                    const LView<Real>& weight) {
+  return reevalPublish<Real, MAXP, MAXT, Policy>(st, pos, vol, N, L, wall, xRef,
+                                                 /*withAreaGrad=*/true, /*withMoments=*/false,
+                                                 weight);
+}
+}  // namespace detail
+
+/// U(x, w) on the resident POWER tessellation `mt` (a MovingTessellation with the Power policy,
+/// built at `pos`, `weight`) with its facets `F`: the interface and wetting energies
+/// (energy/interface.hpp, energy/wall.hpp on the power re-publish) and the facet gravity. ADDS ∂_xU
+/// into `gradX` (3N) and ∂_wU into `gradW` (N); returns the parts. Reduce with reducedGradient.
+template <class MT, class Real>
+PotentialParts partitionPotential(MT& mt, const CellFacets<Real>& F, const LView<Real>& pos,
+                                  const LView<Real>& weight, const Real L[3],
+                                  const PotentialSpec<Real>& s, const LView<Real>& gradX,
+                                  const LView<Real>& gradW) {
+  using Policy = typename MT::PlanePolicy;
+  static_assert(std::is_same_v<Policy, Power>, "partitionPotential needs a power tessellation");
+  PotentialParts e;
+  const int N = F.nCells;
+  if (s.tension.extent(0) > 0 || s.sigmaWall.extent(0) > 0) {
+    auto view =
+        detail::publishPower<Real, Policy>(mt.store, pos, mt.vol, N, L, mt.wall, mt.xRef, weight);
+    if (s.tension.extent(0) > 0)
+      e.interface = energy::interfaceEnergyForce<Real, Policy>(
+          view, s.types, s.tension, s.nTypes, pos, weight, L[0], gradX, gradW, mt.sdf);
+    if (s.sigmaWall.extent(0) > 0)
+      e.wall = energy::wallEnergyForce<Real, Policy>(view, s.types, s.sigmaWall, mt.sdf, pos,
+                                                     weight, L[0], gradX, gradW);
+  }
+  if (s.density.extent(0) > 0)
+    e.gravity = facetGravity(F, pos, s.types, s.density, s.gravity, s.rhoRef, L, gradX, gradW);
+  return e;
 }
 
 struct AdjointResult {
