@@ -199,6 +199,272 @@ peclet::core::solver::HostCsrOp schurHost(const CellFacets<Real>& F, const LView
   }
   return K;
 }
+
+/// Heap sort of a[0, n) ascending, in place (device-callable; the S₀ sparsity pass).
+KOKKOS_INLINE_FUNCTION void heapSortInts(int* a, int n) {
+  auto sift = [a](int r, int e) {
+    for (;;) {
+      int c = 2 * r + 1;
+      if (c >= e)
+        return;
+      if (c + 1 < e && a[c + 1] > a[c])
+        ++c;
+      if (a[r] >= a[c])
+        return;
+      const int t = a[r];
+      a[r] = a[c];
+      a[c] = t;
+      r = c;
+    }
+  };
+  for (int r = n / 2 - 1; r >= 0; --r)
+    sift(r, n);
+  for (int e = n - 1; e > 0; --e) {
+    const int t = a[0];
+    a[0] = a[e];
+    a[e] = t;
+    sift(0, e);
+  }
+}
+
+/// S₀ = C M⁻¹ Cᵀ assembled on the device, bit-identical to schurHost (WO-PERF3 P3.1, §14.4.6
+/// item 4). Columns of C are formed per velocity cell l in schurHost's order (facets of l, then the
+/// self entry), with the same expressions; row i (one thread) visits its column cells l in
+/// ascending order, the occurrences of i in column l in column order, and the entries k of column
+/// l in column order — exactly the order in which schurHost's stable sort leaves the equal-k terms
+/// of row i, so every coefficient is the same left-to-right sum. Off-diagonal slots start at −0
+/// (−0 + v = v for every v, the host's "first term assigned"); the diagonal starts at +0 as on the
+/// host. F must be reciprocal (matchFacets): the cells whose column holds row i are i and its face
+/// neighbours. The off-diagonal sparsity (2-ring, pinned at DOF 0) is kept while F's facet
+/// structure (facetOffset, nbr) is unchanged. All scratch is persistent.
+template <class Real>
+class SchurAssembly {
+ public:
+  using Mem = peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
+  using IV = Kokkos::View<int*, Mem>;
+
+  peclet::core::solver::HostCsrOp assemble(const CellFacets<Real>& F, const LView<Real>& mass) {
+    const int N = F.nCells, nF = F.nFacets;
+    const std::size_t nE = static_cast<std::size_t>(nF) + static_cast<std::size_t>(N);
+    grow(colRow_, nE, "s0.colRow");
+    grow(colVal_, 3 * nE, "s0.colVal");
+    grow(ring_, nE, "s0.ring");
+    grow(ringN_, static_cast<std::size_t>(N), "s0.ringN");
+    grow(diag_, static_cast<std::size_t>(N), "s0.diag");
+    const IV off = F.facetOffset, nbr = F.nbr, woff = F.wallOffset;
+    const LView<Real> area = F.area, conn = F.conn, cen = F.centroid, warea = F.wallArea,
+                      wn = F.wallNormal;
+    const IV colRow = colRow_, ring = ring_, ringN = ringN_;
+    const LView<Real> colVal = colVal_;
+    // ---- columns of C: entries of column l at [off(l) + l, off(l + 1) + l + 1) ----
+    Kokkos::parallel_for(
+        "s0.columns", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int l) {
+          double dl[3] = {0, 0, 0};
+          int e = off(l) + l;
+          for (int f = off(l); f < off(l + 1); ++f, ++e) {
+            const double d =
+                Kokkos::sqrt(conn(3 * f) * conn(3 * f) + conn(3 * f + 1) * conn(3 * f + 1) +
+                             conn(3 * f + 2) * conn(3 * f + 2));
+            const double sc = area(f) / d;
+            for (int a = 0; a < 3; ++a) {
+              dl[a] -= sc * cen(3 * f + a);
+              colVal(3 * e + a) = sc * (cen(3 * f + a) - conn(3 * f + a));
+            }
+            colRow(e) = nbr(f);
+          }
+          for (int f = woff(l); f < woff(l + 1); ++f)
+            for (int a = 0; a < 3; ++a)
+              dl[a] -= warea(f) * wn(3 * f + a);
+          for (int a = 0; a < 3; ++a)
+            colVal(3 * e + a) = dl[a];
+          colRow(e) = l;
+        });
+    // ---- the column cells of row i: {i} ∪ face neighbours, ascending, unique ----
+    Kokkos::parallel_for(
+        "s0.ring", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          const int b = off(i) + i;
+          int n = 0;
+          ring(b + n++) = i;
+          for (int f = off(i); f < off(i + 1); ++f)
+            ring(b + n++) = nbr(f);
+          heapSortInts(&ring(b), n);
+          int u = 0;
+          for (int q = 0; q < n; ++q)
+            if (u == 0 || ring(b + q) != ring(b + u - 1))
+              ring(b + u++) = ring(b + q);
+          ringN(i) = u;
+        });
+    if (!sameStructure(F))
+      sparsity(F);
+    // ---- values, row by row in the stable host order ----
+    const IV start = start_, cols = cols_;
+    const LView<Real> coef = coef_, dg = diag_, m = mass;
+    Kokkos::parallel_for(
+        "s0.values", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          const int s0 = start(i), s1 = start(i + 1);
+          for (int q = s0; q < s1; ++q)
+            coef(q) = -0.0;
+          double di = 0;
+          const int b = off(i) + i;
+          for (int r = 0; r < ringN(i); ++r) {
+            const int l = ring(b + r);
+            const double im = 1.0 / m(l);
+            const int e0 = off(l) + l, e1 = off(l + 1) + l + 1;
+            for (int ei = e0; ei < e1; ++ei) {
+              if (colRow(ei) != i)
+                continue;
+              const double c0 = colVal(3 * ei), c1 = colVal(3 * ei + 1), c2 = colVal(3 * ei + 2);
+              for (int ek = e0; ek < e1; ++ek) {
+                const int k = colRow(ek);
+                const double v =
+                    im * (c0 * colVal(3 * ek) + c1 * colVal(3 * ek + 1) + c2 * colVal(3 * ek + 2));
+                if (k == i) {
+                  di += v;
+                  continue;
+                }
+                if (i == 0 || k == 0)
+                  continue;  // pinned
+                int lo = s0, hi = s1;
+                while (hi - lo > 1) {
+                  const int mid = (lo + hi) / 2;
+                  if (cols(mid) <= k)
+                    lo = mid;
+                  else
+                    hi = mid;
+                }
+                coef(lo) += v;
+              }
+            }
+          }
+          dg(i) = di;
+        });
+    Kokkos::fence();
+    peclet::core::solver::HostCsrOp K;
+    K.n = N;
+    K.diag = peclet::core::toVector(Kokkos::subview(diag_, std::make_pair(0, N)));
+    K.start.assign(hStart_.begin(), hStart_.end());
+    K.nbr.assign(hCols_.begin(), hCols_.end());
+    K.coef = peclet::core::toVector(Kokkos::subview(coef_, std::make_pair(0, nnz_)));
+    return K;
+  }
+
+ private:
+  template <class V>
+  static void grow(V& v, std::size_t n, const char* label) {
+    if (v.extent(0) < n)
+      v = V(Kokkos::view_alloc(std::string(label), Kokkos::WithoutInitializing), n + n / 4 + 64);
+  }
+
+  /// F's facet structure equals the one the cached sparsity was built for.
+  bool sameStructure(const CellFacets<Real>& F) const {
+    if (F.nCells != sN_ || F.nFacets != sF_ || sN_ < 0)
+      return false;
+    const IV off = F.facetOffset, nbr = F.nbr, so = sOff_, sn = sNbr_;
+    const int nC = F.nCells;
+    int bad = 0;
+    Kokkos::parallel_reduce(
+        "s0.same", Kokkos::RangePolicy<Exec>(0, F.nFacets + F.nCells + 1),
+        KOKKOS_LAMBDA(const int q, int& acc) {
+          if (q <= nC)
+            acc += off(q) != so(q) ? 1 : 0;
+          else
+            acc += nbr(q - nC - 1) != sn(q - nC - 1) ? 1 : 0;
+        },
+        bad);
+    return bad == 0;
+  }
+
+  /// The off-diagonal sparsity of S₀ (pinned: row 0 and column 0 empty), rows ascending.
+  void sparsity(const CellFacets<Real>& F) {
+    const int N = F.nCells, nF = F.nFacets;
+    const IV off = F.facetOffset, ring = ring_, ringN = ringN_;
+    grow(ub_, static_cast<std::size_t>(N) + 1, "s0.ub");
+    grow(cnt_, static_cast<std::size_t>(N) + 1, "s0.cnt");
+    const IV ub = ub_, cnt = cnt_;
+    // upper bound per row: Σ over its column cells of the column length
+    Kokkos::parallel_for(
+        "s0.ub", Kokkos::RangePolicy<Exec>(0, N + 1), KOKKOS_LAMBDA(const int i) {
+          int u = 0;
+          if (i > 0) {
+            const int r = i - 1, b = off(r) + r;
+            for (int q = 0; q < ringN(r); ++q) {
+              const int l = ring(b + q);
+              u += off(l + 1) - off(l) + 1;
+            }
+          }
+          ub(i) = u;
+        });
+    int tot = 0;
+    Kokkos::parallel_scan(
+        "s0.ubScan", N + 1,
+        KOKKOS_LAMBDA(const int i, int& upd, const bool fin) {
+          upd += ub(i);
+          if (fin)
+            ub(i) = upd;
+        },
+        tot);
+    grow(cand_, static_cast<std::size_t>(tot), "s0.cand");
+    const IV cand = cand_, colRow = colRow_;
+    Kokkos::parallel_for(
+        "s0.pattern", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          const int b = off(i) + i, c0 = ub(i);
+          int n = 0;
+          if (i != 0)
+            for (int q = 0; q < ringN(i); ++q) {
+              const int l = ring(b + q);
+              for (int e = off(l) + l; e < off(l + 1) + l + 1; ++e) {
+                const int k = colRow(e);
+                if (k != i && k != 0)
+                  cand(c0 + n++) = k;
+              }
+            }
+          heapSortInts(&cand(c0), n);
+          int u = 0;
+          for (int q = 0; q < n; ++q)
+            if (u == 0 || cand(c0 + q) != cand(c0 + u - 1))
+              cand(c0 + u++) = cand(c0 + q);
+          cnt(i + 1) = u;
+        });
+    Kokkos::deep_copy(Kokkos::subview(cnt, 0), 0);
+    int nnz = 0;
+    Kokkos::parallel_scan(
+        "s0.cntScan", N + 1,
+        KOKKOS_LAMBDA(const int i, int& upd, const bool fin) {
+          upd += cnt(i);
+          if (fin)
+            cnt(i) = upd;
+        },
+        nnz);
+    grow(cols_, static_cast<std::size_t>(nnz), "s0.cols");
+    grow(coef_, static_cast<std::size_t>(nnz), "s0.coef");
+    const IV cols = cols_;
+    Kokkos::parallel_for(
+        "s0.compact", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          const int c0 = ub(i);
+          for (int q = cnt(i); q < cnt(i + 1); ++q)
+            cols(q) = cand(c0 + q - cnt(i));
+        });
+    start_ = Kokkos::subview(cnt_, std::make_pair(0, N + 1));
+    nnz_ = nnz;
+    // host copies of the pattern (HostCsrOp) and the structure the pattern belongs to
+    const auto hs = peclet::core::toVector(start_);
+    const auto hc = peclet::core::toVector(Kokkos::subview(cols_, std::make_pair(0, nnz)));
+    hStart_.assign(hs.begin(), hs.end());
+    hCols_.assign(hc.begin(), hc.end());
+    grow(sOff_, static_cast<std::size_t>(N) + 1, "s0.sOff");
+    grow(sNbr_, static_cast<std::size_t>(nF), "s0.sNbr");
+    Kokkos::deep_copy(Kokkos::subview(sOff_, std::make_pair(0, N + 1)), off);
+    Kokkos::deep_copy(Kokkos::subview(sNbr_, std::make_pair(0, nF)), F.nbr);
+    sN_ = N;
+    sF_ = nF;
+  }
+
+  IV colRow_, ring_, ringN_, ub_, cnt_, cand_, cols_, start_, sOff_, sNbr_;
+  LView<Real> colVal_, coef_, diag_;
+  std::vector<peclet::core::Index> hStart_, hCols_;
+  int nnz_ = 0, sN_ = -1, sF_ = -1;
+};
 }  // namespace detail
 
 /// The kick's saddle solver (M7 WO-PERF).
@@ -305,7 +571,7 @@ class SaddleSolver {
     if (!rebuildAmg && lrho_.numLevels() > 0 && builtAssembled_ == assembled_) {
       // the lagged hierarchy (no setup charged)
     } else if (assembled_)
-      lrho_.build(detail::schurHost(F, mass), ap);
+      lrho_.build(schurAsm_.assemble(F, mass), ap);
     else
       lrho_.build(detail::twoPointHost(
                       F,
@@ -870,6 +1136,7 @@ class SaddleSolver {
     }
     dst = peclet::core::toDevice<Real>(src, label);
   }
+  detail::SchurAssembly<Real> schurAsm_;  ///< S₀ on the device (bit-identical to schurHost)
   bool viscous_ = false, useAmg_ = false, assembled_ = false, builtAssembled_ = false;
   double nuH2_ = 0, setupSeconds_ = 0;
   Real cScale_ = 0;

@@ -574,6 +574,37 @@ int checkLightExport() {
   return (okL && okP && full.nWall > 0) ? 0 : 1;
 }
 
+/// S₀ assembled on the device (detail::SchurAssembly) equals schurHost bit for bit — diagonal,
+/// pattern and coefficients — on a fresh sparsity and on the cached one (same structure, new
+/// masses).
+int checkSchurDevice(const lag::CellFacets<real_t>& F0, std::mt19937& rng) {
+  auto F = F0;
+  const auto drop = lag::matchFacets(F);
+  const int N = F.nCells;
+  std::uniform_real_distribution<real_t> U(0.5, 2.0);
+  const auto vol = toHost(F.volume);
+  lag::detail::SchurAssembly<real_t> dev;
+  auto same = [](const std::vector<double>& a, const std::vector<double>& b) {
+    return a.size() == b.size() &&
+           (a.empty() || std::memcmp(a.data(), b.data(), a.size() * sizeof(double)) == 0);
+  };
+  int bad = 0;
+  for (int pass = 0; pass < 2; ++pass) {
+    std::vector<real_t> m(N);
+    for (int i = 0; i < N; ++i)
+      m[i] = vol[i] * U(rng);
+    const DV mass = toDev(m, "mass");
+    const auto H = lag::detail::schurHost(F, mass);
+    const auto D = dev.assemble(F, mass);
+    const bool ok = H.n == D.n && H.start == D.start && H.nbr == D.nbr && same(H.diag, D.diag) &&
+                    same(H.coef, D.coef);
+    std::printf("      S0 device vs host (pass %d, nnz %zu, dropped %d): %s\n", pass, H.coef.size(),
+                drop.dropped, ok ? "bit-identical" : "DIFFERENT");
+    bad |= ok ? 0 : 1;
+  }
+  return bad;
+}
+
 int run(int n, unsigned seed) {
   const real_t L = 1.0, h = L / n;
   const int N = n * n * n;
@@ -642,6 +673,7 @@ int run(int n, unsigned seed) {
     std::printf("      exported V vs targets: %.1e\n", e);
     rc |= e <= 1e-11 ? 0 : 1;
   }
+  rc |= checkSchurDevice(Fp, rng);
   const auto wSolved = toHost(w);
   rc |= checkPotential(mp, x, w, V0, L, h) <= 1e-6 ? 0 : 1;
   rc |= checkIntegrator(x, wSolved, V0, L, h);
