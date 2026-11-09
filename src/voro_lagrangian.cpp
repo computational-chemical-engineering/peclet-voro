@@ -1033,8 +1033,10 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   int amgReuse_ = 10;
   real_t warmTol_ = 1e-4, newtonTol_ = 1e-3;
   bool perfSet_ = false;  // false: the integrator's defaults
-  // Morton relabelling: -1 off, 0 once at the first preparation, K > 0 also every K steps
-  int relabelEvery_ = 0, sinceRelabel_ = 0;
+  // Morton relabelling: -1 off, 0 once at the first preparation, K > 0 also every K steps. K = 100
+  // (M7 WO-PERF2): a re-sort costs ~0.7 step (N 32768); a frozen order loses 66 % of its locality
+  // over 180 Taylor-Green steps (gamma 6), the step time within noise of K = 20 over that run
+  int relabelEvery_ = 100, sinceRelabel_ = 0;
   bool ordered_ = false;
   unsigned relabels_ = 0;  ///< Tess::relabels_ the per-cell state was gathered at
   std::optional<real_t> rhoRef_;
@@ -1126,14 +1128,15 @@ void bindLagrangian(nb::module_& m) {
            "or 'start' (x^n; first order).")
       .def("_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "coupled",
            nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 10, nb::arg("warm_tol") = 1e-4,
-           nb::arg("newton_tol") = 1e-3, nb::arg("relabel") = 0,
+           nb::arg("newton_tol") = 1e-3, nb::arg("relabel") = 100,
            "M7 WO-PERF solver trials (not public API): the kick's saddle method ('schur' nested\n"
            "Schur CG, 'coupled' block-preconditioned FGMRES, 'projection' rotational incremental\n"
            "pressure correction with chi = `rotational`), and AMG hierarchy reuse over at most\n"
            "`amg_reuse` further setups (0: rebuilt every setup); the relative tolerances of the "
            "warm-start\n"
            "and Newton H solves; the cell relabelling (`relabel`: -1 off, 0 Morton order at the\n"
-           "first preparation, K > 0 also re-sorted every K steps; the caller's order is kept).")
+           "first preparation, K > 0 also re-sorted every K steps (default 100); the caller's "
+           "order is kept).")
       .def("_set_solver_options", &LagrangianFlow::set_solver_options, nb::arg("schur_assembled"),
            nb::arg("adjoint_tol"), nb::arg("saddle_tol") = 1e-12,
            "M7 WO4a solver trials (not public API): AMG on the assembled C M^-1 C^T as the Schur\n"
