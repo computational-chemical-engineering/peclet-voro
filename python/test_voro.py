@@ -10,6 +10,8 @@ face divergence). Run with the built module on PYTHONPATH, e.g.:
 
     PYTHONPATH=<build> python python/test_voro.py
 """
+import os
+
 import numpy as np
 from peclet import voro
 
@@ -684,22 +686,30 @@ def test_lagrangian_relabel():
     d = (pos - 0.5 + 0.5 * L) % L - 0.5 * L
     types = (np.linalg.norm(d, axis=1) < 0.3).astype(np.int32)
 
-    def flow(p, ty, relabel):
+    def tess(p):
         t = voro.Tessellation()
         t.set_domain(extent=(L, L, L))
         t.set_weights(np.zeros(len(p)))
         t.build(np.ascontiguousarray(p), strict=True)
-        f = voro.LagrangianFlow(t, np.ascontiguousarray(ty))
+        return t
+
+    # one set of reference volumes for every flow: the cell volumes of builds in different orders
+    # differ in the last ulp, which the inexact inner solves amplify to ~1e-12
+    o = _morton_order(pos, L)
+    V0 = tess(pos).get_volumes()
+
+    def flow(p, ty, relabel, V):
+        t = tess(p)
+        f = voro.LagrangianFlow(t, np.ascontiguousarray(ty), np.ascontiguousarray(V))
         f.set_density(np.array([1.0, 10.0]))
         f.set_viscosity(np.array([0.05, 0.05]))
         f.set_tension(np.array([[0, 1.0], [1.0, 0]]))
         f._set_perf_options(relabel=relabel)
         return t, f
 
-    o = _morton_order(pos, L)
-    ta, fa = flow(pos, types, 0)          # shuffled input, relabelled internally
-    tb, fb = flow(pos[o], types[o], -1)   # Morton input, relabelling off
-    tc, fc = flow(pos, types, -1)         # shuffled input, relabelling off (the old path)
+    ta, fa = flow(pos, types, 0, V0)            # shuffled input, relabelled internally
+    tb, fb = flow(pos[o], types[o], -1, V0[o])  # Morton input, relabelling off
+    tc, fc = flow(pos, types, -1, V0)           # shuffled input, relabelling off (the old path)
     v = 0.1 * rng.standard_normal(pos.shape)
     fa.set_velocities(v)
     fb.set_velocities(v[o])
@@ -708,11 +718,14 @@ def test_lagrangian_relabel():
     fa.step(3)
     fb.step(3)
     fc.step(3)
-    ab = max(np.abs(fa.get_velocities()[o] - fb.get_velocities()).max(),
+    # the same internal order: bit for bit on one thread, thread-order round-off otherwise
+    vmax = np.abs(fb.get_velocities()).max()
+    ab = max(np.abs(fa.get_velocities()[o] - fb.get_velocities()).max() / vmax,
              np.abs(fa.get_positions()[o] - fb.get_positions()).max(),
              np.abs(ta.get_volumes()[o] - tb.get_volumes()).max())
     ac = np.abs(fa.get_velocities() - fc.get_velocities()).max() / np.abs(fc.get_velocities()).max()
-    assert ab < 1e-12 and ac < 1e-8, (ab, ac)
+    one = os.environ.get("OMP_NUM_THREADS") == "1"
+    assert (ab == 0 if one else ab < 1e-10) and ac < 1e-8, (ab, ac)
     assert np.allclose(fa.get_lambda()[o], fb.get_lambda(), rtol=0, atol=1e-10)
     Fa, Fb = ta.get_facets(), tb.get_facets()
     assert np.all(Fa["i"] < Fa["j"]) and len(Fa["i"]) == len(Fb["i"])
@@ -721,7 +734,7 @@ def test_lagrangian_relabel():
     assert {tuple(sorted(x)) for x in pa} == pb
     # a periodic re-sort keeps the run (warm start and step count carried): every 2 steps, and by step 4
     # the cells have moved far enough (0.6 h) to change their Morton order, so steps 5-6 run re-sorted
-    td, fd = flow(pos, types, 2)
+    td, fd = flow(pos, types, 2, V0)
     fd.set_velocities(v)
     fd.step(4)
     moved = int((_morton_order(fd.get_positions(), L) != o).sum())
