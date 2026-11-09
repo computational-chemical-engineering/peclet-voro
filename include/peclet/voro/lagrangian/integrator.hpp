@@ -1220,8 +1220,12 @@ struct IntegratorParams {
   double gaugeAlphaMax = 0.2;  ///< α_max
   double gaugeSkip = 1e-6;     ///< skip the gauge (state untouched) when max_i α_i < this
   int gaugeRetries = 3;        ///< halvings of all α_i on a rejected trial before the skip
-  /// kTrial: G″'s trial after kick 2; kDrift: δ in the next drift (P3.3a: G″'s activation times
-  /// the posterior-monitor factor f_G, no trial OT, no Ũ trial, no M-projection)
+  /// G‴'s activation (§14.4.4; the drift gauge's since M7 WO-PERF3 P3.3b): α_max of G‴ (G″ keeps
+  /// gaugeAlphaMax) and the shift scale s_* of the ŝ-feedback (1 + (ŝ_i/s_*)²)
+  double gaugeAlphaMaxDrift = 0.5, gaugeShiftScale = 0.15;
+  /// kTrial: G″'s trial after kick 2; kDrift: δ in the next drift with G‴'s activation (P3.3b:
+  /// the ε̄ floor, the ŝ-feedback, α_max = gaugeAlphaMaxDrift, times the posterior-monitor factor
+  /// f_G; no trial OT, no Ũ trial, no M-projection)
   GaugeMode gaugeMode = GaugeMode::kTrial;
   double kernelLength = 2;         ///< ℓ/h_i of the interface-normal kernel (§2.2; support 3ℓ)
   double normalLloydShift = 0.25;  ///< W-Q2: a cell of I with an unlike |s|/d above this also
@@ -2235,10 +2239,15 @@ class Integrator {
     return true;
   }
 
-  /// G″'s activation (§12.3.2 step 1) into aG_: ε̇_i = ‖sym(G_i v)‖_F, ε̂_i its max over i and
-  /// i's face neighbours, α_i = fG · min(α_max, c_g τ ε̂_i) (fG = 1: G″; the drift gauge's f_G).
+  /// The gauge's activation into aG_: ε̇_i = ‖sym(G_i v)‖_F, ε̂_i its max over i and i's face
+  /// neighbours.
+  ///  G″ (§12.3.2 step 1; g3 false): α_i = fG · min(α_max, c_g τ ε̂_i), fG = 1.
+  ///  G‴ (§14.4.4; g3 true, the drift gauge): ε̄ = (Σ_i V_i ε̇_i² / Σ_i V_i)^{1/2} (V_i the held
+  ///  volumes V⁰_i), ŝ_i = max_{f∋i} |s_f|/d_f (the facets to neighbour cells, as shifts()),
+  ///  α_i = fG · min(α_max, c_g τ max(ε̂_i, ε̄)(1 + (ŝ_i/s_*)²)), α_max = gaugeAlphaMaxDrift,
+  ///  s_* = gaugeShiftScale, fG the posterior monitor's f_G.
   /// Returns max_i α_i.
-  double gaugeActivation(double tau, double fG) {
+  double gaugeActivation(double tau, double fG, bool g3 = false) {
     cellGradient(F_, vel_, gs_);
     {
       const LView<Real> gs = gs_, e = tmpN_;
@@ -2253,6 +2262,8 @@ class Integrator {
             e(i) = Kokkos::sqrt(q);
           });
     }
+    if (g3)
+      return gaugeActivationG3(tau, fG);
     {
       const CellFacets<Real> G = F_;
       const LView<Real> e = tmpN_, al = aG_;
@@ -2273,6 +2284,49 @@ class Integrator {
           Kokkos::Max<Real>(am));
       return am;
     }
+  }
+
+  /// G‴'s α_i (see gaugeActivation) from ε̇_i in tmpN_.
+  double gaugeActivationG3(double tau, double fG) {
+    double ebar = 0;
+    {
+      const LView<Real> e = tmpN_, V = V0_;
+      Real sve = 0, sv = 0;
+      Kokkos::parallel_reduce(
+          "nhvw.gaugeStrainMean", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i, Real& a, Real& b) {
+            a += V(i) * e(i) * e(i);
+            b += V(i);
+          },
+          sve, sv);
+      ebar = sv > 0 ? std::sqrt(double(sve) / double(sv)) : 0.0;
+    }
+    const CellFacets<Real> G = F_;
+    const LView<Real> e = tmpN_, al = aG_, w = weight_;
+    const Real cg = prm_.gaugeStrain * tau, amax = prm_.gaugeAlphaMaxDrift, fg = fG, eb = ebar,
+               sinv = Real(1) / prm_.gaugeShiftScale;
+    Real am = 0;
+    Kokkos::parallel_reduce(
+        "nhvw.gaugeAlpha3", Kokkos::RangePolicy<Exec>(0, N_),
+        KOKKOS_LAMBDA(const int i, Real& acc) {
+          Real m = e(i) > eb ? e(i) : eb, sh = 0;
+          for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+            const int j = G.nbr(f);
+            const Real q = e(j);
+            m = q > m ? q : m;
+            Real d2 = 0;
+            for (int c = 0; c < 3; ++c)
+              d2 += G.conn(3 * f + c) * G.conn(3 * f + c);
+            const Real sf = Kokkos::fabs(w(i) - w(j)) / (Real(2) * d2);
+            sh = sf > sh ? sf : sh;
+          }
+          const Real r = sh * sinv, c = cg * m * (Real(1) + r * r);
+          const Real a = fg * (c < amax ? c : amax);
+          al(i) = a;
+          acc = a > acc ? a : acc;
+        },
+        Kokkos::Max<Real>(am));
+    return am;
   }
 
   /// The gauge G″ (DESIGN_NOTE §12.3.2) at x = x^{n+1}, v = v^{n+1}: strain-activated, Lloyd-only,
@@ -2382,15 +2436,15 @@ class Integrator {
     rep.gaugeFactor = gaugeFactor_;
   }
 
-  /// The drift gauge (GaugeMode::kDrift; DESIGN_NOTE §14.4.4 with G″'s activation, M7 WO-PERF3
-  /// P3.3a) at x = x^{n+1}, v = v^{n+1}: α_i = f_G · min(α_max, c_g τ ε̂_i); max_i α_i < gaugeSkip:
+  /// The drift gauge (GaugeMode::kDrift; DESIGN_NOTE §14.4.4, M7 WO-PERF3 P3.3a/b) at
+  /// x = x^{n+1}, v = v^{n+1}: G‴'s α_i (gaugeActivation, g3); max_i α_i < gaugeSkip:
   /// δⁿ⁺¹ ≡ 0 and the next drift adds nothing (bit for bit). Otherwise δⁿ⁺¹ = G″ steps 2-4
   /// (gaugeDisplacement: the raw Lloyd move, the per-cell ascent projection with ∇Ũⁿ⁺¹, the
   /// ½-margin cap from this state's export) into gd_, pending for the next drift. No trial OT, no
   /// Ũ trial, no M-projection: the state is untouched here.
   void driftGauge(double tau, StepReport& rep) {
     Kokkos::Timer t;
-    const double am = gaugeActivation(tau, gaugeFactor_);
+    const double am = gaugeActivation(tau, gaugeFactor_, true);
     rep.gaugeAlphaMax = am;
     if (am >= prm_.gaugeSkip) {
       rep.gaugeInterface = gaugeDisplacement(rep);
