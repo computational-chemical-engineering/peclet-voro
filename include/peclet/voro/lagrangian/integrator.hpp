@@ -19,7 +19,10 @@
  *   5. step size τ = min(C_cfl min_i h_i/|v_i|, C_σ √(ρ_σ h_min³/σ_max), τ_user) (stableStep);
  *   6. the gauge G″ (DESIGN_NOTE §12.3.2: strain-activated, Lloyd-only, ascent-free) after kick 2,
  *      every IntegratorParams::gaugeEvery steps (see gauge()); its ΔŨ and ΔK go to their own
- * counters, so K + Ũ + Q + Q_c − W − ΔŨ_G − ΔK_G is what the integrator conserves to O(τ²). Moving
+ * counters, so K + Ũ + Q + Q_c − W − ΔŨ_G − ΔK_G is what the integrator conserves to O(τ²). With
+ * IntegratorParams::gaugeMode = GaugeMode::kDrift (M7 WO-PERF3 P3.3a, §14.4.4) the gauge's
+ * displacement δ is instead added in the next step's drift (driftGauge()); its ΔŨ_G is the
+ * posterior trapezoidal estimate and ΔK_G = 0 (the projection is kick 2's constraint). Moving
  * no-slip walls: the wall term of R becomes ½ Σ_w μ_i A^w |P_w(v_i − u_w)|²/δ_w with u_w a linear
  * field (FlowParams::wallVelocity/wallGradient) at the wall-facet centroid; the affine part −f_w
  * enters the kick's right-hand side and its work f_wᵀv̄ goes to the body work W (C is unchanged: u_w
@@ -466,6 +469,12 @@ class SchurAssembly {
   int nnz_ = 0, sN_ = -1, sF_ = -1;
 };
 }  // namespace detail
+
+/// Where the gauge's displacement goes (M7 WO-PERF3 P3.3a, DESIGN_NOTE §14.4.4).
+enum class GaugeMode {
+  kTrial,  ///< G″ (§12.3.2): a trial OT after kick 2, Ũ-guarded, then an M-projection (gauge())
+  kDrift,  ///< δ added in the next step's drift, posterior-monitored (driftGauge(), §14.4.4)
+};
 
 /// The kick's saddle solver (M7 WO-PERF).
 enum class SaddleMethod {
@@ -1206,11 +1215,14 @@ struct IntegratorParams {
   /// and lowered it at none of the measured drift sizes (4 to enable it: §14.4.3 as designed)
   double carryCap = 0, carryDrop = 1e-2;
   // ---- the gauge G″ (DESIGN_NOTE §12.3.2) ----
-  int gaugeEvery = 1;              ///< the gauge after kick 2 every this many steps (0: off)
-  double gaugeStrain = 3;          ///< c_g: α_i = min(α_max, c_g τ ε̂_i)
-  double gaugeAlphaMax = 0.2;      ///< α_max
-  double gaugeSkip = 1e-6;         ///< skip the gauge (state untouched) when max_i α_i < this
-  int gaugeRetries = 3;            ///< halvings of all α_i on a rejected trial before the skip
+  int gaugeEvery = 1;          ///< the gauge after kick 2 every this many steps (0: off)
+  double gaugeStrain = 3;      ///< c_g: α_i = min(α_max, c_g τ ε̂_i)
+  double gaugeAlphaMax = 0.2;  ///< α_max
+  double gaugeSkip = 1e-6;     ///< skip the gauge (state untouched) when max_i α_i < this
+  int gaugeRetries = 3;        ///< halvings of all α_i on a rejected trial before the skip
+  /// kTrial: G″'s trial after kick 2; kDrift: δ in the next drift (P3.3a: G″'s activation times
+  /// the posterior-monitor factor f_G, no trial OT, no Ũ trial, no M-projection)
+  GaugeMode gaugeMode = GaugeMode::kTrial;
   double kernelLength = 2;         ///< ℓ/h_i of the interface-normal kernel (§2.2; support 3ℓ)
   double normalLloydShift = 0.25;  ///< W-Q2: a cell of I with an unlike |s|/d above this also
                                    ///< gets the normal Lloyd part m̂m̂ᵀ(b_i − x_i)
@@ -1257,6 +1269,12 @@ struct StepReport {
   int gaugeMarginRejects = 0;  ///< trials with a seed on or behind its own facet
   int gaugeEnergyRejects = 0;  ///< trials with Ũ(x̃) > Ũ(x)
   double gaugeTrialDU = 0;     ///< ΔŨ of the last evaluated trial (diagnostics)
+  // the drift gauge (GaugeMode::kDrift, §14.4.4): gaugePotential is then the posterior ΔŨ_G of
+  // the δⁿ this step's drift added, gaugeKinetic 0; gaugeAlphaMax and gaugeCapped describe δⁿ⁺¹
+  int gaugeApplied = 0;    ///< δⁿ was added in this step's drift (1) or not (0)
+  int gaugeRedos = 0;      ///< drifts redone with δⁿ = 0 (OT failure or min_i m_i ≤ 0)
+  int gaugeActive = 0;     ///< cells with δⁿ⁺¹_i ≠ 0
+  double gaugeFactor = 0;  ///< f_G after this step's monitor update
   double tGauge = 0;
 };
 
@@ -1345,6 +1363,7 @@ class Integrator {
     w0_ = LView<Real>("nhvw.w0", n);
     wrapS_ = LView<Real>("nhvw.wrap", n3);
     gd_ = LView<Real>("nhvw.gaugeDelta", n3);
+    dd_ = LView<Real>("nhvw.driftDisp", n3);
     aI_ = LView<Real>("nhvw.areaVec", n3);
     lamG_ = LView<Real>("nhvw.lamGauge", n);
     gs_ = LView<Real>("nhvw.gradV", 9 * n);
@@ -1381,7 +1400,13 @@ class Integrator {
       ++rep.halvings;
     }
     time_ += tau;
-    if (prm_.gaugeEvery > 0 && ++stepCount_ % prm_.gaugeEvery == 0) {
+    if (prm_.gaugeMode == GaugeMode::kDrift) {
+      Kokkos::Timer tg;
+      gaugeMonitor(rep);
+      rep.tGauge = tg.seconds();
+      if (prm_.gaugeEvery > 0 && ++stepCount_ % prm_.gaugeEvery == 0)
+        driftGauge(tau, rep);
+    } else if (prm_.gaugeEvery > 0 && ++stepCount_ % prm_.gaugeEvery == 0) {
       double dU = 0, dK = 0;
       gauge(tau, rep, dU, dK);
       gaugeU_ += dU;
@@ -1663,7 +1688,18 @@ class Integrator {
     prm_.gaugeEvery = every;
     prm_.gaugeStrain = strain;
     prm_.gaugeAlphaMax = alphaMax;
+    deltaPending_ = false;  // a pending drift δ belongs to the old parameters
   }
+  /// M7 WO-PERF3 P3.3a (private perf knob): the gauge's displacement in a trial after kick 2
+  /// (G″) or in the next drift (§14.4.4). A pending drift δ is dropped.
+  void setGaugeMode(GaugeMode mode) {
+    prm_.gaugeMode = mode;
+    deltaPending_ = false;
+  }
+  /// f_G of the drift gauge's posterior monitor (§14.4.4; 1 at construction): a re-prepared
+  /// integrator continues the old run's factor.
+  double gaugeFactor() const { return gaugeFactor_; }
+  void setGaugeFactor(double f) { gaugeFactor_ = f; }
   double theta() const { return prm_.theta; }
   double time() const { return time_; }
   void setTime(double t) { time_ = t; }
@@ -1802,11 +1838,18 @@ class Integrator {
     }
   }
 
-  /// Facets, U and ∇Ũ, π, and the two hierarchies at the current (pos, weight).
-  void evalState(double* tPot = nullptr) {
+  /// Facets, U and ∇Ũ, π, and the two hierarchies at the current (pos, weight). `ready`: the
+  /// facets at this state, already exported and matched (with their match statistics `rm`).
+  void evalState(double* tPot = nullptr, const CellFacets<Real>* ready = nullptr,
+                 const FacetMatch* rm = nullptr) {
     Kokkos::Timer t, tp;
-    F_ = currentFacets();
-    match_ = matchFacets(F_, &pool_);
+    if (ready) {
+      F_ = *ready;
+      match_ = *rm;
+    } else {
+      F_ = currentFacets();
+      match_ = matchFacets(F_, &pool_);
+    }
     Kokkos::fence();
     evalSplit_[0] = tp.seconds();
     tp.reset();
@@ -1952,132 +1995,203 @@ class Integrator {
     Kokkos::fence();
     rep.tKick1 = t.seconds();
     t.reset();
-    // ---- warm start H δw = −τ J_x v^{½} (at x^n) ----
-    {
-      applyVolumeJacobian(F_, vh_, tmpN_);
-      const LView<Real> r = tmpN_;
-      Real s = 0;
-      Kokkos::parallel_reduce(
-          "nhvw.warmMean", Kokkos::RangePolicy<Exec>(0, N_),
-          KOKKOS_LAMBDA(const int i, Real& acc) { acc += r(i); }, s);
-      const Real mean = s / N_, mt = -tau;
-      Kokkos::parallel_for(
-          "nhvw.warmRhs", Kokkos::RangePolicy<Exec>(0, N_),
-          KOKKOS_LAMBDA(const int i) { r(i) = i == 0 ? Real(0) : mt * (r(i) - mean); });
+    // ---- the drift gauge's δⁿ (GaugeMode::kDrift, §14.4.1 step 2): dⁿ = τ v^{½} + δⁿ; on an OT
+    // failure or a seed on/behind its own facet the drift is redone from here with δⁿ = 0 ----
+    const bool withDelta = deltaPending_;
+    deltaPending_ = false;
+    deltaUsed_ = false;
+    if (withDelta)  // the monitor's first half Σ_i ∇_iŨⁿ·δⁿ_i (∇Ũ is still at x^n)
+      gaugeGradDelta0_ = double(detail::dotView(grad_, gd_));
+    int driftEvals = 0;  // the evaluations of a drift redone with δⁿ = 0
+    CellFacets<Real> Fnext;
+    FacetMatch mNext;
+    bool nextReady = false;
+    for (bool useDelta = withDelta;; useDelta = false) {
+      // ---- warm start H δw = −τ J_x v^{½} (at x^n); with δⁿ: H δw = −J_x dⁿ ----
+      if (useDelta) {
+        const LView<Real> dd = dd_, v = vh_, g = gd_;
+        const Real tt = tau;
+        Kokkos::parallel_for(
+            "nhvw.driftDisp", Kokkos::RangePolicy<Exec>(0, 3 * N_),
+            KOKKOS_LAMBDA(const int k) { dd(k) = tt * v(k) + g(k); });
+      }
+      {
+        applyVolumeJacobian(F_, useDelta ? dd_ : vh_, tmpN_);
+        const LView<Real> r = tmpN_;
+        Real s = 0;
+        Kokkos::parallel_reduce(
+            "nhvw.warmMean", Kokkos::RangePolicy<Exec>(0, N_),
+            KOKKOS_LAMBDA(const int i, Real& acc) { acc += r(i); }, s);
+        const Real mean = s / N_, mt = useDelta ? Real(-1) : Real(-tau);
+        Kokkos::parallel_for(
+            "nhvw.warmRhs", Kokkos::RangePolicy<Exec>(0, N_),
+            KOKKOS_LAMBDA(const int i) { r(i) = i == 0 ? Real(0) : mt * (r(i) - mean); });
+        WeightSolveParams wp;
+        wp.pcgTol = prm_.warmTol;
+        wp.amg = &hAmg_;
+        wp.scratch = &wss_;
+        rep.warmIters = solvePinnedH(F_, tmpN_, dw_, wp).first;
+        const LView<Real> w = weight_, dw = dw_;
+        Kokkos::parallel_for(
+            "nhvw.warm", Kokkos::RangePolicy<Exec>(0, N_),
+            KOKKOS_LAMBDA(const int i) { w(i) += dw(i); });
+      }
+      // ---- the carry predictor w_pred = w_lin + ρ_c cⁿ (D14.4, §14.4.3 step 1) ----
+      const double dn =
+          useDelta ? double(detail::maxAbsView(dd_)) : tau * double(detail::maxAbsView(vh_));
+      double rho = 0;
+      if (carryOk && dPrev_ > 0) {
+        const double q = dn / dPrev_;
+        rho = std::min(prm_.carryCap, q * q);
+      }
+      rep.carryRho = rho;
+      Kokkos::deep_copy(wLin_, weight_);
+      if (rho > 0) {
+        const LView<Real> w = weight_, c = carry_;
+        const Real rc = rho;
+        Kokkos::parallel_for(
+            "nhvw.carry", Kokkos::RangePolicy<Exec>(0, N_),
+            KOKKOS_LAMBDA(const int i) { w(i) += rc * c(i); });
+      }
+      // ---- drift (wrapped into the box; the lattice shift is kept for the gravity jump) ----
+      if (useDelta) {
+        const LView<Real> P = pos_, dd = dd_, S = wrapS_;
+        const Kokkos::Array<Real, 3> L3 = {L_[0], L_[1], L_[2]};
+        Kokkos::parallel_for(
+            "nhvw.driftDelta", Kokkos::RangePolicy<Exec>(0, 3 * N_), KOKKOS_LAMBDA(const int k) {
+              const Real Lk = L3[k % 3];
+              const Real x = P(k) + dd(k);
+              const Real sh = Lk * Kokkos::floor(x / Lk);
+              P(k) = x - sh;
+              S(k) = sh;
+            });
+      } else {
+        const LView<Real> P = pos_, v = vh_, S = wrapS_;
+        const Kokkos::Array<Real, 3> L3 = {L_[0], L_[1], L_[2]};
+        Kokkos::parallel_for(
+            "nhvw.drift", Kokkos::RangePolicy<Exec>(0, 3 * N_), KOKKOS_LAMBDA(const int k) {
+              const Real Lk = L3[k % 3];
+              const Real x = P(k) + tau * v(k);
+              const Real sh = Lk * Kokkos::floor(x / Lk);
+              P(k) = x - sh;
+              S(k) = sh;
+            });
+      }
+      // ---- weights by damped Newton, every iterate a repair of the resident engine ----
       WeightSolveParams wp;
-      wp.pcgTol = prm_.warmTol;
+      wp.tol = prm_.weightTol;
+      wp.maxIter = prm_.weightMaxIter;
+      wp.pcgTol = prm_.newtonTol;
+      wp.forcingMax = prm_.newtonForcing;
+      wp.repair = true;
       wp.amg = &hAmg_;
       wp.scratch = &wss_;
-      rep.warmIters = solvePinnedH(F_, tmpN_, dw_, wp).first;
-      const LView<Real> w = weight_, dw = dw_;
-      Kokkos::parallel_for(
-          "nhvw.warm", Kokkos::RangePolicy<Exec>(0, N_),
-          KOKKOS_LAMBDA(const int i) { w(i) += dw(i); });
-    }
-    // ---- the carry predictor w_pred = w_lin + ρ_c cⁿ (D14.4, §14.4.3 step 1) ----
-    const double dn = tau * double(detail::maxAbsView(vh_));
-    double rho = 0;
-    if (carryOk && dPrev_ > 0) {
-      const double q = dn / dPrev_;
-      rho = std::min(prm_.carryCap, q * q);
-    }
-    rep.carryRho = rho;
-    Kokkos::deep_copy(wLin_, weight_);
-    if (rho > 0) {
-      const LView<Real> w = weight_, c = carry_;
-      const Real rc = rho;
-      Kokkos::parallel_for(
-          "nhvw.carry", Kokkos::RangePolicy<Exec>(0, N_),
-          KOKKOS_LAMBDA(const int i) { w(i) += rc * c(i); });
-    }
-    // ---- drift (wrapped into the box; the lattice shift is kept for the gravity jump) ----
-    {
-      const LView<Real> P = pos_, v = vh_, S = wrapS_;
-      const Kokkos::Array<Real, 3> L3 = {L_[0], L_[1], L_[2]};
-      Kokkos::parallel_for(
-          "nhvw.drift", Kokkos::RangePolicy<Exec>(0, 3 * N_), KOKKOS_LAMBDA(const int k) {
-            const Real Lk = L3[k % 3];
-            const Real x = P(k) + tau * v(k);
-            const Real sh = Lk * Kokkos::floor(x / Lk);
-            P(k) = x - sh;
-            S(k) = sh;
-          });
-    }
-    // ---- weights by damped Newton, every iterate a repair of the resident engine ----
-    WeightSolveParams wp;
-    wp.tol = prm_.weightTol;
-    wp.maxIter = prm_.weightMaxIter;
-    wp.pcgTol = prm_.newtonTol;
-    wp.forcingMax = prm_.newtonForcing;
-    wp.repair = true;
-    wp.amg = &hAmg_;
-    wp.scratch = &wss_;
-    wp.fallback = rho > 0 ? &wLin_ : nullptr;  // r₀ > carryDrop: drop the carry, evaluate w_lin
-    wp.fallbackAbove = prm_.carryDrop;
-    WeightSolveResult ws = solveWeights(*mt_, pos_, weight_, V0h_, L_, wp);
-    wp.fallback = nullptr;
-    rep.otR0 = ws.r0;
-    rep.carryDrops = ws.fallback ? 1 : 0;
-    rep.otR0Lin = ws.rFallback;
-    if (!ws.converged) {
-      // the linear warm start can overshoot into a buried cell, from which the damped Newton
-      // cannot recover (every trial keeps it empty): retry once from w^n at the same x^{n+1}
-      ++rep.coldStarts;
-      Kokkos::deep_copy(weight_, w0_);
-      const WeightSolveResult w2 = solveWeights(*mt_, pos_, weight_, V0h_, L_, wp);
-      ws.evaluations += w2.evaluations;
-      ws.evalSeconds += w2.evalSeconds;
-      ws.iters += w2.iters;
-      ws.converged = w2.converged;
-      ws.maxRelErr = w2.maxRelErr;
-    }
-    rep.newtonIters = ws.iters;
-    rep.evaluations += ws.evaluations;
-    rep.driftEvaluations = ws.evaluations;
-    rep.coldRebuilds = ws.coldRebuilds;
-    rep.weightErr = ws.maxRelErr;
-    rep.tRepair += ws.evalSeconds;
-    Kokkos::fence();
-    rep.tWeights = t.seconds() - ws.evalSeconds;
-    if (!ws.converged) {
-      heat_ = heat0;
-      work_ = work0;
-      qc_ = qc0;
-      return false;
-    }
-    // ---- guard: the repaired topology must reproduce the engine's volumes (a stale face the
-    // repair certificate missed shows as a cone-fan volume off the engine's); else cold-rebuild
-    // and re-solve the weights from it ----
-    rep.repairMismatch = repairMismatch();
-    if (rep.repairMismatch > prm_.repairTol) {
-      ++rep.repairFallbacks;
-      fcValid_ = false;
-      mt_->rebuild(pos_);
-      WeightSolveParams wc = wp;
-      wc.repair = false;
-      const WeightSolveResult wr = solveWeights(*mt_, pos_, weight_, V0h_, L_, wc);
-      rep.newtonIters += wr.iters;
-      rep.driftEvaluations += wr.evaluations;
-      rep.weightErr = wr.maxRelErr;
-      if (!wr.converged) {
+      wp.fallback = rho > 0 ? &wLin_ : nullptr;  // r₀ > carryDrop: drop the carry, evaluate w_lin
+      wp.fallbackAbove = prm_.carryDrop;
+      WeightSolveResult ws = solveWeights(*mt_, pos_, weight_, V0h_, L_, wp);
+      wp.fallback = nullptr;
+      rep.otR0 = ws.r0;
+      rep.carryDrops = ws.fallback ? 1 : 0;
+      rep.otR0Lin = ws.rFallback;
+      if (!ws.converged) {
+        // the linear warm start can overshoot into a buried cell, from which the damped Newton
+        // cannot recover (every trial keeps it empty): retry once from w^n at the same x^{n+1}
+        ++rep.coldStarts;
+        Kokkos::deep_copy(weight_, w0_);
+        const WeightSolveResult w2 = solveWeights(*mt_, pos_, weight_, V0h_, L_, wp);
+        ws.evaluations += w2.evaluations;
+        ws.evalSeconds += w2.evalSeconds;
+        ws.iters += w2.iters;
+        ws.converged = w2.converged;
+        ws.maxRelErr = w2.maxRelErr;
+      }
+      rep.newtonIters = ws.iters;
+      rep.evaluations += ws.evaluations;
+      rep.driftEvaluations = driftEvals + ws.evaluations;
+      rep.coldRebuilds = ws.coldRebuilds;
+      rep.weightErr = ws.maxRelErr;
+      rep.tRepair += ws.evalSeconds;
+      Kokkos::fence();
+      rep.tWeights = t.seconds() - ws.evalSeconds;
+      if (!ws.converged) {
+        if (useDelta) {  // §14.4.1 step 3: redo the drift with δⁿ = 0
+          ++rep.gaugeRedos;
+          driftEvals = rep.driftEvaluations;
+          restoreEngine();
+          continue;
+        }
         heat_ = heat0;
         work_ = work0;
         qc_ = qc0;
         return false;
       }
-    }
-    // ---- the next step's carry: cⁿ = w_final − w_lin, ‖dⁿ‖_∞ ----
-    {
-      const LView<Real> c = carry_, w = weight_, wl = wLin_;
-      Kokkos::parallel_for(
-          "nhvw.carryStore", Kokkos::RangePolicy<Exec>(0, N_),
-          KOKKOS_LAMBDA(const int i) { c(i) = w(i) - wl(i); });
-      dPrev_ = dn;
-      carryOk_ = true;
+      // ---- guard: the repaired topology must reproduce the engine's volumes (a stale face the
+      // repair certificate missed shows as a cone-fan volume off the engine's); else cold-rebuild
+      // and re-solve the weights from it ----
+      rep.repairMismatch = repairMismatch();
+      if (rep.repairMismatch > prm_.repairTol) {
+        ++rep.repairFallbacks;
+        fcValid_ = false;
+        mt_->rebuild(pos_);
+        WeightSolveParams wc = wp;
+        wc.repair = false;
+        const WeightSolveResult wr = solveWeights(*mt_, pos_, weight_, V0h_, L_, wc);
+        rep.newtonIters += wr.iters;
+        rep.driftEvaluations += wr.evaluations;
+        rep.weightErr = wr.maxRelErr;
+        if (!wr.converged) {
+          if (useDelta) {
+            ++rep.gaugeRedos;
+            driftEvals = rep.driftEvaluations;
+            restoreEngine();
+            continue;
+          }
+          heat_ = heat0;
+          work_ = work0;
+          qc_ = qc0;
+          return false;
+        }
+      }
+      // ---- with δⁿ: every seed strictly inside its own cell at x^{n+1} (min_i m_i > 0), read
+      // from the export evalState then uses ----
+      if (useDelta) {
+        Fnext = currentFacets();
+        mNext = matchFacets(Fnext, &pool_);
+        cellMargins(Fnext, tmpN_);
+        const LView<Real> m = tmpN_;
+        Real mmin = 0;
+        Kokkos::parallel_reduce(
+            "nhvw.driftMargin", Kokkos::RangePolicy<Exec>(0, N_),
+            KOKKOS_LAMBDA(const int i, Real& acc) { acc = m(i) < acc ? m(i) : acc; },
+            Kokkos::Min<Real>(mmin));
+        if (!(mmin > Real(0))) {
+          ++rep.gaugeRedos;
+          driftEvals = rep.driftEvaluations;
+          Fnext = CellFacets<Real>();  // release the pool buffers
+          restoreEngine();
+          continue;
+        }
+        nextReady = true;
+      }
+      // ---- the next step's carry: cⁿ = w_final − w_lin, ‖dⁿ‖_∞ ----
+      {
+        const LView<Real> c = carry_, w = weight_, wl = wLin_;
+        Kokkos::parallel_for(
+            "nhvw.carryStore", Kokkos::RangePolicy<Exec>(0, N_),
+            KOKKOS_LAMBDA(const int i) { c(i) = w(i) - wl(i); });
+        dPrev_ = dn;
+        carryOk_ = true;
+      }
+      deltaUsed_ = useDelta;
+      rep.gaugeApplied = useDelta ? 1 : 0;
+      break;
     }
     // ---- π, ∇Ũ and the hierarchies at x^{n+1} ----
     double tPot = 0;
-    evalState(&tPot);
+    if (nextReady)
+      evalState(&tPot, &Fnext, &mNext);
+    else
+      evalState(&tPot);
     rep.tPotential = tPot;
     rep.tFacets = evalSplit_[0];
     rep.tEnergy = evalSplit_[1];
@@ -2097,6 +2211,46 @@ class Integrator {
     Kokkos::fence();
     rep.tKick2 = t.seconds();
     return true;
+  }
+
+  /// G″'s activation (§12.3.2 step 1) into aG_: ε̇_i = ‖sym(G_i v)‖_F, ε̂_i its max over i and
+  /// i's face neighbours, α_i = fG · min(α_max, c_g τ ε̂_i) (fG = 1: G″; the drift gauge's f_G).
+  /// Returns max_i α_i.
+  double gaugeActivation(double tau, double fG) {
+    cellGradient(F_, vel_, gs_);
+    {
+      const LView<Real> gs = gs_, e = tmpN_;
+      Kokkos::parallel_for(
+          "nhvw.gaugeStrain", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
+            Real q = 0;
+            for (int a = 0; a < 3; ++a)
+              for (int b = 0; b < 3; ++b) {
+                const Real sab = Real(0.5) * (gs(9 * i + 3 * a + b) + gs(9 * i + 3 * b + a));
+                q += sab * sab;
+              }
+            e(i) = Kokkos::sqrt(q);
+          });
+    }
+    {
+      const CellFacets<Real> G = F_;
+      const LView<Real> e = tmpN_, al = aG_;
+      const Real cg = prm_.gaugeStrain * tau, amax = prm_.gaugeAlphaMax, fg = fG;
+      Real am = 0;
+      Kokkos::parallel_reduce(
+          "nhvw.gaugeAlpha", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i, Real& acc) {
+            Real m = e(i);
+            for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+              const Real q = e(G.nbr(f));
+              m = q > m ? q : m;
+            }
+            const Real a = fg * (cg * m < amax ? cg * m : amax);
+            al(i) = a;
+            acc = a > acc ? a : acc;
+          },
+          Kokkos::Max<Real>(am));
+      return am;
+    }
   }
 
   /// The gauge G″ (DESIGN_NOTE §12.3.2) at x = x^{n+1}, v = v^{n+1}: strain-activated, Lloyd-only,
@@ -2125,38 +2279,8 @@ class Integrator {
     Kokkos::Timer t;
     dU = dK = 0;
     // ---- 1. activation ----
-    cellGradient(F_, vel_, gs_);
     {
-      const LView<Real> gs = gs_, e = tmpN_;
-      Kokkos::parallel_for(
-          "nhvw.gaugeStrain", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
-            Real q = 0;
-            for (int a = 0; a < 3; ++a)
-              for (int b = 0; b < 3; ++b) {
-                const Real sab = Real(0.5) * (gs(9 * i + 3 * a + b) + gs(9 * i + 3 * b + a));
-                q += sab * sab;
-              }
-            e(i) = Kokkos::sqrt(q);
-          });
-    }
-    {
-      const CellFacets<Real> G = F_;
-      const LView<Real> e = tmpN_, al = aG_;
-      const Real cg = prm_.gaugeStrain * tau, amax = prm_.gaugeAlphaMax;
-      Real am = 0;
-      Kokkos::parallel_reduce(
-          "nhvw.gaugeAlpha", Kokkos::RangePolicy<Exec>(0, N_),
-          KOKKOS_LAMBDA(const int i, Real& acc) {
-            Real m = e(i);
-            for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
-              const Real q = e(G.nbr(f));
-              m = q > m ? q : m;
-            }
-            const Real a = cg * m < amax ? cg * m : amax;
-            al(i) = a;
-            acc = a > acc ? a : acc;
-          },
-          Kokkos::Max<Real>(am));
+      const double am = gaugeActivation(tau, 1);
       rep.gaugeAlphaMax = am;
       if (!(am >= prm_.gaugeSkip)) {
         rep.tGauge = t.seconds();
@@ -2219,6 +2343,49 @@ class Integrator {
     rep.gaugeKinetic = dK;
     Kokkos::fence();
     rep.tGauge = t.seconds();
+  }
+
+  /// The drift gauge's posterior monitor (§14.4.4) for the δⁿ this step's drift added (nothing
+  /// when it added none): ΔŨ_G = ½ Σ_i (∇_iŨⁿ + ∇_iŨⁿ⁺¹)·δⁿ_i, the δ-share of the trapezoidal
+  /// path integral; Q_G −= ΔŨ_G (gaugeU_ += ΔŨ_G, the ledger's gauge counter); f_G ← max(f_G/2,
+  /// ⅛) if ΔŨ_G > 0, else min(1, 2 f_G).
+  void gaugeMonitor(StepReport& rep) {
+    if (deltaUsed_) {
+      const double dU = 0.5 * (gaugeGradDelta0_ + double(detail::dotView(grad_, gd_)));
+      gaugeU_ += dU;
+      rep.gaugePotential = dU;
+      gaugeFactor_ =
+          dU > 0 ? std::max(0.5 * gaugeFactor_, 0.125) : std::min(1.0, 2.0 * gaugeFactor_);
+    }
+    rep.gaugeFactor = gaugeFactor_;
+  }
+
+  /// The drift gauge (GaugeMode::kDrift; DESIGN_NOTE §14.4.4 with G″'s activation, M7 WO-PERF3
+  /// P3.3a) at x = x^{n+1}, v = v^{n+1}: α_i = f_G · min(α_max, c_g τ ε̂_i); max_i α_i < gaugeSkip:
+  /// δⁿ⁺¹ ≡ 0 and the next drift adds nothing (bit for bit). Otherwise δⁿ⁺¹ = G″ steps 2-4
+  /// (gaugeDisplacement: the raw Lloyd move, the per-cell ascent projection with ∇Ũⁿ⁺¹, the
+  /// ½-margin cap from this state's export) into gd_, pending for the next drift. No trial OT, no
+  /// Ũ trial, no M-projection: the state is untouched here.
+  void driftGauge(double tau, StepReport& rep) {
+    Kokkos::Timer t;
+    const double am = gaugeActivation(tau, gaugeFactor_);
+    rep.gaugeAlphaMax = am;
+    if (am >= prm_.gaugeSkip) {
+      rep.gaugeInterface = gaugeDisplacement(rep);
+      const LView<Real> d = gd_;
+      int nA = 0;
+      Kokkos::parallel_reduce(
+          "nhvw.gaugeActive", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i, int& acc) {
+            if (d(3 * i) != Real(0) || d(3 * i + 1) != Real(0) || d(3 * i + 2) != Real(0))
+              ++acc;
+          },
+          nA);
+      rep.gaugeActive = nA;
+      deltaPending_ = nA > 0;
+    }
+    Kokkos::fence();
+    rep.tGauge += t.seconds();
   }
 
   /// G″ steps 2-4 (see gauge()): δ (gd_) from α (aG_); returns |I| and counts the normal-part,
@@ -2499,7 +2666,8 @@ class Integrator {
   Real L_[3] = {1, 1, 1};
   double maxV0_ = 0;
   LView<Real> V0_, rho_, mu_, mass_, h_, vel_, vh_, b_, zo_, zn_, grad_, gx_, gw_, pi_, lam1_,
-      lam2_, tmpN_, dw_, pos0_, w0_, wrapS_, gd_, aI_, lamG_, gs_, fw_, aG_, mG_, wLin_, carry_;
+      lam2_, tmpN_, dw_, pos0_, w0_, wrapS_, gd_, aI_, lamG_, gs_, fw_, aG_, mG_, wLin_, carry_,
+      dd_;
   // the carry predictor (IntegratorParams::carryCap): ‖dⁿ⁻¹‖_∞ and whether cⁿ is valid (false
   // after construction and after a failed attempt); π holds a previous solve (the adjoint warm
   // start)
@@ -2515,6 +2683,10 @@ class Integrator {
   bool sStale_ = false, hStale_ = false;
   double evalSplit_[4] = {0, 0, 0, 0};  ///< evalState: facets, energy, H AMG setup, adjoint (s)
   double gaugeU_ = 0, gaugeK_ = 0;
+  // the drift gauge (GaugeMode::kDrift): δⁿ (gd_) is pending for the next drift; whether this
+  // step's drift used it; Σ_i ∇_iŨⁿ·δⁿ_i (the monitor's first half); f_G
+  bool deltaPending_ = false, deltaUsed_ = false;
+  double gaugeGradDelta0_ = 0, gaugeFactor_ = 1;
   // persistent scratch (M7 WO-PERF3 P3.1, DESIGN_NOTE §14.4.6 item 1): the facet exports (a pool:
   // an export takes a buffer no live CellFacets references — F_, fc_, the option-S copy of x^n, the
   // saddle's copy, a gauge trial), the weight solve / H solves / adjoint, the band publish

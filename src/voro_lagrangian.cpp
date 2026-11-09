@@ -571,7 +571,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   }
   // M7 WO-PERF trials (private): the saddle method, B's rotational chi, AMG reuse
   void set_perf_options(const std::string& method, real_t rotational, int amgReuse, real_t warmTol,
-                        real_t newtonTol, int relabel) {
+                        real_t newtonTol, int relabel, const std::string& gauge) {
     namespace lg = peclet::voro::lagrangian;
     if (method == "schur")
       method_ = lg::SaddleMethod::kSchurCG;
@@ -582,6 +582,14 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     else
       throw std::invalid_argument(
           "voro: LagrangianFlow._set_perf_options(method in 'schur', 'coupled', 'projection')");
+    lg::GaugeMode gm;
+    if (gauge == "trial")
+      gm = lg::GaugeMode::kTrial;
+    else if (gauge == "drift")
+      gm = lg::GaugeMode::kDrift;
+    else
+      throw std::invalid_argument(
+          "voro: LagrangianFlow._set_perf_options(gauge in 'trial', 'drift')");
     if (!(rotational >= 0) || amgReuse < 0 || !(warmTol > 0) || !(newtonTol > 0) || relabel < -1)
       throw std::invalid_argument(
           "voro: LagrangianFlow._set_perf_options(rotational >= 0, amg_reuse >= 0, tolerances > "
@@ -591,9 +599,12 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     amgReuse_ = amgReuse;
     warmTol_ = warmTol;
     newtonTol_ = newtonTol;
+    gaugeMode_ = gm;
     perfSet_ = true;
-    withIntegIfAny(
-        [&](auto& I) { I.setPerfOptions(method_, rotational_, amgReuse_, warmTol_, newtonTol_); });
+    withIntegIfAny([&](auto& I) {
+      I.setPerfOptions(method_, rotational_, amgReuse_, warmTol_, newtonTol_);
+      I.setGaugeMode(gaugeMode_);
+    });
   }
   void set_gauge(int every, real_t strain, real_t alpha_max) {
     if (every < 0 || !(strain >= 0) || !(alpha_max >= 0))
@@ -823,6 +834,10 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["gauge_solve_fails"] = col([](const auto& r) { return r.gaugeSolveFails; });
     d["gauge_energy_rejects"] = col([](const auto& r) { return r.gaugeEnergyRejects; });
     d["gauge_trial_dU"] = col([](const auto& r) { return r.gaugeTrialDU; });
+    d["gauge_applied"] = col([](const auto& r) { return r.gaugeApplied; });
+    d["gauge_redos"] = col([](const auto& r) { return r.gaugeRedos; });
+    d["gauge_active"] = col([](const auto& r) { return r.gaugeActive; });
+    d["gauge_factor"] = col([](const auto& r) { return r.gaugeFactor; });
     withInteg([&](auto& I) {
       d["gauge_potential_total"] = I.gaugePotential();
       d["gauge_kinetic_total"] = I.gaugeKinetic();
@@ -884,6 +899,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       time_ = I.time();
       acc_ = {I.heat(),       I.constraintWork(), I.bodyWork(),
               I.wrapOffset(), I.gaugePotential(), I.gaugeKinetic()};
+      gaugeFactor_ = I.gaugeFactor();
     });
   }
 
@@ -1029,8 +1045,11 @@ class LagrangianFlow : public peclet::core::python::Releasable {
             I->setGauge(gaugeOn_ ? gaugeEvery_ : 0, strain_, alphaMax_);
             if (adjointTol_ > 0)
               I->setSolverOptions(schurAssembled_, adjointTol_, saddleTol_);
-            if (perfSet_)
+            if (perfSet_) {
               I->setPerfOptions(method_, rotational_, amgReuse_, warmTol_, newtonTol_);
+              I->setGaugeMode(gaugeMode_);
+            }
+            I->setGaugeFactor(gaugeFactor_);
             if (kickTol_ > 0)
               I->setKickTolerance(kickTol_);
             if (volumeTol_ > 0)
@@ -1062,6 +1081,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   int amgReuse_ = 10;
   real_t warmTol_ = 1e-4, newtonTol_ = 1e-3;
   bool perfSet_ = false;  // false: the integrator's defaults
+  peclet::voro::lagrangian::GaugeMode gaugeMode_ = peclet::voro::lagrangian::GaugeMode::kTrial;
+  real_t gaugeFactor_ = 1;  // the drift gauge's f_G, carried across a re-preparation
   // Morton relabelling: -1 off, 0 once at the first preparation, K > 0 also every K steps. K = 100
   // (M7 WO-PERF2): a re-sort costs ~0.7 step (N 32768); a frozen order loses 66 % of its locality
   // over 180 Taylor-Green steps (gamma 6), the step time within noise of K = 20 over that run
@@ -1157,19 +1178,21 @@ void bindLagrangian(nb::module_& m) {
            "Where kick 1's velocity constraint is taken: 'midpoint' (x^n + dt/2 v^n with the\n"
            "weights solved there; DESIGN_NOTE option S; the default: second order in the energy)\n"
            "or 'start' (x^n; first order).")
-      .def("_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "coupled",
-           nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 10, nb::arg("warm_tol") = 1e-3,
-           nb::arg("newton_tol") = 1e-3, nb::arg("relabel") = 100,
-           "M7 WO-PERF solver trials (not public API): the kick's saddle method ('schur' nested\n"
-           "Schur CG, 'coupled' block-preconditioned FGMRES, 'projection' rotational incremental\n"
-           "pressure correction with chi = `rotational`), and AMG hierarchy reuse over at most\n"
-           "`amg_reuse` further setups (0: rebuilt every setup); the relative tolerances of the "
-           "warm-start\n"
-           "and Newton H solves (the Newton one is inert under the Eisenstat-Walker forcing, the\n"
-           "default since M7 WO-PERF3 P3.2); the cell relabelling (`relabel`: -1 off, 0 Morton "
-           "order at the\n"
-           "first preparation, K > 0 also re-sorted every K steps (default 100); the caller's "
-           "order is kept).")
+      .def(
+          "_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "coupled",
+          nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 10, nb::arg("warm_tol") = 1e-3,
+          nb::arg("newton_tol") = 1e-3, nb::arg("relabel") = 100, nb::arg("gauge") = "trial",
+          "M7 WO-PERF solver trials (not public API): the kick's saddle method ('schur' nested\n"
+          "Schur CG, 'coupled' block-preconditioned FGMRES, 'projection' rotational incremental\n"
+          "pressure correction with chi = `rotational`), and AMG hierarchy reuse over at most\n"
+          "`amg_reuse` further setups (0: rebuilt every setup); the relative tolerances of the "
+          "warm-start\n"
+          "and Newton H solves (the Newton one is inert under the Eisenstat-Walker forcing, the\n"
+          "default since M7 WO-PERF3 P3.2); the cell relabelling (`relabel`: -1 off, 0 Morton "
+          "order at the\n"
+          "first preparation, K > 0 also re-sorted every K steps (default 100); the caller's "
+          "order is kept); the gauge's displacement (`gauge`: 'trial' G''s trial OT after kick 2,\n"
+          "'drift' added in the next step's drift, DESIGN_NOTE §14.4.4 with G''s activation).")
       .def(
           "_set_kick_tolerance", &LagrangianFlow::set_kick_tolerance, nb::arg("tol"),
           "M7 WO-PERF3 accuracy knob (provisional, not public API): eta_K, the relative tolerance\n"
