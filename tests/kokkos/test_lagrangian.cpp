@@ -360,6 +360,7 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     m2.setWeights(w2);
     m2.rebuild(p2);
     lag::Integrator<MT> I(m2, p2, w2, Larr, V0, spec, fp, v);
+    I.setGaugeMode(lag::GaugeMode::kTrial);  // G″'s trial (the default; set so the test says so)
     double P0[3] = {0, 0, 0}, P1[3] = {0, 0, 0}, pn = 0, maxV = 0;
     for (int i = 0; i < N; ++i) {
       const double m = (ty[i] ? 10.0 : 1.0) * V0[i];
@@ -390,6 +391,40 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
         int(r.gaugeAccepted), r.gaugePotential, r.gaugeKinetic, r.minMargin / h, dP, cmax);
     rc |= (r.gaugeTries > 0 && r.gaugeAccepted && r.gaugePotential <= 0 && r.gaugeKinetic <= 0 &&
            r.minMargin > 0 && dP <= 1e-12 && cmax <= 10 * lag::SaddleParams{}.tol)
+              ? 0
+              : 1;
+    // the drift gauge (GaugeMode::kDrift, §14.4.4) from the same state: step 1 computes δ¹ (no
+    // trial), step 2's drift adds it; momentum and C v as for G″
+    DV p4 = toDev(x, "f.pos4"), w4 = toDev(w0, "f.w4");
+    MT m4;
+    m4.alloc(N, Larr, real_t(1e-10) * h, real_t(0.25) * h, 4, N);
+    m4.setWeights(w4);
+    m4.rebuild(p4);
+    lag::Integrator<MT> J(m4, p4, w4, Larr, V0, spec, fp, v);
+    J.setGaugeMode(lag::GaugeMode::kDrift);
+    const auto r1 = J.step(tau);
+    const auto r2 = J.step(tau);
+    const auto vj = toHost(J.velocity());
+    double Pj[3] = {0, 0, 0};
+    for (int i = 0; i < N; ++i)
+      for (int a = 0; a < 3; ++a)
+        Pj[a] += (ty[i] ? 10.0 : 1.0) * V0[i] * vj[3 * i + a];
+    double dPj = 0;
+    for (int a = 0; a < 3; ++a)
+      dPj = std::max(dPj, std::fabs(Pj[a] - P0[a]) / pn);
+    lag::applyDivergence(J.facets(), J.velocity(), cv);
+    double cj = 0;
+    for (double c : toHost(cv))
+      cj = std::max(cj, std::fabs(c) * tau / maxV);
+    std::printf(
+        "  (F) drift gauge: step 1 max alpha=%.2e active=%d applied=%d; step 2 applied=%d redos=%d "
+        "dU_G=%.2e f_G=%.3f tries=%d min margin/h=%.3f |dP|/sum m|v|=%.1e |Cv| tau/maxV=%.1e\n",
+        r1.gaugeAlphaMax, r1.gaugeActive, r1.gaugeApplied, r2.gaugeApplied, r2.gaugeRedos,
+        r2.gaugePotential, r2.gaugeFactor, r1.gaugeTries + r2.gaugeTries, r2.minMargin / h, dPj,
+        cj);
+    rc |= (r1.gaugeActive > 0 && r1.gaugeApplied == 0 && r2.gaugeApplied == 1 &&
+           r2.gaugeRedos == 0 && r1.gaugeTries + r2.gaugeTries == 0 && r2.minMargin > 0 &&
+           dPj <= 1e-12 && cj <= 10 * lag::SaddleParams{}.tol)
               ? 0
               : 1;
   }

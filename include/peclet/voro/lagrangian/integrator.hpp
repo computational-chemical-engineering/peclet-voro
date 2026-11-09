@@ -1713,6 +1713,28 @@ class Integrator {
     Kokkos::deep_copy(lam2_, Kokkos::View<const Real*, Kokkos::HostSpace>(lambda.data(), N_));
     stepCount_ = stepCount;
   }
+  /// The drift gauge's pending δⁿ (GaugeMode::kDrift; (3N) in this integrator's cell order, empty
+  /// when none is pending) and its restore: a re-prepared integrator (the relabelling of
+  /// LagrangianFlow) continues the old run's δⁿ, as it continues f_G. Call setPendingDelta after
+  /// setGauge/setGaugeMode, which drop a pending δ.
+  std::vector<Real> pendingDelta() const {
+    std::vector<Real> d;
+    if (deltaPending_) {
+      d.resize(3 * static_cast<std::size_t>(N_));
+      Kokkos::deep_copy(Kokkos::View<Real*, Kokkos::HostSpace>(d.data(), d.size()), gd_);
+    }
+    return d;
+  }
+  void setPendingDelta(const std::vector<Real>& d) {
+    if (d.empty()) {
+      deltaPending_ = false;
+      return;
+    }
+    if (static_cast<int>(d.size()) != 3 * N_)
+      throw std::logic_error("voro: NHV-W setPendingDelta: delta is not (N, 3)");
+    Kokkos::deep_copy(gd_, Kokkos::View<const Real*, Kokkos::HostSpace>(d.data(), d.size()));
+    deltaPending_ = true;
+  }
   /// Restore the energy accumulators (a re-prepared integrator continues the old run's totals).
   void setAccumulators(double heat, double qc, double work, double wrap, double gaugeU = 0,
                        double gaugeK = 0) {

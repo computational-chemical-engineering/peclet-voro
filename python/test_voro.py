@@ -676,7 +676,13 @@ def _morton_order(pos, L):
 def test_lagrangian_relabel():
     """LagrangianFlow stores its cells in Morton order (an internal permutation): every getter and
     setter keeps the caller's order, and a run from shuffled input is the run from Morton-ordered
-    input with the relabelling off."""
+    input with the relabelling off. Under both gauges: the trial G'' and the drift gauge, whose
+    pending delta a periodic re-sort carries (M7 WO-PERF3 P3.3b)."""
+    for gauge in ("trial", "drift"):
+        _lagrangian_relabel(gauge)
+
+
+def _lagrangian_relabel(gauge):
     rng = np.random.default_rng(11)
     n, L = 8, 1.0
     g = (np.arange(n) + 0.5) / n
@@ -704,7 +710,7 @@ def test_lagrangian_relabel():
         f.set_density(np.array([1.0, 10.0]))
         f.set_viscosity(np.array([0.05, 0.05]))
         f.set_tension(np.array([[0, 1.0], [1.0, 0]]))
-        f._set_perf_options(relabel=relabel)
+        f._set_perf_options(relabel=relabel, gauge=gauge)
         return t, f
 
     ta, fa = flow(pos, types, 0, V0)            # shuffled input, relabelled internally
@@ -742,7 +748,7 @@ def test_lagrangian_relabel():
     fa.step(3)
     ad = np.abs(fd.get_velocities() - fa.get_velocities()).max() / np.abs(fa.get_velocities()).max()
     assert moved > 0 and ad < 1e-8, (moved, ad)
-    print(f"  Lagrangian relabel: Morton-input {ab:.1e}, vs unrelabelled {ac:.1e}, "
+    print(f"  Lagrangian relabel ({gauge}): Morton-input {ab:.1e}, vs unrelabelled {ac:.1e}, "
           f"re-sorted every 2 ({moved} cells reordered) {ad:.1e}")
 
 

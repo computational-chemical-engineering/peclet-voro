@@ -938,20 +938,26 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   }
 
   /// The periodic re-sort of a running flow: relabel, re-prepare, and carry λ₂ (kick 1's warm
-  /// start) and the gauge's step count into the new integrator.
+  /// start), the gauge's step count and the drift gauge's pending δⁿ into the new integrator.
   void resort() {
-    std::vector<real_t> lam;
+    std::vector<real_t> lam, delta;
     long count = 0;
     withInteg([&](auto& I) {
       lam = peclet::core::toVector(I.lambda());
       count = I.stepCount();
+      delta = I.pendingDelta();
     });
     const std::vector<int> order = relabelCells();
     if (order.empty())
       return;
     prepare();
     lam = cellsToInternal(order, std::move(lam), 1);
-    withInteg([&](auto& I) { I.setWarmStart(lam, count); });
+    if (!delta.empty())
+      delta = cellsToInternal(order, std::move(delta), 3);
+    withInteg([&](auto& I) {
+      I.setWarmStart(lam, count);
+      I.setPendingDelta(delta);
+    });
   }
 
   /// (Re)build the integrator when an input, the tessellation's positions or its weights changed.
