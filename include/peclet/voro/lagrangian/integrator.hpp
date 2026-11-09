@@ -1200,8 +1200,11 @@ struct IntegratorParams {
   /// the carry predictor of the x^{n+1} weights (D14.4, §14.4.3, P3.2): w_pred = w_lin + ρ_c cⁿ,
   /// cⁿ the previous step's Newton correction w_final − w_lin, ρ_c = min(carryCap,
   /// (‖dⁿ‖_∞/‖dⁿ⁻¹‖_∞)²), 0 after a restart (construction, a τ-halving) or ‖dⁿ⁻¹‖ = 0; the
-  /// carry is dropped (w_lin evaluated) when w_pred's max relative volume error exceeds carryDrop
-  double carryCap = 4, carryDrop = 1e-2;
+  /// carry is dropped (w_lin evaluated) when w_pred's max relative volume error exceeds carryDrop.
+  /// carryCap = 0: no carry (w_lin is evaluated first), the default since M7 WO-PERF3 P3.3a step 0:
+  /// on the Q4 drop (N 4096) the carry raised the median drift evaluations 4 -> 5 at max|d|/h ~ 0.1
+  /// and lowered it at none of the measured drift sizes (4 to enable it: §14.4.3 as designed)
+  double carryCap = 0, carryDrop = 1e-2;
   // ---- the gauge G″ (DESIGN_NOTE §12.3.2) ----
   int gaugeEvery = 1;              ///< the gauge after kick 2 every this many steps (0: off)
   double gaugeStrain = 3;          ///< c_g: α_i = min(α_max, c_g τ ε̂_i)
