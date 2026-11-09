@@ -602,7 +602,27 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     gaugeEvery_ = every;
     strain_ = strain;
     alphaMax_ = alpha_max;
-    withIntegIfAny([&](auto& I) { I.setGauge(gaugeEvery_, strain_, alphaMax_); });
+    withIntegIfAny([&](auto& I) { I.setGauge(gaugeOn_ ? gaugeEvery_ : 0, strain_, alphaMax_); });
+  }
+  // M7 WO-PERF3 accuracy knobs (provisional names, not public API): relative tolerances in (0, 1)
+  static void checkRelTol(const char* name, real_t tol) {
+    if (!(tol > 0 && tol < 1))
+      throw std::invalid_argument(std::string("voro: LagrangianFlow.") + name +
+                                  "(tol) takes a relative tolerance 0 < tol < 1");
+  }
+  void set_kick_tolerance(real_t tol) {
+    checkRelTol("_set_kick_tolerance", tol);
+    kickTol_ = tol;
+    withIntegIfAny([&](auto& I) { I.setKickTolerance(kickTol_); });
+  }
+  void set_volume_tolerance(real_t tol) {
+    checkRelTol("_set_volume_tolerance", tol);
+    volumeTol_ = tol;
+    withIntegIfAny([&](auto& I) { I.setVolumeTolerance(volumeTol_); });
+  }
+  void set_gauge_enabled(bool on) {
+    gaugeOn_ = on;
+    withIntegIfAny([&](auto& I) { I.setGauge(gaugeOn_ ? gaugeEvery_ : 0, strain_, alphaMax_); });
   }
   void set_wall_velocity(std::array<real_t, 3> offset,
                          std::optional<nb::ndarray<real_t, nb::c_contig>> gradient) {
@@ -1006,11 +1026,15 @@ class LagrangianFlow : public peclet::core::python::Releasable {
             I->setMidpointConstraint(midpoint_);
             I->setTime(time_);
             I->setAccumulators(acc_[0], acc_[1], acc_[2], acc_[3], acc_[4], acc_[5]);
-            I->setGauge(gaugeEvery_, strain_, alphaMax_);
+            I->setGauge(gaugeOn_ ? gaugeEvery_ : 0, strain_, alphaMax_);
             if (adjointTol_ > 0)
               I->setSolverOptions(schurAssembled_, adjointTol_, saddleTol_);
             if (perfSet_)
               I->setPerfOptions(method_, rotational_, amgReuse_, warmTol_, newtonTol_);
+            if (kickTol_ > 0)
+              I->setKickTolerance(kickTol_);
+            if (volumeTol_ > 0)
+              I->setVolumeTolerance(volumeTol_);
             if constexpr (T::kHasSdf)
               i1_ = std::move(I);
             else
@@ -1051,6 +1075,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   std::array<real_t, 9> wallG_{0, 0, 0, 0, 0, 0, 0, 0, 0};
   real_t strain_ = 3, alphaMax_ = 0.2;
   int gaugeEvery_ = 1;
+  bool gaugeOn_ = true;                 // _set_gauge_enabled (every_ kept while off)
+  real_t kickTol_ = 0, volumeTol_ = 0;  // accuracy knobs; 0: the integrator's defaults
   bool dirty_ = true;
   const real_t* posData_ = nullptr;
   std::unique_ptr<Integ<NoSdfT>> i0_;
@@ -1144,6 +1170,17 @@ void bindLagrangian(nb::module_& m) {
            "order at the\n"
            "first preparation, K > 0 also re-sorted every K steps (default 100); the caller's "
            "order is kept).")
+      .def(
+          "_set_kick_tolerance", &LagrangianFlow::set_kick_tolerance, nb::arg("tol"),
+          "M7 WO-PERF3 accuracy knob (provisional, not public API): eta_K, the relative tolerance\n"
+          "of the kick's velocity/constraint solves, |C v|_inf <= tol |C| v_ref and |r_v|_2 <=\n"
+          "tol |b|_2 (default 1e-9). 0 < tol < 1.")
+      .def("_set_volume_tolerance", &LagrangianFlow::set_volume_tolerance, nb::arg("tol"),
+           "M7 WO-PERF3 accuracy knob (provisional, not public API): the per-step volume solve's\n"
+           "max_i |V_i - V0_i| / V0_i (default 1e-12). 0 < tol < 1.")
+      .def("_set_gauge_enabled", &LagrangianFlow::set_gauge_enabled, nb::arg("on"),
+           "M7 WO-PERF3 accuracy knob (provisional, not public API): the gauge on (default) or\n"
+           "off, keeping set_gauge's cadence and parameters.")
       .def("_set_solver_options", &LagrangianFlow::set_solver_options, nb::arg("schur_assembled"),
            nb::arg("adjoint_tol"), nb::arg("saddle_tol") = 1e-9,
            "M7 WO4a solver trials (not public API): AMG on the assembled C M^-1 C^T as the Schur\n"

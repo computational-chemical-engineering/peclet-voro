@@ -1648,6 +1648,14 @@ class Integrator {
     prm_.warmTol = warmTol;
     prm_.newtonTol = newtonTol;
   }
+  /// M7 WO-PERF3 accuracy knobs (provisional, opt-in; exact stays the default): η_K, the relative
+  /// tolerance of the kick saddles (D14.3: ‖C v‖_∞ ≤ η_K ‖C‖ v_ref and ‖r_v‖₂ ≤ η_K ‖b‖₂; default
+  /// 1e-9), and the OT volume tolerance max_i |V_i − V⁰_i| / V⁰_i (default 1e-12).
+  void setKickTolerance(double eta) {
+    prm_.saddle.tol = eta;
+    prm_.saddle.innerTol = eta;
+  }
+  void setVolumeTolerance(double tol) { prm_.weightTol = tol; }
   void setGauge(int every, double strain, double alphaMax) {
     prm_.gaugeEvery = every;
     prm_.gaugeStrain = strain;
