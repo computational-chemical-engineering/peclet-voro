@@ -323,9 +323,10 @@ WeightSolveResult solveWeights(MT& mt, const LView<Real>& pos, const LView<Real>
     }
     WeightSolveStep st;
     st.maxRelErr = maxRel;
+    // H only (DESIGN_NOTE §14.4.6 item 2): the light export, bit-identical in what H reads
     const CellFacets<Real> F =
-        exportCellFacets<Real, Power>(mt.store, pos, weight, N, L, mt.wall, mt.xRef, mt.vol, false,
-                                      prm.scratch ? &prm.scratch->facets : nullptr);
+        exportFacetsLight<Real, Power>(mt.store, pos, weight, N, L, mt.wall, mt.xRef, mt.vol,
+                                       prm.scratch ? &prm.scratch->facets : nullptr);
     {
       // the mean of V0 − V is round-off (Σ V0 = Σ V); remove it before pinning, or row 0 would
       // absorb the whole imbalance (a ~1e-12 relative floor on cell 0 at N = 4096)

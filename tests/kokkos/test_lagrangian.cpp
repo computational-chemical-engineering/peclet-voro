@@ -20,10 +20,16 @@
  *       with option S, holds every volume to 1e-12 (each Newton iterate a REPAIR, checked against
  *       a cold rebuild to 1e-9) and its K + Ũ + Q + Q_c error falls ≥ 3× at τ/2 (second order);
  *       a force-free state stays exactly at rest.
+ *   (G) The light export of an OT evaluation (exportFacetsLight, M7 WO-PERF3 P3.1): nFacets,
+ *       facetOffset, nbr, area and conn bit-identical to the full export's, on a walled power
+ *       tessellation (SDF sphere solid) with seeds inside the solid (empty cells, whose faces are
+ *       exported as wall facets of their live neighbours); and a FacetPool export bit-identical to
+ *       a one-shot one in every array.
  */
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <Kokkos_Core.hpp>
 #include <random>
 #include <vector>
@@ -497,6 +503,77 @@ double checkPotential(MT& mp, const std::vector<real_t>& x, const DV& w,
   return std::max({eX, eW, eR, eSum * 1e6});
 }
 
+template <class T>
+bool sameBits(const Kokkos::View<T*, Mem>& a, const Kokkos::View<T*, Mem>& b) {
+  if (a.extent(0) != b.extent(0))
+    return false;
+  const auto ha = peclet::core::toVector(a), hb = peclet::core::toVector(b);
+  return ha.empty() || std::memcmp(ha.data(), hb.data(), ha.size() * sizeof(T)) == 0;
+}
+
+// (G) the light export vs the full one, and pooled vs one-shot exports
+int checkLightExport() {
+  using Sdf = peclet::voro::SdfSphere<real_t>;
+  using peclet::voro::Power;
+  const real_t L = 1.0, Larr[3] = {L, L, L};
+  const Sdf ball{0.5, 0.5, 0.5, 0.25};
+  std::mt19937 rng(29);
+  std::uniform_real_distribution<real_t> U(0, 1);
+  std::vector<real_t> x;
+  int nSolid = 0;
+  while (x.size() < 3 * 1500) {
+    const real_t p[3] = {U(rng), U(rng), U(rng)};
+    const bool solid = !(ball.eval(p[0], p[1], p[2]) > 0);
+    if (solid && nSolid >= 4)
+      continue;
+    nSolid += solid ? 1 : 0;
+    x.insert(x.end(), p, p + 3);
+  }
+  const int N = static_cast<int>(x.size() / 3);
+  const real_t h = std::cbrt(L * L * L / N);
+  std::vector<real_t> wh(N);
+  for (auto& v : wh)
+    v = real_t(0.05) * h * h * (2 * U(rng) - 1);
+  const DV pos = toDev(x, "pos"), w = toDev(wh, "w");
+  peclet::voro::MovingTessellation<real_t, kP, kT, true, Sdf> mt;
+  mt.sdf = ball;
+  mt.alloc(N, Larr, real_t(1e-4) * h, real_t(0.25) * h, 4, N);
+  mt.setWeights(w);
+  mt.rebuild(pos);
+  int nEmpty = 0;
+  for (real_t v : toHost(mt.vol))
+    nEmpty += v > 0 ? 0 : 1;
+  const auto full =
+      lag::exportCellFacets<real_t, Power>(mt.store, pos, w, N, Larr, mt.wall, mt.xRef, mt.vol);
+  const auto light =
+      lag::exportFacetsLight<real_t, Power>(mt.store, pos, w, N, Larr, mt.wall, mt.xRef, mt.vol);
+  lag::FacetPool<real_t> pool;
+  const auto lightP = lag::exportFacetsLight<real_t, Power>(mt.store, pos, w, N, Larr, mt.wall,
+                                                            mt.xRef, mt.vol, &pool);
+  const auto fullP = lag::exportCellFacets<real_t, Power>(mt.store, pos, w, N, Larr, mt.wall,
+                                                          mt.xRef, mt.vol, false, &pool);
+  bool okL = true;
+  for (const auto* Fl : {&light, &lightP})
+    okL = okL && Fl->nCells == full.nCells && Fl->nFacets == full.nFacets &&
+          sameBits(Fl->facetOffset, full.facetOffset) && sameBits(Fl->nbr, full.nbr) &&
+          sameBits(Fl->area, full.area) && sameBits(Fl->conn, full.conn);
+  const bool okP =
+      fullP.nFacets == full.nFacets && fullP.nWall == full.nWall &&
+      sameBits(fullP.facetOffset, full.facetOffset) && sameBits(fullP.nbr, full.nbr) &&
+      sameBits(fullP.area, full.area) && sameBits(fullP.centroid, full.centroid) &&
+      sameBits(fullP.conn, full.conn) && sameBits(fullP.second, full.second) &&
+      sameBits(fullP.wallOffset, full.wallOffset) && sameBits(fullP.wallArea, full.wallArea) &&
+      sameBits(fullP.wallCentroid, full.wallCentroid) &&
+      sameBits(fullP.wallNormal, full.wallNormal) && sameBits(fullP.volume, full.volume) &&
+      sameBits(fullP.cellCentroid, full.cellCentroid);
+  std::printf(
+      "  (G) light export N=%d facets=%d wall facets=%d empty cells=%d: light == full %s, "
+      "pooled == one-shot %s (pool %d buffers)\n",
+      N, full.nFacets, full.nWall, nEmpty, okL ? "bit-identical" : "DIFFERS",
+      okP ? "bit-identical" : "DIFFERS", pool.size());
+  return (okL && okP && full.nWall > 0) ? 0 : 1;
+}
+
 int run(int n, unsigned seed) {
   const real_t L = 1.0, h = L / n;
   const int N = n * n * n;
@@ -579,6 +656,7 @@ int main(int argc, char** argv) {
   {
     std::printf("Lagrangian power-cell layer (backend=%s):\n",
                 Kokkos::DefaultExecutionSpace::name());
+    rc |= checkLightExport();
     rc |= run(12, 1u);
     rc |= run(16, 7u);
     std::printf("%s\n", rc == 0 ? "ALL LAGRANGIAN CHECKS PASS" : "LAGRANGIAN CHECKS FAILED");

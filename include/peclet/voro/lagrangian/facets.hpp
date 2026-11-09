@@ -341,23 +341,17 @@ class FacetPool {
   std::vector<std::unique_ptr<FacetBuffer<Real>>> bufs_;
 };
 
-/// Re-evaluate every resident cell of `store` on the current positions (and, for the Power
-/// policy, the resident weights) and export its facet geometry. `L` is the cubic periodic box
-/// (the engine's minimal-image contract); `wall`/`xRef` restore the resident SDF wall planes as
-/// in reevalPublish (leave empty without geometry). `weight` may be empty for Voronoi.
-/// `engineVol` (optional, the engine's per-cell volumes): a face toward a neighbour whose cell is
-/// EMPTY (its seed lies in the SDF solid, or a buried power cell) is not a DOF coupling — it is
-/// exported as a wall facet of the live cell (outward normal toward the dead seed).
-/// `pool` (optional): the arrays come from an idle buffer of the pool instead of fresh allocations
-/// (same values; the result aliases the buffer while it lives).
-template <class Real, class Policy, int MAXP, int MAXT>
-CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
-                                  const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
-                                  const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N,
-                                  const Real L[3], WallStore<Real> wall = {},
-                                  Kokkos::View<Real*, peclet::core::MemSpace> xRef = {},
-                                  Kokkos::View<Real*, peclet::core::MemSpace> engineVol = {},
-                                  bool withHigherMoments = false, FacetPool<Real>* pool = nullptr) {
+namespace detail {
+/// exportCellFacets (Light = false) and exportFacetsLight (Light = true): one count kernel, so the
+/// facet set and its order are the same; the light fill stores only nbr, area and conn.
+template <class Real, class Policy, bool Light, int MAXP, int MAXT>
+CellFacets<Real> exportFacets(const TopologyStore<MAXP, MAXT>& store,
+                              const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
+                              const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N,
+                              const Real L[3], WallStore<Real> wall,
+                              Kokkos::View<Real*, peclet::core::MemSpace> xRef,
+                              Kokkos::View<Real*, peclet::core::MemSpace> engineVol,
+                              bool withHigherMoments, FacetPool<Real>* pool) {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Cell = ConvexCell<Real, MAXP, MAXT, false>;
@@ -375,10 +369,12 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
   FacetBuffer<Real>* B = pool ? &pool->acquire() : nullptr;
   const auto fOff = scratchView(B ? &B->facetOffset : nullptr, static_cast<std::size_t>(N) + 1,
                                 "lag.facetOffset", true);
-  const auto wOff = scratchView(B ? &B->wallOffset : nullptr, static_cast<std::size_t>(N) + 1,
-                                "lag.wallOffset", true);
+  const auto wOff = Light ? Kokkos::View<int*, Mem>()
+                          : scratchView(B ? &B->wallOffset : nullptr,
+                                        static_cast<std::size_t>(N) + 1, "lag.wallOffset", true);
   Kokkos::parallel_for(
-      "lagrangian.facets.count", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+      Light ? "lagrangian.facets.countLight" : "lagrangian.facets.count",
+      Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         Cell c;
         detail::loadCell<Policy>(st, Wl, P, W, XR, L3, i, c);
         int ni = 0, nw = 0;
@@ -395,7 +391,8 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
             ++nw;
         }
         fOff(i + 1) = ni;
-        wOff(i + 1) = nw;
+        if constexpr (!Light)
+          wOff(i + 1) = nw;
       });
   int nF = 0, nW = 0;
   Kokkos::parallel_scan(
@@ -407,15 +404,16 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
           fOff(i) = upd;
       },
       nF);
-  Kokkos::parallel_scan(
-      "lagrangian.facets.scanWall", N + 1,
-      KOKKOS_LAMBDA(const int i, int& upd, const bool fin) {
-        const int v = wOff(i);
-        upd += v;
-        if (fin)
-          wOff(i) = upd;
-      },
-      nW);
+  if constexpr (!Light)
+    Kokkos::parallel_scan(
+        "lagrangian.facets.scanWall", N + 1,
+        KOKKOS_LAMBDA(const int i, int& upd, const bool fin) {
+          const int v = wOff(i);
+          upd += v;
+          if (fin)
+            wOff(i) = upd;
+        },
+        nW);
 
   // ---- 2. fill ----
   CellFacets<Real> F;
@@ -426,6 +424,40 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
   F.wallOffset = wOff;
   const std::size_t sF = static_cast<std::size_t>(nF), sW = static_cast<std::size_t>(nW);
   const std::size_t sN = static_cast<std::size_t>(N);
+  if constexpr (Light) {
+    // what H reads (applyWeightHessian, pinnedHostH): the same values as the full export's
+    F.nbr = scratchView(B ? &B->nbr : nullptr, sF, "lag.nbr", false);
+    F.area = scratchView(B ? &B->area : nullptr, sF, "lag.area", false);
+    F.conn = scratchView(B ? &B->conn : nullptr, 3 * sF, "lag.conn", false);
+    const CellFacets<Real> G = F;
+    Kokkos::parallel_for(
+        "lagrangian.facets.fillLight", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          Cell c;
+          detail::loadCell<Policy>(st, Wl, P, W, XR, L3, i, c);
+          int fi = G.facetOffset(i);
+          for (int k = 0; k < c.np; ++k) {
+            if (!detail::isFace(c, k))
+              continue;
+            Real a, cen[3], sec[9], cv, cm[3];
+            if (!faceMoments(c, k, a, cen, sec, cv, cm))
+              continue;
+            const int j = c.pnbr[k];
+            if (j >= 0 && (!hasEV || EV(j) > Real(0))) {
+              G.nbr(fi) = j;
+              G.area(fi) = a;
+              Real r[3] = {P(3 * j) - P(3 * i), P(3 * j + 1) - P(3 * i + 1),
+                           P(3 * j + 2) - P(3 * i + 2)};
+              r[0] = r[0] > Lxh ? r[0] - Lx : (r[0] < -Lxh ? r[0] + Lx : r[0]);
+              r[1] = r[1] > Lyh ? r[1] - Ly : (r[1] < -Lyh ? r[1] + Ly : r[1]);
+              r[2] = r[2] > Lzh ? r[2] - Lz : (r[2] < -Lzh ? r[2] + Lz : r[2]);
+              for (int d = 0; d < 3; ++d)
+                G.conn(3 * fi + d) = r[d];
+              ++fi;
+            }
+          }
+        });
+    return F;
+  }
   F.nbr = scratchView(B ? &B->nbr : nullptr, sF, "lag.nbr", false);
   F.area = scratchView(B ? &B->area : nullptr, sF, "lag.area", false);
   F.centroid = scratchView(B ? &B->centroid : nullptr, 3 * sF, "lag.cen", false);
@@ -502,6 +534,44 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
             G.cellSecond(9 * i + e) = Q[e];
       });
   return F;
+}
+}  // namespace detail
+
+/// Re-evaluate every resident cell of `store` on the current positions (and, for the Power
+/// policy, the resident weights) and export its facet geometry. `L` is the cubic periodic box
+/// (the engine's minimal-image contract); `wall`/`xRef` restore the resident SDF wall planes as
+/// in reevalPublish (leave empty without geometry). `weight` may be empty for Voronoi.
+/// `engineVol` (optional, the engine's per-cell volumes): a face toward a neighbour whose cell is
+/// EMPTY (its seed lies in the SDF solid, or a buried power cell) is not a DOF coupling — it is
+/// exported as a wall facet of the live cell (outward normal toward the dead seed).
+/// `pool` (optional): the arrays come from an idle buffer of the pool instead of fresh allocations
+/// (same values; the result aliases the buffer while it lives).
+template <class Real, class Policy, int MAXP, int MAXT>
+CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
+                                  const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
+                                  const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N,
+                                  const Real L[3], WallStore<Real> wall = {},
+                                  Kokkos::View<Real*, peclet::core::MemSpace> xRef = {},
+                                  Kokkos::View<Real*, peclet::core::MemSpace> engineVol = {},
+                                  bool withHigherMoments = false, FacetPool<Real>* pool = nullptr) {
+  return detail::exportFacets<Real, Policy, false>(store, pos, weight, N, L, wall, xRef, engineVol,
+                                                   withHigherMoments, pool);
+}
+
+/// The LIGHT export of an OT evaluation (M7 WO-PERF3 P3.1, DESIGN_NOTE §14.4.6 item 2): only what
+/// the weight Hessian H reads — nCells, nFacets, facetOffset, nbr, area, conn — bit-identical to
+/// exportCellFacets' (the same count kernel and faceMoments per face; the other stores are
+/// skipped). Every other member is empty (nWall = 0): not a CellFacets for any other consumer.
+template <class Real, class Policy, int MAXP, int MAXT>
+CellFacets<Real> exportFacetsLight(const TopologyStore<MAXP, MAXT>& store,
+                                   const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
+                                   const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N,
+                                   const Real L[3], WallStore<Real> wall = {},
+                                   Kokkos::View<Real*, peclet::core::MemSpace> xRef = {},
+                                   Kokkos::View<Real*, peclet::core::MemSpace> engineVol = {},
+                                   FacetPool<Real>* pool = nullptr) {
+  return detail::exportFacets<Real, Policy, true>(store, pos, weight, N, L, wall, xRef, engineVol,
+                                                  false, pool);
 }
 
 /// Result of matchFacets: directed facets dropped for want of a reciprocal.
