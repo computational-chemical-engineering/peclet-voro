@@ -475,8 +475,12 @@ enum class SaddleMethod {
 };
 
 struct SaddleParams {
-  double tol = 1e-12;       ///< outer: ‖C v‖_∞ ≤ tol · max_i V_i / τ (DESIGN_NOTE §2.6)
-  double innerTol = 1e-10;  ///< relative residual of each inner A-solve
+  /// η_K (DESIGN_NOTE D14.3, M7 WO-PERF3 P3.2): ‖C v‖_∞ ≤ tol · ‖C‖ · v_ref, relative alone (the
+  /// former min with tol · max_i V_i / τ, §2.6, is dropped; 1e-12 before P3.2)
+  double tol = 1e-9;
+  /// relative residual of each inner A-solve, and the coupled stop's ‖r_v‖₂ target innerTol ‖b‖₂
+  /// (D14.3: η_K; 1e-10 before P3.2)
+  double innerTol = 1e-9;
   int maxOuter = 2000, maxInner = 2000;
   double amgSwitch = 0.5;  ///< inner preconditioner: AMG when max ν τ/h² exceeds this, else Jacobi
   /// Schur preconditioner: true (default since M7 WO4a) = AMG on the assembled inertial Schur
@@ -642,8 +646,8 @@ class SaddleSolver {
   }
 
   /// Solve (M + a ζ) v + Cᵀ μ = b, C v = 0, with μ = (τ/2) λ: `lam` holds the initial guess of
-  /// λ (e.g. the previous kick's) and returns λ = μ / halfTau. `a` = θ τ/2, `tolAbs` the outer
-  /// bound on ‖C v‖_∞.
+  /// λ (e.g. the previous kick's) and returns λ = μ / halfTau. `a` = θ τ/2. `tolAbs` is overwritten
+  /// by the relative bound tol · ‖C‖ · v_ref (D14.3; it was a cap before M7 WO-PERF3 P3.2).
   SaddleStats solve(Real a, Real halfTau, Real tolAbs, const LView<Real>& b, const LView<Real>& v,
                     const LView<Real>& lam, const SaddleParams& prm) {
     using Exec = peclet::core::ExecSpace;
@@ -675,8 +679,9 @@ class SaddleSolver {
       st.tSetup += tPart.seconds();
     }
     const LView<Real> r = r_, z = z_, zo = zOld_, p = p_, s = s_, q = q_, vv = v, mu = lam;
-    {  // the stop, physically scaled (M7 WO4a): ‖C v‖_∞ ≤ min(tolAbs, tol · ‖C‖ · v_ref), with
-       // v_ref = max_i |b_i|/m_i the velocity the kick would produce unconstrained. tolAbs alone
+    {  // the stop, physically scaled (M7 WO4a): ‖C v‖_∞ ≤ tol · ‖C‖ · v_ref, with v_ref =
+       // max_i |b_i|/m_i the velocity the kick would produce unconstrained; relative alone since
+       // M7 WO-PERF3 P3.2 (D14.3: the caller's tolAbs is no longer a cap). tolAbs alone
        // (tol · max V/τ, §2.6) is relative to the grid velocity h/τ: at rest, where b is round-off,
        // it accepted the warm start with no iteration and its divergent part (measured 1.1e-13 v_g
        // on the walled 16³ layer, ratio 1000; 1.5e-15 v_g once projected)
@@ -691,8 +696,7 @@ class SaddleSolver {
             acc = u > acc ? u : acc;
           },
           Kokkos::Max<Real>(vr));
-      const Real tp = Real(prm.tol) * cScale_ * vr;
-      tolAbs = tp < tolAbs ? tp : tolAbs;
+      tolAbs = Real(prm.tol) * cScale_ * vr;
       st.tolUsed = tolAbs;
     }
     {  // warm start: μ₀ = (τ/2) λ_guess (mean removed), v₀ = A⁻¹(b − Cᵀμ₀)
@@ -1171,6 +1175,10 @@ struct IntegratorParams {
   /// and at 1e-12 the π error was its floor (rest: 3e-13 vs 9e-16 at 1e-15, +3 PCG iterations;
   /// M7 WO4a)
   double adjointTol = 1e-14;
+  /// the warm-started π solve (DESIGN_NOTE §14.4.2, M7 WO-PERF3 P3.2): from the previous π to
+  /// ‖Hπ + ∂_wU‖₂ ≤ max(adjointWarmTol ‖r₀‖₂, adjointTol ‖∂_wU‖₂), r₀ the warm-start residual (the
+  /// first solve after construction has no previous π: from zero to adjointTol, as before P3.2)
+  double adjointWarmTol = 1e-8;
   int maxHalvings = 4;  ///< τ halvings when the weight solve fails (W-Q7)
   /// option S (the default since M7 WO4′, orchestrator decision 2026-11-08: second order in the
   /// energy, ×4.2 per τ halving vs ×2.4 at x^n): kick 1's C at x^n + (τ/2) v^n; false: at x^n
@@ -1181,11 +1189,19 @@ struct IntegratorParams {
   /// iterations it took right after the build. 0: rebuilt at every setup (the WO4 behaviour).
   /// Default 10 since M7 WO-PERF (orchestrator WO, measured: N 32768 setups 1.1-6 s/step -> ~0.5).
   int amgReuse = 10;
-  /// relative residual of the linear warm-start H solves (x^{n+1} and the option-S midpoint) and
-  /// of the Newton H solves (the inexact-Newton forcing; the volumes still close to weightTol)
-  /// (WO4: 1e-10 both; WO-PERF defaults 1e-4 / 1e-3: H V-cycles per solve ~20 -> 6, Newton 3 -> 4
-  /// iterations, volumes still to weightTol)
-  double warmTol = 1e-4, newtonTol = 1e-3;
+  /// relative residual of the linear warm-start (predictor) H solves (x^{n+1}, the option-S
+  /// midpoint and the gauge trial) and of the Newton H solves when newtonForcing = 0 (the volumes
+  /// still close to weightTol) (WO4: 1e-10 both; WO-PERF 1e-4 / 1e-3; the predictor 1e-3 since M7
+  /// WO-PERF3 P3.2, DESIGN_NOTE §14.4.2)
+  double warmTol = 1e-3, newtonTol = 1e-3;
+  /// Eisenstat–Walker forcing of the per-step Newton H solves (§14.4.2, P3.2): Newton step k to
+  /// the relative residual min(newtonForcing, r_k), r_k the max relative volume error; 0: newtonTol
+  double newtonForcing = 0.1;
+  /// the carry predictor of the x^{n+1} weights (D14.4, §14.4.3, P3.2): w_pred = w_lin + ρ_c cⁿ,
+  /// cⁿ the previous step's Newton correction w_final − w_lin, ρ_c = min(carryCap,
+  /// (‖dⁿ‖_∞/‖dⁿ⁻¹‖_∞)²), 0 after a restart (construction, a τ-halving) or ‖dⁿ⁻¹‖ = 0; the
+  /// carry is dropped (w_lin evaluated) when w_pred's max relative volume error exceeds carryDrop
+  double carryCap = 4, carryDrop = 1e-2;
   // ---- the gauge G″ (DESIGN_NOTE §12.3.2) ----
   int gaugeEvery = 1;              ///< the gauge after kick 2 every this many steps (0: off)
   double gaugeStrain = 3;          ///< c_g: α_i = min(α_max, c_g τ ε̂_i)
@@ -1207,6 +1223,11 @@ struct StepReport {
   SaddleStats kick1, kick2;
   int warmIters = 0, newtonIters = 0, evaluations = 0, coldRebuilds = 0, adjIters = 0;
   double weightErr = 0;
+  // the x^{n+1} weight solve (M7 WO-PERF3 P3.2): its evaluations, the max relative volume error
+  // of its first evaluation (r₀ at w_pred), the carry factor ρ_c, and whether the carry was dropped
+  int driftEvaluations = 0;
+  double otR0 = 0, carryRho = 0, otR0Lin = 0;  ///< otR0Lin: r₀ at w_lin when the carry was dropped
+  int carryDrops = 0;
   int halvings = 0;
   int unmatched = 0;          ///< one-sided facets dropped at x^{n+1} (matchFacets)
   int repairFallbacks = 0;    ///< cold rebuilds after the repaired topology failed the check
@@ -1315,6 +1336,8 @@ class Integrator {
     lam2_ = LView<Real>("nhvw.lam2", n);
     tmpN_ = LView<Real>("nhvw.tmpN", n);
     dw_ = LView<Real>("nhvw.dw", n);
+    wLin_ = LView<Real>("nhvw.wLin", n);
+    carry_ = LView<Real>("nhvw.carry", n);
     pos0_ = LView<Real>("nhvw.pos0", n3);
     w0_ = LView<Real>("nhvw.w0", n);
     wrapS_ = LView<Real>("nhvw.wrap", n3);
@@ -1711,6 +1734,7 @@ class Integrator {
     wp.maxIter = prm_.weightMaxIter;
     wp.repair = true;
     wp.pcgTol = prm_.newtonTol;
+    wp.forcingMax = prm_.newtonForcing;
     const WeightSolveResult ws = solveWeights(*mt_, pos_, weight_, V0h_, L_, wp);
     rep.tRepair += ws.evalSeconds;
     rep.evaluations += ws.evaluations;
@@ -1798,7 +1822,10 @@ class Integrator {
     wp.pcgTol = prm_.adjointTol;
     wp.amg = &hAmg_;
     wp.scratch = &wss_;
+    wp.warmStart = piValid_;
+    wp.warmRelTol = prm_.adjointWarmTol;
     adj_ = reducedGradient(F_, gx_, gw_, pi_, grad_, wp);
+    piValid_ = true;
     if (hFresh)
       hRef_ = adj_.pcgIters;
     else if (adj_.pcgIters > 1.5 * hRef_ + 2)
@@ -1880,6 +1907,10 @@ class Integrator {
   bool attempt(double tau, StepReport& rep) {
     Kokkos::Timer t;
     fcValid_ = false;
+    // the carry (§14.4.3) holds only from a step completed at full τ: a failed attempt (the
+    // τ-halving retry) restarts it
+    const bool carryOk = carryOk_;
+    carryOk_ = false;
     const double heat0 = heat_, work0 = work_, qc0 = qc_;  // kick 1's increments undone on a retry
     // ---- kick 1 at x^n (λ₁ warm-started from the last λ₂, same geometry) ----
     Kokkos::deep_copy(lam1_, lam2_);
@@ -1932,6 +1963,22 @@ class Integrator {
           "nhvw.warm", Kokkos::RangePolicy<Exec>(0, N_),
           KOKKOS_LAMBDA(const int i) { w(i) += dw(i); });
     }
+    // ---- the carry predictor w_pred = w_lin + ρ_c cⁿ (D14.4, §14.4.3 step 1) ----
+    const double dn = tau * double(detail::maxAbsView(vh_));
+    double rho = 0;
+    if (carryOk && dPrev_ > 0) {
+      const double q = dn / dPrev_;
+      rho = std::min(prm_.carryCap, q * q);
+    }
+    rep.carryRho = rho;
+    Kokkos::deep_copy(wLin_, weight_);
+    if (rho > 0) {
+      const LView<Real> w = weight_, c = carry_;
+      const Real rc = rho;
+      Kokkos::parallel_for(
+          "nhvw.carry", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i) { w(i) += rc * c(i); });
+    }
     // ---- drift (wrapped into the box; the lattice shift is kept for the gravity jump) ----
     {
       const LView<Real> P = pos_, v = vh_, S = wrapS_;
@@ -1950,10 +1997,17 @@ class Integrator {
     wp.tol = prm_.weightTol;
     wp.maxIter = prm_.weightMaxIter;
     wp.pcgTol = prm_.newtonTol;
+    wp.forcingMax = prm_.newtonForcing;
     wp.repair = true;
     wp.amg = &hAmg_;
     wp.scratch = &wss_;
+    wp.fallback = rho > 0 ? &wLin_ : nullptr;  // r₀ > carryDrop: drop the carry, evaluate w_lin
+    wp.fallbackAbove = prm_.carryDrop;
     WeightSolveResult ws = solveWeights(*mt_, pos_, weight_, V0h_, L_, wp);
+    wp.fallback = nullptr;
+    rep.otR0 = ws.r0;
+    rep.carryDrops = ws.fallback ? 1 : 0;
+    rep.otR0Lin = ws.rFallback;
     if (!ws.converged) {
       // the linear warm start can overshoot into a buried cell, from which the damped Newton
       // cannot recover (every trial keeps it empty): retry once from w^n at the same x^{n+1}
@@ -1968,6 +2022,7 @@ class Integrator {
     }
     rep.newtonIters = ws.iters;
     rep.evaluations += ws.evaluations;
+    rep.driftEvaluations = ws.evaluations;
     rep.coldRebuilds = ws.coldRebuilds;
     rep.weightErr = ws.maxRelErr;
     rep.tRepair += ws.evalSeconds;
@@ -1991,6 +2046,7 @@ class Integrator {
       wc.repair = false;
       const WeightSolveResult wr = solveWeights(*mt_, pos_, weight_, V0h_, L_, wc);
       rep.newtonIters += wr.iters;
+      rep.driftEvaluations += wr.evaluations;
       rep.weightErr = wr.maxRelErr;
       if (!wr.converged) {
         heat_ = heat0;
@@ -1998,6 +2054,15 @@ class Integrator {
         qc_ = qc0;
         return false;
       }
+    }
+    // ---- the next step's carry: cⁿ = w_final − w_lin, ‖dⁿ‖_∞ ----
+    {
+      const LView<Real> c = carry_, w = weight_, wl = wLin_;
+      Kokkos::parallel_for(
+          "nhvw.carryStore", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i) { c(i) = w(i) - wl(i); });
+      dPrev_ = dn;
+      carryOk_ = true;
     }
     // ---- π, ∇Ũ and the hierarchies at x^{n+1} ----
     double tPot = 0;
@@ -2423,7 +2488,12 @@ class Integrator {
   Real L_[3] = {1, 1, 1};
   double maxV0_ = 0;
   LView<Real> V0_, rho_, mu_, mass_, h_, vel_, vh_, b_, zo_, zn_, grad_, gx_, gw_, pi_, lam1_,
-      lam2_, tmpN_, dw_, pos0_, w0_, wrapS_, gd_, aI_, lamG_, gs_, fw_, aG_, mG_;
+      lam2_, tmpN_, dw_, pos0_, w0_, wrapS_, gd_, aI_, lamG_, gs_, fw_, aG_, mG_, wLin_, carry_;
+  // the carry predictor (IntegratorParams::carryCap): ‖dⁿ⁻¹‖_∞ and whether cⁿ is valid (false
+  // after construction and after a failed attempt); π holds a previous solve (the adjoint warm
+  // start)
+  double dPrev_ = 0;
+  bool carryOk_ = false, piValid_ = false;
   Kokkos::View<int*, Mem> cls_, iList_;
   bool movingWall_ = false;
   long stepCount_ = 0;

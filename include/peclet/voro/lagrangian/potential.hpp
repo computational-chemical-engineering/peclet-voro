@@ -248,7 +248,8 @@ struct AdjointResult {
 /// The adjoint reduction: π from H π = −∂_wU (H singular on constants: the round-off mean of the
 /// right-hand side is removed and π_0 pinned as in the weight solve, then π is shifted to mean
 /// zero), and `grad` = ∂_xU + J_xᵀπ = ∇Ũ. `dUdx` (3N), `dUdw` (N) in; `pi` (N), `grad` (3N) out.
-/// `prm.pcgTol` is the relative residual of the H solve.
+/// `prm.pcgTol` is the relative residual of the H solve. `prm.warmStart`: `pi` holds the guess
+/// (the previous π) and the stop is solvePinnedH's warm criterion (M7 WO-PERF3 P3.2).
 template <class Real>
 AdjointResult reducedGradient(const CellFacets<Real>& F, const LView<Real>& dUdx,
                               const LView<Real>& dUdw, const LView<Real>& pi,
@@ -266,6 +267,36 @@ AdjointResult reducedGradient(const CellFacets<Real>& F, const LView<Real>& dUdx
     Kokkos::parallel_for(
         "adj.rhs", Kokkos::RangePolicy<Exec>(0, N),
         KOKKOS_LAMBDA(const int i) { r(i) = i == 0 ? Real(0) : -(b(i) - m); });
+  }
+  if (prm.warmStart) {
+    // warm start from the π held in `pi` (§14.4.2, M7 WO-PERF3 P3.2): the pinned system's guess is
+    // π − π_0 (H annihilates constants); with no iteration `pi` is left bit-unchanged
+    const LView<Real> xw = detail::wsVector(prm.scratch, &WeightSolveScratch::adjX, N, "adj.x"),
+                      p = pi;
+    Real p0 = 0;
+    Kokkos::deep_copy(
+        Kokkos::View<Real, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(&p0),
+        Kokkos::subview(pi, 0));
+    Kokkos::parallel_for(
+        "adj.warm", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(const int i) { xw(i) = p(i) - p0; });
+    const auto [it, res] = solvePinnedH(F, rhs, xw, prm);
+    if (it > 0) {
+      Real s = 0;
+      Kokkos::parallel_reduce(
+          "adj.pimean", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i, Real& acc) { acc += xw(i); }, s);
+      const Real m = s / N;
+      Kokkos::parallel_for(
+          "adj.gauge", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i) { p(i) = xw(i) - m; });
+    }
+    applyVolumeJacobianT(F, pi, grad);
+    const LView<Real> gr = grad, gx = dUdx;
+    Kokkos::parallel_for(
+        "adj.grad", Kokkos::RangePolicy<Exec>(0, 3 * N),
+        KOKKOS_LAMBDA(const int q) { gr(q) += gx(q); });
+    return {it, res};
   }
   const auto [it, res] = solvePinnedH(F, rhs, pi, prm);
   {

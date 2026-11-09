@@ -55,9 +55,10 @@ struct HostFacets {
 /// every step (the NHV-W integrator) and passed by WeightSolveParams::scratch. Device vectors are
 /// exact-length leading subviews, zeroed on every use like the one-shot allocations they replace.
 struct WeightSolveScratch {
-  LView<double> r, z, p, q, tmp;   ///< solvePinnedH's PCG vectors
-  LView<double> rhs, dw, wt;       ///< solveWeights' Newton vectors
-  LView<double> adjRhs;            ///< reducedGradient's right-hand side
+  LView<double> r, z, p, q, tmp;  ///< solvePinnedH's PCG vectors
+  LView<double> rhs, dw, wt;      ///< solveWeights' Newton vectors
+  LView<double> adjRhs;           ///< reducedGradient's right-hand side
+  LView<double> adjX;             ///< reducedGradient's warm-started iterate (π shifted, π_0 = 0)
   std::vector<double> V, Vt, res;  ///< host volumes (current, trial) and the Newton rhs
   HostFacets host;                 ///< pinnedHostH's host copies of the facets
   FacetPool<double> facets;        ///< the Newton iterations' exports
@@ -79,6 +80,20 @@ struct WeightSolveParams {
   const peclet::core::solver::GraphAMGDevice* amg = nullptr;
   /// Persistent scratch (null: allocate per call, as before).
   WeightSolveScratch* scratch = nullptr;
+  /// Eisenstat–Walker forcing of the Newton H solves (DESIGN_NOTE §14.4.2, M7 WO-PERF3 P3.2): > 0
+  /// solves Newton step k to the relative residual η_k = min(forcingMax, r_k), r_k the current
+  /// max_i |V_i − V⁰_i| / V⁰_i; 0: the fixed pcgTol.
+  double forcingMax = 0;
+  /// The carry predictor's fallback (§14.4.3 step 2): when non-null and the first evaluation's
+  /// max relative volume error exceeds fallbackAbove, `weight` is replaced by *fallback (the
+  /// linear predictor) and evaluated again (WeightSolveResult::fallback).
+  const LView<double>* fallback = nullptr;
+  double fallbackAbove = 1e-2;
+  /// solvePinnedH warm start (the adjoint, §14.4.2): x holds the initial guess (x_0 = 0) and the
+  /// stop is ‖r‖₂ ≤ max(warmRelTol ‖r_init‖₂, pcgTol ‖rhs‖₂); when r_init already meets it there
+  /// is no iteration and x is untouched. false: x = 0 and ‖r‖₂ ≤ pcgTol ‖rhs‖₂.
+  bool warmStart = false;
+  double warmRelTol = 1e-8;
 };
 
 struct WeightSolveStep {
@@ -96,6 +111,9 @@ struct WeightSolveResult {
   bool roundoffFloor = false;  ///< stalled with maxRelErr ≤ 1e3·tol (step at the round-off floor)
   int coldRebuilds = 0;        ///< repair mode: evaluations the repair routed to a cold rebuild
   int evaluations = 0;         ///< tessellation updates (repairs or rebuilds)
+  double r0 = 0;               ///< max relative volume error of the first evaluation (the guess)
+  bool fallback = false;       ///< the guess missed fallbackAbove and *fallback was evaluated
+  double rFallback = 0;        ///< max relative volume error at *fallback (when evaluated)
   double evalSeconds = 0;      ///< wall time of those updates
   std::vector<WeightSolveStep> history;
 };
@@ -210,16 +228,29 @@ std::pair<int, double> solvePinnedH(const CellFacets<Real>& F, const LView<Real>
                     p = detail::wsVector(S, &WeightSolveScratch::p, N, "ws.p"),
                     q = detail::wsVector(S, &WeightSolveScratch::q, N, "ws.q"),
                     tmp = detail::wsVector(S, &WeightSolveScratch::tmp, N, "ws.tmp");
-  Kokkos::deep_copy(x, Real(0));
-  Kokkos::deep_copy(res, r);
-  const Real r0 = std::sqrt(detail::dotView(res, res));
-  if (!(r0 > Real(0)))
-    return {0, 0.0};
+  using Exec = peclet::core::ExecSpace;
+  const Real r0 = std::sqrt(detail::dotView(r, r));
+  Real target = static_cast<Real>(prm.pcgTol) * r0, rn = r0;
+  if (prm.warmStart) {  // res = r − H x from the caller's guess
+    detail::applyPinnedH(F, x, tmp, q);
+    Kokkos::parallel_for(
+        "ws.warmRes", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(const int i) { res(i) = r(i) - q(i); });
+    rn = std::sqrt(detail::dotView(res, res));
+    const Real tw = static_cast<Real>(prm.warmRelTol) * rn;
+    target = tw > target ? tw : target;
+    if (rn <= target)
+      return {0, r0 > Real(0) ? double(rn / r0) : 0.0};
+  } else {
+    Kokkos::deep_copy(x, Real(0));
+    Kokkos::deep_copy(res, r);
+    if (!(r0 > Real(0)))
+      return {0, 0.0};
+  }
   amg.apply(res, z);
   Kokkos::deep_copy(p, z);
-  Real rz = detail::dotView(res, z), rn = r0;
+  Real rz = detail::dotView(res, z);
   int it = 0;
-  using Exec = peclet::core::ExecSpace;
   for (; it < prm.pcgMaxIter; ++it) {
     detail::applyPinnedH(F, p, tmp, q);
     const Real pq = detail::dotView(p, q);
@@ -232,7 +263,7 @@ std::pair<int, double> solvePinnedH(const CellFacets<Real>& F, const LView<Real>
           res(i) -= al * q(i);
         });
     rn = std::sqrt(detail::dotView(res, res));
-    if (rn <= prm.pcgTol * r0) {
+    if (rn <= target) {
       ++it;
       break;
     }
@@ -244,7 +275,7 @@ std::pair<int, double> solvePinnedH(const CellFacets<Real>& F, const LView<Real>
         "ws.dir", Kokkos::RangePolicy<Exec>(0, N),
         KOKKOS_LAMBDA(const int i) { p(i) = z(i) + be * p(i); });
   }
-  return {it, rn / r0};
+  return {it, r0 > Real(0) ? double(rn / r0) : 0.0};
 }
 
 /// Damped Newton for V(x, w) = V⁰ on the resident power tessellation `mt` (a MovingTessellation
@@ -311,6 +342,22 @@ WeightSolveResult solveWeights(MT& mt, const LView<Real>& pos, const LView<Real>
   evaluate(weight, V);
   double maxRel, nr, minV;
   stats(V, maxRel, nr, minV);
+  R.r0 = maxRel;
+  if (prm.fallback && maxRel > prm.fallbackAbove) {  // drop the carry: the linear predictor
+    R.fallback = true;
+    Kokkos::deep_copy(weight, *prm.fallback);
+    Real s = 0;
+    Kokkos::parallel_reduce(
+        "ws.wmean2", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(const int i, Real& acc) { acc += weight(i); }, s);
+    const Real m = s / N;
+    Kokkos::parallel_for(
+        "ws.gauge2", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(const int i) { weight(i) -= m; });
+    evaluate(weight, V);
+    stats(V, maxRel, nr, minV);
+    R.rFallback = maxRel;
+  }
   const LView<Real> rhs = detail::wsVector(prm.scratch, &WeightSolveScratch::rhs, N, "ws.rhs"),
                     dw = detail::wsVector(prm.scratch, &WeightSolveScratch::dw, N, "ws.dw"),
                     wt = detail::wsVector(prm.scratch, &WeightSolveScratch::wt, N, "ws.wt");
@@ -343,7 +390,10 @@ WeightSolveResult solveWeights(MT& mt, const LView<Real>& pos, const LView<Real>
       r[0] = 0.0;  // pinned
       Kokkos::deep_copy(rhs, Kokkos::View<const double*, Kokkos::HostSpace>(r.data(), N));
     }
-    const auto [pit, pres] = solvePinnedH(F, rhs, dw, prm);
+    WeightSolveParams pk = prm;  // the forcing of this Newton step
+    if (prm.forcingMax > 0)
+      pk.pcgTol = std::min(prm.forcingMax, maxRel);
+    const auto [pit, pres] = solvePinnedH(F, rhs, dw, pk);
     st.pcgIters = pit;
     st.pcgRelRes = pres;
     double al = 1.0, maxRelT = 0, nrT = 0, minVT = 0;

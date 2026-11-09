@@ -756,6 +756,11 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["warm_iterations"] = col([](const auto& r) { return r.warmIters; });
     d["newton_iterations"] = col([](const auto& r) { return r.newtonIters; });
     d["repairs"] = col([](const auto& r) { return r.evaluations; });
+    d["drift_evaluations"] = col([](const auto& r) { return r.driftEvaluations; });
+    d["ot_r0"] = col([](const auto& r) { return r.otR0; });
+    d["carry_rho"] = col([](const auto& r) { return r.carryRho; });
+    d["ot_r0_lin"] = col([](const auto& r) { return r.otR0Lin; });
+    d["carry_drops"] = col([](const auto& r) { return r.carryDrops; });
     d["cold_rebuilds"] = col([](const auto& r) { return r.coldRebuilds; });
     d["weight_error"] = col([](const auto& r) { return r.weightErr; });
     d["adjoint_iterations"] = col([](const auto& r) { return r.adjIters; });
@@ -1127,21 +1132,23 @@ void bindLagrangian(nb::module_& m) {
            "weights solved there; DESIGN_NOTE option S; the default: second order in the energy)\n"
            "or 'start' (x^n; first order).")
       .def("_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "coupled",
-           nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 10, nb::arg("warm_tol") = 1e-4,
+           nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 10, nb::arg("warm_tol") = 1e-3,
            nb::arg("newton_tol") = 1e-3, nb::arg("relabel") = 100,
            "M7 WO-PERF solver trials (not public API): the kick's saddle method ('schur' nested\n"
            "Schur CG, 'coupled' block-preconditioned FGMRES, 'projection' rotational incremental\n"
            "pressure correction with chi = `rotational`), and AMG hierarchy reuse over at most\n"
            "`amg_reuse` further setups (0: rebuilt every setup); the relative tolerances of the "
            "warm-start\n"
-           "and Newton H solves; the cell relabelling (`relabel`: -1 off, 0 Morton order at the\n"
+           "and Newton H solves (the Newton one is inert under the Eisenstat-Walker forcing, the\n"
+           "default since M7 WO-PERF3 P3.2); the cell relabelling (`relabel`: -1 off, 0 Morton "
+           "order at the\n"
            "first preparation, K > 0 also re-sorted every K steps (default 100); the caller's "
            "order is kept).")
       .def("_set_solver_options", &LagrangianFlow::set_solver_options, nb::arg("schur_assembled"),
-           nb::arg("adjoint_tol"), nb::arg("saddle_tol") = 1e-12,
+           nb::arg("adjoint_tol"), nb::arg("saddle_tol") = 1e-9,
            "M7 WO4a solver trials (not public API): AMG on the assembled C M^-1 C^T as the Schur\n"
            "preconditioner, the relative tolerance of the pi (adjoint) solve, and the saddle's\n"
-           "constraint tolerance |C v|_inf <= saddle_tol max V / dt.")
+           "constraint tolerance |C v|_inf <= saddle_tol |C| v_ref (relative; M7 WO-PERF3 P3.2).")
       .def(
           "set_gauge", &LagrangianFlow::set_gauge, nb::arg("every") = 1, nb::arg("strain") = 3.0,
           nb::arg("alpha_max") = 0.2,

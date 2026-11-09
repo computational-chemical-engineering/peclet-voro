@@ -261,9 +261,12 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
       bn += b[k] * b[k];
     }
     const double cons = st.constraint * tau / maxV, mom = std::sqrt(rn / bn);
-    std::printf("  (E) saddle: outer=%d inner=%d |Cv|_inf tau/maxV=%.1e momentum resid=%.1e\n",
-                st.outer, st.inner, cons, mom);
-    rc |= (cons <= 1e-12 && mom <= 1e-8) ? 0 : 1;
+    std::printf(
+        "  (E) saddle: outer=%d inner=%d |Cv|_inf tau/maxV=%.1e (bound %.1e) momentum resid=%.1e\n",
+        st.outer, st.inner, cons, st.tolUsed * tau / maxV, mom);
+    // D14.3 (M7 WO-PERF3 P3.2): the stop is relative, ‖C v‖_∞ ≤ η_K ‖C‖ v_ref (st.tolUsed); the
+    // former absolute 1e-12 τ/max V is no longer the criterion
+    rc |= (st.constraint <= st.tolUsed && mom <= 1e-8) ? 0 : 1;
   }
 
   // --- a viscous drop with tension over T = 8e-3 at τ and τ/2 (option S: kick 1 constrained at
@@ -386,7 +389,7 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
         r.gaugeAlphaMax, r.gaugeInterface, r.gaugeProjected, r.gaugeCapped, r.gaugeTries,
         int(r.gaugeAccepted), r.gaugePotential, r.gaugeKinetic, r.minMargin / h, dP, cmax);
     rc |= (r.gaugeTries > 0 && r.gaugeAccepted && r.gaugePotential <= 0 && r.gaugeKinetic <= 0 &&
-           r.minMargin > 0 && dP <= 1e-12 && cmax <= 1e-11)
+           r.minMargin > 0 && dP <= 1e-12 && cmax <= 10 * lag::SaddleParams{}.tol)
               ? 0
               : 1;
   }
