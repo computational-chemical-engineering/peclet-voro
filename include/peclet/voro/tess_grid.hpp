@@ -23,6 +23,7 @@
 #include <cstdint>
 #include <Kokkos_Core.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "morton/morton.hpp"  // suite spatial-index primitive (after Kokkos_Core: MORTON_HD->KOKKOS_FUNCTION)
@@ -92,6 +93,48 @@ struct WorklistCache {
   }
 };
 
+/// The first `n` entries of the persistent buffer `buf` (M7 WO-PERF3 P3.1: no View allocation per
+/// steady step, DESIGN_NOTE §14.4.6 item 1). `buf` is (re)allocated under `label` — the label of
+/// the one-shot allocation it replaces — only when its capacity is short, with 25 % headroom;
+/// `zero` refills the n entries with zeros (the replaced allocation was zero-initialised). The
+/// result is an exact-length rank-1 subview, so a consumer reading extent(0) sees the size it saw
+/// before. A grown buffer leaves the old allocation to whoever still references it.
+template <class T, class Mem>
+Kokkos::View<T*, Mem> persistentLeading(Kokkos::View<T*, Mem>& buf, std::size_t n,
+                                        const char* label, bool zero) {
+  if (buf.extent(0) < n)
+    buf = Kokkos::View<T*, Mem>(Kokkos::view_alloc(std::string(label), Kokkos::WithoutInitializing),
+                                n + n / 4);
+  Kokkos::View<T*, Mem> s = Kokkos::subview(buf, std::make_pair(std::size_t(0), n));
+  if (zero)
+    Kokkos::deep_copy(s, T(0));
+  return s;
+}
+
+/// `slot` null: a one-shot View exactly as before (zero-initialised iff `zero`); else
+/// persistentLeading(*slot, ...).
+template <class T, class Mem>
+Kokkos::View<T*, Mem> scratchView(Kokkos::View<T*, Mem>* slot, std::size_t n, const char* label,
+                                  bool zero) {
+  if (slot)
+    return persistentLeading(*slot, n, label, zero);
+  if (zero)
+    return Kokkos::View<T*, Mem>(std::string(label), n);
+  return Kokkos::View<T*, Mem>(Kokkos::view_alloc(std::string(label), Kokkos::WithoutInitializing),
+                               n);
+}
+
+/// Persistent arrays of buildTessGrid (the counting sort and the grid-sorted copies), held by a
+/// stepper that bins every step (MovingTessellation::step). The TessGrid a call returns aliases
+/// them: it is valid until the next call with the same scratch.
+template <class Real>
+struct TessGridScratch {
+  using MemSpace = peclet::core::MemSpace;
+  Kokkos::View<int*, MemSpace> cellOf, counts, cellStart, cursor, binned, slotOf;
+  Kokkos::View<Real*, MemSpace> posSorted, wSorted;
+  Kokkos::View<gid_t*, MemSpace> gidSorted;
+};
+
 /**
  * Build the counting-sort grid + worklist for the Voronoi gather (the first half of the old
  * buildTessellation, unchanged). `Weighted` only affects the grid density (Power keeps 1 seed/cell;
@@ -104,7 +147,8 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, peclet::core::MemSpace>& 
                              const Kokkos::View<Real*, peclet::core::MemSpace>& weight, int N,
                              const Real L[3], int sw = kSearchWindow, int densityCount = -1,
                              Kokkos::View<long*, peclet::core::MemSpace> gid = {},
-                             WorklistCache<Real>* wlc = nullptr) {
+                             WorklistCache<Real>* wlc = nullptr,
+                             TessGridScratch<Real>* scr = nullptr) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   TessGrid<Real> grid;
@@ -187,8 +231,8 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, peclet::core::MemSpace>& 
   grid.useMorton = useMorton;
 
   // --- counting sort: bin seeds into grid cells (Morton- or linear-indexed) ---
-  Kokkos::View<int*, MemSpace> cellOf("cellOf", N);
-  Kokkos::View<int*, MemSpace> counts("counts", ncellEff + 1);
+  auto cellOf = scratchView(scr ? &scr->cellOf : nullptr, (size_t)N, "cellOf", true);
+  auto counts = scratchView(scr ? &scr->counts : nullptr, (size_t)ncellEff + 1, "counts", true);
   Kokkos::deep_copy(counts, 0);
   Kokkos::parallel_for(
       "tess.bin", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
@@ -203,7 +247,8 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, peclet::core::MemSpace>& 
         Kokkos::atomic_inc(&counts(c));
       });
 
-  Kokkos::View<int*, MemSpace> cellStart("cellStart", ncellEff + 1);
+  auto cellStart =
+      scratchView(scr ? &scr->cellStart : nullptr, (size_t)ncellEff + 1, "cellStart", true);
   Kokkos::parallel_scan(
       "tess.scan", Kokkos::RangePolicy<Exec>(0, ncellEff + 1),
       KOKKOS_LAMBDA(const int c, int& acc, const bool fin) {
@@ -213,11 +258,11 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, peclet::core::MemSpace>& 
         acc += v;
       });
 
-  Kokkos::View<int*, MemSpace> cursor("cursor", ncellEff);
+  auto cursor = scratchView(scr ? &scr->cursor : nullptr, (size_t)ncellEff, "cursor", true);
   Kokkos::parallel_for(
       "tess.cursor", Kokkos::RangePolicy<Exec>(0, ncellEff),
       KOKKOS_LAMBDA(const int c) { cursor(c) = cellStart(c); });
-  Kokkos::View<int*, MemSpace> binned("binned", N);
+  auto binned = scratchView(scr ? &scr->binned : nullptr, (size_t)N, "binned", true);
   Kokkos::parallel_for(
       "tess.scatter", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         int slot = Kokkos::atomic_fetch_add(&cursor(cellOf(i)), 1);
@@ -232,13 +277,12 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, peclet::core::MemSpace>& 
   // the inverse map so the subset gather can address cells by their ORIGINAL index.
   using Kokkos::view_alloc;
   using Kokkos::WithoutInitializing;
-  Kokkos::View<Real*, MemSpace> posSorted(view_alloc(std::string("posSorted"), WithoutInitializing),
-                                          (size_t)N * 3);
-  Kokkos::View<int*, MemSpace> slotOf(view_alloc(std::string("slotOf"), WithoutInitializing), N);
-  Kokkos::View<gid_t*, MemSpace> gidSorted(
-      view_alloc(std::string("gidSorted"), WithoutInitializing), haveGid ? N : 0);
-  Kokkos::View<Real*, MemSpace> wSorted(view_alloc(std::string("wSorted"), WithoutInitializing),
-                                        Weighted ? N : 0);
+  auto posSorted = scratchView(scr ? &scr->posSorted : nullptr, (size_t)N * 3, "posSorted", false);
+  auto slotOf = scratchView(scr ? &scr->slotOf : nullptr, (size_t)N, "slotOf", false);
+  auto gidSorted =
+      scratchView(scr ? &scr->gidSorted : nullptr, (size_t)(haveGid ? N : 0), "gidSorted", false);
+  auto wSorted =
+      scratchView(scr ? &scr->wSorted : nullptr, (size_t)(Weighted ? N : 0), "wSorted", false);
   {
     const bool haveGidL = haveGid;
     Kokkos::parallel_for(

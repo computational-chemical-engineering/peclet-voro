@@ -139,16 +139,25 @@ struct PotentialParts {
   double total() const { return interface + wall + gravity; }
 };
 
+/// Persistent scratch of partitionPotential (M7 WO-PERF3 P3.1: no View allocation per steady
+/// step): the band flags and the band publish's arrays.
+template <class Real>
+struct PotentialScratch {
+  Kokkos::View<int*, peclet::core::MemSpace> unlike, band;
+  ReevalScratch<Real> publish;
+};
+
 namespace detail {
 template <class Real, class Policy, int MAXP, int MAXT>
 TessellationView<Real> publishPower(const TopologyStore<MAXP, MAXT>& st, const LView<Real>& pos,
                                     const LView<Real>& vol, int N, const Real L[3],
                                     const WallStore<Real>& wall, const LView<Real>& xRef,
                                     const LView<Real>& weight,
-                                    const Kokkos::View<int*, peclet::core::MemSpace>& band = {}) {
+                                    const Kokkos::View<int*, peclet::core::MemSpace>& band = {},
+                                    ReevalScratch<Real>* scr = nullptr) {
   return reevalPublish<Real, MAXP, MAXT, Policy>(st, pos, vol, N, L, wall, xRef,
                                                  /*withAreaGrad=*/true, /*withMoments=*/false,
-                                                 weight, band);
+                                                 weight, band, scr);
 }
 
 /// The band B of the interface and wetting energies (DESIGN_NOTE §14.4.6 item 3): the cells with
@@ -157,11 +166,13 @@ TessellationView<Real> publishPower(const TopologyStore<MAXP, MAXT>& st, const L
 /// wallEnergyForce acts on wall facets only), so publishing B alone is inert.
 template <class Real>
 Kokkos::View<int*, peclet::core::MemSpace> energyBand(
-    const CellFacets<Real>& F, const Kokkos::View<int*, peclet::core::MemSpace>& types,
-    bool walls) {
+    const CellFacets<Real>& F, const Kokkos::View<int*, peclet::core::MemSpace>& types, bool walls,
+    PotentialScratch<Real>* scr = nullptr) {
   using Exec = peclet::core::ExecSpace;
   const int N = F.nCells;
-  Kokkos::View<int*, peclet::core::MemSpace> unlike("pot.unlike", N), band("pot.band", N);
+  const std::size_t sN = static_cast<std::size_t>(N);
+  const auto unlike = scratchView(scr ? &scr->unlike : nullptr, sN, "pot.unlike", true);
+  const auto band = scratchView(scr ? &scr->band : nullptr, sN, "pot.band", true);
   const CellFacets<Real> G = F;
   const Kokkos::View<int*, peclet::core::MemSpace> T = types;
   Kokkos::parallel_for(
@@ -192,7 +203,7 @@ template <class MT, class Real>
 PotentialParts partitionPotential(MT& mt, const CellFacets<Real>& F, const LView<Real>& pos,
                                   const LView<Real>& weight, const Real L[3],
                                   const PotentialSpec<Real>& s, const LView<Real>& gradX,
-                                  const LView<Real>& gradW) {
+                                  const LView<Real>& gradW, PotentialScratch<Real>* scr = nullptr) {
   using Policy = typename MT::PlanePolicy;
   static_assert(std::is_same_v<Policy, Power>, "partitionPotential needs a power tessellation");
   PotentialParts e;
@@ -201,7 +212,8 @@ PotentialParts partitionPotential(MT& mt, const CellFacets<Real>& F, const LView
   if ((s.tension.extent(0) > 0 && !nonlocal) || s.sigmaWall.extent(0) > 0) {
     auto view = detail::publishPower<Real, Policy>(
         mt.store, pos, mt.vol, N, L, mt.wall, mt.xRef, weight,
-        detail::energyBand(F, s.types, s.sigmaWall.extent(0) > 0));
+        detail::energyBand(F, s.types, s.sigmaWall.extent(0) > 0, scr),
+        scr ? &scr->publish : nullptr);
     if (s.tension.extent(0) > 0 && !nonlocal)
       e.interface = energy::interfaceEnergyForce<Real, Policy>(
           view, s.types, s.tension, s.nTypes, pos, weight, L[0], gradX, gradW, mt.sdf);
@@ -243,7 +255,7 @@ AdjointResult reducedGradient(const CellFacets<Real>& F, const LView<Real>& dUdx
                               const LView<Real>& grad, const WeightSolveParams& prm = {}) {
   using Exec = peclet::core::ExecSpace;
   const int N = F.nCells;
-  LView<Real> rhs("adj.rhs", N);
+  const LView<Real> rhs = detail::wsVector(prm.scratch, &WeightSolveScratch::adjRhs, N, "adj.rhs");
   {
     const LView<Real> b = dUdw, r = rhs;
     Real s = 0;

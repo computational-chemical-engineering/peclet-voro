@@ -52,6 +52,16 @@ struct SubsetGatherResult {
  *                 the cold build); the facet CSR itself is not published here (the store is).
  * Default false: the store + volume are what Phase-1 needs (geometry is re-derived on reload).
  */
+/// Persistent arrays of subsetGather (M7 WO-PERF3 P3.1), held by a stepper that gathers every
+/// step (MovingTessellation). The status View a call returns aliases them: it is valid until the
+/// next call with the same scratch.
+template <class Real>
+struct SubsetGatherScratch {
+  using MemSpace = peclet::core::MemSpace;
+  Kokkos::View<int*, MemSpace> status, facetCount, cellFacetBase, oNbr, facetCursor;
+  Kokkos::View<Real*, MemSpace> oArea, oDV, oConn;
+};
+
 template <class Real, bool Weighted = false, bool TrackAdj = false, class Sdf = NoSdf>
 SubsetGatherResult<Real> subsetGather(
     const TessGrid<Real>& grid, const Kokkos::View<int*, peclet::core::MemSpace>& indices,
@@ -64,13 +74,11 @@ SubsetGatherResult<Real> subsetGather(
     bool withForceGeom = false, WallStore<Real> outWall = {},
     Kokkos::View<int*, peclet::core::MemSpace> outNear = {},
     Kokkos::View<int*, peclet::core::MemSpace> outNearCnt = {}, int nearCap = 0,
-    Real nearMargin = Real(0)) {
+    Real nearMargin = Real(0), SubsetGatherScratch<Real>* scr = nullptr) {
   using peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Builder = CellBuilder<Real, Weighted, Sdf, TrackAdj>;
   const int N = grid.N;
-  using Kokkos::view_alloc;
-  using Kokkos::WithoutInitializing;
 
   // Power reach needs the global max weight (see CellBuilder::blockReachSq); 0 for Voronoi. The
   // grid carries the per-slot weights (wSorted), so reduce over those.
@@ -86,26 +94,26 @@ SubsetGatherResult<Real> subsetGather(
   }
 
   SubsetGatherResult<Real> res;
-  res.status = Kokkos::View<int*, MemSpace>("subset.status", N);  // zero-init (unwritten = kOk)
+  res.status = scratchView(scr ? &scr->status : nullptr, (size_t)N, "subset.status",
+                           true);  // zero-init (unwritten = kOk)
 
   // Throwaway facet over-buffer: buildCell reserves a contiguous CSR range per cell and writes the
   // neighbour id (+ optional geometry) there. Sized for the subset (mean ~15.5 faces/cell +
   // headroom); the topology store is the published Phase-1 output, this buffer is just buildCell's
   // scratch.
-  Kokkos::View<int*, MemSpace> facetCount("subset.facetCount", N);
-  Kokkos::View<int*, MemSpace> cellFacetBase("subset.cellFacetBase", N);
+  auto facetCount =
+      scratchView(scr ? &scr->facetCount : nullptr, (size_t)N, "subset.facetCount", true);
+  auto cellFacetBase =
+      scratchView(scr ? &scr->cellFacetBase : nullptr, (size_t)N, "subset.cellFacetBase", true);
   // Worst case per cell (MAXF_TMP): a subset of wall-clipped cells carries far more faces than the
   // Poisson mean, and the buffer is only scratch.
   const size_t facetCap = (size_t)(nSubset > 0 ? nSubset : 1) * (size_t)Builder::MAXF_TMP;
-  Kokkos::View<int*, MemSpace> oNbr(view_alloc(std::string("subset.oNbr"), WithoutInitializing),
-                                    facetCap);
-  Kokkos::View<Real*, MemSpace> oArea(view_alloc(std::string("subset.oArea"), WithoutInitializing),
-                                      facetCap * 3);
-  Kokkos::View<Real*, MemSpace> oDV(view_alloc(std::string("subset.oDV"), WithoutInitializing),
-                                    facetCap * 3);
-  Kokkos::View<Real*, MemSpace> oConn(view_alloc(std::string("subset.oConn"), WithoutInitializing),
-                                      facetCap * 3);
-  Kokkos::View<int*, MemSpace> facetCursor("subset.facetCursor", 1);
+  auto oNbr = scratchView(scr ? &scr->oNbr : nullptr, facetCap, "subset.oNbr", false);
+  auto oArea = scratchView(scr ? &scr->oArea : nullptr, facetCap * 3, "subset.oArea", false);
+  auto oDV = scratchView(scr ? &scr->oDV : nullptr, facetCap * 3, "subset.oDV", false);
+  auto oConn = scratchView(scr ? &scr->oConn : nullptr, facetCap * 3, "subset.oConn", false);
+  auto facetCursor =
+      scratchView(scr ? &scr->facetCursor : nullptr, (size_t)1, "subset.facetCursor", true);
 
   // Empty candidate-list outputs (skin emission is not wanted for the subset gather).
   Kokkos::View<int*, MemSpace> noCand, noCandCnt;

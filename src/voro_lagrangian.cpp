@@ -724,7 +724,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       });
       ++sinceRelabel_;
     }
-    t_->wHost_ = peclet::core::toVector(t_->weight_);
+    lag::detail::hostCopy(t_->weight_, t_->wHost_);  // no staging allocation per step
     t_->wDirty_ = false;
     lastDt_ = reps.empty() ? lastDt_ : reps.back().dt;
     auto col = [&](auto get) {

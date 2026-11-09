@@ -29,7 +29,8 @@
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/convex_cell.hpp"
 #include "peclet/voro/plane_policy.hpp"
-#include "peclet/voro/sdf.hpp"  // WallStore
+#include "peclet/voro/sdf.hpp"        // WallStore
+#include "peclet/voro/tess_grid.hpp"  // scratchView
 #include "peclet/voro/tessellation_view.hpp"
 #include "peclet/voro/tessellator.hpp"  // areaGradEnumerate / areaGradFill (rung A3)
 #include "peclet/voro/topology_store.hpp"
@@ -50,6 +51,17 @@ namespace peclet::voro {
 /// re-evaluated on its radical planes with the resident weights (`weight`, N), so the published
 /// geometry is the power geometry of the power topology; Voronoi (the default) ignores `weight`
 /// and is byte-identical to the historical path.
+/// Persistent arrays of reevalPublish (M7 WO-PERF3 P3.1), held by a caller that publishes every
+/// step (the M7 band publish of lagrangian/potential.hpp). The view a call returns aliases them:
+/// it is valid until the next call with the same scratch.
+template <class Real>
+struct ReevalScratch {
+  using Mem = peclet::core::MemSpace;
+  Kokkos::View<int*, Mem> facetCount, edgeCount, base, ebase, eOff, eCnt, eFacet;
+  Kokkos::View<gid_t*, Mem> fNbr, seedId;
+  Kokkos::View<Real*, Mem> fArea, fDV, fConn, eGrad, eLen, fM2, edgeLength;
+};
+
 template <class Real, int MAXP, int MAXT, class Policy = Voronoi>
 TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
                                      const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
@@ -58,19 +70,21 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
                                      Kokkos::View<Real*, peclet::core::MemSpace> xRef = {},
                                      bool withAreaGrad = false, bool withMoments = false,
                                      Kokkos::View<Real*, peclet::core::MemSpace> weight = {},
-                                     Kokkos::View<int*, peclet::core::MemSpace> mask = {}) {
+                                     Kokkos::View<int*, peclet::core::MemSpace> mask = {},
+                                     ReevalScratch<Real>* scr = nullptr) {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Cell = ConvexCell<Real, MAXP, MAXT, false>;
-  using Kokkos::view_alloc;
-  using Kokkos::WithoutInitializing;
   const Real Lx = L[0], Ly = L[1], Lz = L[2];
   TopologyStore<MAXP, MAXT> st = store;
   Kokkos::View<Real*, Mem> P = pos;
 
   // ---- 1. per-cell live-face count (topology only: the >=3-incident-live-triangle criterion) ----
-  Kokkos::View<int*, Mem> facetCount("rp.facetCount", static_cast<std::size_t>(N));
-  Kokkos::View<int*, Mem> edgeCount("rp.edgeCount", withAreaGrad ? static_cast<std::size_t>(N) : 0);
+  auto facetCount = scratchView(scr ? &scr->facetCount : nullptr, static_cast<std::size_t>(N),
+                                "rp.facetCount", true);
+  auto edgeCount =
+      scratchView(scr ? &scr->edgeCount : nullptr, withAreaGrad ? static_cast<std::size_t>(N) : 0,
+                  "rp.edgeCount", true);
   constexpr int kMaxF = MAXP;  // == CellBuilder::MAXF_TMP: what the cold build can publish
   const bool wag = withAreaGrad;
   // `mask` (N, optional): cells with mask(i) == 0 are published with no facets (and no area
@@ -111,8 +125,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
       });
 
   // ---- 2. exclusive prefix sum -> per-cell facet base + total facet count ----
-  Kokkos::View<int*, Mem> base(view_alloc(std::string("rp.base"), WithoutInitializing),
-                               static_cast<std::size_t>(N));
+  auto base =
+      scratchView(scr ? &scr->base : nullptr, static_cast<std::size_t>(N), "rp.base", false);
   int nFacets = 0;
   {
     Kokkos::View<int*, Mem> fc = facetCount, bs = base;
@@ -125,8 +139,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
         },
         nFacets);
   }
-  Kokkos::View<int*, Mem> ebase(view_alloc(std::string("rp.ebase"), WithoutInitializing),
-                                withAreaGrad ? static_cast<std::size_t>(N) : 0);
+  auto ebase = scratchView(scr ? &scr->ebase : nullptr,
+                           withAreaGrad ? static_cast<std::size_t>(N) : 0, "rp.ebase", false);
   int nEdges = 0;
   if (withAreaGrad) {
     Kokkos::View<int*, Mem> ec = edgeCount, eb = ebase;
@@ -142,23 +156,19 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
 
   // ---- 3. fill the facet CSR: reeval geometry, then facetGeometry per live face ----
   const std::size_t nF = static_cast<std::size_t>(nFacets);
-  Kokkos::View<gid_t*, Mem> fNbr(view_alloc(std::string("rp.fNbr"), WithoutInitializing), nF);
-  Kokkos::View<Real*, Mem> fArea(view_alloc(std::string("rp.fArea"), WithoutInitializing), nF * 3);
-  Kokkos::View<Real*, Mem> fDV(view_alloc(std::string("rp.fDV"), WithoutInitializing), nF * 3);
-  Kokkos::View<Real*, Mem> fConn(view_alloc(std::string("rp.fConn"), WithoutInitializing), nF * 3);
+  auto fNbr = scratchView(scr ? &scr->fNbr : nullptr, nF, "rp.fNbr", false);
+  auto fArea = scratchView(scr ? &scr->fArea : nullptr, nF * 3, "rp.fArea", false);
+  auto fDV = scratchView(scr ? &scr->fDV : nullptr, nF * 3, "rp.fDV", false);
+  auto fConn = scratchView(scr ? &scr->fConn : nullptr, nF * 3, "rp.fConn", false);
   const std::size_t nE = static_cast<std::size_t>(nEdges);
-  Kokkos::View<int*, Mem> eOff(view_alloc(std::string("rp.eOff"), WithoutInitializing),
-                               withAreaGrad ? nF : 0);
-  Kokkos::View<int*, Mem> eCnt(view_alloc(std::string("rp.eCnt"), WithoutInitializing),
-                               withAreaGrad ? nF : 0);
-  Kokkos::View<int*, Mem> eFacet(view_alloc(std::string("rp.eFacet"), WithoutInitializing),
-                                 withAreaGrad ? nE : 0);
-  Kokkos::View<Real*, Mem> eGrad(view_alloc(std::string("rp.eGrad"), WithoutInitializing),
-                                 withAreaGrad ? nE * 3 : 0);
-  Kokkos::View<Real*, Mem> eLen(view_alloc(std::string("rp.eLen"), WithoutInitializing),
-                                withAreaGrad ? nE * 4 : 0);
-  Kokkos::View<Real*, Mem> fM2(view_alloc(std::string("rp.fM2"), WithoutInitializing),
-                               withMoments ? nF : 0);
+  auto eOff = scratchView(scr ? &scr->eOff : nullptr, withAreaGrad ? nF : 0, "rp.eOff", false);
+  auto eCnt = scratchView(scr ? &scr->eCnt : nullptr, withAreaGrad ? nF : 0, "rp.eCnt", false);
+  auto eFacet =
+      scratchView(scr ? &scr->eFacet : nullptr, withAreaGrad ? nE : 0, "rp.eFacet", false);
+  auto eGrad =
+      scratchView(scr ? &scr->eGrad : nullptr, withAreaGrad ? nE * 3 : 0, "rp.eGrad", false);
+  auto eLen = scratchView(scr ? &scr->eLen : nullptr, withAreaGrad ? nE * 4 : 0, "rp.eLen", false);
+  auto fM2 = scratchView(scr ? &scr->fM2 : nullptr, withMoments ? nF : 0, "rp.fM2", false);
   const bool wm = withMoments;
   {
     Kokkos::View<int*, Mem> bs = base, eb = ebase;
@@ -230,8 +240,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
   view.cellFacetOffset = base;
   view.cellFacetCount = facetCount;
   view.cellVolume = vol;
-  view.cellSeedId = Kokkos::View<gid_t*, Mem>(
-      view_alloc(std::string("rp.seedId"), WithoutInitializing), static_cast<std::size_t>(N));
+  view.cellSeedId =
+      scratchView(scr ? &scr->seedId : nullptr, static_cast<std::size_t>(N), "rp.seedId", false);
   {
     Kokkos::View<gid_t*, Mem> vSeed = view.cellSeedId;
     Kokkos::parallel_for(
@@ -249,8 +259,7 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
     view.facetEdgeCount = eCnt;
     view.edgeFacet = eFacet;
     view.edgeAreaGrad = eGrad;
-    view.edgeLength =
-        Kokkos::View<Real*, Mem>(view_alloc(std::string("rp.edgeLength"), WithoutInitializing), nE);
+    view.edgeLength = scratchView(scr ? &scr->edgeLength : nullptr, nE, "rp.edgeLength", false);
     {
       auto el = view.edgeLength;
       Kokkos::parallel_for(

@@ -43,6 +43,26 @@
 
 namespace peclet::voro::lagrangian {
 
+/// Host copies of the facet arrays a two-point operator reads (facetOffset, nbr, area, conn), kept
+/// by a caller that assembles one every step (pinnedHostH, the integrator's twoPointHost).
+struct HostFacets {
+  std::vector<int> off, nbr;
+  std::vector<double> area, conn;
+};
+
+/// Persistent scratch of the weight solve, the pinned H solves and the adjoint (M7 WO-PERF3 P3.1,
+/// DESIGN_NOTE §14.4.6 item 1: no View allocation per steady step), held by a caller that solves
+/// every step (the NHV-W integrator) and passed by WeightSolveParams::scratch. Device vectors are
+/// exact-length leading subviews, zeroed on every use like the one-shot allocations they replace.
+struct WeightSolveScratch {
+  LView<double> r, z, p, q, tmp;   ///< solvePinnedH's PCG vectors
+  LView<double> rhs, dw, wt;       ///< solveWeights' Newton vectors
+  LView<double> adjRhs;            ///< reducedGradient's right-hand side
+  std::vector<double> V, Vt, res;  ///< host volumes (current, trial) and the Newton rhs
+  HostFacets host;                 ///< pinnedHostH's host copies of the facets
+  FacetPool<double> facets;        ///< the Newton iterations' exports
+};
+
 struct WeightSolveParams {
   double tol = 1e-12;     ///< stop at max_i |V_i − V⁰_i| / V⁰_i ≤ tol
   int maxIter = 50;       ///< Newton iterations
@@ -57,6 +77,8 @@ struct WeightSolveParams {
   /// A prebuilt AMG hierarchy to precondition the H solves with (e.g. built on a nearby
   /// geometry); null: build one on the current H per solve.
   const peclet::core::solver::GraphAMGDevice* amg = nullptr;
+  /// Persistent scratch (null: allocate per call, as before).
+  WeightSolveScratch* scratch = nullptr;
 };
 
 struct WeightSolveStep {
@@ -79,6 +101,34 @@ struct WeightSolveResult {
 };
 
 namespace detail {
+/// Copy a contiguous rank-1 View into a host vector (resized to its extent) with no Kokkos
+/// allocation: the values toVector returns, without its staging buffer.
+template <class V, class T>
+void hostCopy(const V& v, std::vector<T>& out) {
+  out.resize(v.extent(0));
+  if (out.empty())
+    return;
+  Kokkos::View<T*, typename V::array_layout, Kokkos::HostSpace,
+               Kokkos::MemoryTraits<Kokkos::Unmanaged>>
+      h(out.data(), out.size());
+  Kokkos::deep_copy(h, v);
+}
+
+/// `slot` of the scratch `s` (null: a one-shot zero-initialised View, as before) at length n.
+inline LView<double> wsVector(WeightSolveScratch* s, LView<double> WeightSolveScratch::*slot, int n,
+                              const char* label) {
+  return scratchView(s ? &(s->*slot) : nullptr, static_cast<std::size_t>(n), label, true);
+}
+
+/// `F`'s facetOffset, nbr, area and conn into the host vectors of `h`.
+template <class Real>
+void copyHostFacets(const CellFacets<Real>& F, HostFacets& h) {
+  hostCopy(F.facetOffset, h.off);
+  hostCopy(F.nbr, h.nbr);
+  hostCopy(F.area, h.area);
+  hostCopy(F.conn, h.conn);
+}
+
 template <class Real>
 Real dotView(const LView<Real>& a, const LView<Real>& b) {
   Real s = 0;
@@ -98,13 +148,17 @@ void applyPinnedH(const CellFacets<Real>& F, const LView<Real>& x, const LView<R
   Kokkos::deep_copy(Kokkos::subview(y, 0), Kokkos::subview(x, 0));
 }
 
-/// The pinned H as a host CSR (off-diagonal duplicates of multi-image facets merged).
+/// The pinned H as a host CSR (off-diagonal duplicates of multi-image facets merged). `scr`
+/// (optional): the host copies of the facets are its persistent vectors.
 template <class Real>
-peclet::core::solver::HostCsrOp pinnedHostH(const CellFacets<Real>& F) {
-  const auto off = peclet::core::toVector(F.facetOffset);
-  const auto nbr = peclet::core::toVector(F.nbr);
-  const auto area = peclet::core::toVector(F.area);
-  const auto conn = peclet::core::toVector(F.conn);
+peclet::core::solver::HostCsrOp pinnedHostH(const CellFacets<Real>& F,
+                                            WeightSolveScratch* scr = nullptr) {
+  static_assert(std::is_same_v<Real, double>, "the weight solve runs in double (GraphAMG)");
+  HostFacets own;
+  HostFacets& h = scr ? scr->host : own;
+  copyHostFacets(F, h);
+  const std::vector<int>&off = h.off, &nbr = h.nbr;
+  const std::vector<double>&area = h.area, &conn = h.conn;
   const int N = F.nCells;
   peclet::core::solver::HostCsrOp K;
   K.n = N;
@@ -147,10 +201,15 @@ std::pair<int, double> solvePinnedH(const CellFacets<Real>& F, const LView<Real>
   if (!prm.amg) {
     peclet::core::solver::AmgParams ap;
     ap.ndofPerNode = 1;
-    own.build(detail::pinnedHostH(F), ap);
+    own.build(detail::pinnedHostH(F, prm.scratch), ap);
   }
   const peclet::core::solver::GraphAMGDevice& amg = prm.amg ? *prm.amg : own;
-  LView<Real> res("ws.r", N), z("ws.z", N), p("ws.p", N), q("ws.q", N), tmp("ws.tmp", N);
+  WeightSolveScratch* S = prm.scratch;
+  const LView<Real> res = detail::wsVector(S, &WeightSolveScratch::r, N, "ws.r"),
+                    z = detail::wsVector(S, &WeightSolveScratch::z, N, "ws.z"),
+                    p = detail::wsVector(S, &WeightSolveScratch::p, N, "ws.p"),
+                    q = detail::wsVector(S, &WeightSolveScratch::q, N, "ws.q"),
+                    tmp = detail::wsVector(S, &WeightSolveScratch::tmp, N, "ws.tmp");
   Kokkos::deep_copy(x, Real(0));
   Kokkos::deep_copy(res, r);
   const Real r0 = std::sqrt(detail::dotView(res, res));
@@ -224,13 +283,13 @@ WeightSolveResult solveWeights(MT& mt, const LView<Real>& pos, const LView<Real>
       Kokkos::fence();
       R.evalSeconds += tm.seconds();
       R.coldRebuilds += (st.fellBack || st.route == decltype(st)::kRebuildGate) ? 1 : 0;
-      V = peclet::core::toVector(Kokkos::subview(mt.vol, std::make_pair(0, N)));
+      detail::hostCopy(Kokkos::subview(mt.vol, std::make_pair(0, N)), V);
       return *std::min_element(V.begin(), V.end()) > 0.0;
     }
     mt.rebuild(pos);
     Kokkos::fence();
     R.evalSeconds += tm.seconds();
-    V = peclet::core::toVector(Kokkos::subview(mt.vol, std::make_pair(0, N)));
+    detail::hostCopy(Kokkos::subview(mt.vol, std::make_pair(0, N)), V);
     return mt.report().buried == 0;
   };
   auto stats = [&](const std::vector<double>& V, double& maxRel, double& l2, double& minV) {
@@ -246,11 +305,15 @@ WeightSolveResult solveWeights(MT& mt, const LView<Real>& pos, const LView<Real>
     l2 = std::sqrt(l2);
   };
 
-  std::vector<double> V, Vt;
+  WeightSolveScratch own;
+  WeightSolveScratch& S = prm.scratch ? *prm.scratch : own;
+  std::vector<double>&V = S.V, &Vt = S.Vt;
   evaluate(weight, V);
   double maxRel, nr, minV;
   stats(V, maxRel, nr, minV);
-  LView<Real> rhs("ws.rhs", N), dw("ws.dw", N), wt("ws.wt", N);
+  const LView<Real> rhs = detail::wsVector(prm.scratch, &WeightSolveScratch::rhs, N, "ws.rhs"),
+                    dw = detail::wsVector(prm.scratch, &WeightSolveScratch::dw, N, "ws.dw"),
+                    wt = detail::wsVector(prm.scratch, &WeightSolveScratch::wt, N, "ws.wt");
   for (int it = 0; it < prm.maxIter; ++it) {
     R.iters = it;
     R.maxRelErr = maxRel;
@@ -261,11 +324,13 @@ WeightSolveResult solveWeights(MT& mt, const LView<Real>& pos, const LView<Real>
     WeightSolveStep st;
     st.maxRelErr = maxRel;
     const CellFacets<Real> F =
-        exportCellFacets<Real, Power>(mt.store, pos, weight, N, L, mt.wall, mt.xRef, mt.vol);
+        exportCellFacets<Real, Power>(mt.store, pos, weight, N, L, mt.wall, mt.xRef, mt.vol, false,
+                                      prm.scratch ? &prm.scratch->facets : nullptr);
     {
       // the mean of V0 − V is round-off (Σ V0 = Σ V); remove it before pinning, or row 0 would
       // absorb the whole imbalance (a ~1e-12 relative floor on cell 0 at N = 4096)
-      std::vector<double> r(N);
+      std::vector<double>& r = S.res;
+      r.resize(N);
       double mean = 0;
       for (int i = 0; i < N; ++i) {
         r[i] = V0[i] - V[i];

@@ -29,12 +29,15 @@
 #define PECLET_VORO_LAGRANGIAN_FACETS_HPP
 
 #include <Kokkos_Core.hpp>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/convex_cell.hpp"
 #include "peclet/voro/plane_policy.hpp"
-#include "peclet/voro/sdf.hpp"  // WallStore
+#include "peclet/voro/sdf.hpp"        // WallStore
+#include "peclet/voro/tess_grid.hpp"  // persistentLeading
 #include "peclet/voro/topology_store.hpp"
 
 namespace peclet::voro::lagrangian {
@@ -297,6 +300,47 @@ KOKKOS_INLINE_FUNCTION void loadCell(const Store& st, const WallStore<Real>& Wl,
 }
 }  // namespace detail
 
+/// The persistent device arrays of one facet export (M7 WO-PERF3 P3.1, DESIGN_NOTE §14.4.6 item 1:
+/// no View allocation per steady step). Grown on demand, never shrunk; an export hands out
+/// exact-length leading subviews, so every consumer's extent(0) is what it was.
+template <class Real>
+struct FacetBuffer {
+  using Mem = peclet::core::MemSpace;
+  Kokkos::View<int*, Mem> facetOffset, wallOffset, nbr;
+  Kokkos::View<Real*, Mem> area, centroid, conn, second, wallArea, wallCentroid, wallNormal, volume,
+      cellCentroid, third, cellSecond;
+  /// No CellFacets (or copy of one of its Views) references this buffer any more.
+  bool idle() const {
+    const auto free = [](const auto& v) { return v.use_count() <= 1; };
+    return free(facetOffset) && free(wallOffset) && free(nbr) && free(area) && free(centroid) &&
+           free(conn) && free(second) && free(wallArea) && free(wallCentroid) && free(wallNormal) &&
+           free(volume) && free(cellCentroid) && free(third) && free(cellSecond);
+  }
+};
+
+/// A pool of FacetBuffers for a caller that exports every step (the NHV-W integrator, the OT weight
+/// solve). An export takes an IDLE buffer — one that no live CellFacets still references (Kokkos'
+/// reference count is the liveness test) — so it never overwrites arrays a live CellFacets reads:
+/// the integrator's state facets, the option-S copy of x^n, the saddle solver's copy, the export
+/// kept for reuse (fc_), a gauge trial, a Python-held array. A new buffer is added only when every
+/// buffer is live, so the pool settles at the largest number of simultaneously live exports.
+template <class Real>
+class FacetPool {
+ public:
+  FacetBuffer<Real>& acquire() {
+    for (auto& b : bufs_)
+      if (b->idle())
+        return *b;
+    bufs_.push_back(std::make_unique<FacetBuffer<Real>>());
+    return *bufs_.back();
+  }
+  int size() const { return static_cast<int>(bufs_.size()); }
+  Kokkos::View<int*, peclet::core::MemSpace> keep;  ///< matchFacets' per-facet flags (per call)
+
+ private:
+  std::vector<std::unique_ptr<FacetBuffer<Real>>> bufs_;
+};
+
 /// Re-evaluate every resident cell of `store` on the current positions (and, for the Power
 /// policy, the resident weights) and export its facet geometry. `L` is the cubic periodic box
 /// (the engine's minimal-image contract); `wall`/`xRef` restore the resident SDF wall planes as
@@ -304,6 +348,8 @@ KOKKOS_INLINE_FUNCTION void loadCell(const Store& st, const WallStore<Real>& Wl,
 /// `engineVol` (optional, the engine's per-cell volumes): a face toward a neighbour whose cell is
 /// EMPTY (its seed lies in the SDF solid, or a buried power cell) is not a DOF coupling — it is
 /// exported as a wall facet of the live cell (outward normal toward the dead seed).
+/// `pool` (optional): the arrays come from an idle buffer of the pool instead of fresh allocations
+/// (same values; the result aliases the buffer while it lives).
 template <class Real, class Policy, int MAXP, int MAXT>
 CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
                                   const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
@@ -311,7 +357,7 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
                                   const Real L[3], WallStore<Real> wall = {},
                                   Kokkos::View<Real*, peclet::core::MemSpace> xRef = {},
                                   Kokkos::View<Real*, peclet::core::MemSpace> engineVol = {},
-                                  bool withHigherMoments = false) {
+                                  bool withHigherMoments = false, FacetPool<Real>* pool = nullptr) {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Cell = ConvexCell<Real, MAXP, MAXT, false>;
@@ -326,8 +372,11 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
   const Kokkos::Array<Real, 3> L3 = {Lx, Ly, Lz};
 
   // ---- 1. count interior / wall faces per cell ----
-  Kokkos::View<int*, Mem> fOff("lag.facetOffset", static_cast<std::size_t>(N) + 1);
-  Kokkos::View<int*, Mem> wOff("lag.wallOffset", static_cast<std::size_t>(N) + 1);
+  FacetBuffer<Real>* B = pool ? &pool->acquire() : nullptr;
+  const auto fOff = scratchView(B ? &B->facetOffset : nullptr, static_cast<std::size_t>(N) + 1,
+                                "lag.facetOffset", true);
+  const auto wOff = scratchView(B ? &B->wallOffset : nullptr, static_cast<std::size_t>(N) + 1,
+                                "lag.wallOffset", true);
   Kokkos::parallel_for(
       "lagrangian.facets.count", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         Cell c;
@@ -376,26 +425,20 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
   F.facetOffset = fOff;
   F.wallOffset = wOff;
   const std::size_t sF = static_cast<std::size_t>(nF), sW = static_cast<std::size_t>(nW);
-  F.nbr = Kokkos::View<int*, Mem>(view_alloc(std::string("lag.nbr"), WithoutInitializing), sF);
-  F.area = Kokkos::View<Real*, Mem>(view_alloc(std::string("lag.area"), WithoutInitializing), sF);
-  F.centroid =
-      Kokkos::View<Real*, Mem>(view_alloc(std::string("lag.cen"), WithoutInitializing), 3 * sF);
-  F.conn =
-      Kokkos::View<Real*, Mem>(view_alloc(std::string("lag.conn"), WithoutInitializing), 3 * sF);
-  F.second =
-      Kokkos::View<Real*, Mem>(view_alloc(std::string("lag.sec"), WithoutInitializing), 9 * sF);
-  F.wallArea =
-      Kokkos::View<Real*, Mem>(view_alloc(std::string("lag.wArea"), WithoutInitializing), sW);
-  F.wallCentroid =
-      Kokkos::View<Real*, Mem>(view_alloc(std::string("lag.wCen"), WithoutInitializing), 3 * sW);
-  F.wallNormal =
-      Kokkos::View<Real*, Mem>(view_alloc(std::string("lag.wNormal"), WithoutInitializing), 3 * sW);
-  F.volume = Kokkos::View<Real*, Mem>("lag.volume", static_cast<std::size_t>(N));
-  F.cellCentroid = Kokkos::View<Real*, Mem>("lag.cellCen", 3 * static_cast<std::size_t>(N));
+  const std::size_t sN = static_cast<std::size_t>(N);
+  F.nbr = scratchView(B ? &B->nbr : nullptr, sF, "lag.nbr", false);
+  F.area = scratchView(B ? &B->area : nullptr, sF, "lag.area", false);
+  F.centroid = scratchView(B ? &B->centroid : nullptr, 3 * sF, "lag.cen", false);
+  F.conn = scratchView(B ? &B->conn : nullptr, 3 * sF, "lag.conn", false);
+  F.second = scratchView(B ? &B->second : nullptr, 9 * sF, "lag.sec", false);
+  F.wallArea = scratchView(B ? &B->wallArea : nullptr, sW, "lag.wArea", false);
+  F.wallCentroid = scratchView(B ? &B->wallCentroid : nullptr, 3 * sW, "lag.wCen", false);
+  F.wallNormal = scratchView(B ? &B->wallNormal : nullptr, 3 * sW, "lag.wNormal", false);
+  F.volume = scratchView(B ? &B->volume : nullptr, sN, "lag.volume", true);
+  F.cellCentroid = scratchView(B ? &B->cellCentroid : nullptr, 3 * sN, "lag.cellCen", true);
   if (withHigherMoments) {
-    F.third = Kokkos::View<Real*, Mem>(view_alloc(std::string("lag.third"), WithoutInitializing),
-                                       10 * sF);
-    F.cellSecond = Kokkos::View<Real*, Mem>("lag.cellSec", 9 * static_cast<std::size_t>(N));
+    F.third = scratchView(B ? &B->third : nullptr, 10 * sF, "lag.third", false);
+    F.cellSecond = scratchView(B ? &B->cellSecond : nullptr, 9 * sN, "lag.cellSec", true);
   }
   const bool hm = withHigherMoments;
   const CellFacets<Real> G = F;
@@ -474,14 +517,19 @@ struct FacetMatch {
 /// facets break the pairing every gather in lagrangian/operators.hpp relies on (1ᵀC = 0, Cᵀ the
 /// transpose of C, H symmetric). Dropping the sliver changes cell i's closure by its area only.
 /// Returns the count and the largest area dropped; F is compacted in place when any is.
+/// `pool` (optional): the flags are the pool's scratch and the compacted arrays come from an idle
+/// buffer of the pool instead of fresh allocations (same values).
 template <class Real>
-FacetMatch matchFacets(CellFacets<Real>& F) {
-  using Mem = peclet::core::MemSpace;
+FacetMatch matchFacets(CellFacets<Real>& F, FacetPool<Real>* pool = nullptr) {
   using Exec = peclet::core::ExecSpace;
   const int N = F.nCells, nF = F.nFacets;
   const CellFacets<Real> G = F;
-  Kokkos::View<int*, Mem> keep("lag.keep", static_cast<std::size_t>(nF));
-  Kokkos::View<int*, Mem> off("lag.offKeep", static_cast<std::size_t>(N) + 1);
+  // the compaction target: an idle buffer, never F's own (F references it)
+  FacetBuffer<Real>* B = pool ? &pool->acquire() : nullptr;
+  const auto keep =
+      scratchView(pool ? &pool->keep : nullptr, static_cast<std::size_t>(nF), "lag.keep", true);
+  const auto off = scratchView(B ? &B->facetOffset : nullptr, static_cast<std::size_t>(N) + 1,
+                               "lag.offKeep", true);
   FacetMatch res;
   int dropped = 0;
   Real amax = 0;
@@ -530,11 +578,13 @@ FacetMatch matchFacets(CellFacets<Real>& F) {
       },
       nK);
   const std::size_t sK = static_cast<std::size_t>(nK);
-  Kokkos::View<int*, Mem> nbr("lag.nbr", sK);
-  Kokkos::View<Real*, Mem> area("lag.area", sK), cen("lag.cen", 3 * sK), conn("lag.conn", 3 * sK),
-      sec("lag.sec", 9 * sK);
+  const auto nbr = scratchView(B ? &B->nbr : nullptr, sK, "lag.nbr", true);
+  const auto area = scratchView(B ? &B->area : nullptr, sK, "lag.area", true);
+  const auto cen = scratchView(B ? &B->centroid : nullptr, 3 * sK, "lag.cen", true);
+  const auto conn = scratchView(B ? &B->conn : nullptr, 3 * sK, "lag.conn", true);
+  const auto sec = scratchView(B ? &B->second : nullptr, 9 * sK, "lag.sec", true);
   const bool hm = F.third.extent(0) > 0;
-  Kokkos::View<Real*, Mem> thd("lag.third", hm ? 10 * sK : 0);
+  const auto thd = scratchView(B ? &B->third : nullptr, hm ? 10 * sK : 0, "lag.third", true);
   Kokkos::parallel_for(
       "lagrangian.facets.matchFill", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         int o = off(i);

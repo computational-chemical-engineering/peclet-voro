@@ -220,6 +220,12 @@ struct MovingTessellation {
   Kokkos::View<int*, Mem> extraNbr, extraCnt;  // Phase-4 partner-discovered candidate neighbours
   Kokkos::View<int, Mem> counter;
   int gridNcell = 0;
+  // per-step scratch of the grid build + subset gather and the step-invariant worklist table
+  // (M7 WO-PERF3 P3.1: no View allocation per steady step; the table is the E3 cache, reused
+  // byte for byte while the grid key is unchanged)
+  TessGridScratch<Real> gridScratch;
+  SubsetGatherScratch<Real> subsetScratch;
+  WorklistCache<Real> wlCache;
 
   /// @param nProc_  cells to maintain (default n = single-domain). For the distributed driver pass
   /// the
@@ -640,7 +646,7 @@ struct MovingTessellation {
     subsetGather<Real, Weighted, true, Sdf>(grid, wl, n, store.np, store.nt, store.pnbr, store.tri,
                                             vol, store.poke4, sdf, /*withForceGeom=*/false, wall,
                                             near, nearCnt, useNearMiss ? kNearCap : 0,
-                                            nearMarginFrac * skin);
+                                            nearMarginFrac * skin, &subsetScratch);
     auto W = wl;
     auto rb = rebuilt;
     auto P = pos;
@@ -832,7 +838,7 @@ struct MovingTessellation {
   RepairStats step(const Kokkos::View<Real*, Mem>& pos) {
     RepairStats s;
     auto grid = buildTessGrid<Real, Weighted>(pos, weight, N, L, sw, densityCount,
-                                              Kokkos::View<long*, Mem>());
+                                              Kokkos::View<long*, Mem>(), &wlCache, &gridScratch);
     Kokkos::deep_copy(rebuilt, 0);
     // Use the cheap local certificate whenever store.poke4 is valid for the current topology. With
     // the 4th-face plane included the local cert matches the brute flag set (it is complete, not a

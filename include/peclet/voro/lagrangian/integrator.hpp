@@ -86,13 +86,15 @@ Real maxAbsView(const LView<Real>& a) {
 ///   (K x)_i = extra(i) x_i + Σ_f coef(i, j, A, d) (x_i − x_j),
 /// multi-image duplicates merged. `pin`: row and column 0 lose their off-diagonals (the diagonal
 /// is kept) — the SPD preconditioner matrix of a singular (periodic / Neumann) Laplacian.
+/// `hf` (optional): persistent host copies of the facets (M7 WO-PERF3 P3.1).
 template <class Real, class Coef, class Extra>
 peclet::core::solver::HostCsrOp twoPointHost(const CellFacets<Real>& F, Coef coef, Extra extra,
-                                             bool pin) {
-  const auto off = peclet::core::toVector(F.facetOffset);
-  const auto nbr = peclet::core::toVector(F.nbr);
-  const auto area = peclet::core::toVector(F.area);
-  const auto conn = peclet::core::toVector(F.conn);
+                                             bool pin, HostFacets* hf = nullptr) {
+  HostFacets own;
+  HostFacets& h = hf ? *hf : own;
+  copyHostFacets(F, h);
+  const std::vector<int>&off = h.off, &nbr = h.nbr;
+  const std::vector<double>&area = h.area, &conn = h.conn;
   const int N = F.nCells;
   peclet::core::solver::HostCsrOp K;
   K.n = N;
@@ -272,9 +274,10 @@ class SaddleSolver {
       scr_ = DissipationScratch<Real>(N);
       kv_.clear();
     }
-    const auto rh = peclet::core::toVector(rho);
-    const auto mh = peclet::core::toVector(mu);
-    const auto hh = peclet::core::toVector(h);
+    detail::hostCopy(rho, rhoH_);
+    detail::hostCopy(mu, muH_);
+    detail::hostCopy(h, hH_);
+    const std::vector<double>&rh = rhoH_, &mh = muH_, &hh = hH_;
     viscous_ = false;
     nuH2_ = 0;
     for (int i = 0; i < N; ++i) {
@@ -284,15 +287,17 @@ class SaddleSolver {
     peclet::core::solver::AmgParams ap;
     ap.ndofPerNode = 1;
     {  // Cahouet–Chabard viscous diagonal 2μ_i/V_i (scaled by a = θτ/2 in solve)
-      const auto vh = peclet::core::toVector(F.volume);
-      std::vector<double> cc(N);
+      detail::hostCopy(F.volume, volH_);
+      const std::vector<double>& vh = volH_;
+      std::vector<double>& cc = ccH_;
+      cc.resize(N);
       for (int i = 0; i < N; ++i)
         cc[i] = vh[i] > 0 ? 2.0 * mh[i] / vh[i] : 0.0;
-      cc_ = peclet::core::toDevice<Real>(cc, "sd.cc");
+      toDeviceInto(cc, cc_, "sd.cc");
       const double muMin = N > 0 ? *std::min_element(mh.begin(), mh.end()) : 0.0;
       for (int i = 0; i < N; ++i)
         cc[i] = vh[i] > 0 ? muMin / vh[i] : 0.0;
-      ccMin_ = peclet::core::toDevice<Real>(cc, "sd.ccMin");
+      toDeviceInto(cc, ccMin_, "sd.ccMin");
     }
     Kokkos::Timer tb;
     if (!rebuildAmg && lrho_.numLevels() > 0 && builtAssembled_ == assembled_) {
@@ -386,7 +391,8 @@ class SaddleSolver {
       tPart.reset();
       peclet::core::solver::AmgParams ap;
       ap.ndofPerNode = 1;
-      const auto mh = peclet::core::toVector(mass_);
+      detail::hostCopy(mass_, massH_);
+      const std::vector<double>& mh = massH_;
       const auto& muh = mh_;
       const double aa = a;
       visc_.build(detail::twoPointHost(
@@ -396,7 +402,7 @@ class SaddleSolver {
                             muh[i] + muh[j] > 0 ? 2 * muh[i] * muh[j] / (muh[i] + muh[j]) : 0.0;
                         return aa * (4.0 / 9.0) * muf * A / d;
                       },
-                      [&](int i) { return mh[i]; }, /*pin=*/false),
+                      [&](int i) { return mh[i]; }, /*pin=*/false, &hostF_),
                   ap);
       st.tSetup += tPart.seconds();
     }
@@ -846,6 +852,22 @@ class SaddleSolver {
   CellFacets<Real> F_;
   LView<Real> mu_, mass_;
   std::vector<double> mh_;
+  // persistent host copies (M7 WO-PERF3 P3.1): ρ, μ, h, V, the Cahouet–Chabard diagonals, the
+  // masses and the facets of the viscous AMG matrix
+  std::vector<double> rhoH_, muH_, hH_, volH_, ccH_, massH_;
+  HostFacets hostF_;
+  /// `dst` = `src` on the device: copied into dst's allocation when it has the length and nothing
+  /// else references it, else a new View (`label`) as before.
+  static void toDeviceInto(const std::vector<double>& src, LView<Real>& dst, const char* label) {
+    if constexpr (std::is_same_v<Real, double>) {
+      if (dst.extent(0) == src.size() && dst.use_count() == 1) {
+        Kokkos::deep_copy(dst,
+                          Kokkos::View<const double*, Kokkos::HostSpace>(src.data(), src.size()));
+        return;
+      }
+    }
+    dst = peclet::core::toDevice<Real>(src, label);
+  }
   bool viscous_ = false, useAmg_ = false, assembled_ = false, builtAssembled_ = false;
   double nuH2_ = 0, setupSeconds_ = 0;
   Real cScale_ = 0;
@@ -1115,7 +1137,8 @@ class Integrator {
   double capillaryStep(double capillary) const {
     if (spec_.tension.extent(0) == 0)
       return std::numeric_limits<double>::infinity();
-    const auto ten = peclet::core::toVector(spec_.tension);
+    detail::hostCopy(spec_.tension, tenH_);
+    const std::vector<double>& ten = tenH_;
     double smax = 0;
     for (double s : ten)
       smax = std::max(smax, s);
@@ -1138,7 +1161,8 @@ class Integrator {
         Kokkos::Min<Real>(rmin));
     if (!(rmin < std::numeric_limits<Real>::infinity()))
       return std::numeric_limits<double>::infinity();
-    const auto hh = peclet::core::toVector(h_);
+    detail::hostCopy(h_, hH_);
+    const std::vector<double>& hh = hH_;
     const double hmin = *std::min_element(hh.begin(), hh.end());
     return capillary * std::sqrt(rmin * hmin * hmin * hmin / smax);
   }
@@ -1396,6 +1420,7 @@ class Integrator {
     WeightSolveParams wp;
     wp.pcgTol = prm_.warmTol;
     wp.amg = &hAmg_;
+    wp.scratch = &wss_;
     solvePinnedH(F_, tmpN_, dw_, wp);
     {
       const LView<Real> w = weight_, w0 = w0_, dw = dw_, P = pos_, P0 = pos0_, U = u, S = wrapS_;
@@ -1435,7 +1460,7 @@ class Integrator {
   /// export is kept (fc_) for the next consumer at the same state (currentFacets()).
   double repairMismatch() {
     fc_ = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_, mt_->wall, mt_->xRef,
-                                        mt_->vol);
+                                        mt_->vol, false, &pool_);
     fcValid_ = true;
     const CellFacets<Real> F = fc_;
     const LView<Real> ve = mt_->vol, v0 = V0_, vf = F.volume;
@@ -1456,7 +1481,7 @@ class Integrator {
     if (fcValid_)
       return fc_;
     return exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_, mt_->wall, mt_->xRef,
-                                         mt_->vol);
+                                         mt_->vol, false, &pool_);
   }
 
   /// saddle_.setup at F_, the S₀ hierarchy rebuilt or lagged per IntegratorParams::amgReuse.
@@ -1477,13 +1502,13 @@ class Integrator {
   void evalState(double* tPot = nullptr) {
     Kokkos::Timer t, tp;
     F_ = currentFacets();
-    match_ = matchFacets(F_);
+    match_ = matchFacets(F_, &pool_);
     Kokkos::fence();
     evalSplit_[0] = tp.seconds();
     tp.reset();
     Kokkos::deep_copy(gx_, Real(0));
     Kokkos::deep_copy(gw_, Real(0));
-    parts_ = partitionPotential(*mt_, F_, pos_, weight_, L_, spec_, gx_, gw_);
+    parts_ = partitionPotential(*mt_, F_, pos_, weight_, L_, spec_, gx_, gw_, &pots_);
     Kokkos::fence();
     evalSplit_[1] = tp.seconds();
     tp.reset();
@@ -1492,7 +1517,7 @@ class Integrator {
     const bool hFresh =
         prm_.amgReuse <= 0 || hAge_ >= prm_.amgReuse || hStale_ || hAmg_.numLevels() == 0;
     if (hFresh) {
-      hAmg_.build(detail::pinnedHostH(F_), ap);
+      hAmg_.build(detail::pinnedHostH(F_, &wss_), ap);
       hAge_ = 0;
       hStale_ = false;
     } else {
@@ -1503,6 +1528,7 @@ class Integrator {
     WeightSolveParams wp;
     wp.pcgTol = prm_.adjointTol;
     wp.amg = &hAmg_;
+    wp.scratch = &wss_;
     adj_ = reducedGradient(F_, gx_, gw_, pi_, grad_, wp);
     if (hFresh)
       hRef_ = adj_.pcgIters;
@@ -1600,7 +1626,7 @@ class Integrator {
       }
       F_ = currentFacets();
       fcValid_ = false;  // pos/weight return to x^n below
-      matchFacets(F_);
+      matchFacets(F_, &pool_);
       setupSaddle();
       rep.kick1 = kick(tau, vel_, vh_, lam1_, pos0_);
       // kick 1's constraint work (τ/4) λ₁ᵀ C^s v^n (C^s v^{½} = 0, C^s v^n ≠ 0)
@@ -1630,6 +1656,7 @@ class Integrator {
       WeightSolveParams wp;
       wp.pcgTol = prm_.warmTol;
       wp.amg = &hAmg_;
+      wp.scratch = &wss_;
       rep.warmIters = solvePinnedH(F_, tmpN_, dw_, wp).first;
       const LView<Real> w = weight_, dw = dw_;
       Kokkos::parallel_for(
@@ -1656,6 +1683,7 @@ class Integrator {
     wp.pcgTol = prm_.newtonTol;
     wp.repair = true;
     wp.amg = &hAmg_;
+    wp.scratch = &wss_;
     WeightSolveResult ws = solveWeights(*mt_, pos_, weight_, V0h_, L_, wp);
     if (!ws.converged) {
       // the linear warm start can overshoot into a buried cell, from which the damped Newton
@@ -1800,7 +1828,7 @@ class Integrator {
       ++rep.gaugeTries;
       if (moveAndSolve(s, gd_, rep)) {
         CellFacets<Real> Ft = currentFacets();
-        matchFacets(Ft);
+        matchFacets(Ft, &pool_);
         cellMargins(Ft, mG_);
         const LView<Real> mg = mG_;
         Real mmin = 0;
@@ -1812,7 +1840,7 @@ class Integrator {
           Kokkos::deep_copy(gx_, Real(0));
           Kokkos::deep_copy(gw_, Real(0));
           const PotentialParts pt =
-              partitionPotential(*mt_, Ft, pos_, weight_, L_, spec_, gx_, gw_);
+              partitionPotential(*mt_, Ft, pos_, weight_, L_, spec_, gx_, gw_, &pots_);
           rep.gaugeTrialDU = pt.total() + wrapOffset_ - wrapJump() - U0;
           if (pt.total() + wrapOffset_ - wrapJump() <= U0) {
             accumulateWrap();
@@ -2137,6 +2165,13 @@ class Integrator {
   bool sStale_ = false, hStale_ = false;
   double evalSplit_[4] = {0, 0, 0, 0};  ///< evalState: facets, energy, H AMG setup, adjoint (s)
   double gaugeU_ = 0, gaugeK_ = 0;
+  // persistent scratch (M7 WO-PERF3 P3.1, DESIGN_NOTE §14.4.6 item 1): the facet exports (a pool:
+  // an export takes a buffer no live CellFacets references — F_, fc_, the option-S copy of x^n, the
+  // saddle's copy, a gauge trial), the weight solve / H solves / adjoint, the band publish
+  FacetPool<Real> pool_;
+  WeightSolveScratch wss_;
+  PotentialScratch<Real> pots_;
+  mutable std::vector<double> tenH_, hH_;  ///< capillaryStep's host copies
   CellFacets<Real> F_;
   CellFacets<Real> fc_;   ///< repairMismatch()'s export, reused at the same state (currentFacets)
   bool fcValid_ = false;  ///< fc_ describes the current (pos, weight, engine)
