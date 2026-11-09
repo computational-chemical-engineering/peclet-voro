@@ -50,10 +50,38 @@ inline nb::dict repairStatsDict(const peclet::voro::RepairStats& st) {
   return d;
 }
 
+// The internal cell order (M7 WO-PERF2). The resident cells may be stored in an order other than
+// the caller's — LagrangianFlow keeps them in Morton order for locality — described by `perm`:
+// perm[k] is the caller's index of internal cell k, empty meaning the identity. Every per-cell
+// argument and result crosses that boundary through these two gathers (strided records: `s`
+// values per cell); with an empty perm they return their input untouched.
+template <class T>
+std::vector<T> cellsToInternal(const std::vector<int>& perm, std::vector<T> v, std::size_t s) {
+  if (perm.empty() || v.size() != s * perm.size())
+    return v;  // identity, or a count the caller's own check rejects
+  std::vector<T> out(v.size());
+  for (std::size_t k = 0; k < perm.size(); ++k)
+    for (std::size_t c = 0; c < s; ++c)
+      out[s * k + c] = v[s * static_cast<std::size_t>(perm[k]) + c];
+  return out;
+}
+template <class T>
+std::vector<T> cellsToCaller(const std::vector<int>& perm, std::vector<T> v, std::size_t s) {
+  if (perm.empty() || v.size() != s * perm.size())
+    return v;
+  std::vector<T> out(v.size());
+  for (std::size_t k = 0; k < perm.size(); ++k)
+    for (std::size_t c = 0; c < s; ++c)
+      out[s * static_cast<std::size_t>(perm[k]) + c] = v[s * k + c];
+  return out;
+}
+
 class LagrangianFlow;  // voro_lagrangian.cpp: drives the resident power engine in place
+class FacetOperators;  // voro_lagrangian.cpp: snapshots the cell order with the facets
 
 class Tess : public peclet::core::python::Releasable {
   friend class LagrangianFlow;
+  friend class FacetOperators;
 
  public:
   Tess() = default;
@@ -83,7 +111,7 @@ class Tess : public peclet::core::python::Releasable {
   void set_weights(nb::ndarray<real_t, nb::c_contig> w) {
     if (w.ndim() != 1)
       throw std::runtime_error("set_weights(): expected an (N,) array");
-    wHost_ = flatten1(w);
+    wHost_ = cellsToInternal(perm_, flatten1(w), 1);
     weighted_ = true;
     wDirty_ = true;
   }
@@ -120,11 +148,20 @@ class Tess : public peclet::core::python::Releasable {
     N_ = static_cast<int>(p.size() / 3);
     if (N_ <= 0)
       throw std::runtime_error("voro: build() needs at least one point");
+    if (!perm_.empty() && perm_.size() != static_cast<std::size_t>(N_)) {
+      perm_.clear();  // a new point count: the caller's order again
+      ++relabels_;
+    }
+    pos_ = peclet::core::toDevice<real_t>(cellsToInternal(perm_, std::move(p), 3), "pos");
+    buildResident(strict);
+  }
+
+  // The cold build of the resident engine at pos_ (and wHost_), both in the internal order.
+  void buildResident(bool strict) {
     const double boxVol = static_cast<double>(L_[0]) * L_[1] * L_[2];
     const real_t spacing = static_cast<real_t>(std::cbrt(boxVol / N_));
     if (weighted_ && static_cast<int>(wHost_.size()) != N_)
       throw std::runtime_error("build(): weights (N,) must match the particle count");
-    pos_ = peclet::core::toDevice<real_t>(p, "pos");
     if (weighted_) {
       weight_ = peclet::core::toDevice<real_t>(wHost_, "w");
       wDirty_ = false;
@@ -182,7 +219,7 @@ class Tess : public peclet::core::python::Releasable {
           "voro: step(positions) got " + std::to_string(p.size() / 3) + " points but build() had " +
           std::to_string(N_) +
           " — the count is fixed by build(); call build() again to change it.");
-    pos_ = peclet::core::toDevice<real_t>(p, "pos");
+    pos_ = peclet::core::toDevice<real_t>(cellsToInternal(perm_, std::move(p), 3), "pos");
     if (weighted_ && wDirty_) {  // weights changed since the last build/step: refresh in place
       if (static_cast<int>(wHost_.size()) != N_)
         throw std::runtime_error("step(): weights (N,) must match the particle count");
@@ -198,7 +235,8 @@ class Tess : public peclet::core::python::Releasable {
     const std::size_t N = static_cast<std::size_t>(N_);
     DView vol = std::visit([](auto& mt) { return mt.vol; }, mt_);
     auto v = Kokkos::subview(vol, Kokkos::make_pair(std::size_t(0), N));
-    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(v), {N}, {1});
+    return peclet::core::python::vector_to_ndarray(
+        cellsToCaller(perm_, peclet::core::toVector(v), 1), {N}, {1});
   }
 
   // Per-cell Voronoi neighbour (= face) count, recomputed from the resident topology store.
@@ -217,8 +255,8 @@ class Tess : public peclet::core::python::Releasable {
           st.load(i, c, Lx, Ly, Lz);
           C(i) = c.countFaces();
         });
-    return peclet::core::python::vector_to_ndarray(peclet::core::toVector(cnt),
-                                                   {static_cast<std::size_t>(N)}, {1});
+    return peclet::core::python::vector_to_ndarray(
+        cellsToCaller(perm_, peclet::core::toVector(cnt), 1), {static_cast<std::size_t>(N)}, {1});
   }
 
   // Rung A3: energies + forces of the RESIDENT tessellation (after build/step) on the published
@@ -242,8 +280,8 @@ class Tess : public peclet::core::python::Releasable {
     if ((int)tension.size() != nT * nT)
       throw std::runtime_error(
           "energy_forces(): tension must be (nTypes, nTypes) with nTypes = max(types)+1");
-    Kokkos::View<int*, Mem> dtype("en.type", N);
-    Kokkos::deep_copy(dtype, Kokkos::View<const int*, Kokkos::HostSpace>(types.data(), N));
+    Kokkos::View<int*, Mem> dtype = peclet::core::toDevice<int>(
+        cellsToInternal(perm_, std::vector<int>(types.data(), types.data() + N), 1), "en.type");
     DView dten("en.tension", (size_t)nT * nT);
     Kokkos::deep_copy(
         dten, Kokkos::View<const real_t*, Kokkos::HostSpace>(tension.data(), (size_t)nT * nT));
@@ -258,8 +296,9 @@ class Tess : public peclet::core::python::Releasable {
     if (dEdV) {
       if ((int)dEdV->size() != N)
         throw std::runtime_error("energy_forces(): dEdV must be (N,)");
-      dde = DView("en.dEdV", N);
-      Kokkos::deep_copy(dde, Kokkos::View<const real_t*, Kokkos::HostSpace>(dEdV->data(), N));
+      dde = peclet::core::toDevice<real_t>(
+          cellsToInternal(perm_, std::vector<real_t>(dEdV->data(), dEdV->data() + N), 1),
+          "en.dEdV");
     }
     DView force("en.force", 3 * (size_t)N), forceW("en.forceW", weighted_ ? N : 0);
     Kokkos::deep_copy(force, real_t(0));
@@ -296,10 +335,12 @@ class Tess : public peclet::core::python::Releasable {
     d["lloyd_energy"] = eLloyd;
     d["tension_energy"] = eTen;
     d["force"] = peclet::core::python::vector_to_ndarray(
-        peclet::core::toVector(force), {static_cast<std::size_t>(N), std::size_t(3)}, {3, 1});
+        cellsToCaller(perm_, peclet::core::toVector(force), 3),
+        {static_cast<std::size_t>(N), std::size_t(3)}, {3, 1});
     if (weighted_)
-      d["force_w"] = peclet::core::python::vector_to_ndarray(peclet::core::toVector(forceW),
-                                                             {static_cast<std::size_t>(N)}, {1});
+      d["force_w"] = peclet::core::python::vector_to_ndarray(
+          cellsToCaller(perm_, peclet::core::toVector(forceW), 1), {static_cast<std::size_t>(N)},
+          {1});
     return d;
   }
 
@@ -337,7 +378,7 @@ class Tess : public peclet::core::python::Releasable {
             return std::vector<int>(N, 0);
         },
         mt_);
-    return peclet::core::python::vector_to_ndarray(std::move(v), {N}, {1});
+    return peclet::core::python::vector_to_ndarray(cellsToCaller(perm_, std::move(v), 1), {N}, {1});
   }
 
   int num_particles() const { return N_; }
@@ -349,9 +390,36 @@ class Tess : public peclet::core::python::Releasable {
     weight_ = DView{};
     scene_.clear();
     N_ = 0;
+    perm_.clear();
   }
 
  private:
+  // Store the resident cells in the order `order` (order[k] = the current internal index of new
+  // cell k): positions and weights gathered, perm_ composed, the engine cold-rebuilt. Used by
+  // LagrangianFlow (Morton relabelling); the caller sees no change through the getters.
+  void relabel(const std::vector<int>& order) {
+    const std::size_t N = static_cast<std::size_t>(N_);
+    if (order.size() != N)
+      throw std::logic_error("voro: Tessellation relabel: order is not (N,)");
+    const std::vector<real_t> p = peclet::core::toVector(pos_);
+    std::vector<real_t> pn(3 * N), wn(weighted_ ? N : 0);
+    std::vector<int> perm(N);
+    for (std::size_t k = 0; k < N; ++k) {
+      const std::size_t o = static_cast<std::size_t>(order[k]);
+      for (int a = 0; a < 3; ++a)
+        pn[3 * k + a] = p[3 * o + a];
+      if (weighted_)
+        wn[k] = wHost_[o];
+      perm[k] = perm_.empty() ? order[k] : perm_[o];
+    }
+    pos_ = peclet::core::toDevice<real_t>(pn, "pos");
+    if (weighted_)
+      wHost_ = std::move(wn);
+    perm_ = std::move(perm);
+    ++relabels_;
+    buildResident(false);
+  }
+
   std::array<real_t, 3> L_{1, 1, 1};
   real_t tolFrac_ = defaults::kCertificateTolerance;
   bool localCert_ = true, useGate_ = true, profile_ = false;
@@ -363,6 +431,8 @@ class Tess : public peclet::core::python::Releasable {
   DView pos_, weight_;
   SceneHolder scene_;
   MtVariant mt_;
+  std::vector<int> perm_;  ///< caller index of internal cell k (empty: the identity)
+  unsigned relabels_ = 0;  ///< bumped whenever perm_ changes (LagrangianFlow checks it)
 };
 
 // The diagnostics tier of Tessellation: a view onto the owner (no state of its own).

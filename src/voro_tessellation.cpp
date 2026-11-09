@@ -10,6 +10,10 @@ peclet::voro::fv::FaceMesh<real_t> Tess::face_mesh() {
     throw std::runtime_error(
         "voro: FlowSolver needs a built Tessellation — call tessellation.build(positions) "
         "first.");
+  if (!perm_.empty())
+    throw std::runtime_error(
+        "voro: FlowSolver over a Tessellation that a LagrangianFlow drives is not supported "
+        "(its cells are stored in the flow's internal order).");
   const int N = N_;
   const real_t Larr[3] = {L_[0], L_[1], L_[2]};
   return std::visit(

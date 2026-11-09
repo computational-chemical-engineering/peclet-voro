@@ -661,6 +661,78 @@ def test_lagrangian():
           f"reduced potential FD {e_red:.1e}")
 
 
+def _morton_order(pos, L):
+    """The Morton (Z) order of LagrangianFlow's relabelling (21 bits per axis, x fastest)."""
+    q = np.clip(np.floor(pos / L * 2.0**21), 0, 2**21 - 1).astype(np.uint64)
+    key = np.zeros(len(pos), dtype=np.uint64)
+    for b in range(21):
+        for a in range(3):
+            key |= ((q[:, a] >> np.uint64(b)) & np.uint64(1)) << np.uint64(3 * b + a)
+    return np.argsort(key, kind="stable")
+
+
+def test_lagrangian_relabel():
+    """LagrangianFlow stores its cells in Morton order (an internal permutation): every getter and
+    setter keeps the caller's order, and a run from shuffled input is the run from Morton-ordered
+    input with the relabelling off."""
+    rng = np.random.default_rng(11)
+    n, L = 8, 1.0
+    g = (np.arange(n) + 0.5) / n
+    lat = np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3)
+    pos = (lat + 0.15 / n * (2 * rng.random(lat.shape) - 1)) % L
+    pos = pos[rng.permutation(len(pos))]
+    d = (pos - 0.5 + 0.5 * L) % L - 0.5 * L
+    types = (np.linalg.norm(d, axis=1) < 0.3).astype(np.int32)
+
+    def flow(p, ty, relabel):
+        t = voro.Tessellation()
+        t.set_domain(extent=(L, L, L))
+        t.set_weights(np.zeros(len(p)))
+        t.build(np.ascontiguousarray(p), strict=True)
+        f = voro.LagrangianFlow(t, np.ascontiguousarray(ty))
+        f.set_density(np.array([1.0, 10.0]))
+        f.set_viscosity(np.array([0.05, 0.05]))
+        f.set_tension(np.array([[0, 1.0], [1.0, 0]]))
+        f._set_perf_options(relabel=relabel)
+        return t, f
+
+    o = _morton_order(pos, L)
+    ta, fa = flow(pos, types, 0)          # shuffled input, relabelled internally
+    tb, fb = flow(pos[o], types[o], -1)   # Morton input, relabelling off
+    tc, fc = flow(pos, types, -1)         # shuffled input, relabelling off (the old path)
+    v = 0.1 * rng.standard_normal(pos.shape)
+    fa.set_velocities(v)
+    fb.set_velocities(v[o])
+    fc.set_velocities(v)
+    assert np.array_equal(fa.get_velocities(), v)
+    fa.step(3)
+    fb.step(3)
+    fc.step(3)
+    ab = max(np.abs(fa.get_velocities()[o] - fb.get_velocities()).max(),
+             np.abs(fa.get_positions()[o] - fb.get_positions()).max(),
+             np.abs(ta.get_volumes()[o] - tb.get_volumes()).max())
+    ac = np.abs(fa.get_velocities() - fc.get_velocities()).max() / np.abs(fc.get_velocities()).max()
+    assert ab < 1e-12 and ac < 1e-8, (ab, ac)
+    assert np.allclose(fa.get_lambda()[o], fb.get_lambda(), rtol=0, atol=1e-10)
+    Fa, Fb = ta.get_facets(), tb.get_facets()
+    assert np.all(Fa["i"] < Fa["j"]) and len(Fa["i"]) == len(Fb["i"])
+    pa = set(zip(o.argsort()[Fa["i"]].tolist(), o.argsort()[Fa["j"]].tolist()))
+    pb = set(zip(Fb["i"].tolist(), Fb["j"].tolist()))
+    assert {tuple(sorted(x)) for x in pa} == pb
+    # a periodic re-sort keeps the run (warm start and step count carried): every 2 steps, and by step 4
+    # the cells have moved far enough (0.6 h) to change their Morton order, so steps 5-6 run re-sorted
+    td, fd = flow(pos, types, 2)
+    fd.set_velocities(v)
+    fd.step(4)
+    moved = int((_morton_order(fd.get_positions(), L) != o).sum())
+    fd.step(2)
+    fa.step(3)
+    ad = np.abs(fd.get_velocities() - fa.get_velocities()).max() / np.abs(fa.get_velocities()).max()
+    assert moved > 0 and ad < 1e-8, (moved, ad)
+    print(f"  Lagrangian relabel: Morton-input {ab:.1e}, vs unrelabelled {ac:.1e}, "
+          f"re-sorted every 2 ({moved} cells reordered) {ad:.1e}")
+
+
 def _slab_scene(z0, z1, L):
     """The solid outside the fluid slab z0 < z < z1, on BOTH sides of the periodic seam (the SDF is
     evaluated at unwrapped cell coordinates and is not periodic): boxes [z1-L, z0] and [z1, z0+L]."""
@@ -750,6 +822,7 @@ if __name__ == "__main__":
     test_weights()
     test_energy_forces()
     test_lagrangian()
+    test_lagrangian_relabel()
     test_flow_solver()
     test_redistribute()
     test_pore_cells()

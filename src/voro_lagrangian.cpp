@@ -13,10 +13,59 @@
 #include "peclet/voro/lagrangian/potential.hpp"
 #include "peclet/voro/lagrangian/weight_solve.hpp"
 #include "voro_bindings_tess.hpp"
+// after Kokkos_Core (MORTON_HD -> KOKKOS_FUNCTION)
+#include "morton/morton.hpp"
 
 namespace peclet::voro::pybind {
 
 namespace lag = peclet::voro::lagrangian;
+
+namespace {
+/// The record order of a per-facet export in the caller's labels: facets grouped by the caller
+/// index of their exporting cell `ci` (ascending, stable — the identity when nothing was
+/// relabelled).
+std::vector<std::size_t> callerRecordOrder(const std::vector<int>& ci, bool relabelled) {
+  std::vector<std::size_t> o(ci.size());
+  for (std::size_t q = 0; q < o.size(); ++q)
+    o[q] = q;
+  if (relabelled)
+    std::stable_sort(o.begin(), o.end(),
+                     [&](std::size_t a, std::size_t b) { return ci[a] < ci[b]; });
+  return o;
+}
+/// The Morton (Z) order of the points `x` (3N) in the box [0, L): order[k] is the index of the k-th
+/// point along the curve (21 bits per axis, x fastest; ties keep their index order).
+std::vector<int> mortonOrder(const std::vector<real_t>& x, const std::array<real_t, 3>& L) {
+  using Code = morton::Morton3D21;
+  const std::size_t N = x.size() / 3;
+  const double scale = static_cast<double>(Code::coord_max) + 1.0;
+  std::vector<Code::code_type> key(N);
+  for (std::size_t i = 0; i < N; ++i) {
+    Code::coord_type q[3];
+    for (int a = 0; a < 3; ++a) {
+      const double f = std::floor(static_cast<double>(x[3 * i + a]) / L[a] * scale);
+      q[a] = static_cast<Code::coord_type>(
+          std::min(std::max(f, 0.0), static_cast<double>(Code::coord_max)));
+    }
+    key[i] = Code::encode(q[0], q[1], q[2]).code();
+  }
+  std::vector<int> order(N);
+  for (std::size_t i = 0; i < N; ++i)
+    order[i] = static_cast<int>(i);
+  std::stable_sort(order.begin(), order.end(), [&](int a, int b) { return key[a] < key[b]; });
+  return order;
+}
+
+template <class T>
+std::vector<T> gatherRecords(const std::vector<T>& v, const std::vector<std::size_t>& o,
+                             std::size_t s) {
+  std::vector<T> out(v.size());
+  for (std::size_t q = 0; q < o.size(); ++q)
+    for (std::size_t c = 0; c < s; ++c)
+      out[s * q + c] = v[s * o[q] + c];
+  return out;
+}
+}  // namespace
 
 lag::CellFacets<real_t> Tess::cell_facets() {
   if (N_ == 0)
@@ -46,6 +95,8 @@ nb::dict Tess::get_facets() {
   const auto conn = peclet::core::toVector(F.conn);
   const auto sec = peclet::core::toVector(F.second);
   const auto x = peclet::core::toVector(pos_);
+  // caller labels (the identity unless a LagrangianFlow relabelled the cells)
+  const auto lab = [&](int k) { return perm_.empty() ? k : perm_[static_cast<std::size_t>(k)]; };
   std::vector<int> vi, vj;
   std::vector<real_t> va, vc, vd, vs;
   for (int i = 0; i < N_; ++i)
@@ -55,10 +106,10 @@ nb::dict Tess::get_facets() {
         throw std::runtime_error(
             "voro: get_facets(): a cell borders its own periodic image — the box is too small "
             "for the point count.");
-      if (j < i)
-        continue;  // the facet is exported once, from its lower cell
-      vi.push_back(i);
-      vj.push_back(j);
+      if (lab(j) < lab(i))
+        continue;  // the facet is exported once, from its lower cell (caller labels)
+      vi.push_back(lab(i));
+      vj.push_back(lab(j));
       va.push_back(area[f]);
       for (int a = 0; a < 3; ++a) {
         vc.push_back(x[3 * i + a] + cen[3 * f + a]);
@@ -68,6 +119,15 @@ nb::dict Tess::get_facets() {
         vs.push_back(sec[9 * f + e]);
     }
   const std::size_t n = vi.size();
+  if (!perm_.empty()) {  // records grouped by the caller's lower cell, as without relabelling
+    const auto o = callerRecordOrder(vi, true);
+    vi = gatherRecords(vi, o, 1);
+    vj = gatherRecords(vj, o, 1);
+    va = gatherRecords(va, o, 1);
+    vc = gatherRecords(vc, o, 3);
+    vd = gatherRecords(vd, o, 3);
+    vs = gatherRecords(vs, o, 9);
+  }
   nb::dict d;
   d["i"] = peclet::core::python::vector_to_ndarray(std::move(vi), {n}, {1});
   d["j"] = peclet::core::python::vector_to_ndarray(std::move(vj), {n}, {1});
@@ -88,11 +148,18 @@ nb::dict Tess::get_wall_facets() {
   std::vector<int> vi(area.size());
   for (int i = 0; i < N_; ++i)
     for (int f = off[i]; f < off[i + 1]; ++f) {
-      vi[f] = i;
+      vi[f] = perm_.empty() ? i : perm_[static_cast<std::size_t>(i)];
       for (int a = 0; a < 3; ++a)
         cen[3 * f + a] += x[3 * i + a];
     }
   const std::size_t n = area.size();
+  if (!perm_.empty()) {  // records grouped by the caller's cell index
+    const auto o = callerRecordOrder(vi, true);
+    vi = gatherRecords(vi, o, 1);
+    area = gatherRecords(area, o, 1);
+    cen = gatherRecords(cen, o, 3);
+    nrm = gatherRecords(nrm, o, 3);
+  }
   nb::dict d;
   d["i"] = peclet::core::python::vector_to_ndarray(std::move(vi), {n}, {1});
   d["area"] = peclet::core::python::vector_to_ndarray(std::move(area), {n}, {1});
@@ -109,15 +176,15 @@ nb::dict Tess::get_cell_moments() {
   for (std::size_t q = 0; q < cen.size(); ++q)
     cen[q] += x[q];
   nb::dict d;
-  d["volume"] = toNumpy1(std::move(vol));
-  d["centroid"] = toNumpy3(std::move(cen));
+  d["volume"] = toNumpy1(cellsToCaller(perm_, std::move(vol), 1));
+  d["centroid"] = toNumpy3(cellsToCaller(perm_, std::move(cen), 3));
   return d;
 }
 
 nb::ndarray<nb::numpy, real_t> Tess::get_weights() {
   if (!weighted_)
     return toNumpy1(std::vector<real_t>(static_cast<std::size_t>(N_), real_t(0)));
-  return toNumpy1(wHost_);
+  return toNumpy1(cellsToCaller(perm_, wHost_, 1));
 }
 
 nb::dict Tess::solve_weights(nb::ndarray<real_t, nb::c_contig> volumes, real_t tol, int max_iter) {
@@ -125,7 +192,7 @@ nb::dict Tess::solve_weights(nb::ndarray<real_t, nb::c_contig> volumes, real_t t
     throw std::runtime_error(
         "voro: solve_weights() needs a POWER tessellation: call set_weights(initial guess, e.g. "
         "zeros) and build(positions) first.");
-  std::vector<real_t> v0 = flatten1(volumes);
+  std::vector<real_t> v0 = cellsToInternal(perm_, flatten1(volumes), 1);
   if (static_cast<int>(v0.size()) != N_)
     throw std::runtime_error("voro: solve_weights(volumes) must be (N,)");
   double s0 = 0, s = 0;
@@ -233,8 +300,8 @@ nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
     throw std::invalid_argument(
         "voro: reduced_potential() takes `density` and `gravity` together (facet gravity)");
   const lag::CellFacets<real_t> F = cell_facets();
-  Kokkos::View<int*, Mem> dtype("rp.type", N);
-  Kokkos::deep_copy(dtype, Kokkos::View<const int*, Kokkos::HostSpace>(types.data(), N));
+  Kokkos::View<int*, Mem> dtype = peclet::core::toDevice<int>(
+      cellsToInternal(perm_, std::vector<int>(types.data(), types.data() + N), 1), "rp.type");
   DView gx("rp.dUdx", 3 * static_cast<std::size_t>(N)), gw("rp.dUdw", N);
   lag::PotentialSpec<real_t> spec;
   spec.types = dtype;
@@ -250,8 +317,10 @@ nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
   if (spec.interfaceEnergy == lag::InterfaceEnergy::Nonlocal) {
     // V⁰ of E_M: the given reference volumes, else the current cell volumes
     std::vector<double> V0 =
-        volumes ? std::vector<double>(volumes->data(), volumes->data() + volumes->size())
-                : peclet::core::toVector(F.volume);
+        volumes
+            ? cellsToInternal(
+                  perm_, std::vector<double>(volumes->data(), volumes->data() + volumes->size()), 1)
+            : peclet::core::toVector(F.volume);
     if (static_cast<int>(V0.size()) != N)
       throw std::runtime_error("voro: reduced_potential(volumes) must be (N,)");
     spec.refVolume = peclet::core::toDevice<real_t>(V0, "rp.V0");
@@ -279,10 +348,10 @@ nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
   d["wall_energy"] = e.wall;
   d["gravity_energy"] = e.gravity;
   d["energy"] = e.total();
-  d["gradient"] = toNumpy3(peclet::core::toVector(grad));
-  d["gradient_x"] = toNumpy3(peclet::core::toVector(gx));
-  d["gradient_w"] = toNumpy1(peclet::core::toVector(gw));
-  d["pi"] = toNumpy1(peclet::core::toVector(pi));
+  d["gradient"] = toNumpy3(cellsToCaller(perm_, peclet::core::toVector(grad), 3));
+  d["gradient_x"] = toNumpy3(cellsToCaller(perm_, peclet::core::toVector(gx), 3));
+  d["gradient_w"] = toNumpy1(cellsToCaller(perm_, peclet::core::toVector(gw), 1));
+  d["pi"] = toNumpy1(cellsToCaller(perm_, peclet::core::toVector(pi), 1));
   d["pcg_iterations"] = R.pcgIters;
   d["pcg_rel_residual"] = R.pcgRelRes;
   return d;
@@ -310,7 +379,8 @@ class FacetOperators : public peclet::core::python::Releasable {
     if (h.size() != (vecIn ? 3 * N : N))
       throw std::runtime_error("voro: FacetOperators.apply('" + op + "') takes an array of " +
                                std::string(vecIn ? "(N,3)" : "(N,)") + " values");
-    DView in = peclet::core::toDevice<real_t>(h, "fo.in");
+    DView in = peclet::core::toDevice<real_t>(cellsToInternal(perm_, std::move(h), vecIn ? 3 : 1),
+                                              "fo.in");
     if (op == "volume_jacobian" || op == "divergence" || op == "weight_hessian") {
       DView out("fo.out", N);
       if (op == "volume_jacobian")
@@ -319,13 +389,13 @@ class FacetOperators : public peclet::core::python::Releasable {
         lag::applyDivergence(F_, in, out);
       else
         lag::applyWeightHessian(F_, in, out);
-      return toNumpy1(peclet::core::toVector(out));
+      return toNumpy1(cellsToCaller(perm_, peclet::core::toVector(out), 1));
     }
     if (op == "cell_gradient") {
       DView out("fo.out", 9 * N);
       lag::cellGradient(F_, in, out);
-      return peclet::core::python::vector_to_ndarray(peclet::core::toVector(out), {N, 3, 3},
-                                                     {9, 3, 1});
+      return peclet::core::python::vector_to_ndarray(
+          cellsToCaller(perm_, peclet::core::toVector(out), 9), {N, 3, 3}, {9, 3, 1});
     }
     DView out("fo.out", 3 * N);
     if (op == "volume_jacobian_t")
@@ -334,7 +404,7 @@ class FacetOperators : public peclet::core::python::Releasable {
       lag::applyDivergenceT(F_, in, out);
     else
       lag::applyDissipation(F_, mu_, in, out, scr_);
-    return toNumpy3(peclet::core::toVector(out));
+    return toNumpy3(cellsToCaller(perm_, peclet::core::toVector(out), 3));
   }
 
   int num_cells() const { return F_.nCells; }
@@ -344,14 +414,18 @@ class FacetOperators : public peclet::core::python::Releasable {
     F_ = lag::CellFacets<real_t>{};
     mu_ = DView{};
     scr_ = lag::DissipationScratch<real_t>{};
+    perm_.clear();
   }
 
   // A scalar viscosity arrives as a one-element vector.
   void init(Tess& t, std::vector<real_t> mu) {
     F_ = t.cell_facets();
+    perm_ = t.perm_;  // the snapshot's cell order (apply() maps through it)
     const int N = F_.nCells;
     if (static_cast<int>(mu.size()) == 1)
       mu.assign(static_cast<std::size_t>(N), mu[0]);
+    else
+      mu = cellsToInternal(perm_, std::move(mu), 1);
     if (static_cast<int>(mu.size()) != N)
       throw std::runtime_error("voro: FacetOperators(viscosity=) must be a scalar or (N,)");
     for (real_t m : mu)
@@ -369,6 +443,7 @@ class FacetOperators : public peclet::core::python::Releasable {
   lag::CellFacets<real_t> F_;
   DView mu_;
   lag::DissipationScratch<real_t> scr_;
+  std::vector<int> perm_;  ///< Tess::perm_ at the snapshot (empty: the caller's order)
 };
 
 // --------------------------------------------------------------------------------------------------
@@ -390,7 +465,9 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     const int N = t.N_;
     if (static_cast<int>(types.size()) != N)
       throw std::runtime_error("voro: LagrangianFlow(types) must be (N,)");
-    types_.assign(types.data(), types.data() + N);
+    // per-cell state is held in the Tessellation's internal cell order (Tess::perm_)
+    types_ = cellsToInternal(t.perm_, std::vector<int>(types.data(), types.data() + N), 1);
+    relabels_ = t.relabels_;
     nT_ = 0;
     for (int ty : types_) {
       if (ty < 0)
@@ -398,7 +475,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       nT_ = std::max(nT_, ty + 1);
     }
     if (volumes) {
-      V0_ = flatten1(*volumes);
+      V0_ = cellsToInternal(t.perm_, flatten1(*volumes), 1);
       if (static_cast<int>(V0_.size()) != N)
         throw std::runtime_error("voro: LagrangianFlow(volumes) must be (N,)");
     } else {
@@ -494,7 +571,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   }
   // M7 WO-PERF trials (private): the saddle method, B's rotational chi, AMG reuse
   void set_perf_options(const std::string& method, real_t rotational, int amgReuse, real_t warmTol,
-                        real_t newtonTol) {
+                        real_t newtonTol, int relabel) {
     namespace lg = peclet::voro::lagrangian;
     if (method == "schur")
       method_ = lg::SaddleMethod::kSchurCG;
@@ -505,10 +582,11 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     else
       throw std::invalid_argument(
           "voro: LagrangianFlow._set_perf_options(method in 'schur', 'coupled', 'projection')");
-    if (!(rotational >= 0) || amgReuse < 0 || !(warmTol > 0) || !(newtonTol > 0))
+    if (!(rotational >= 0) || amgReuse < 0 || !(warmTol > 0) || !(newtonTol > 0) || relabel < -1)
       throw std::invalid_argument(
           "voro: LagrangianFlow._set_perf_options(rotational >= 0, amg_reuse >= 0, tolerances > "
-          "0)");
+          "0, relabel >= -1)");
+    relabelEvery_ = relabel;
     rotational_ = rotational;
     amgReuse_ = amgReuse;
     warmTol_ = warmTol;
@@ -578,26 +656,33 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     std::vector<real_t> h = flatten3(v);
     if (h.size() != vel_.size())
       throw std::runtime_error("voro: LagrangianFlow.set_velocities() must be (N,3)");
+    checkOrder();
     pull();
-    vel_ = std::move(h);
+    vel_ = cellsToInternal(t_->perm_, std::move(h), 3);
     dirty_ = true;
   }
 
+  // (the getters return the caller's cell order: an O(N) gather through Tess::perm_)
   nb::ndarray<nb::numpy, real_t> get_velocities() {
+    checkOrder();
     pull();
-    return toNumpy3(vel_);
+    return toNumpy3(cellsToCaller(t_->perm_, vel_, 3));
   }
   nb::ndarray<nb::numpy, real_t> get_positions() {
-    return toNumpy3(peclet::core::toVector(t_->pos_));
+    checkOrder();
+    return toNumpy3(cellsToCaller(t_->perm_, peclet::core::toVector(t_->pos_), 3));
   }
   nb::ndarray<nb::numpy, real_t> get_pi() {
-    return toNumpy1(fromInteg([](auto& I) { return I.pi(); }));
+    auto v = fromInteg([](auto& I) { return I.pi(); });
+    return toNumpy1(cellsToCaller(t_->perm_, std::move(v), 1));
   }
   nb::ndarray<nb::numpy, real_t> get_lambda() {
-    return toNumpy1(fromInteg([](auto& I) { return I.lambda(); }));
+    auto v = fromInteg([](auto& I) { return I.lambda(); });
+    return toNumpy1(cellsToCaller(t_->perm_, std::move(v), 1));
   }
   nb::ndarray<nb::numpy, real_t> get_potential_gradient() {
-    return toNumpy3(fromInteg([](auto& I) { return I.gradient(); }));
+    auto v = fromInteg([](auto& I) { return I.gradient(); });
+    return toNumpy3(cellsToCaller(t_->perm_, std::move(v), 3));
   }
 
   nb::dict energies() {
@@ -625,17 +710,20 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     prepare();
     std::vector<lag::StepReport> reps;
     reps.reserve(n);
-    withInteg([&](auto& I) {
-      for (int k = 0; k < n; ++k) {
+    for (int k = 0; k < n; ++k) {
+      if (relabelEvery_ > 0 && sinceRelabel_ >= relabelEvery_)
+        resort();
+      withInteg([&](auto& I) {
         const double tau = I.stableStep(cfl_, cap_, dtUser_);
         if (!std::isfinite(tau))
           throw std::runtime_error(
               "voro: LagrangianFlow.step(): nothing limits the step (no velocity, no tension) "
               "— call set_dt().");
         reps.push_back(I.step(tau));
-      }
-      time_ = I.time();
-    });
+        time_ = I.time();
+      });
+      ++sinceRelabel_;
+    }
     t_->wHost_ = peclet::core::toVector(t_->weight_);
     t_->wDirty_ = false;
     lastDt_ = reps.empty() ? lastDt_ : reps.back().dt;
@@ -774,12 +862,66 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     });
   }
 
+  /// The Tessellation's cell order is the one this flow's per-cell state was gathered in.
+  void checkOrder() const {
+    if (t_->relabels_ != relabels_)
+      throw std::runtime_error(
+          "voro: LagrangianFlow: its Tessellation was rebuilt with a new point count or driven by "
+          "another LagrangianFlow — build a new LagrangianFlow.");
+  }
+
+  /// Store the cells in the Morton order of their current positions (cache locality of the facet
+  /// operators, AMG and the repair; the caller's order is kept by Tess::perm_). Permutes this
+  /// flow's per-cell host state and the Tessellation (cold rebuild), marking the integrator for a
+  /// re-preparation. Returns the gather order, empty when the cells already are in that order.
+  std::vector<int> relabelCells() {
+    Tess& t = *t_;
+    ordered_ = true;
+    sinceRelabel_ = 0;
+    std::vector<int> order = mortonOrder(peclet::core::toVector(t.pos_), t.L_);
+    bool identity = true;
+    for (std::size_t k = 0; k < order.size() && identity; ++k)
+      identity = order[k] == static_cast<int>(k);
+    if (identity)
+      return {};
+    pull();  // the integrator's state is now on the host; it is rebuilt in the new order
+    i0_.reset();
+    i1_.reset();
+    types_ = cellsToInternal(order, std::move(types_), 1);
+    V0_ = cellsToInternal(order, std::move(V0_), 1);
+    vel_ = cellsToInternal(order, std::move(vel_), 3);
+    t.relabel(order);
+    relabels_ = t.relabels_;
+    dirty_ = true;
+    return order;
+  }
+
+  /// The periodic re-sort of a running flow: relabel, re-prepare, and carry λ₂ (kick 1's warm
+  /// start) and the gauge's step count into the new integrator.
+  void resort() {
+    std::vector<real_t> lam;
+    long count = 0;
+    withInteg([&](auto& I) {
+      lam = peclet::core::toVector(I.lambda());
+      count = I.stepCount();
+    });
+    const std::vector<int> order = relabelCells();
+    if (order.empty())
+      return;
+    prepare();
+    lam = cellsToInternal(order, std::move(lam), 1);
+    withInteg([&](auto& I) { I.setWarmStart(lam, count); });
+  }
+
   /// (Re)build the integrator when an input, the tessellation's positions or its weights changed.
   void prepare() {
     Tess& t = *t_;
+    checkOrder();
     if ((i0_ || i1_) && !dirty_ && !t.wDirty_ && t.pos_.data() == posData_)
       return;
     pull();
+    if (!ordered_ && relabelEvery_ >= 0)
+      relabelCells();  // the first preparation stores the cells in Morton order
     if (t.wDirty_) {
       Kokkos::deep_copy(t.weight_, Kokkos::View<const real_t*, Kokkos::HostSpace>(t.wHost_.data(),
                                                                                   t.wHost_.size()));
@@ -891,6 +1033,10 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   int amgReuse_ = 10;
   real_t warmTol_ = 1e-4, newtonTol_ = 1e-3;
   bool perfSet_ = false;  // false: the integrator's defaults
+  // Morton relabelling: -1 off, 0 once at the first preparation, K > 0 also every K steps
+  int relabelEvery_ = 0, sinceRelabel_ = 0;
+  bool ordered_ = false;
+  unsigned relabels_ = 0;  ///< Tess::relabels_ the per-cell state was gathered at
   std::optional<real_t> rhoRef_;
   real_t dtUser_ = 0, cfl_ = 0.2, cap_ = 0.5, time_ = 0, lastDt_ = 0, theta_ = 0.5;
   std::array<double, 6> acc_{0, 0, 0, 0, 0, 0};
@@ -980,13 +1126,14 @@ void bindLagrangian(nb::module_& m) {
            "or 'start' (x^n; first order).")
       .def("_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "coupled",
            nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 10, nb::arg("warm_tol") = 1e-4,
-           nb::arg("newton_tol") = 1e-3,
+           nb::arg("newton_tol") = 1e-3, nb::arg("relabel") = 0,
            "M7 WO-PERF solver trials (not public API): the kick's saddle method ('schur' nested\n"
            "Schur CG, 'coupled' block-preconditioned FGMRES, 'projection' rotational incremental\n"
            "pressure correction with chi = `rotational`), and AMG hierarchy reuse over at most\n"
            "`amg_reuse` further setups (0: rebuilt every setup); the relative tolerances of the "
            "warm-start\n"
-           "and Newton H solves.")
+           "and Newton H solves; the cell relabelling (`relabel`: -1 off, 0 Morton order at the\n"
+           "first preparation, K > 0 also re-sorted every K steps; the caller's order is kept).")
       .def("_set_solver_options", &LagrangianFlow::set_solver_options, nb::arg("schur_assembled"),
            nb::arg("adjoint_tol"), nb::arg("saddle_tol") = 1e-12,
            "M7 WO4a solver trials (not public API): AMG on the assembled C M^-1 C^T as the Schur\n"

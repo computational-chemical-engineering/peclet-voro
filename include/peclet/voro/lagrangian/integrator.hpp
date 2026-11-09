@@ -1340,6 +1340,16 @@ class Integrator {
   double theta() const { return prm_.theta; }
   double time() const { return time_; }
   void setTime(double t) { time_ = t; }
+  /// The state a re-prepared integrator inherits beyond v, t and the accumulators (the relabelling
+  /// of LagrangianFlow): the last λ₂ (kick 1's warm start, cell order of this integrator) and the
+  /// step count (the gauge cadence).
+  long stepCount() const { return stepCount_; }
+  void setWarmStart(const std::vector<Real>& lambda, long stepCount) {
+    if (static_cast<int>(lambda.size()) != N_)
+      throw std::logic_error("voro: NHV-W setWarmStart: lambda is not (N,)");
+    Kokkos::deep_copy(lam2_, Kokkos::View<const Real*, Kokkos::HostSpace>(lambda.data(), N_));
+    stepCount_ = stepCount;
+  }
   /// Restore the energy accumulators (a re-prepared integrator continues the old run's totals).
   void setAccumulators(double heat, double qc, double work, double wrap, double gaugeU = 0,
                        double gaugeK = 0) {
