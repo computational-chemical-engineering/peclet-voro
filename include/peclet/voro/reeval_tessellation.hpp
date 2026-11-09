@@ -57,7 +57,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
                                      const Real L[3], WallStore<Real> wall = {},
                                      Kokkos::View<Real*, peclet::core::MemSpace> xRef = {},
                                      bool withAreaGrad = false, bool withMoments = false,
-                                     Kokkos::View<Real*, peclet::core::MemSpace> weight = {}) {
+                                     Kokkos::View<Real*, peclet::core::MemSpace> weight = {},
+                                     Kokkos::View<int*, peclet::core::MemSpace> mask = {}) {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Cell = ConvexCell<Real, MAXP, MAXT, false>;
@@ -72,8 +73,18 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
   Kokkos::View<int*, Mem> edgeCount("rp.edgeCount", withAreaGrad ? static_cast<std::size_t>(N) : 0);
   constexpr int kMaxF = MAXP;  // == CellBuilder::MAXF_TMP: what the cold build can publish
   const bool wag = withAreaGrad;
+  // `mask` (N, optional): cells with mask(i) == 0 are published with no facets (and no area
+  // gradients) — the band publish of M7 (DESIGN_NOTE §14.4.6 item 3); empty: every cell
+  const Kokkos::View<int*, Mem> msk = mask;
+  const bool masked = mask.extent(0) > 0;
   Kokkos::parallel_for(
       "reevalPublish.count", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        if (masked && msk(i) == 0) {
+          facetCount(i) = 0;
+          if (wag)
+            edgeCount(i) = 0;
+          return;
+        }
         Cell c;
         st.load(i, c, Lx, Ly, Lz);
         int nf = 0;
@@ -157,6 +168,8 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
     const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
     Kokkos::parallel_for(
         "reevalPublish.fill", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          if (masked && msk(i) == 0)
+            return;
           Cell c;
           st.load(i, c, Lx, Ly, Lz);
           if (Wl.active()) {  // restore the wall planes for the seed's displacement since save

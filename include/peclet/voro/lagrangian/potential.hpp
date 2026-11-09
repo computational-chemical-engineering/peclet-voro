@@ -144,10 +144,43 @@ template <class Real, class Policy, int MAXP, int MAXT>
 TessellationView<Real> publishPower(const TopologyStore<MAXP, MAXT>& st, const LView<Real>& pos,
                                     const LView<Real>& vol, int N, const Real L[3],
                                     const WallStore<Real>& wall, const LView<Real>& xRef,
-                                    const LView<Real>& weight) {
+                                    const LView<Real>& weight,
+                                    const Kokkos::View<int*, peclet::core::MemSpace>& band = {}) {
   return reevalPublish<Real, MAXP, MAXT, Policy>(st, pos, vol, N, L, wall, xRef,
                                                  /*withAreaGrad=*/true, /*withMoments=*/false,
-                                                 weight);
+                                                 weight, band);
+}
+
+/// The band B of the interface and wetting energies (DESIGN_NOTE §14.4.6 item 3): the cells with
+/// an unlike facet, their face neighbours, and (`walls`) every cell with a wall facet. Every other
+/// cell contributes exact zeros to U, ∂_xU and ∂_wU (interfaceEnergyForce skips like facets,
+/// wallEnergyForce acts on wall facets only), so publishing B alone is inert.
+template <class Real>
+Kokkos::View<int*, peclet::core::MemSpace> energyBand(
+    const CellFacets<Real>& F, const Kokkos::View<int*, peclet::core::MemSpace>& types,
+    bool walls) {
+  using Exec = peclet::core::ExecSpace;
+  const int N = F.nCells;
+  Kokkos::View<int*, peclet::core::MemSpace> unlike("pot.unlike", N), band("pot.band", N);
+  const CellFacets<Real> G = F;
+  const Kokkos::View<int*, peclet::core::MemSpace> T = types;
+  Kokkos::parallel_for(
+      "pot.unlike", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        int u = 0;
+        for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f)
+          u |= T(G.nbr(f)) != T(i) ? 1 : 0;
+        unlike(i) = u;
+      });
+  Kokkos::parallel_for(
+      "pot.band", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        int b = unlike(i);
+        for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f)
+          b |= unlike(G.nbr(f));
+        if (walls && G.wallOffset(i + 1) > G.wallOffset(i))
+          b = 1;
+        band(i) = b;
+      });
+  return band;
 }
 }  // namespace detail
 
@@ -166,8 +199,9 @@ PotentialParts partitionPotential(MT& mt, const CellFacets<Real>& F, const LView
   const int N = F.nCells;
   const bool nonlocal = s.tension.extent(0) > 0 && s.interfaceEnergy == InterfaceEnergy::Nonlocal;
   if ((s.tension.extent(0) > 0 && !nonlocal) || s.sigmaWall.extent(0) > 0) {
-    auto view =
-        detail::publishPower<Real, Policy>(mt.store, pos, mt.vol, N, L, mt.wall, mt.xRef, weight);
+    auto view = detail::publishPower<Real, Policy>(
+        mt.store, pos, mt.vol, N, L, mt.wall, mt.xRef, weight,
+        detail::energyBand(F, s.types, s.sigmaWall.extent(0) > 0));
     if (s.tension.extent(0) > 0 && !nonlocal)
       e.interface = energy::interfaceEnergyForce<Real, Policy>(
           view, s.types, s.tension, s.nTypes, pos, weight, L[0], gradX, gradW, mt.sdf);
