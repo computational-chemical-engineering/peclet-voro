@@ -175,8 +175,10 @@ peclet::core::solver::HostCsrOp schurHost(const CellFacets<Real>& F, const LView
   K.start.assign(N + 1, 0);
   for (int i = 0; i < N; ++i) {
     auto& row = rows[i];
-    std::sort(row.begin(), row.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
+    // stable: equal-k terms are summed in insertion order (l ascending, then the order of the
+    // column entries), a defined order the device assembly reproduces bit for bit
+    std::stable_sort(row.begin(), row.end(),
+                     [](const auto& a, const auto& b) { return a.first < b.first; });
     for (std::size_t q = 0; q < row.size(); ++q) {
       const int k = row[q].first;
       if (k == i) {
