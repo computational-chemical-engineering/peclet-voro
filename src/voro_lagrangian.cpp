@@ -562,8 +562,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     else
       throw std::invalid_argument(
           "voro: LagrangianFlow.set_kick_constraint(mode) takes 'midpoint' (C of kick 1 at x^n + "
-          "dt/2 v^n, option S, the default), 'start' (at x^n) or 'pressure' (no constraint: the "
-          "last pressures in kick 1)");
+          "dt/2 v^n, option S), 'start' (at x^n) or 'pressure' (no constraint: the last "
+          "pressures in kick 1; the default)");
     dirty_ = true;
   }
   // M7 WO4a solver trials (private): the assembled Schur preconditioner, the π-solve tolerance
@@ -1103,7 +1103,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   std::array<real_t, 3> gravity_{0, 0, 0}, bodyAmp_{0, 0, 0}, bodyWave_{0, 0, 0};
   bool hasGravity_ = false, schurAssembled_ = false;
   peclet::voro::lagrangian::KickConstraint kick1_ =
-      peclet::voro::lagrangian::KickConstraint::kMidpoint;
+      peclet::voro::lagrangian::KickConstraint::kPressure;
   real_t adjointTol_ = 0, saddleTol_ = 0;  // 0: not set (the integrator's defaults)
   peclet::voro::lagrangian::SaddleMethod method_ = peclet::voro::lagrangian::SaddleMethod::kCoupled;
   real_t rotational_ = 1;
@@ -1205,11 +1205,11 @@ void bindLagrangian(nb::module_& m) {
            "Step-size constants C_cfl, C_sigma (0 switches a limit off).")
       .def("set_kick_constraint", &LagrangianFlow::set_kick_constraint, nb::arg("mode"),
            "Where kick 1's velocity constraint is taken: 'midpoint' (x^n + dt/2 v^n with the\n"
-           "weights solved there; DESIGN_NOTE option S; the default: second order in the energy),\n"
-           "'start' (x^n; first order), or 'pressure' (no constraint and no saddle: the last\n"
-           "pressures 3/4 lambda^n + 1/4 lambda^(n-1) act in kick 1's implicit solve, one saddle\n"
-           "per step; restart steps - the first, and the retry after a step halving - use option\n"
-           "S; DESIGN_NOTE D14.1).")
+           "weights solved there; DESIGN_NOTE option S: second order in the energy), 'start'\n"
+           "(x^n; first order), or 'pressure' (the default: no constraint and no saddle; the\n"
+           "last pressures 3/4 lambda^n + 1/4 lambda^(n-1) act in kick 1's implicit solve, one\n"
+           "saddle per step, second order; restart steps - the first, and the retry after a\n"
+           "step halving - use option S; DESIGN_NOTE D14.1).")
       .def(
           "_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "coupled",
           nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 10, nb::arg("warm_tol") = 1e-3,

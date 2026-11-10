@@ -3,12 +3,13 @@
  * \brief One time step of the Lagrangian power-cell method NHV-W (M7 DESIGN_NOTE §10.3 item 6,
  * with §2.6 for the linear solves and §2.7 steps 3 and 5 for the heat and the step size):
  *
- *   1. kick 1 at x^n, friction fused (θ-midpoint), velocity constraint C^n v^{½} = 0 (by default
- *      C and ζ of kick 1 at x^n + (τ/2) v^n instead, option S,
+ *   1. kick 1 at x^n, friction fused (θ-midpoint), velocity constraint C^n v^{½} = 0 (with
+ *      option S C and ζ of kick 1 at x^n + (τ/2) v^n instead,
  * IntegratorParams::kickConstraint): (M + θ(τ/2)ζ^n) v^{½} + (τ/2) C^{nᵀ} λ₁ = (M −
- * (1−θ)(τ/2)ζ^n) v^n − (τ/2)(∇Ũ^n − M a(x^n)); with KickConstraint::kPressure (D14.1) no
- * constraint and no saddle: λ₁ is replaced by λ̄ = ¾λⁿ + ¼λⁿ⁻¹ (the last two kick-2 multipliers)
- * on the right-hand side, and Q_c += (τ/4) λ̄ᵀCⁿ(vⁿ + v^{½}); a restart step is option S;
+ * (1−θ)(τ/2)ζ^n) v^n − (τ/2)(∇Ũ^n − M a(x^n)); with KickConstraint::kPressure (D14.1, the
+ * default since M7 WO-PERF3 P3.4) no constraint and no saddle: λ₁ is replaced by λ̄ = ¾λⁿ + ¼λⁿ⁻¹
+ * (the last two kick-2 multipliers) on the right-hand side, and Q_c += (τ/4) λ̄ᵀCⁿ(vⁿ + v^{½}); a
+ * restart step is option S;
  *   2. drift x^{n+1} = x^n + τ v^{½} (wrapped into the box); weights warm-started by
  *      H δw = −τ J_x v^{½} (at x^n) and solved by the damped Newton of weight_solve.hpp, every
  *      iterate an incremental REPAIR of the resident engine (no cold rebuild); then π^{n+1} and
@@ -1248,10 +1249,10 @@ struct IntegratorParams {
   /// first solve after construction has no previous π: from zero to adjointTol, as before P3.2)
   double adjointWarmTol = 1e-8;
   int maxHalvings = 4;  ///< τ halvings when the weight solve fails (W-Q7)
-  /// kick 1: option S (kMidpoint, the default since M7 WO4′, orchestrator decision 2026-11-08:
-  /// second order in the energy, ×4.2 per τ halving vs ×2.4 at x^n, kStart), or D14.1's pressure
-  /// kick (kPressure, M7 WO-PERF3 P3.4)
-  KickConstraint kickConstraint = KickConstraint::kMidpoint;
+  /// kick 1: D14.1's pressure kick (kPressure, the default since M7 WO-PERF3 P3.4: one saddle
+  /// per step, every P3.4 gate passed; energy ×4.1–4.8 per τ halving), option S (kMidpoint, the
+  /// default from M7 WO4′ to P3.4 and the restart step: ×3.9; kStart: ×2.4)
+  KickConstraint kickConstraint = KickConstraint::kPressure;
   double repairTol = 1e-10;  ///< repaired-topology volume check (cone fan vs engine), relative
   /// AMG reuse (M7 WO-PERF): the S₀ (L_ρ) and H hierarchies are kept as preconditioners for at most
   /// this many further setups, and rebuilt early when their solve needs more than 1.5× (+2) the
