@@ -86,6 +86,40 @@ inline peclet::core::solver::AmgParams m7AmgParams() {
   return ap;
 }
 
+/// Break-even AMG reuse (D14.6, DESIGN_NOTE §14.4.7; M7 WO-PERF3 P3.6), one per hierarchy. After a
+/// setup the first recorded solve's iteration count is the reference; every later solve adds its
+/// excess over it. The hierarchy is rebuilt before its next solve once the excess reaches R_setup
+/// (its setup cost in iterations of that solve, a frozen constant), once it is maxAge steps old, or
+/// after a failed step attempt. Counts only, so the iterates do not depend on wall time. maxAge ≤ 0:
+/// rebuilt at every opportunity.
+struct AmgReuse {
+  int rSetup = 0;  ///< R_setup (iterations)
+  int ref = -1, excess = 0;
+  long builtStep = -1;
+  bool failed = false;
+  bool due(long step, int maxAge) const {
+    return maxAge <= 0 || builtStep < 0 || failed || excess >= rSetup || step - builtStep >= maxAge;
+  }
+  void built(long step) {
+    ref = -1;
+    excess = 0;
+    builtStep = step;
+    failed = false;
+  }
+  void solved(int its) {
+    if (ref < 0)
+      ref = its;
+    else
+      excess += its > ref ? its - ref : 0;
+  }
+};
+/// R_setup of §14.4.7, measured once on core C1 and frozen: S₀ in kick-saddle FGMRES iterations, H
+/// in adjoint PCG iterations (V-cycles), L_μ in kick-saddle FGMRES iterations. N 32768 Q4 drop,
+/// rebuilt at every opportunity, 1 / 4 threads: S₀ 12.6 / 12.3 (setup 756 / 207 ms), H 18.9 / 20.6,
+/// L_μ 1.4 / 1.6 (μ 1, ν τ/h² 2.95) — the note's defaults 4 / 9 / 4 assumed a faster S₀ and H setup
+/// (M7 WO-PERF3 P3.6; hub results/WO_PERF3_P36.md).
+inline constexpr int kReuseSetupS0 = 12, kReuseSetupH = 20, kReuseSetupVisc = 2;
+
 template <class Real>
 Real maxAbsView(const LView<Real>& a) {
   Real m = 0;
@@ -630,7 +664,6 @@ class SaddleSolver {
       viscous_ = viscous_ || mh[i] > 0;
       nuH2_ = std::max(nuH2_, mh[i] / (rh[i] * hh[i] * hh[i]));
     }
-    const peclet::core::solver::AmgParams ap = detail::m7AmgParams();
     {  // Cahouet–Chabard viscous diagonal 2μ_i/V_i (scaled by a = θτ/2 in solve)
       detail::hostCopy(F.volume, volH_);
       const std::vector<double>& vh = volH_;
@@ -644,25 +677,9 @@ class SaddleSolver {
         cc[i] = vh[i] > 0 ? muMin / vh[i] : 0.0;
       toDeviceInto(cc, ccMin_, "sd.ccMin");
     }
-    Kokkos::Timer tb;
-    if (!rebuildAmg && lrho_.numLevels() > 0 && builtAssembled_ == assembled_) {
-      // the lagged hierarchy (no setup charged)
-    } else if (assembled_) {
-      // the S₀ configuration of the P3.0-c study (§14.4.7, variant (e)): Chebyshev degree 3
-      // (21 → 16 kick-2 iterations at N 4096 and 32768; M7 WO-PERF3 P3.6)
-      peclet::core::solver::AmgParams s0 = ap;
-      s0.chebDegree = 3;
-      lrho_.build(schurAsm_.assembleDevice(F, mass), s0);
-    } else
-      lrho_.build(detail::twoPointHost(
-                      F,
-                      [&](int i, int j, double A, double d) {
-                        return A / d * 0.5 * (1.0 / rh[i] + 1.0 / rh[j]);
-                      },
-                      [](int) { return 0.0; }, /*pin=*/true),
-                  ap);
-    builtAssembled_ = assembled_;
-    setupSeconds_ = tb.seconds();
+    setupSeconds_ = 0;
+    if (rebuildAmg || lrho_.numLevels() == 0 || builtAssembled_ != assembled_)
+      buildSchur();  // else the lagged hierarchy (no setup charged)
     mh_ = mh;
     {  // ‖C‖ per unit velocity: max_i Σ_f (A/d)|c_f| + Σ_w A_w (the physically scaled stop in
        // solve)
@@ -891,6 +908,40 @@ class SaddleSolver {
   void setAssembled(bool on) { assembled_ = on; }  ///< SaddleParams::schurAssembled (next setup)
   const CellFacets<Real>& facets() const { return F_; }
   DissipationScratch<Real>& scratch() { return scr_; }
+  /// The S₀ (assembled) or L_ρ hierarchy at the last setup's facets and masses; its time is charged
+  /// to the next solve's st.tSetup. setup() calls it unless the hierarchy is lagged; the integrator
+  /// calls it right before a kick saddle when the break-even rule says so (M7 WO-PERF3 P3.6).
+  void buildSchur() {
+    Kokkos::Timer tb;
+    if (assembled_) {
+      // the S₀ configuration of the P3.0-c study (§14.4.7, variant (e)): Chebyshev degree 3
+      // (21 → 16 kick-2 iterations at N 4096 and 32768; M7 WO-PERF3 P3.6)
+      peclet::core::solver::AmgParams s0 = detail::m7AmgParams();
+      s0.chebDegree = 3;
+      lrho_.build(schurAsm_.assembleDevice(F_, mass_), s0);
+    } else {
+      const std::vector<double>& rh = rhoH_;
+      lrho_.build(detail::twoPointHost(
+                      F_,
+                      [&](int i, int j, double A, double d) {
+                        return A / d * 0.5 * (1.0 / rh[i] + 1.0 / rh[j]);
+                      },
+                      [](int) { return 0.0; }, /*pin=*/true),
+                  detail::m7AmgParams());
+    }
+    builtAssembled_ = assembled_;
+    setupSeconds_ += tb.seconds();
+  }
+  bool hasSchur() const { return lrho_.numLevels() > 0 && builtAssembled_ == assembled_; }
+  /// The step clock and age cap of the viscous hierarchy's break-even reuse (D14.6).
+  void setAmgClock(long step, int maxAge) {
+    amgClock_ = step;
+    amgMaxAge_ = maxAge;
+  }
+  /// A kick saddle preconditioned by the viscous hierarchy took `its` outer iterations.
+  void recordViscSolve(int its) { viscReuse_.solved(its); }
+  /// A step attempt failed: the viscous hierarchy is rebuilt before its next solve.
+  void markAmgFailed() { viscReuse_.failed = true; }
   /// out = ζ v at the last setup's facets and viscosity, by the ζ-plan (viscous only)
   void applyZeta(const LView<Real>& v, const LView<Real>& out) {
     applyDissipation(plan_, v, out, scr_);
@@ -898,8 +949,10 @@ class SaddleSolver {
 
  private:
   /// The inner A-solve preconditioner of a solve at a = θτ/2: AMG on the scalar two-point viscous
-  /// operator (built here, its time charged to st.tSetup) when max ν τ/h² exceeds prm.amgSwitch,
-  /// else Jacobi; st.tSetup also takes the last setup()'s time (charged once).
+  /// operator when max ν τ/h² exceeds prm.amgSwitch, else Jacobi; st.tSetup also takes the last
+  /// setup()'s time (charged once). The viscous hierarchy is rebuilt (its time charged to
+  /// st.tSetup) only when the break-even rule says so (viscReuse_; the solves recorded are the kick
+  /// saddles', recordViscSolve) — kept across geometries and τ, like S₀ (M7 WO-PERF3 P3.6).
   void prepareInner(Real a, Real halfTau, const SaddleParams& prm, SaddleStats& st) {
     Kokkos::Timer tPart;
     st.tSetup = setupSeconds_;  // charged once, to the first solve after setup()
@@ -907,7 +960,7 @@ class SaddleSolver {
     st.viscNumber = nuH2_ * 2 * halfTau;
     useAmg_ = viscous_ && a > Real(0) && st.viscNumber > prm.amgSwitch;
     st.amgInner = useAmg_;
-    if (useAmg_) {
+    if (useAmg_ && (visc_.numLevels() == 0 || viscReuse_.due(amgClock_, amgMaxAge_))) {
       tPart.reset();
       const peclet::core::solver::AmgParams ap = detail::m7AmgParams();
       detail::hostCopy(mass_, massH_);
@@ -928,6 +981,7 @@ class SaddleSolver {
                       },
                       [&](int i) { return mh[i]; }, /*pin=*/false, &hostF_),
                   ap);
+      viscReuse_.built(amgClock_);
       st.tSetup += tPart.seconds();
     }
   }
@@ -1360,6 +1414,9 @@ class SaddleSolver {
   double nuH2_ = 0, setupSeconds_ = 0;
   Real cScale_ = 0;
   peclet::core::solver::GraphAMGDevice lrho_, visc_;
+  detail::AmgReuse viscReuse_{detail::kReuseSetupVisc};
+  long amgClock_ = 0;
+  int amgMaxAge_ = 10;
   LView<Real> cc_, ccMin_, r_, z_, zOld_, p_, s_, w_, q_, ir_, iz_, ip_, iq_, zdiag_, c0_, c1_,
       rStar_;
   /// A: FGMRES bases, Krylov (V) and preconditioned (Z), velocity (3N) and multiplier (N) blocks
@@ -1401,10 +1458,9 @@ struct IntegratorParams {
   /// default from M7 WO4′ to P3.4 and the restart step: ×3.9; kStart: ×2.4)
   KickConstraint kickConstraint = KickConstraint::kPressure;
   double repairTol = 1e-10;  ///< repaired-topology volume check (cone fan vs engine), relative
-  /// AMG reuse (M7 WO-PERF): the S₀ (L_ρ) and H hierarchies are kept as preconditioners for at most
-  /// this many further setups, and rebuilt early when their solve needs more than 1.5× (+2) the
-  /// iterations it took right after the build. 0: rebuilt at every setup (the WO4 behaviour).
-  /// Default 10 since M7 WO-PERF (orchestrator WO, measured: N 32768 setups 1.1-6 s/step -> ~0.5).
+  /// AMG reuse: the age cap, in accepted steps, of the S₀ (L_ρ), H and L_μ hierarchies under the
+  /// break-even rule (D14.6, detail::AmgReuse; since M7 WO-PERF3 P3.6 — before: this many setups
+  /// with a 1.5× (+2) trigger). 0: rebuilt at every setup / solve (the WO4 behaviour).
   int amgReuse = 10;
   /// relative residual of the linear warm-start (predictor) H solves (x^{n+1}, the option-S
   /// midpoint and the gauge trial) and of the Newton H solves when newtonForcing = 0 (the volumes
@@ -1623,11 +1679,14 @@ class Integrator {
             " step halvings (max |V - V0|/V0 = " + std::to_string(rep.weightErr) + ")");
       // restore x^n, w^n and the engine; the state at x^n is untouched
       restoreEngine();
+      s0Reuse_.failed = hReuse_.failed = true;  // D14.6: rebuild after a failed attempt
+      saddle_.markAmgFailed();
       tau *= 0.5;
       ++rep.halvings;
       kickRestart_ = true;  // kPressure: the retry is an option-S step
     }
     time_ += tau;
+    ++amgClock_;  // the hierarchies' age is counted in accepted steps (D14.6)
     if (prm_.kickConstraint == KickConstraint::kPressure) {
       if (kickRestart_)  // §14.4.1 step 0: λⁿ⁻¹ := λⁿ := the restart step's λ₂
         Kokkos::deep_copy(lamPrev_, lam2_);
@@ -2113,18 +2172,16 @@ class Integrator {
                                          mt_->vol, false, &pool_);
   }
 
-  /// saddle_.setup at F_, the S₀ hierarchy rebuilt or lagged per IntegratorParams::amgReuse.
+  /// saddle_.setup at F_; the S₀ hierarchy is built here only when there is none — otherwise
+  /// lazily, right before a kick saddle, at that saddle's geometry, when the break-even rule says
+  /// so (s0Reuse_, kick()).
   void setupSaddle() {
-    const bool fresh = prm_.amgReuse <= 0 || sAge_ >= prm_.amgReuse || sStale_;
     saddle_.setAssembled(prm_.saddle.schurAssembled);
-    saddle_.setup(F_, rho_, mu_, mass_, h_, fresh);
-    if (fresh) {
-      sAge_ = 0;
-      sStale_ = false;
-      sRef_ = -1;  // the next kick's outer count is the reference
-    } else {
-      ++sAge_;
-    }
+    saddle_.setAmgClock(amgClock_, prm_.amgReuse);
+    const bool first = !saddle_.hasSchur();
+    saddle_.setup(F_, rho_, mu_, mass_, h_, first);
+    if (first)
+      s0Reuse_.built(amgClock_);
   }
 
   /// Facets, U and ∇Ũ, π, and the two hierarchies at the current (pos, weight). `ready`: the
@@ -2150,14 +2207,9 @@ class Integrator {
     evalSplit_[1] = tp.seconds();
     tp.reset();
     const peclet::core::solver::AmgParams ap = detail::m7AmgParams();
-    const bool hFresh =
-        prm_.amgReuse <= 0 || hAge_ >= prm_.amgReuse || hStale_ || hAmg_.numLevels() == 0;
-    if (hFresh) {
+    if (hAmg_.numLevels() == 0 || hReuse_.due(amgClock_, prm_.amgReuse)) {
       hAmg_.build(detail::pinnedHostH(F_, &wss_), ap);
-      hAge_ = 0;
-      hStale_ = false;
-    } else {
-      ++hAge_;
+      hReuse_.built(amgClock_);
     }
     evalSplit_[2] = tp.seconds();
     tp.reset();
@@ -2169,10 +2221,7 @@ class Integrator {
     wp.warmRelTol = prm_.adjointWarmTol;
     adj_ = reducedGradient(F_, gx_, gw_, pi_, grad_, wp);
     piValid_ = true;
-    if (hFresh)
-      hRef_ = adj_.pcgIters;
-    else if (adj_.pcgIters > 1.5 * hRef_ + 2)
-      hStale_ = true;
+    hReuse_.solved(adj_.pcgIters);  // H's break-even count: the adjoint solve of each evaluation
     Kokkos::fence();
     evalSplit_[3] = tp.seconds();
     setupSaddle();
@@ -2226,11 +2275,14 @@ class Integrator {
       st = saddle_.solveMomentum(th * ht, ht, b_, vNew, prm_.saddle);
     } else {
       const Real tolAbs = prm_.saddle.tol * maxV0_ / tau;
+      if (s0Reuse_.due(amgClock_, prm_.amgReuse)) {  // D14.6: rebuilt before the next solve
+        saddle_.buildSchur();
+        s0Reuse_.built(amgClock_);
+      }
       st = saddle_.solve(th * ht, ht, tolAbs, b_, vNew, lam, prm_.saddle);
-      if (sRef_ < 0)
-        sRef_ = st.outer;
-      else if (st.outer > 1.5 * sRef_ + 2)
-        sStale_ = true;
+      s0Reuse_.solved(st.outer);
+      if (st.amgInner)
+        saddle_.recordViscSolve(st.outer);
       st.constraint *= tau / maxV0_;
     }
     // heat (τ/2) v̄_θᵀ ζ (v_old + v_new)/2 and body work (τ/2) (M a)ᵀ (v_old + v_new)/2
@@ -3144,10 +3196,10 @@ class Integrator {
   bool movingWall_ = false;
   long stepCount_ = 0;
   int restoreRebuilds_ = 0;
-  // AMG reuse (IntegratorParams::amgReuse): setups since the build, the iteration reference of the
-  // first solve after it, and the stale flag (iterations grew past 1.5× + 2)
-  int sAge_ = 0, hAge_ = 0, sRef_ = -1, hRef_ = 0;
-  bool sStale_ = false, hStale_ = false;
+  // break-even AMG reuse (D14.6): S₀ / L_ρ and H; the step clock their age is counted in (L_μ's
+  // state lives in the SaddleSolver)
+  detail::AmgReuse s0Reuse_{detail::kReuseSetupS0}, hReuse_{detail::kReuseSetupH};
+  long amgClock_ = 0;
   double evalSplit_[4] = {0, 0, 0, 0};  ///< evalState: facets, energy, H AMG setup, adjoint (s)
   double gaugeU_ = 0, gaugeK_ = 0;
   // the drift gauge (GaugeMode::kDrift): δⁿ (gd_) is pending for the next drift; whether this
