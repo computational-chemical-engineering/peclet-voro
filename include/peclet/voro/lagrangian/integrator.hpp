@@ -1553,6 +1553,9 @@ struct StepReport {
   double gaugeFactor = 0;  ///< f_G after this step's monitor update
   double gaugeBeta = 0;  ///< β of the weight relaxation W added to δⁿ⁺¹ (0: none this step)
   double gaugeWeightRes = 0;  ///< W's PCG residual ‖r₅‖₂/‖r₀‖₂ (0: none this step)
+  /// the last gaugeDisplacement's δ (before a trial's halvings): max_i |δ_i|/h_i and
+  /// (Σ_i |δ_i|²/h_i² / N)^{1/2} (diagnostics)
+  double gaugeDispMax = 0, gaugeDispRms = 0;
   double tGauge = 0;
   /// The step's energy ledger by stage (diagnostics only, M7 WO-EB; the accepted attempt). Per kick
   /// k: ΔK_k, its heat, Q_c and body-work increments, and its potential-force work
@@ -3141,6 +3144,21 @@ class Integrator {
     rep.gaugeNormal = nNormal;
     rep.gaugeProjected = nProj;
     rep.gaugeCapped = nCap;
+    {
+      Real dmax = 0, dsq = 0;
+      Kokkos::parallel_reduce(
+          "nhvw.gaugeDispNorm", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i, Real& mx, Real& sq) {
+            const Real q = (d(3 * i) * d(3 * i) + d(3 * i + 1) * d(3 * i + 1) +
+                            d(3 * i + 2) * d(3 * i + 2)) /
+                           (h(i) * h(i));
+            mx = q > mx ? q : mx;
+            sq += q;
+          },
+          Kokkos::Max<Real>(dmax), Kokkos::Sum<Real>(dsq));
+      rep.gaugeDispMax = std::sqrt(double(dmax));
+      rep.gaugeDispRms = N_ > 0 ? std::sqrt(double(dsq) / N_) : 0.0;
+    }
     return n;
   }
 
