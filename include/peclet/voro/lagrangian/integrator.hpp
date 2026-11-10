@@ -3313,7 +3313,7 @@ class Integrator {
           },
           nCap, Kokkos::Min<Real>(cmin));
       rep.gaugeCapped = nCap;
-      rep.gaugeCapMin = cmin;
+      rep.gaugeCapMin = cmin < Real(1) ? cmin : Real(1);  // Min's identity is +∞ when none capped
     }
     {
       Real dmax = 0, dsq = 0;
