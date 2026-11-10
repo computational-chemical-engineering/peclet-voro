@@ -752,6 +752,44 @@ def _lagrangian_relabel(gauge):
           f"re-sorted every 2 ({moved} cells reordered) {ad:.1e}")
 
 
+def test_lagrangian_theta_half_stiff():
+    """The theta policy's least damped regime (M7 WO-PERF3-R1, review F6): without set_dt and
+    without tension the step is CFL-only and theta stays 1/2 (it is fixed at prepare from the step
+    bound), so a viscous flow runs Crank-Nicolson at nu tau/h^2 >> 1, where the viscous amplification
+    tends to -1. Forced Kolmogorov flow (rho 1, mu 1, U 0.08 on a jittered 8^3 lattice: nu tau/h^2
+    ~ 20) from the continuum profile, 200 steps: the energy stays bounded (K/K0 <= 2; measured
+    1.27-1.42, the discrete steady state of the moving mesh) and its step-to-step oscillation stays
+    small and does not grow (max |dK|/K0 over the last 50 steps <= 1e-2 and <= that over steps
+    10-60; measured 8.9e-4 vs 4.0e-3). Can fail: theta = 0.45 in the policy gives 6.7e-2 vs 6.5e-2,
+    and the CFL step then shrinks the stiffness to nu tau/h^2 = 3.3."""
+    rng = np.random.default_rng(3)
+    n, L, U, nu = 8, 1.0, 0.08, 1.0
+    k, h = 2 * np.pi, 1.0 / n
+    g = (np.arange(n) + 0.5) / n
+    pos = np.stack(np.meshgrid(g, g, g, indexing="ij"), -1).reshape(-1, 3)
+    pos = np.ascontiguousarray((pos + 0.15 / n * (2 * rng.random(pos.shape) - 1)) % L)
+    t = voro.Tessellation()
+    t.set_domain(extent=(L, L, L))
+    t.set_weights(np.zeros(len(pos)))
+    t.build(pos, strict=True)
+    f = voro.LagrangianFlow(t, np.zeros(len(pos), np.int32))
+    f.set_density(np.array([1.0]))
+    f.set_viscosity(np.array([nu]))
+    f.set_body_force((U * nu * k * k, 0.0, 0.0), (0.0, 0.0, k))
+    v = np.zeros_like(pos)
+    v[:, 0] = U * np.sin(k * pos[:, 2])
+    f.set_velocities(v)
+    K0 = f.energies()["kinetic"]
+    r = f.step(200)
+    K = r["kinetic"] / K0
+    stiff = nu * r["dt"].min() / h**2
+    early, late = np.abs(np.diff(K[10:60])).max(), np.abs(np.diff(K[-50:])).max()
+    assert f.theta == 0.5 and stiff >= 10, (f.theta, stiff)
+    assert np.all(np.isfinite(K)) and K.max() <= 2.0 and late <= min(early, 1e-2), (K.max(), early, late)
+    print(f"  Lagrangian theta 1/2 at nu tau/h^2 {stiff:.1f}..{nu * r['dt'].max() / h**2:.1f}: K/K0 "
+          f"{K.min():.3f}..{K.max():.3f} over 200 steps, |dK|/K0 steps 10-60 {early:.1e}, last 50 {late:.1e}")
+
+
 def _slab_scene(z0, z1, L):
     """The solid outside the fluid slab z0 < z < z1, on BOTH sides of the periodic seam (the SDF is
     evaluated at unwrapped cell coordinates and is not periodic): boxes [z1-L, z0] and [z1, z0+L]."""
@@ -842,6 +880,7 @@ if __name__ == "__main__":
     test_energy_forces()
     test_lagrangian()
     test_lagrangian_relabel()
+    test_lagrangian_theta_half_stiff()
     test_flow_solver()
     test_redistribute()
     test_pore_cells()
