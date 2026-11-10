@@ -1481,7 +1481,9 @@ struct IntegratorParams {
   // ---- the gauge G″ (DESIGN_NOTE §12.3.2) ----
   int gaugeEvery = 1;          ///< the gauge after kick 2 every this many steps (0: off)
   double gaugeStrain = 3;      ///< c_g: α_i = min(α_max, c_g τ ε̂_i)
-  double gaugeAlphaMax = 0.2;  ///< α_max
+  /// α_max: 0.5 since M7 WO-G1 (DESIGN_NOTE_GAUGE_INTEGRATOR D16.6, interim until G2): at 0.2 the
+  /// W3 Taylor-Green run (N 4096, γ 100) saturates α on every step and dies at γ 45 (WO-S3 B)
+  double gaugeAlphaMax = 0.5;
   double gaugeSkip = 1e-6;     ///< skip the gauge (state untouched) when max_i α_i < this
   int gaugeRetries = 3;        ///< halvings of all α_i on a rejected trial before the skip
   /// G‴'s activation (§14.4.4; the drift gauge's since M7 WO-PERF3 P3.3b): α_max of G‴ (G″ keeps

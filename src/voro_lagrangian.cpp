@@ -1146,7 +1146,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   std::array<double, 6> acc_{0, 0, 0, 0, 0, 0};
   std::array<real_t, 3> wallU_{0, 0, 0};
   std::array<real_t, 9> wallG_{0, 0, 0, 0, 0, 0, 0, 0, 0};
-  real_t strain_ = 3, alphaMax_ = 0.2;
+  real_t strain_ = 3, alphaMax_ = 0.5;  // M7 WO-G1 (D16.6): was 0.2
   int gaugeEvery_ = 1;
   bool gaugeOn_ = true;                 // _set_gauge_enabled (every_ kept while off)
   real_t kickTol_ = 0, volumeTol_ = 0;  // accuracy knobs; 0: the integrator's defaults
@@ -1266,7 +1266,7 @@ void bindLagrangian(nb::module_& m) {
            "constraint tolerance |C v|_inf <= saddle_tol |C| v_ref (relative; M7 WO-PERF3 P3.2).")
       .def(
           "set_gauge", &LagrangianFlow::set_gauge, nb::arg("every") = 1, nb::arg("strain") = 3.0,
-          nb::arg("alpha_max") = 0.2,
+          nb::arg("alpha_max") = 0.5,
           "The gauge G'' (M7 DESIGN_NOTE §12.3.2) after kick 2 every `every` steps (0: off):\n"
           "strain-activated, Lloyd-only and ascent-free. alpha_i = min(alpha_max, strain * dt *\n"
           "max |sym grad v| over the cell and its face neighbours); skipped, the state untouched,\n"
