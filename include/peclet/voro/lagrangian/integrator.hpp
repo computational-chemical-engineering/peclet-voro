@@ -647,9 +647,13 @@ class SaddleSolver {
     Kokkos::Timer tb;
     if (!rebuildAmg && lrho_.numLevels() > 0 && builtAssembled_ == assembled_) {
       // the lagged hierarchy (no setup charged)
-    } else if (assembled_)
-      lrho_.build(schurAsm_.assembleDevice(F, mass), ap);
-    else
+    } else if (assembled_) {
+      // the S₀ configuration of the P3.0-c study (§14.4.7, variant (e)): Chebyshev degree 3
+      // (21 → 16 kick-2 iterations at N 4096 and 32768; M7 WO-PERF3 P3.6)
+      peclet::core::solver::AmgParams s0 = ap;
+      s0.chebDegree = 3;
+      lrho_.build(schurAsm_.assembleDevice(F, mass), s0);
+    } else
       lrho_.build(detail::twoPointHost(
                       F,
                       [&](int i, int j, double A, double d) {
