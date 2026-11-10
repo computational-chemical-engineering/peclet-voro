@@ -268,6 +268,21 @@ TessGrid<Real> buildTessGrid(const Kokkos::View<Real*, peclet::core::MemSpace>& 
         int slot = Kokkos::atomic_fetch_add(&cursor(cellOf(i)), 1);
         binned(slot) = i;
       });
+  // The atomic scatter leaves each bin in thread-arrival order, and the build visits candidates
+  // in bin order (clip order, facet order, rounding), so a threaded build differed run to run.
+  // Sort each bin ascending — the serial scatter's order, so a 1-thread build is unchanged.
+  // Bins hold ~2 seeds: an insertion sort per bin.
+  Kokkos::parallel_for(
+      "tess.binSort", Kokkos::RangePolicy<Exec>(0, ncellEff), KOKKOS_LAMBDA(const int c) {
+        const int b = cellStart(c), e = cellStart(c + 1);
+        for (int s = b + 1; s < e; ++s) {
+          const int v = binned(s);
+          int t = s - 1;
+          for (; t >= b && binned(t) > v; --t)
+            binned(t + 1) = binned(t);
+          binned(t + 1) = v;
+        }
+      });
 
   // Reorder seed data into grid (binned) order. The build then gathers neighbours
   // from contiguous memory instead of chasing scattered original indices through
