@@ -1492,6 +1492,10 @@ struct IntegratorParams {
   /// 4 c_g τ ε̄), S_J⁻¹ by gaugeWeightIters PCG iterations preconditioned by the S₀ hierarchy
   int gaugeWeightEvery = 4, gaugeWeightIters = 5;
   double gaugeWeightBetaMax = 0.2;
+  /// the drift gauge's G″ validity trigger (D15.5): with the flow active (ε̄ > 0), when
+  /// max_i ŝ_i > gaugeTriggerShift or min_i m_i/h_i < gaugeTriggerMargin, the gauge application is
+  /// one G″ trial (gauge()) instead of a drift δ; an accepted trial makes the next step a restart
+  double gaugeTriggerShift = 0.30, gaugeTriggerMargin = 0.05;
   /// kTrial: G″'s trial after kick 2; kDrift: δ in the next drift with G‴'s activation (P3.3b:
   /// the ε̄ floor, the ŝ-feedback, α_max = gaugeAlphaMaxDrift, times the posterior-monitor factor
   /// f_G; no trial OT, no Ũ trial, no M-projection)
@@ -1551,6 +1555,7 @@ struct StepReport {
   double gaugeFactor = 0;  ///< f_G after this step's monitor update
   double gaugeBeta = 0;  ///< β of the weight relaxation W added to δⁿ⁺¹ (0: none this step)
   double gaugeWeightRes = 0;  ///< W's PCG residual ‖r₅‖₂/‖r₀‖₂ (0: none this step)
+  int gaugeTriggered = 0;  ///< the validity trigger replaced this step's δⁿ⁺¹ by a G″ trial (1)
   double tGauge = 0;
 };
 
@@ -2924,11 +2929,26 @@ class Integrator {
   /// δⁿ⁺¹ ≡ 0 and the next drift adds nothing (bit for bit). Otherwise δⁿ⁺¹ = G″ steps 2-4
   /// (gaugeDisplacement: the raw Lloyd move, the per-cell ∇Ũ projection with ∇Ũⁿ⁺¹, the
   /// ½-margin cap from this state's export) into gd_, pending for the next drift. No trial OT, no
-  /// Ũ trial, no M-projection: the state is untouched here.
+  /// Ũ trial, no M-projection: the state is untouched here. Validity trigger (D15.5): when ε̄ > 0
+  /// and driftTrigger(), this application is one G″ trial (gauge(), its ΔŨ and ΔK to the gauge
+  /// counters) instead, no δⁿ⁺¹ is pending, and an accepted trial makes the next step a restart.
   void driftGauge(double tau, StepReport& rep) {
     Kokkos::Timer t;
     const double am = gaugeActivation(tau, gaugeFactor_, true);
     rep.gaugeAlphaMax = am;
+    if (gaugeEbar_ > 0 && driftTrigger()) {  // the G″ validity trigger (D15.5)
+      const double t0 = rep.tGauge + t.seconds(), dUmon = rep.gaugePotential;
+      double dU = 0, dK = 0;
+      gauge(tau, rep, dU, dK);
+      gaugeU_ += dU;
+      gaugeK_ += dK;
+      rep.gaugePotential += dUmon;  // this step's monitor ΔŨ_G (δⁿ) plus the trial's ΔŨ
+      rep.gaugeTriggered = 1;
+      if (rep.gaugeAccepted)  // x and v jumped: the λ history no longer extrapolates
+        kickRestart_ = true;
+      rep.tGauge += t0;
+      return;
+    }
     if (am >= prm_.gaugeSkip) {
       const bool withW = prm_.gaugeWeightEvery > 0 && stepCount_ % prm_.gaugeWeightEvery == 0;
       if (withW)
@@ -2948,6 +2968,27 @@ class Integrator {
     }
     Kokkos::fence();
     rep.tGauge += t.seconds();
+  }
+
+  /// The drift gauge's G″ validity trigger (D15.5) at the current state: max_i ŝ_i >
+  /// gaugeTriggerShift (ŝ_i = max_{f∋i} |s_f|/d_f, as shifts()) or min_i m_i/h_i <
+  /// gaugeTriggerMargin (m_i from cellMargins, h_i = V⁰_i^{1/3}).
+  bool driftTrigger() {
+    double sAll = 0, sUnlike = 0;
+    shifts(sAll, sUnlike);
+    if (sAll > prm_.gaugeTriggerShift)
+      return true;
+    cellMargins(F_, mG_);
+    const LView<Real> m = mG_, h = h_;
+    Real q = 0;
+    Kokkos::parallel_reduce(
+        "nhvw.gaugeTriggerMargin", Kokkos::RangePolicy<Exec>(0, N_),
+        KOKKOS_LAMBDA(const int i, Real& acc) {
+          const Real r = m(i) / h(i);
+          acc = r < acc ? r : acc;
+        },
+        Kokkos::Min<Real>(q));
+    return double(q) < prm_.gaugeTriggerMargin;
   }
 
   /// G″ steps 2-4 (see gauge()): δ (gd_) from α (aG_); returns |I| and counts the normal-part,
