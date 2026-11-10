@@ -20,7 +20,7 @@
  *      work W += (τ/2) (M a)ᵀ(v_old + v_new)/2 per kick, so that K + Ũ + Q + Q_c − W is conserved
  *      to the integrator's O(τ²);
  *   5. step size τ = min(C_cfl min_i h_i/|v_i|, C_σ √(ρ_σ h_min³/σ_max), τ_user) (stableStep);
- *   6. the gauge G″ (DESIGN_NOTE §12.3.2: strain-activated, Lloyd-only, ascent-free) after kick 2,
+ *   6. the gauge G″ (DESIGN_NOTE §12.3.2: strain-activated, Lloyd-only, ∇Ũ-projected) after kick 2,
  *      every IntegratorParams::gaugeEvery steps (see gauge()); its ΔŨ and ΔK go to their own
  * counters, so K + Ũ + Q + Q_c − W − ΔŨ_G − ΔK_G is what the integrator conserves to O(τ²). With
  * IntegratorParams::gaugeMode = GaugeMode::kDrift (M7 WO-PERF3 P3.3a, §14.4.4) the gauge's
@@ -1536,7 +1536,7 @@ struct StepReport {
   bool gaugeAccepted = false;  ///< a trial was accepted
   int gaugeNormal = 0;         ///< cells of I with the W-Q2 normal Lloyd part
   int gaugeInterface = 0;      ///< |I|
-  int gaugeProjected = 0;      ///< cells whose ascent component was removed (step 3)
+  int gaugeProjected = 0;      ///< cells whose ∇Ũ component was removed (step 3, D15.5)
   int gaugeCapped = 0;         ///< cells scaled down by the margin cap (step 4)
   double gaugeAlphaMax = 0;    ///< max_i α_i (computed also when the gauge is skipped)
   double gaugePotential = 0;   ///< ΔŨ of the accepted trial (≤ 0)
@@ -1632,6 +1632,23 @@ class Integrator {
       mass[i] = rho[i] * V0h_[i];
       h[i] = std::cbrt(V0h_[i]);
       maxV0_ = std::max(maxV0_, V0h_[i]);
+    }
+    {  // F_ref = max(σ_max h̄, ρ_max|g|h̄³, ρ_max|a|h̄³), h̄ = (|Ω|/N)^{1/3} (DESIGN_NOTE §13.3.1)
+      double vt = 0, sig = 0, rmax = 0, g2 = 0, a2 = 0;
+      for (double v : V0h_)
+        vt += v;
+      for (const LView<Real>& tab : {spec.tension, spec.sigmaWall})
+        if (tab.extent(0) > 0)
+          for (double s : peclet::core::toVector(tab))
+            sig = std::max(sig, std::fabs(s));
+      for (double r : fp.density)
+        rmax = std::max(rmax, r);
+      for (int a = 0; a < 3; ++a) {
+        g2 += double(spec.gravity[a]) * double(spec.gravity[a]);
+        a2 += fp.bodyAmp[a] * fp.bodyAmp[a];
+      }
+      const double hb = N_ > 0 ? std::cbrt(vt / N_) : 0.0, hb3 = hb * hb * hb;
+      fRef_ = std::max({sig * hb, rmax * std::sqrt(g2) * hb3, rmax * std::sqrt(a2) * hb3});
     }
     rho_ = peclet::core::toDevice<Real>(rho, "nhvw.rho");
     V0_ = peclet::core::toDevice<Real>(V0h_, "nhvw.V0");
@@ -2773,7 +2790,7 @@ class Integrator {
   }
 
   /// The gauge G″ (DESIGN_NOTE §12.3.2) at x = x^{n+1}, v = v^{n+1}: strain-activated, Lloyd-only,
-  /// ascent-free; it never descends Ũ (D12.1, D12.2).
+  /// first-order Ũ-neutral (D15.5) and Ũ-guarded; it never descends Ũ (D12.1, D12.2).
   ///  1. activation  ε̇_i = ‖sym(G_i v)‖_F (the linear-exact cell gradient), ε̂_i = its max over i
   ///                 and i's face neighbours, α_i = min(α_max, c_g τ ε̂_i). max_i α_i < gaugeSkip:
   ///                 nothing else runs, the state is untouched bit for bit.
@@ -2784,8 +2801,9 @@ class Integrator {
   ///                 normal (m_i = Σ_{k∈I, t_k=t_i, r<3ℓ} w(r) a_k; â_i if |m_i| < 0.1|a_i|).
   ///                 The rest: r_i = b_i − x_i (b_i the centroid of the clipped power cell).
   ///                 δ_i = α_i r_i.
-  ///  3. projection  g_i = ∇_iŨ: if g_i·δ_i > 0, δ_i −= (g_i·δ_i/|g_i|²) g_i (ΔŨ ≤ 0 to first
-  ///                 order, cell by cell).
+  ///  3. projection  g_i = ∇_iŨ: if |g_i| > 10⁻¹⁰F_ref, δ_i −= (g_i·δ_i/|g_i|²) g_i, both signs
+  ///                 (D15.5; until M7 WO-S3 only when g_i·δ_i > 0), so ΔŨ = 0 to first
+  ///                 order, cell by cell: the gauge does no first-order work.
   ///  4. margin cap  |δ_i| ≤ ½ m_i (cellMargins; δ_i = 0 if m_i ≤ 0).
   ///  5. trial       x̃ = x + δ, OT warm-started from w^{n+1} (moveAndSolve); reject if OT fails,
   ///                 min_i m_i(x̃) ≤ 0 or Ũ(x̃) > Ũ(x) (with the periodic-in-g wrap jump); on a
@@ -2887,7 +2905,7 @@ class Integrator {
   /// to amgMaxAge accepted steps, built at an earlier geometry), so with a fixed iteration count
   /// δ^W depends on the hierarchy's age, deterministically (the reuse is counted in steps).
   /// Linearised, H δw = −J_xδ^W = −βHw: δw = −βw.
-  /// (gaugeDisplacement then makes it tangential on I and 0 on CL, and applies the ascent
+  /// (gaugeDisplacement then makes it tangential on I and 0 on CL, and applies the ∇Ũ
   /// projection and the margin cap to the sum δ = α r + δ^W.)
   void weightRelaxation(double tau, StepReport& rep) {
     const double beta =
@@ -2942,7 +2960,7 @@ class Integrator {
   /// The drift gauge (GaugeMode::kDrift; DESIGN_NOTE §14.4.4, M7 WO-PERF3 P3.3a/b) at
   /// x = x^{n+1}, v = v^{n+1}: G‴'s α_i (gaugeActivation, g3); max_i α_i < gaugeSkip:
   /// δⁿ⁺¹ ≡ 0 and the next drift adds nothing (bit for bit). Otherwise δⁿ⁺¹ = G″ steps 2-4
-  /// (gaugeDisplacement: the raw Lloyd move, the per-cell ascent projection with ∇Ũⁿ⁺¹, the
+  /// (gaugeDisplacement: the raw Lloyd move, the per-cell ∇Ũ projection with ∇Ũⁿ⁺¹, the
   /// ½-margin cap from this state's export) into gd_, pending for the next drift. No trial OT, no
   /// Ũ trial, no M-projection: the state is untouched here.
   void driftGauge(double tau, StepReport& rep) {
@@ -3013,6 +3031,8 @@ class Integrator {
     const int n = nI;
     const Kokkos::Array<Real, 3> L3 = {L_[0], L_[1], L_[2]};
     const Real kl = prm_.kernelLength, sThr = prm_.normalLloydShift;
+    // the projection acts on |g_i| > 10⁻¹⁰ F_ref (D15.5); F_ref = 0 (no force scale): on g_i ≠ 0
+    const Real gmin2 = Real(1e-20 * fRef_ * fRef_);
     int nNormal = 0, nProj = 0, nCap = 0;
     // the kernel sum is a brute-force loop over I (|I| ~ N^{2/3}); a cell list is the upgrade
     Kokkos::parallel_reduce(
@@ -3088,11 +3108,11 @@ class Integrator {
             for (int c = 0; c < 3; ++c)
               di[c] += e[c] - en * tn[c];
           }
-          // 3. remove the ascent component
+          // 3. remove the ∇Ũ component, both signs (D15.5): Σ_i g_i·δ_i = 0 to first order
           const Real gi[3] = {g(3 * i), g(3 * i + 1), g(3 * i + 2)};
           const Real gd = gi[0] * di[0] + gi[1] * di[1] + gi[2] * di[2];
           const Real gg = gi[0] * gi[0] + gi[1] * gi[1] + gi[2] * gi[2];
-          if (gd > Real(0) && gg > Real(0)) {
+          if (gg > gmin2) {
             for (int c = 0; c < 3; ++c)
               di[c] -= gd / gg * gi[c];
             ++cP;
@@ -3275,6 +3295,7 @@ class Integrator {
   int N_ = 0;
   Real L_[3] = {1, 1, 1};
   double maxV0_ = 0;
+  double fRef_ = 0;  ///< F_ref (the force scale of the gauge projection's threshold, D15.5)
   LView<Real> V0_, rho_, mu_, mass_, h_, vel_, vh_, b_, zo_, zn_, grad_, gx_, gw_, pi_, lam1_,
       lam2_, tmpN_, dw_, pos0_, w0_, wrapS_, gd_, aI_, lamG_, gs_, fw_, aG_, mG_, wLin_, carry_,
       dd_, dW_, wr_, wz_, wp_, wq_, wy_, lamPrev_;
