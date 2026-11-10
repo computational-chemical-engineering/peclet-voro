@@ -90,8 +90,8 @@ inline peclet::core::solver::AmgParams m7AmgParams() {
 /// setup the first recorded solve's iteration count is the reference; every later solve adds its
 /// excess over it. The hierarchy is rebuilt before its next solve once the excess reaches R_setup
 /// (its setup cost in iterations of that solve, a frozen constant), once it is maxAge steps old, or
-/// after a failed step attempt. Counts only, so the iterates do not depend on wall time. maxAge ≤ 0:
-/// rebuilt at every opportunity.
+/// after a failed step attempt. Counts only, so the iterates do not depend on wall time. maxAge ≤
+/// 0: rebuilt at every opportunity.
 struct AmgReuse {
   int rSetup = 0;  ///< R_setup (iterations)
   int ref = -1, excess = 0;
