@@ -75,6 +75,17 @@
 namespace peclet::voro::lagrangian {
 
 namespace detail {
+/// The AMG configuration of the integrator's per-geometry hierarchies (S₀ or L_ρ, H, L_μ): core
+/// C1's parallel setup, MIS-2 aggregation and a dense coarsest level (M7 WO-PERF3 P3.6, DESIGN_NOTE
+/// §14.4.7, §14.5). The host oracle (Greedy, coarse CG) stays the default everywhere else.
+inline peclet::core::solver::AmgParams m7AmgParams() {
+  peclet::core::solver::AmgParams ap;
+  ap.ndofPerNode = 1;
+  ap.aggregation = peclet::core::solver::Aggregation::Mis2;
+  ap.coarseSolve = peclet::core::solver::CoarseSolve::Dense;
+  return ap;
+}
+
 template <class Real>
 Real maxAbsView(const LView<Real>& a) {
   Real m = 0;
@@ -250,7 +261,37 @@ class SchurAssembly {
   using Exec = peclet::core::ExecSpace;
   using IV = Kokkos::View<int*, Mem>;
 
+  /// S₀ as a host CSR (the test oracle's comparison; schurHost's layout).
   peclet::core::solver::HostCsrOp assemble(const CellFacets<Real>& F, const LView<Real>& mass) {
+    compute(F, mass);
+    const int N = F.nCells;
+    peclet::core::solver::HostCsrOp K;
+    K.n = N;
+    K.diag = peclet::core::toVector(Kokkos::subview(diag_, std::make_pair(0, N)));
+    K.start.assign(hStart_.begin(), hStart_.end());
+    K.nbr.assign(hCols_.begin(), hCols_.end());
+    K.coef = peclet::core::toVector(Kokkos::subview(coef_, std::make_pair(0, nnz_)));
+    return K;
+  }
+
+  /// S₀ as a device CSR (the same arrays as assemble(), no host round trip): the input of core
+  /// C1's parallel setup, GraphAMGDevice::build(DeviceCsr) (M7 WO-PERF3 P3.6, DESIGN_NOTE §14.5).
+  /// The views alias this object's scratch; build() copies them.
+  peclet::core::solver::DeviceCsr assembleDevice(const CellFacets<Real>& F,
+                                                 const LView<Real>& mass) {
+    compute(F, mass);
+    const int N = F.nCells;
+    peclet::core::solver::DeviceCsr K;
+    K.n = N;
+    K.diag = Kokkos::subview(diag_, std::make_pair(0, N));
+    K.start = Kokkos::subview(iStart_, std::make_pair(0, N + 1));
+    K.nbr = Kokkos::subview(iCols_, std::make_pair(0, nnz_));
+    K.coef = Kokkos::subview(coef_, std::make_pair(0, nnz_));
+    return K;
+  }
+
+ private:
+  void compute(const CellFacets<Real>& F, const LView<Real>& mass) {
     const int N = F.nCells, nF = F.nFacets;
     const std::size_t nE = static_cast<std::size_t>(nF) + static_cast<std::size_t>(N);
     grow(colRow_, nE, "s0.colRow");
@@ -346,16 +387,8 @@ class SchurAssembly {
           dg(i) = di;
         });
     Kokkos::fence();
-    peclet::core::solver::HostCsrOp K;
-    K.n = N;
-    K.diag = peclet::core::toVector(Kokkos::subview(diag_, std::make_pair(0, N)));
-    K.start.assign(hStart_.begin(), hStart_.end());
-    K.nbr.assign(hCols_.begin(), hCols_.end());
-    K.coef = peclet::core::toVector(Kokkos::subview(coef_, std::make_pair(0, nnz_)));
-    return K;
   }
 
- private:
   template <class V>
   static void grow(V& v, std::size_t n, const char* label) {
     if (v.extent(0) < n)
@@ -458,6 +491,19 @@ class SchurAssembly {
     const auto hc = peclet::core::toVector(Kokkos::subview(cols_, std::make_pair(0, nnz)));
     hStart_.assign(hs.begin(), hs.end());
     hCols_.assign(hc.begin(), hc.end());
+    // the pattern in core's index type (DeviceCsr), for the device build
+    grow(iStart_, static_cast<std::size_t>(N) + 1, "s0.iStart");
+    grow(iCols_, static_cast<std::size_t>(nnz) + 1, "s0.iCols");
+    {
+      const IV st = start_;
+      const XV is = iStart_, ic = iCols_;
+      Kokkos::parallel_for(
+          "s0.idxStart", Kokkos::RangePolicy<Exec>(0, N + 1),
+          KOKKOS_LAMBDA(const int i) { is(i) = st(i); });
+      Kokkos::parallel_for(
+          "s0.idxCols", Kokkos::RangePolicy<Exec>(0, nnz),
+          KOKKOS_LAMBDA(const int q) { ic(q) = cols(q); });
+    }
     grow(sOff_, static_cast<std::size_t>(N) + 1, "s0.sOff");
     grow(sNbr_, static_cast<std::size_t>(nF), "s0.sNbr");
     Kokkos::deep_copy(Kokkos::subview(sOff_, std::make_pair(0, N + 1)), off);
@@ -466,7 +512,9 @@ class SchurAssembly {
     sF_ = nF;
   }
 
+  using XV = Kokkos::View<peclet::core::Index*, Mem>;
   IV colRow_, ring_, ringN_, ub_, cnt_, cand_, cols_, start_, sOff_, sNbr_;
+  XV iStart_, iCols_;
   LView<Real> colVal_, coef_, diag_;
   std::vector<peclet::core::Index> hStart_, hCols_;
   int nnz_ = 0, sN_ = -1, sF_ = -1;
@@ -582,8 +630,7 @@ class SaddleSolver {
       viscous_ = viscous_ || mh[i] > 0;
       nuH2_ = std::max(nuH2_, mh[i] / (rh[i] * hh[i] * hh[i]));
     }
-    peclet::core::solver::AmgParams ap;
-    ap.ndofPerNode = 1;
+    const peclet::core::solver::AmgParams ap = detail::m7AmgParams();
     {  // Cahouet–Chabard viscous diagonal 2μ_i/V_i (scaled by a = θτ/2 in solve)
       detail::hostCopy(F.volume, volH_);
       const std::vector<double>& vh = volH_;
@@ -601,7 +648,7 @@ class SaddleSolver {
     if (!rebuildAmg && lrho_.numLevels() > 0 && builtAssembled_ == assembled_) {
       // the lagged hierarchy (no setup charged)
     } else if (assembled_)
-      lrho_.build(schurAsm_.assemble(F, mass), ap);
+      lrho_.build(schurAsm_.assembleDevice(F, mass), ap);
     else
       lrho_.build(detail::twoPointHost(
                       F,
@@ -858,8 +905,7 @@ class SaddleSolver {
     st.amgInner = useAmg_;
     if (useAmg_) {
       tPart.reset();
-      peclet::core::solver::AmgParams ap;
-      ap.ndofPerNode = 1;
+      const peclet::core::solver::AmgParams ap = detail::m7AmgParams();
       detail::hostCopy(mass_, massH_);
       const std::vector<double>& mh = massH_;
       const auto& muh = mh_;
@@ -2094,8 +2140,7 @@ class Integrator {
     Kokkos::fence();
     evalSplit_[1] = tp.seconds();
     tp.reset();
-    peclet::core::solver::AmgParams ap;
-    ap.ndofPerNode = 1;
+    const peclet::core::solver::AmgParams ap = detail::m7AmgParams();
     const bool hFresh =
         prm_.amgReuse <= 0 || hAge_ >= prm_.amgReuse || hStale_ || hAmg_.numLevels() == 0;
     if (hFresh) {
