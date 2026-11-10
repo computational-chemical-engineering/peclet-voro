@@ -281,6 +281,180 @@ void applyDissipation(const CellFacets<Real>& F, const LView<Real>& mu, const LV
       });
 }
 
+/// The ζ-plan (M7 DESIGN_NOTE D14.5, §14.4.6 item 5): the geometric factors of applyDissipation,
+/// precomputed once per geometry (and viscosity) so that each apply is three gathers with no
+/// square root, division, harmonic mean or volume lookup. Per facet f of cell i (neighbour j):
+///   gOwn_f = A (c_f − x_i)/(d V_i),  gNbr_f = A (c_f − x_j′)/(d V_j)  (j's factor of the same
+///   facet, in i's frame), n̂_f, 1/d_f, k2_f = 2 μ_f V_f (V_f = A d/3);
+/// per cell: gSum_i = Σ_f gOwn_f and the no-slip wall block W_i = Σ_w μ_i A^w/δ_w (I − n̂_w n̂_wᵀ)
+/// (symmetric; xx, xy, xz, yy, yz, zz). V_i ≤ 0 gives zero factors, as in applyDissipation.
+/// The apply agrees with applyDissipation to round-off, not bit for bit (the factors are
+/// associated differently). Buffers grow with headroom and are reused: no allocation per build
+/// in steady stepping. The plan keeps a reference to the facets it was built from.
+template <class Real>
+struct DissipationPlan {
+  CellFacets<Real> F;
+  LView<Real> gOwn, gNbr, nrm, invD, k2;  // 3, 3, 3, 1, 1 per facet
+  LView<Real> gSum, wall;                 // 3, 6 per cell
+  bool built() const { return F.nCells > 0; }
+
+  void build(const CellFacets<Real>& facets, const LView<Real>& mu) {
+    using Exec = peclet::core::ExecSpace;
+    F = facets;
+    const std::size_t nF = static_cast<std::size_t>(F.nFacets),
+                      nC = static_cast<std::size_t>(F.nCells);
+    grow(gOwn, 3 * nF, "zplan.gOwn");
+    grow(gNbr, 3 * nF, "zplan.gNbr");
+    grow(nrm, 3 * nF, "zplan.nrm");
+    grow(invD, nF, "zplan.invD");
+    grow(k2, nF, "zplan.k2");
+    grow(gSum, 3 * nC, "zplan.gSum");
+    grow(wall, 6 * nC, "zplan.wall");
+    const CellFacets<Real> G = F;
+    const LView<Real> M = mu, go = gOwn, gn = gNbr, nr = nrm, id = invD, kk = k2, gs = gSum,
+                      wb = wall;
+    Kokkos::parallel_for(
+        "lagrangian.zplan", Kokkos::RangePolicy<Exec>(0, G.nCells), KOKKOS_LAMBDA(const int i) {
+          const Real ivi = G.volume(i) > Real(0) ? Real(1) / G.volume(i) : Real(0);
+          Real sum[3] = {0, 0, 0};
+          for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+            const int j = G.nbr(f);
+            Real d2 = 0;
+            for (int a = 0; a < 3; ++a)
+              d2 += G.conn(3 * f + a) * G.conn(3 * f + a);
+            const Real d = Kokkos::sqrt(d2), s = G.area(f) / d;
+            const Real ivj = G.volume(j) > Real(0) ? Real(1) / G.volume(j) : Real(0);
+            for (int a = 0; a < 3; ++a) {
+              const Real c = G.centroid(3 * f + a), q = G.conn(3 * f + a);
+              go(3 * f + a) = s * c * ivi;
+              gn(3 * f + a) = s * (c - q) * ivj;
+              nr(3 * f + a) = q / d;
+              sum[a] += s * c * ivi;
+            }
+            id(f) = Real(1) / d;
+            const Real mi = M(i), mj = M(j);
+            const Real muf = (mi + mj) > Real(0) ? Real(2) * mi * mj / (mi + mj) : Real(0);
+            kk(f) = Real(2) * muf * G.area(f) * d / Real(3);
+          }
+          for (int a = 0; a < 3; ++a)
+            gs(3 * i + a) = sum[a];
+          Real w6[6] = {0, 0, 0, 0, 0, 0};
+          for (int f = G.wallOffset(i); f < G.wallOffset(i + 1); ++f) {
+            const Real nw[3] = {G.wallNormal(3 * f), G.wallNormal(3 * f + 1),
+                                G.wallNormal(3 * f + 2)};
+            const Real dw = nw[0] * G.wallCentroid(3 * f) + nw[1] * G.wallCentroid(3 * f + 1) +
+                            nw[2] * G.wallCentroid(3 * f + 2);
+            if (!(dw > Real(0)))
+              continue;
+            const Real kw = M(i) * G.wallArea(f) / dw;
+            w6[0] += kw * (Real(1) - nw[0] * nw[0]);
+            w6[1] -= kw * nw[0] * nw[1];
+            w6[2] -= kw * nw[0] * nw[2];
+            w6[3] += kw * (Real(1) - nw[1] * nw[1]);
+            w6[4] -= kw * nw[1] * nw[2];
+            w6[5] += kw * (Real(1) - nw[2] * nw[2]);
+          }
+          for (int e = 0; e < 6; ++e)
+            wb(6 * i + e) = w6[e];
+        });
+  }
+
+ private:
+  static void grow(LView<Real>& v, std::size_t n, const char* label) {
+    if (v.extent(0) < n)
+      v = LView<Real>(Kokkos::view_alloc(std::string(label), Kokkos::WithoutInitializing),
+                      n + n / 4 + 64);
+  }
+};
+
+/// out (3N) = ζ v by the plan `P` (see DissipationPlan; the operator of applyDissipation). Three
+/// gathers: G_i = Σ_f (v_j − v_i) ⊗ gOwn_f; per facet S_f = k2_f sym(Ḡ_f P_f + (v_j − v_i)/d ⊗ n̂)
+/// with its direct adjoint −S_f n̂/d and Γ_i = Σ_f ½ S_f P_f, plus W_i v_i; then
+/// Σ_f Γ_j gNbr_f − Γ_i gSum_i.
+template <class Real>
+void applyDissipation(const DissipationPlan<Real>& P, const LView<Real>& v, const LView<Real>& out,
+                      DissipationScratch<Real>& scr) {
+  using Exec = peclet::core::ExecSpace;
+  const CellFacets<Real> G = P.F;
+  const LView<Real> gs = scr.gs, gam = scr.gam, go = P.gOwn, gn = P.gNbr, nr = P.nrm, id = P.invD,
+                    kk = P.k2, gsum = P.gSum, wb = P.wall;
+  Kokkos::parallel_for(
+      "lagrangian.zplan.grad", Kokkos::RangePolicy<Exec>(0, G.nCells), KOKKOS_LAMBDA(const int i) {
+        Real g[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+        const Real vi[3] = {v(3 * i), v(3 * i + 1), v(3 * i + 2)};
+        for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+          const int j = G.nbr(f);
+          const Real gf[3] = {go(3 * f), go(3 * f + 1), go(3 * f + 2)};
+          for (int a = 0; a < 3; ++a) {
+            const Real dv = v(3 * j + a) - vi[a];
+            for (int b = 0; b < 3; ++b)
+              g[3 * a + b] += dv * gf[b];
+          }
+        }
+        for (int e = 0; e < 9; ++e)
+          gs(9 * i + e) = g[e];
+      });
+  Kokkos::parallel_for(
+      "lagrangian.zplan.stress", Kokkos::RangePolicy<Exec>(0, G.nCells),
+      KOKKOS_LAMBDA(const int i) {
+        Real gm[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0}, o[3] = {0, 0, 0}, gi[9];
+        const Real vi[3] = {v(3 * i), v(3 * i + 1), v(3 * i + 2)};
+        for (int e = 0; e < 9; ++e)
+          gi[e] = gs(9 * i + e);
+        for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+          const int j = G.nbr(f);
+          const Real n[3] = {nr(3 * f), nr(3 * f + 1), nr(3 * f + 2)};
+          const Real idf = id(f), k = kk(f);
+          Real Gf[9];
+          for (int e = 0; e < 9; ++e)
+            Gf[e] = Real(0.5) * (gi[e] + gs(9 * j + e));
+          Real w[3];
+          for (int a = 0; a < 3; ++a)
+            w[a] = (v(3 * j + a) - vi[a]) * idf -
+                   (Gf[3 * a] * n[0] + Gf[3 * a + 1] * n[1] + Gf[3 * a + 2] * n[2]);
+          for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+              Gf[3 * a + b] += w[a] * n[b];
+          Real S[9];
+          for (int a = 0; a < 3; ++a)
+            for (int b = 0; b < 3; ++b)
+              S[3 * a + b] = k * Real(0.5) * (Gf[3 * a + b] + Gf[3 * b + a]);
+          Real Sn[3];
+          for (int a = 0; a < 3; ++a)
+            Sn[a] = S[3 * a] * n[0] + S[3 * a + 1] * n[1] + S[3 * a + 2] * n[2];
+          for (int a = 0; a < 3; ++a) {
+            o[a] -= Sn[a] * idf;
+            for (int b = 0; b < 3; ++b)
+              gm[3 * a + b] += Real(0.5) * (S[3 * a + b] - Sn[a] * n[b]);
+          }
+        }
+        const Real* W = &wb(6 * i);
+        o[0] += W[0] * vi[0] + W[1] * vi[1] + W[2] * vi[2];
+        o[1] += W[1] * vi[0] + W[3] * vi[1] + W[4] * vi[2];
+        o[2] += W[2] * vi[0] + W[4] * vi[1] + W[5] * vi[2];
+        for (int e = 0; e < 9; ++e)
+          gam(9 * i + e) = gm[e];
+        for (int a = 0; a < 3; ++a)
+          out(3 * i + a) = o[a];
+      });
+  Kokkos::parallel_for(
+      "lagrangian.zplan.gather", Kokkos::RangePolicy<Exec>(0, G.nCells),
+      KOKKOS_LAMBDA(const int k) {
+        Real o[3] = {0, 0, 0};
+        for (int f = G.facetOffset(k); f < G.facetOffset(k + 1); ++f) {
+          const int j = G.nbr(f);
+          const Real g[3] = {gn(3 * f), gn(3 * f + 1), gn(3 * f + 2)};
+          for (int a = 0; a < 3; ++a)
+            o[a] += gam(9 * j + 3 * a) * g[0] + gam(9 * j + 3 * a + 1) * g[1] +
+                    gam(9 * j + 3 * a + 2) * g[2];
+        }
+        const Real s[3] = {gsum(3 * k), gsum(3 * k + 1), gsum(3 * k + 2)};
+        for (int a = 0; a < 3; ++a)
+          out(3 * k + a) += o[a] - (gam(9 * k + 3 * a) * s[0] + gam(9 * k + 3 * a + 1) * s[1] +
+                                    gam(9 * k + 3 * a + 2) * s[2]);
+      });
+}
+
 }  // namespace peclet::voro::lagrangian
 
 #endif  // PECLET_VORO_LAGRANGIAN_OPERATORS_HPP

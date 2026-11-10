@@ -634,6 +634,8 @@ class SaddleSolver {
           Kokkos::Max<Real>(sc));
       cScale_ = sc;
     }
+    if (viscous_)  // the ζ-plan of this geometry (D14.5): every ζ apply of the kicks uses it
+      plan_.build(F, mu);
     if (viscous_) {  // approximate diagonal of ζ: Σ_f μ_f A/(3d)(1 + n_a²) + wall μ A_w/δ_w (1 −
                      // n_wa²)
       const CellFacets<Real> G = F;
@@ -828,6 +830,10 @@ class SaddleSolver {
   void setAssembled(bool on) { assembled_ = on; }  ///< SaddleParams::schurAssembled (next setup)
   const CellFacets<Real>& facets() const { return F_; }
   DissipationScratch<Real>& scratch() { return scr_; }
+  /// out = ζ v at the last setup's facets and viscosity, by the ζ-plan (viscous only)
+  void applyZeta(const LView<Real>& v, const LView<Real>& out) {
+    applyDissipation(plan_, v, out, scr_);
+  }
 
  private:
   /// The inner A-solve preconditioner of a solve at a = θτ/2: AMG on the scalar two-point viscous
@@ -919,7 +925,7 @@ class SaddleSolver {
     // out = K' (xv, xm): (M + aζ) xv + Cᵀxm, ς C xv
     auto applyK = [&](const LView<Real>& xv, const LView<Real>& xm, const LView<Real>& ov,
                       const LView<Real>& om) {
-      applyDissipation(F_, mu_, xv, ov, scr_);
+      applyDissipation(plan_, xv, ov, scr_);
       applyDivergenceT(F_, xm, w_);
       const LView<Real> W = w_;
       Kokkos::parallel_for(
@@ -1081,7 +1087,7 @@ class SaddleSolver {
     Kokkos::deep_copy(X, Real(0));
     Real rz = detail::dotView(r, z);
     for (int it = 0; it < iters; ++it) {
-      applyDissipation(F_, mu_, p, q, scr_);
+      applyDissipation(plan_, p, q, scr_);
       Kokkos::parallel_for(
           "sd.capAp", Kokkos::RangePolicy<Exec>(0, n3),
           KOKKOS_LAMBDA(const int k) { q(k) = m(k / 3) * p(k) + a * q(k); });
@@ -1128,7 +1134,7 @@ class SaddleSolver {
         Kokkos::deep_copy(X, Real(0));
         return 0;
       }
-      applyDissipation(F_, mu_, X, q, scr_);
+      applyDissipation(plan_, X, q, scr_);
       Kokkos::parallel_for(
           "sd.r0", Kokkos::RangePolicy<Exec>(0, n3),
           KOKKOS_LAMBDA(const int k) { r(k) = B(k) - (m(k / 3) * X(k) + a * q(k)); });
@@ -1163,7 +1169,7 @@ class SaddleSolver {
     Kokkos::deep_copy(p, z);
     Real rz = detail::dotView(r, z);
     for (int it = 0; it < prm.maxInner; ++it) {
-      applyDissipation(F_, mu_, p, q, scr_);
+      applyDissipation(plan_, p, q, scr_);
       Kokkos::parallel_for(
           "sd.Ap", Kokkos::RangePolicy<Exec>(0, n3),
           KOKKOS_LAMBDA(const int k) { q(k) = m(k / 3) * p(k) + a * q(k); });
@@ -1219,6 +1225,7 @@ class SaddleSolver {
   /// A: FGMRES bases, Krylov (V) and preconditioned (Z), velocity (3N) and multiplier (N) blocks
   std::vector<LView<Real>> kv_, km_, zv_, zm_;
   DissipationScratch<Real> scr_;
+  DissipationPlan<Real> plan_;  ///< the ζ-plan of the last setup (D14.5; viscous only)
 };
 
 /// The physical inputs of the integrator beyond the potential: per-type viscosity and density
@@ -2043,7 +2050,7 @@ class Integrator {
     const bool visc = saddle_.viscous();
     const LView<Real> m = mass_, vo = vOld, b = b_, zo = zo_, g = grad_, P = posForce;
     if (visc)
-      applyDissipation(F_, mu_, vOld, zo_, saddle_.scratch());
+      saddle_.applyZeta(vOld, zo_);
     else
       Kokkos::deep_copy(zo_, Real(0));
     const Kokkos::Array<Real, 3> amp = {fp_.bodyAmp[0], fp_.bodyAmp[1], fp_.bodyAmp[2]},
@@ -2087,7 +2094,7 @@ class Integrator {
     // heat (τ/2) v̄_θᵀ ζ (v_old + v_new)/2 and body work (τ/2) (M a)ᵀ (v_old + v_new)/2
     const LView<Real> vn = vNew, zn = zn_;
     if (visc)
-      applyDissipation(F_, mu_, vNew, zn_, saddle_.scratch());
+      saddle_.applyZeta(vNew, zn_);
     else
       Kokkos::deep_copy(zn_, Real(0));
     Real dq = 0, dw = 0;

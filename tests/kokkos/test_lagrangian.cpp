@@ -22,6 +22,10 @@
  *       a force-free state stays exactly at rest. The same drop with the 'pressure' kick 1
  *       (KickConstraint::kPressure, D14.1: one saddle per step, restart steps by option S) at τ,
  *       τ/2, τ/4: volumes to 1e-12 and the energy error falling ≥ 3.5× per halving.
+ *   (B′) The ζ-plan (DissipationPlan, D14.5) against the direct ζ apply on random fields
+ *       (‖Δ‖₂/‖ζv‖₂), its symmetry, and its rigid-mode null (translations; rotations on the rows
+ *       free of periodic wraps), each ≤ 1e-14; on the SDF-walled tessellation of (G) the plan
+ *       against the direct apply only (the per-side SDF clip makes ζ itself non-symmetric there).
  *   (G) The light export of an OT evaluation (exportFacetsLight, M7 WO-PERF3 P3.1): nFacets,
  *       facetOffset, nbr, area and conn bit-identical to the full export's, on a walled power
  *       tessellation (SDF sphere solid) with seeds inside the solid (empty cells, whose faces are
@@ -199,6 +203,100 @@ double checkOperators(const lag::CellFacets<real_t>& F, std::mt19937& rng) {
       eCadj, eJadj, eZsym, eH1, eC1, eCt1, eJt1, eZtr);
   e = std::max({eCadj, eJadj, eZsym, eH1, eC1, eCt1, eJt1, eZtr});
   return e;
+}
+
+// (B′) the ζ-plan (DissipationPlan, M7 DESIGN_NOTE D14.5) against the direct applyDissipation on
+// random fields and a random positive viscosity: ‖ζv − ζv_direct‖₂/‖ζv_direct‖₂; the plan's
+// symmetry |⟨ζu, v⟩ − ⟨u, ζv⟩|/(‖ζu‖‖v‖); its rigid modes, relative to a random field's
+// max|ζu|/max|u|: translations (all rows, `walls` false) and the rotations v = Ω x on the rows
+// whose 3-ring holds no periodic wrap (ζ v_i reads v up to three facet rings away), when `x` (the
+// generators, 3N) is given. Returns the worst; each ≤ 1e-14 is the P3.5 gate.
+double checkZetaPlan(const lag::CellFacets<real_t>& F, const std::vector<real_t>& x,
+                     std::mt19937& rng, bool walls, const char* tag) {
+  const int N = F.nCells;
+  std::normal_distribution<real_t> G(0, 1);
+  std::vector<real_t> v(3 * N), u(3 * N), mu(N);
+  for (auto& q : v)
+    q = G(rng);
+  for (auto& q : u)
+    q = G(rng);
+  for (auto& q : mu)
+    q = std::exp(real_t(0.5) * G(rng));
+  const DV dv = toDev(v, "zp.v"), du = toDev(u, "zp.u"), dmu = toDev(mu, "zp.mu");
+  DV o1("zp.o1", 3 * N), o2("zp.o2", 3 * N);
+  lag::DissipationScratch<real_t> scr(N);
+  lag::DissipationPlan<real_t> P;
+  P.build(F, dmu);
+  P.build(F, dmu);  // a rebuild reuses the buffers
+  double eDir = 0;
+  for (const DV& f : {dv, du}) {
+    lag::applyDissipation(F, dmu, f, o1, scr);
+    lag::applyDissipation(P, f, o2, scr);
+    const auto a = toHost(o1), b = toHost(o2);
+    double dd = 0, nn = 0;
+    for (int k = 0; k < 3 * N; ++k) {
+      dd += (a[k] - b[k]) * (a[k] - b[k]);
+      nn += a[k] * a[k];
+    }
+    eDir = std::max(eDir, std::sqrt(dd / nn));
+  }
+  lag::applyDissipation(P, du, o1, scr);
+  lag::applyDissipation(P, dv, o2, scr);
+  const auto Zu = toHost(o1), Zv = toHost(o2);
+  const double eSym = std::fabs(dot(Zu, v) - dot(u, Zv)) / std::sqrt(dot(Zu, Zu) * dot(v, v));
+  const double scale = maxAbs(Zu) / maxAbs(u);
+  double eTr = 0, eRot = 0;
+  int nRows = 0;
+  if (!walls) {
+    std::vector<real_t> t(3 * N);
+    for (int a = 0; a < 3; ++a) {
+      for (int i = 0; i < N; ++i)
+        for (int c = 0; c < 3; ++c)
+          t[3 * i + c] = c == a ? 1.0 : 0.0;
+      lag::applyDissipation(P, toDev(t, "zp.t"), o1, scr);
+      eTr = std::max(eTr, maxAbs(toHost(o1)) / scale);
+    }
+  }
+  if (!x.empty()) {
+    const auto off = peclet::core::toVector(F.facetOffset), nb = peclet::core::toVector(F.nbr);
+    const auto cn = toHost(F.conn);
+    std::vector<char> near(N, 0);
+    for (int i = 0; i < N; ++i)
+      for (int f = off[i]; f < off[i + 1]; ++f)
+        for (int c = 0; c < 3; ++c)
+          if (std::fabs(x[3 * nb[f] + c] - x[3 * i + c] - cn[3 * f + c]) > 1e-9)
+            near[i] = 1;
+    for (int ring = 0; ring < 3; ++ring) {
+      std::vector<char> nx = near;
+      for (int i = 0; i < N; ++i)
+        for (int f = off[i]; f < off[i + 1]; ++f)
+          if (near[nb[f]])
+            nx[i] = 1;
+      near.swap(nx);
+    }
+    const double Om[3][3] = {{0, 0.7, -1.3}, {-0.7, 0, 0.4}, {1.3, -0.4, 0}};
+    std::vector<real_t> r(3 * N);
+    for (int i = 0; i < N; ++i)
+      for (int a = 0; a < 3; ++a)
+        r[3 * i + a] = Om[a][0] * x[3 * i] + Om[a][1] * x[3 * i + 1] + Om[a][2] * x[3 * i + 2];
+    lag::applyDissipation(P, toDev(r, "zp.r"), o1, scr);
+    const auto Zr = toHost(o1);
+    double m = 0;
+    for (int i = 0; i < N; ++i)
+      if (!near[i]) {
+        ++nRows;
+        for (int c = 0; c < 3; ++c)
+          m = std::max(m, double(std::fabs(Zr[3 * i + c])));
+      }
+    eRot = m / (scale * maxAbs(r));
+  }
+  std::printf(
+      "      zeta-plan %s: vs direct %.1e, symmetry %.1e, translation %.1e, rotation %.1e (%d "
+      "rows)\n",
+      tag, eDir, eSym, eTr, eRot, nRows);
+  // walls: the SDF clip is per cell side, so the two sides of a cut facet differ and ζ itself
+  // (direct or planned) is not symmetric there; the plan is gated against the direct apply only
+  return walls ? eDir : std::max({eDir, eSym, eTr, eRot});
 }
 
 // (E) the NHV-W saddle and integrator on a solved power tessellation (x, weights w0, volumes V0)
@@ -659,7 +757,8 @@ int checkLightExport() {
       "pooled == one-shot %s (pool %d buffers)\n",
       N, full.nFacets, full.nWall, nEmpty, okL ? "bit-identical" : "DIFFERS",
       okP ? "bit-identical" : "DIFFERS", pool.size());
-  return (okL && okP && full.nWall > 0) ? 0 : 1;
+  const double ez = checkZetaPlan(full, {}, rng, true, "walled (SDF)");
+  return (okL && okP && full.nWall > 0 && ez <= 1e-14) ? 0 : 1;
 }
 
 /// S₀ assembled on the device (detail::SchurAssembly) equals schurHost bit for bit — diagonal,
@@ -723,6 +822,7 @@ int run(int n, unsigned seed) {
   double eg = checkGeometry(mv, Fv, pos, DV{}, L, h);
   double eo = checkOperators(Fv, rng);
   rc |= (eg <= tolGeom && eo <= tolOp) ? 0 : 1;
+  rc |= checkZetaPlan(Fv, x, rng, false, "Voronoi") <= 1e-14 ? 0 : 1;
 
   // --- power: weights from the weight solve on ±20 % targets (C) ---
   const auto Vvor = toHost(Fv.volume);
@@ -752,6 +852,7 @@ int run(int n, unsigned seed) {
   eg = checkGeometry(mp, Fp, pos, w, L, h);
   eo = checkOperators(Fp, rng);
   rc |= (eg <= tolGeom && eo <= tolOp) ? 0 : 1;
+  rc |= checkZetaPlan(Fp, x, rng, false, "power") <= 1e-14 ? 0 : 1;
   // the exported volumes are the solved ones
   {
     const auto Vp = toHost(Fp.volume);
