@@ -2882,8 +2882,11 @@ class Integrator {
 
   /// The weight-relaxation displacement of G‴+W (§14.4.4) into dW_, at x^{n+1}, w^{n+1}:
   /// δ^W = M⁻¹J_xᵀ y, S_J y = β H w, S_J = J_xM⁻¹J_xᵀ (matrix-free), β = min(β_max, 4 c_g τ ε̄),
-  /// y by gaugeWeightIters PCG iterations from 0, preconditioned by one V-cycle of kick 2's S₀
-  /// hierarchy at x^{n+1}, no tolerance. Linearised, H δw = −J_xδ^W = −βHw: δw = −βw.
+  /// y by gaugeWeightIters PCG iterations from 0, preconditioned by one V-cycle of the saddle's
+  /// last S₀ (or L_ρ) hierarchy, no tolerance. That hierarchy is reused across steps (D14.6: up
+  /// to amgMaxAge accepted steps, built at an earlier geometry), so with a fixed iteration count
+  /// δ^W depends on the hierarchy's age, deterministically (the reuse is counted in steps).
+  /// Linearised, H δw = −J_xδ^W = −βHw: δw = −βw.
   /// (gaugeDisplacement then makes it tangential on I and 0 on CL, and applies the ascent
   /// projection and the margin cap to the sum δ = α r + δ^W.)
   void weightRelaxation(double tau, StepReport& rep) {
