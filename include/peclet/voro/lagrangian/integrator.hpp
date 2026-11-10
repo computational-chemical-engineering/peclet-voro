@@ -1562,6 +1562,13 @@ struct StepReport {
   double ebK1 = 0, ebHeat1 = 0, ebQc1 = 0, ebWork1 = 0, ebGrad1 = 0;
   double ebK2 = 0, ebHeat2 = 0, ebQc2 = 0, ebWork2 = 0, ebGrad2 = 0;
   double ebDU = 0, ebTrap = 0;
+  /// The kick/drift mismatch T − G₁ − G₂ by force (M7 WO-EB). Per kick k with gradient g and all
+  /// other forces P_k (M Δv_k = −(τ/2)(g + P_k)): ebGd_k = (τ/4) gᵀΔv_k, ebPhi_k = (τ²/8) gᵀM⁻¹g,
+  /// ebPsiC_k = (τ²/8) gᵀM⁻¹Cᵀλ_k (the C and λ the kick used); then (τ²/8) gᵀM⁻¹P_k = −ebGd_k −
+  /// ebPhi_k, and T − G₁ − G₂ = ebGd₁ − ebGd₂. At constant τ the Φ terms telescope, so the
+  /// non-telescoping part is Σ_n (τ²/8) gⁿᵀM⁻¹(P₂ⁿ − P₁ⁿ): kick 2 of step n−1 against kick 1
+  /// of step n, at the same xⁿ.
+  double ebGd1 = 0, ebPhi1 = 0, ebPsiC1 = 0, ebGd2 = 0, ebPhi2 = 0, ebPsiC2 = 0;
 };
 
 /// Parameters of the t = 0 relaxation R0 (DESIGN_NOTE §12.3.1; the values of the P4 pilot).
@@ -2360,6 +2367,7 @@ class Integrator {
     carryOk_ = false;
     const double heat0 = heat_, work0 = work_, qc0 = qc_;  // kick 1's increments undone on a retry
     const double ebK0 = kineticEnergyOf(vel_), ebU0 = parts_.total() + wrapOffset_;  // WO-EB ledger
+    bool ebForceDone = false;
     const bool pressure = prm_.kickConstraint == KickConstraint::kPressure && !kickRestart_;
     const bool zetaReady = zetaValid_;  // zn_ = ζ vel_ at F_ (the last kick 2), consumed here
     zetaValid_ = false;
@@ -2414,6 +2422,8 @@ class Integrator {
         // kick 1's constraint work (τ/4) λ₁ᵀ C^s v^n (C^s v^{½} = 0, C^s v^n ≠ 0)
         applyDivergence(F_, vel_, tmpN_);
         qc_ += 0.25 * tau * detail::dotView(lam1_, tmpN_);
+        ebForce(tau, lam1_, rep.ebPhi1, rep.ebPsiC1);  // C^s, λ₁ (WO-EB ledger)
+        ebForceDone = true;
         F_ = Fn;
         Kokkos::deep_copy(pos_, pos0_);
         Kokkos::deep_copy(weight_, w0_);
@@ -2427,6 +2437,9 @@ class Integrator {
     rep.ebQc1 = qc_ - qc0;
     rep.ebWork1 = work_ - work0;
     rep.ebGrad1 = 0.25 * tau * double(detail::dotView(grad_, vel_) + detail::dotView(grad_, vh_));
+    rep.ebGd1 = 0.25 * tau * double(detail::dotView(grad_, vh_) - detail::dotView(grad_, vel_));
+    if (!ebForceDone)  // 'pressure' (λ̄) and 'start' (λ₁): Cⁿ
+      ebForce(tau, lam1_, rep.ebPhi1, rep.ebPsiC1);
     Kokkos::fence();
     rep.tKick1 = t.seconds();
     t.reset();
@@ -2659,6 +2672,8 @@ class Integrator {
     rep.ebQc2 = qc_ - qc1;
     rep.ebWork2 = work_ - work1;
     rep.ebGrad2 = 0.25 * tau * double(detail::dotView(grad_, vh_) + detail::dotView(grad_, vel_));
+    rep.ebGd2 = 0.25 * tau * double(detail::dotView(grad_, vel_) - detail::dotView(grad_, vh_));
+    ebForce(tau, lam2_, rep.ebPhi2, rep.ebPsiC2);
     Kokkos::fence();
     rep.tKick2 = t.seconds();
     return true;
@@ -3188,6 +3203,23 @@ class Integrator {
         },
         k);
     return k;
+  }
+
+  /// WO-EB ledger: phi = (τ²/8) gᵀM⁻¹g and psiC = (τ²/8) gᵀM⁻¹Cᵀλ with g = grad_ and C at F_
+  /// (b_ is free scratch after a kick).
+  void ebForce(double tau, const LView<Real>& lam, double& phi, double& psiC) {
+    applyDivergenceT(F_, lam, b_);
+    const LView<Real> g = grad_, c = b_, m = mass_;
+    Real a = 0, b = 0;
+    Kokkos::parallel_reduce(
+        "nhvw.ebForce", Kokkos::RangePolicy<Exec>(0, 3 * N_),
+        KOKKOS_LAMBDA(const int k, Real& x, Real& y) {
+          x += g(k) * g(k) / m(k / 3);
+          y += g(k) * c(k) / m(k / 3);
+        },
+        a, b);
+    phi = 0.125 * tau * tau * double(a);
+    psiC = 0.125 * tau * tau * double(b);
   }
 
   double maxSpeed() const {
