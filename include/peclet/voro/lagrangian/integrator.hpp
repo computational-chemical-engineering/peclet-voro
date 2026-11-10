@@ -1556,6 +1556,9 @@ struct StepReport {
   double gaugeBeta = 0;  ///< β of the weight relaxation W added to δⁿ⁺¹ (0: none this step)
   double gaugeWeightRes = 0;  ///< W's PCG residual ‖r₅‖₂/‖r₀‖₂ (0: none this step)
   int gaugeTriggered = 0;  ///< the validity trigger replaced this step's δⁿ⁺¹ by a G″ trial (1)
+  /// the last gaugeDisplacement's δ (before a trial's halvings): max_i |δ_i|/h_i and
+  /// (Σ_i |δ_i|²/h_i² / N)^{1/2} (diagnostics)
+  double gaugeDispMax = 0, gaugeDispRms = 0;
   double tGauge = 0;
 };
 
@@ -3136,6 +3139,21 @@ class Integrator {
     rep.gaugeNormal = nNormal;
     rep.gaugeProjected = nProj;
     rep.gaugeCapped = nCap;
+    {
+      Real dmax = 0, dsq = 0;
+      Kokkos::parallel_reduce(
+          "nhvw.gaugeDispNorm", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i, Real& mx, Real& sq) {
+            const Real q = (d(3 * i) * d(3 * i) + d(3 * i + 1) * d(3 * i + 1) +
+                            d(3 * i + 2) * d(3 * i + 2)) /
+                           (h(i) * h(i));
+            mx = q > mx ? q : mx;
+            sq += q;
+          },
+          Kokkos::Max<Real>(dmax), Kokkos::Sum<Real>(dsq));
+      rep.gaugeDispMax = std::sqrt(double(dmax));
+      rep.gaugeDispRms = N_ > 0 ? std::sqrt(double(dsq) / N_) : 0.0;
+    }
     return n;
   }
 

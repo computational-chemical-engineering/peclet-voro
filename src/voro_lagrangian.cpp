@@ -853,6 +853,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["gauge_beta"] = col([](const auto& r) { return r.gaugeBeta; });
     d["gauge_weight_residual"] = col([](const auto& r) { return r.gaugeWeightRes; });
     d["gauge_triggered"] = col([](const auto& r) { return r.gaugeTriggered; });
+    d["gauge_disp_max"] = col([](const auto& r) { return r.gaugeDispMax; });
+    d["gauge_disp_rms"] = col([](const auto& r) { return r.gaugeDispRms; });
     withInteg([&](auto& I) {
       d["gauge_potential_total"] = I.gaugePotential();
       d["gauge_kinetic_total"] = I.gaugeKinetic();
