@@ -2664,9 +2664,10 @@ class Integrator {
   /// neighbours.
   ///  G″ (§12.3.2 step 1; g3 false): α_i = fG · min(α_max, c_g τ ε̂_i), fG = 1.
   ///  G‴ (§14.4.4; g3 true, the drift gauge): ε̄ = (Σ_i V_i ε̇_i² / Σ_i V_i)^{1/2} over the
-  ///  non-band cells (no unlike facet; D15.5) (V_i the held volumes V⁰_i), ŝ_i = max_{f∋i} |s_f|/d_f (the facets to neighbour cells, as shifts()),
-  ///  α_i = fG · min(α_max, c_g τ max(ε̂_i, ε̄)(1 + (ŝ_i/s_*)²)), α_max = gaugeAlphaMaxDrift,
-  ///  s_* = gaugeShiftScale, fG the posterior monitor's f_G.
+  ///  non-band cells (no unlike facet; D15.5) (V_i the held volumes V⁰_i), ŝ_i = max_{f∋i}
+  ///  |s_f|/d_f (the facets to neighbour cells, as shifts()), α_i = fG · min(α_max, c_g τ max(ε̂_i,
+  ///  ε̄)(1 + (ŝ_i/s_*)²)), α_max = gaugeAlphaMaxDrift, s_* = gaugeShiftScale, fG the posterior
+  ///  monitor's f_G.
   /// Returns max_i α_i.
   double gaugeActivation(double tau, double fG, bool g3 = false) {
     cellGradient(F_, vel_, gs_);
@@ -3144,9 +3145,9 @@ class Integrator {
       Kokkos::parallel_reduce(
           "nhvw.gaugeDispNorm", Kokkos::RangePolicy<Exec>(0, N_),
           KOKKOS_LAMBDA(const int i, Real& mx, Real& sq) {
-            const Real q = (d(3 * i) * d(3 * i) + d(3 * i + 1) * d(3 * i + 1) +
-                            d(3 * i + 2) * d(3 * i + 2)) /
-                           (h(i) * h(i));
+            const Real q =
+                (d(3 * i) * d(3 * i) + d(3 * i + 1) * d(3 * i + 1) + d(3 * i + 2) * d(3 * i + 2)) /
+                (h(i) * h(i));
             mx = q > mx ? q : mx;
             sq += q;
           },
