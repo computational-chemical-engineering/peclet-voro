@@ -1992,6 +1992,7 @@ class Integrator {
   void evalState(double* tPot = nullptr, const CellFacets<Real>* ready = nullptr,
                  const FacetMatch* rm = nullptr) {
     Kokkos::Timer t, tp;
+    zetaValid_ = false;
     if (ready) {
       F_ = *ready;
       match_ = *rm;
@@ -2044,14 +2045,16 @@ class Integrator {
   /// One kick at the current state: vNew, lam from vOld; adds the heat and the body work.
   /// `pressure` (kick 1 of a KickConstraint::kPressure step, §14.4.1 step 1): no constraint;
   /// `lam` is λ̄ (input), (τ/2)Cᵀλ̄ joins the right-hand side and vNew holds the A-solve's guess.
+  /// `zoReady`: zo_ already holds ζ vOld at this geometry (the last kick 2's, §14.4.1 step 1).
   SaddleStats kick(double tau, const LView<Real>& vOld, const LView<Real>& vNew,
-                   const LView<Real>& lam, const LView<Real>& posForce, bool pressure = false) {
+                   const LView<Real>& lam, const LView<Real>& posForce, bool pressure = false,
+                   bool zoReady = false) {
     const Real th = prm_.theta, ht = Real(0.5) * tau;
     const bool visc = saddle_.viscous();
-    const LView<Real> m = mass_, vo = vOld, b = b_, zo = zo_, g = grad_, P = posForce;
-    if (visc)
+    if (visc && !zoReady)
       saddle_.applyZeta(vOld, zo_);
-    else
+    const LView<Real> m = mass_, vo = vOld, b = b_, zo = zo_, g = grad_, P = posForce;
+    if (!visc)
       Kokkos::deep_copy(zo_, Real(0));
     const Kokkos::Array<Real, 3> amp = {fp_.bodyAmp[0], fp_.bodyAmp[1], fp_.bodyAmp[2]},
                                  kw = {fp_.bodyWave[0], fp_.bodyWave[1], fp_.bodyWave[2]};
@@ -2129,6 +2132,8 @@ class Integrator {
     carryOk_ = false;
     const double heat0 = heat_, work0 = work_, qc0 = qc_;  // kick 1's increments undone on a retry
     const bool pressure = prm_.kickConstraint == KickConstraint::kPressure && !kickRestart_;
+    const bool zetaReady = zetaValid_;  // zn_ = ζ vel_ at F_ (the last kick 2), consumed here
+    zetaValid_ = false;
     rep.kickRestart = prm_.kickConstraint == KickConstraint::kPressure && kickRestart_ ? 1 : 0;
     if (pressure) {
       // ---- kick 1, D14.1 (§14.4.1 step 1): λ̄ = ¾λⁿ + ¼λⁿ⁻¹ through Cⁿᵀ inside the CN A-solve at
@@ -2144,7 +2149,12 @@ class Integrator {
             "nhvw.kickGuess", Kokkos::RangePolicy<Exec>(0, 3 * N_),
             KOKKOS_LAMBDA(const int k) { vh(k) += c * (v(k) - vh(k)); });
       }
-      rep.kick1 = kick(tau, vel_, vh_, lam1_, pos_, /*pressure=*/true);
+      // Bⁿvⁿ uses the stored ζⁿvⁿ: kick 2's ζⁿ⁺¹vⁿ⁺¹ of the last step when neither the geometry
+      // nor v moved since (D14.5; not after an accepted trial-gauge move) — the same numbers
+      const bool zoReady = zetaReady && saddle_.viscous();
+      if (zoReady)
+        std::swap(zo_, zn_);
+      rep.kick1 = kick(tau, vel_, vh_, lam1_, pos_, /*pressure=*/true, zoReady);
       {
         const LView<Real> s = b_, v = vel_, vh = vh_;
         Kokkos::parallel_for(
@@ -2398,6 +2408,7 @@ class Integrator {
     else
       Kokkos::deep_copy(lam2_, lam1_);
     rep.kick2 = kick(tau, vh_, vel_, lam2_, pos_);
+    zetaValid_ = true;  // zn_ = ζ vel_ at F_ (or 0, inviscid) until F_ or vel_ moves
     applyDivergence(F_, vh_, tmpN_);
     qc_ += 0.25 * tau * detail::dotView(lam2_, tmpN_);
     kinetic_ = kineticEnergy();
@@ -2580,6 +2591,7 @@ class Integrator {
       Kokkos::deep_copy(lamG_, Real(0));
       saddle_.solve(Real(0), Real(0.5 * tau), Real(prm_.saddle.tol * maxV0_ / tau), b_, vel_, lamG_,
                     prm_.saddle);
+      zetaValid_ = false;
       kinetic_ = kineticEnergy();
       dK = kinetic_ - K0;
     }
@@ -3014,6 +3026,10 @@ class Integrator {
   CellFacets<Real> F_;
   CellFacets<Real> fc_;   ///< repairMismatch()'s export, reused at the same state (currentFacets)
   bool fcValid_ = false;  ///< fc_ describes the current (pos, weight, engine)
+  /// zn_ holds ζ vel_ at F_ (kick 2's, for the heat): the next 'pressure' kick 1 reuses it as its
+  /// ζⁿvⁿ (D14.5). Cleared by evalState (a new geometry), the gauge projection (a new v) and
+  /// every attempt (which overwrites zn_).
+  bool zetaValid_ = false;
   PotentialParts parts_;
   FacetMatch match_;
   AdjointResult adj_;
