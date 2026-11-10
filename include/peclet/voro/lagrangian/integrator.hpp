@@ -1510,9 +1510,10 @@ struct IntegratorParams {
   bool gaugeClamp = false;
   double gaugeShiftOn = 0.25, gaugeShiftFull = 0.40, gaugeMarginOn = 0.05, gaugeStateGain = 0.5,
          gaugeCritical = 0.8;
-  /// the directional cap (§16.5 step 8): c_i = min(1, ½h_i/|δ_i|, min over i's facets (walls
-  /// included) with δ_i·n̂ > 0 of ½m_{i,f}/(δ_i·n̂)); off: the isotropic |δ_i| ≤ ½m_i
-  bool gaugeDirectionalCap = false;
+  /// the directional cap (§16.5 step 8; on since M7 WO-G2 G2.3): c_i = min(1, ½h_i/|δ_i|, min
+  /// over i's facets (walls included) with δ_i·n̂ > 0 of ½m_{i,f}/(δ_i·n̂)); off: the isotropic
+  /// |δ_i| ≤ ½m_i, which froze a cell's moves away from a facet as m_i → 0
+  bool gaugeDirectionalCap = true;
   /// the Ũ-debt compensation (§16.5 step 7): δ −= (B/Γ) P_𝒜M⁻¹∇Ũ, Γ = ∇Ũᵀ P_𝒜M⁻¹∇Ũ, the added
   /// part capped per cell at ½|δ_i|; off: B is booked only
   bool gaugeCompensate = false;
