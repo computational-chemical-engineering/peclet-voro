@@ -211,9 +211,10 @@ double checkOperators(const lag::CellFacets<real_t>& F, std::mt19937& rng) {
 // max|ζu|/max|u|: translations (all rows, `walls` false) and the rotations v = Ω x on the rows
 // whose 3-ring holds no periodic wrap (ζ v_i reads v up to three facet rings away), when `x` (the
 // generators, 3N) is given. Returns the worst; each ≤ 1e-14 is the P3.5 gate.
-double checkZetaPlan(const lag::CellFacets<real_t>& F, const std::vector<real_t>& x,
-                     std::mt19937& rng, bool walls, const char* tag) {
+double checkZetaPlan(const lag::CellFacets<real_t>& F, const std::vector<real_t>& x, bool walls,
+                     const char* tag) {
   const int N = F.nCells;
+  std::mt19937 rng(41);  // its own generator: the problems drawn after it stay as they were
   std::normal_distribution<real_t> G(0, 1);
   std::vector<real_t> v(3 * N), u(3 * N), mu(N);
   for (auto& q : v)
@@ -757,7 +758,7 @@ int checkLightExport() {
       "pooled == one-shot %s (pool %d buffers)\n",
       N, full.nFacets, full.nWall, nEmpty, okL ? "bit-identical" : "DIFFERS",
       okP ? "bit-identical" : "DIFFERS", pool.size());
-  const double ez = checkZetaPlan(full, {}, rng, true, "walled (SDF)");
+  const double ez = checkZetaPlan(full, {}, true, "walled (SDF)");
   return (okL && okP && full.nWall > 0 && ez <= 1e-14) ? 0 : 1;
 }
 
@@ -822,7 +823,7 @@ int run(int n, unsigned seed) {
   double eg = checkGeometry(mv, Fv, pos, DV{}, L, h);
   double eo = checkOperators(Fv, rng);
   rc |= (eg <= tolGeom && eo <= tolOp) ? 0 : 1;
-  rc |= checkZetaPlan(Fv, x, rng, false, "Voronoi") <= 1e-14 ? 0 : 1;
+  rc |= checkZetaPlan(Fv, x, false, "Voronoi") <= 1e-14 ? 0 : 1;
 
   // --- power: weights from the weight solve on ±20 % targets (C) ---
   const auto Vvor = toHost(Fv.volume);
@@ -852,7 +853,7 @@ int run(int n, unsigned seed) {
   eg = checkGeometry(mp, Fp, pos, w, L, h);
   eo = checkOperators(Fp, rng);
   rc |= (eg <= tolGeom && eo <= tolOp) ? 0 : 1;
-  rc |= checkZetaPlan(Fp, x, rng, false, "power") <= 1e-14 ? 0 : 1;
+  rc |= checkZetaPlan(Fp, x, false, "power") <= 1e-14 ? 0 : 1;
   // the exported volumes are the solved ones
   {
     const auto Vp = toHost(Fp.volume);
