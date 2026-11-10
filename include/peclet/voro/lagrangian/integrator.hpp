@@ -20,10 +20,11 @@
  *      work W += (τ/2) (M a)ᵀ(v_old + v_new)/2 per kick, so that K + Ũ + Q + Q_c − W is conserved
  *      to the integrator's O(τ²);
  *   5. step size τ = min(C_cfl min_i h_i/|v_i|, C_σ √(ρ_σ h_min³/σ_max), τ_user) (stableStep);
- *   6. the gauge G″ (DESIGN_NOTE §12.3.2: strain-activated, Lloyd-only, ∇Ũ-projected) after kick 2,
- *      every IntegratorParams::gaugeEvery steps (see gauge()); its ΔŨ and ΔK go to their own
- * counters, so K + Ũ + Q + Q_c − W − ΔŨ_G − ΔK_G is what the integrator conserves to O(τ²). With
- * IntegratorParams::gaugeMode = GaugeMode::kDrift (M7 WO-PERF3 P3.3a, §14.4.4) the gauge's
+ *   6. the gauge G⁗ (DESIGN_NOTE_GAUGE_INTEGRATOR §16.5, M7 WO-G2: rate + state clamp, Lloyd-only,
+ *      ∇Ũ-projected, Ũ-debt compensated, directionally capped, accepted on validity only) after
+ *      kick 2, every IntegratorParams::gaugeEvery steps (see gauge()); its ΔŨ and ΔK go to their
+ * own counters, so K + Ũ + Q + Q_c − W − ΔŨ_G − ΔK_G is what the integrator conserves to O(τ²).
+ * With IntegratorParams::gaugeMode = GaugeMode::kDrift (M7 WO-PERF3 P3.3a, §14.4.4) the gauge's
  * displacement δ is instead added in the next step's drift (driftGauge()); its ΔŨ_G is the
  * posterior trapezoidal estimate and ΔK_G = 0 (the projection is kick 2's constraint). Moving
  * no-slip walls: the wall term of R becomes ½ Σ_w μ_i A^w |P_w(v_i − u_w)|²/δ_w with u_w a linear
@@ -1506,8 +1507,9 @@ struct IntegratorParams {
   /// the state clamp (§16.5 steps 3-4): q_i = clip(max((ŝ_i − s_on)/(s_full − s_on),
   /// (ℓ_on − ℓ_i)/ℓ_on), 0, 1), ℓ_i = m_i/h_i, q̂_i its max over i and i's face neighbours,
   /// α_i = min(α_max, α_rate,i + α_q q̂_i); q̂_i > 0 also gives a cell of I the normal Lloyd part,
-  /// and a critical cell (q̂_i ≥ q_crit) is not ∇Ũ-projected (step 6). Off: q̂ ≡ 0.
-  bool gaugeClamp = false;
+  /// and a critical cell (q̂_i ≥ q_crit) is not ∇Ũ-projected (step 6). Off: q̂ ≡ 0. On since M7
+  /// WO-G2 G2.4 (with the compensation below); the parameters are R16.6's.
+  bool gaugeClamp = true;
   double gaugeShiftOn = 0.25, gaugeShiftFull = 0.40, gaugeMarginOn = 0.05, gaugeStateGain = 0.5,
          gaugeCritical = 0.8;
   /// the directional cap (§16.5 step 8; on since M7 WO-G2 G2.3): c_i = min(1, ½h_i/|δ_i|, min
@@ -1515,8 +1517,8 @@ struct IntegratorParams {
   /// |δ_i| ≤ ½m_i, which froze a cell's moves away from a facet as m_i → 0
   bool gaugeDirectionalCap = true;
   /// the Ũ-debt compensation (§16.5 step 7): δ −= (B/Γ) P_𝒜M⁻¹∇Ũ, Γ = ∇Ũᵀ P_𝒜M⁻¹∇Ũ, the added
-  /// part capped per cell at ½|δ_i|; off: B is booked only
-  bool gaugeCompensate = false;
+  /// part capped per cell at ½|δ_i|; off: B is booked only (R16.8's alternative)
+  bool gaugeCompensate = true;
 };
 
 /// Per-step record (energies are the values AFTER the step).
@@ -2887,15 +2889,16 @@ class Integrator {
   ///                 nothing else runs, the state is untouched bit for bit.
   ///  2. raw move    sets: CL = cells with both a wall facet and an unlike facet; I = the other
   ///                 cells with an unlike facet; the rest. CL: r_i = 0. I: r_i = P_i(b_i − x_i),
-  ///                 plus m̂_im̂_iᵀ(b_i − x_i) when an unlike facet of i has |s|/d >
+  ///                 plus m̂_im̂_iᵀ(b_i − x_i) when q̂_i > 0 or an unlike facet of i has |s|/d >
   ///                 normalLloydShift (W-Q2), P_i = I − m̂_im̂_iᵀ with m̂ the §2.8 step-1 kernel
   ///                 normal (m_i = Σ_{k∈I, t_k=t_i, r<3ℓ} w(r) a_k; â_i if |m_i| < 0.1|a_i|).
   ///                 The rest: r_i = b_i − x_i (b_i the centroid of the clipped power cell).
-  ///                 δ_i = α_i r_i.
-  ///  3. projection  g_i = ∇_iŨ: if |g_i| > 10⁻¹⁰F_ref, δ_i −= (g_i·δ_i/|g_i|²) g_i, both signs
-  ///                 (D15.5; until M7 WO-S3 only when g_i·δ_i > 0), so ΔŨ = 0 to first
-  ///                 order, cell by cell: the gauge does no first-order work.
-  ///  4. margin cap  |δ_i| ≤ ½ m_i (cellMargins; δ_i = 0 if m_i ≤ 0).
+  ///                 δ_i = α_i r_i (gaugeDisplacement, §16.5 step 5).
+  ///  3. projection  g_i = ∇_iŨ: if |g_i| > 10⁻¹⁰F_ref and q̂_i < q_crit, δ_i −= (g_i·δ_i/|g_i|²)
+  ///                 g_i, both signs (D15.5), so ΔŨ = 0 to first order, cell by cell: the gauge
+  ///                 does no first-order work outside the critical cells. Then the Ũ-debt
+  ///                 compensation (§16.5 step 7).
+  ///  4. cap         the directional cap (§16.5 step 8; the isotropic |δ_i| ≤ ½ m_i when off).
   ///  5. trial       x̃ = x + δ, OT warm-started from w^{n+1} (moveAndSolve); reject only if OT
   ///                 fails or min_i m_i(x̃) ≤ 0 (D16.3: the Ũ guard is removed); on a rejection
   ///                 halve all α_i (δ scales linearly), at most gaugeRetries times, then skip (x,

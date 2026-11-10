@@ -1299,15 +1299,26 @@ void bindLagrangian(nb::module_& m) {
       .def(
           "set_gauge", &LagrangianFlow::set_gauge, nb::arg("every") = 1, nb::arg("strain") = 3.0,
           nb::arg("alpha_max") = 0.5,
-          "The gauge G'' (M7 DESIGN_NOTE §12.3.2) after kick 2 every `every` steps (0: off):\n"
-          "strain-activated, Lloyd-only and ascent-free. alpha_i = min(alpha_max, strain * dt *\n"
-          "max |sym grad v| over the cell and its face neighbours); skipped, the state untouched,\n"
-          "when max alpha < 1e-6. Interface cells move tangentially to their power-cell centroid\n"
-          "(plus the normal part when an unlike facet has |s|/d > 0.25), contact-line cells stay,\n"
-          "the rest move to the centroid: delta = alpha (b - x); each cell's ascent component\n"
-          "along grad U~ removed, |delta| capped at half the distance to its own facet planes;\n"
-          "weights re-solved, rejected if U~ rises or a seed leaves its cell (3 halvings), then\n"
-          "v projected onto C v = 0 in the M-metric. Its dU, dK are counted separately.")
+          "The gauge G4 (M7 DESIGN_NOTE_GAUGE_INTEGRATOR §16.5) after kick 2 every `every` steps\n"
+          "(0: off): a Lloyd relabelling. Rate alpha_i = strain * dt * max(e_i, e_bar) (1 + (s_i "
+          "/\n"
+          "0.15)^2), e_i = max |sym grad v| over the cell and its face neighbours, e_bar its "
+          "volume\n"
+          "RMS off the interface band, s_i = max |s|/d over the cell's facets; skipped, the state\n"
+          "untouched, when max rate < 1e-6. A state clamp adds 0.5 q_i (q from |s|/d >= 0.25 and\n"
+          "margin/h <= 0.05; the neighbour max); alpha_i <= alpha_max. Interface cells move\n"
+          "tangentially to their power-cell centroid (plus the normal part under the clamp or "
+          "when\n"
+          "an unlike facet has |s|/d > 0.25), contact-line cells stay, the rest move to the\n"
+          "centroid: delta = alpha (b - x); each cell's grad U~ component removed (not in "
+          "critical\n"
+          "cells), the U~ debt compensated along -grad U~, each move capped to stay inside its "
+          "own\n"
+          "cell's half-spaces. 'trial' (default): weights re-solved, rejected only if OT fails or "
+          "a\n"
+          "seed leaves its cell (3 halvings), then v projected onto C v = 0 in the M-metric;\n"
+          "'drift' (_set_perf_options): added in the next drift. Its dU, dK are counted\n"
+          "separately.")
       .def("set_wall_velocity", &LagrangianFlow::set_wall_velocity, nb::arg("offset"),
            nb::arg("gradient") = nb::none(),
            "No-slip wall velocity u_w(y) = offset + gradient @ y at the wall facets (tangential\n"
