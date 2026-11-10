@@ -919,6 +919,11 @@ class SaddleSolver {
                       [&](int i, int j, double A, double d) {
                         const double muf =
                             muh[i] + muh[j] > 0 ? 2 * muh[i] * muh[j] / (muh[i] + muh[j]) : 0.0;
+                        // c = 4/9: the isotropic mean of ζ's compact two-point part
+                        // μ_fA/(3d)(I + n̂n̂ᵀ) (zdiag), NOT the continuum L_μ = μ_fA/d of
+                        // §13.4.4: on ζ itself (N 512, dense) κ((M + a c L)⁻¹(M + aζ)) is
+                        // minimal at c ≈ 0.40–0.44 for every ν τ/h² in 0.6–100 (c = 1: +22–31 %
+                        // at 0.6–10); spec(ζ, L_1⊗I) = [0.38, 1.81], median 0.49 (M7 WO-PERF3 P3.6)
                         return aa * (4.0 / 9.0) * muf * A / d;
                       },
                       [&](int i) { return mh[i]; }, /*pin=*/false, &hostF_),
