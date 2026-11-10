@@ -865,6 +865,12 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["eb_grad2"] = col([](const auto& r) { return r.ebGrad2; });
     d["eb_dU"] = col([](const auto& r) { return r.ebDU; });
     d["eb_trap"] = col([](const auto& r) { return r.ebTrap; });
+    d["eb_gd1"] = col([](const auto& r) { return r.ebGd1; });
+    d["eb_phi1"] = col([](const auto& r) { return r.ebPhi1; });
+    d["eb_psic1"] = col([](const auto& r) { return r.ebPsiC1; });
+    d["eb_gd2"] = col([](const auto& r) { return r.ebGd2; });
+    d["eb_phi2"] = col([](const auto& r) { return r.ebPhi2; });
+    d["eb_psic2"] = col([](const auto& r) { return r.ebPsiC2; });
     withInteg([&](auto& I) {
       d["gauge_potential_total"] = I.gaugePotential();
       d["gauge_kinetic_total"] = I.gaugeKinetic();
