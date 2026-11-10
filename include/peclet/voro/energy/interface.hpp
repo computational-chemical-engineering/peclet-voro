@@ -33,9 +33,10 @@ Real interfaceEnergyForce(const TessellationView<Real>& view,
                           const Kokkos::View<Real*, peclet::core::MemSpace>& weight, Real L,
                           const Kokkos::View<Real*, peclet::core::MemSpace>& force,
                           const Kokkos::View<Real*, peclet::core::MemSpace>& forceW = {},
-                          const Sdf& sdf = Sdf{}) {
+                          const Sdf& sdf = Sdf{}, detail::RouteScratch<Real>* scr = nullptr) {
   using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();
+  const auto rb = detail::beginRoute<Real, Policy>(view, forceW, scr);
   Real E = 0;
   Kokkos::parallel_reduce(
       "energy.interface", Kokkos::RangePolicy<Exec>(0, N),
@@ -68,10 +69,10 @@ Real interfaceEnergyForce(const TessellationView<Real>& view,
           }
         }
         if (any)
-          detail::routeCellGradient<Real, Policy>(view, i, gl, nf, pos, weight, L, sdf, force,
-                                                  forceW);
+          detail::routeCellGradient<Real, Policy>(view, i, gl, nf, pos, weight, L, sdf, rb);
       },
       E);
+  detail::gatherRoute(view, rb, force, forceW, scr);
   return E;
 }
 

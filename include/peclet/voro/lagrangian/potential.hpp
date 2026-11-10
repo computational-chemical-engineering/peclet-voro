@@ -140,11 +140,12 @@ struct PotentialParts {
 };
 
 /// Persistent scratch of partitionPotential (M7 WO-PERF3 P3.1: no View allocation per steady
-/// step): the band flags and the band publish's arrays.
+/// step): the band flags, the band publish's arrays and the gradient combiner's slots.
 template <class Real>
 struct PotentialScratch {
   Kokkos::View<int*, peclet::core::MemSpace> unlike, band;
   ReevalScratch<Real> publish;
+  energy::detail::RouteScratch<Real> route;
 };
 
 namespace detail {
@@ -215,11 +216,13 @@ PotentialParts partitionPotential(MT& mt, const CellFacets<Real>& F, const LView
         detail::energyBand(F, s.types, s.sigmaWall.extent(0) > 0, scr),
         scr ? &scr->publish : nullptr);
     if (s.tension.extent(0) > 0 && !nonlocal)
-      e.interface = energy::interfaceEnergyForce<Real, Policy>(
-          view, s.types, s.tension, s.nTypes, pos, weight, L[0], gradX, gradW, mt.sdf);
+      e.interface = energy::interfaceEnergyForce<Real, Policy>(view, s.types, s.tension, s.nTypes,
+                                                               pos, weight, L[0], gradX, gradW,
+                                                               mt.sdf, scr ? &scr->route : nullptr);
     if (s.sigmaWall.extent(0) > 0)
-      e.wall = energy::wallEnergyForce<Real, Policy>(view, s.types, s.sigmaWall, mt.sdf, pos,
-                                                     weight, L[0], gradX, gradW);
+      e.wall =
+          energy::wallEnergyForce<Real, Policy>(view, s.types, s.sigmaWall, mt.sdf, pos, weight,
+                                                L[0], gradX, gradW, scr ? &scr->route : nullptr);
   }
   if (nonlocal) {
     if (static_cast<int>(s.refVolume.extent(0)) != N)

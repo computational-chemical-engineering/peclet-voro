@@ -44,9 +44,10 @@ void volumeGradientForce(const TessellationView<Real>& view,
                          const Kokkos::View<Real*, peclet::core::MemSpace>& weight, Real L,
                          const Kokkos::View<Real*, peclet::core::MemSpace>& force,
                          const Kokkos::View<Real*, peclet::core::MemSpace>& forceW = {},
-                         const Sdf& sdf = Sdf{}) {
+                         const Sdf& sdf = Sdf{}, detail::RouteScratch<Real>* scr = nullptr) {
   using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();
+  const auto rb = detail::beginRoute<Real, Policy>(view, forceW, scr);
   Kokkos::parallel_for(
       "energy.volume", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         const Real de = dEdV(i);
@@ -67,12 +68,11 @@ void volumeGradientForce(const TessellationView<Real>& view,
               gl[3 * k + c] = Real(2) * de * view.connect(f, c);
           }
         }
-        detail::routeCellGradient<Real, Policy>(view, i, gl, nf, pos, weight, L, sdf, force,
-                                                forceW);
+        detail::routeCellGradient<Real, Policy>(view, i, gl, nf, pos, weight, L, sdf, rb);
         if (fd)
-          for (int c = 0; c < 3; ++c)
-            Kokkos::atomic_add(&force(3 * i + c), de * view.wallDV(i, c));
+          rb.addOwn(i, de * view.wallDV(i, 0), de * view.wallDV(i, 1), de * view.wallDV(i, 2));
       });
+  detail::gatherRoute(view, rb, force, forceW, scr);
 }
 
 }  // namespace peclet::voro::energy

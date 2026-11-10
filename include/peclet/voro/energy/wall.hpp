@@ -43,9 +43,11 @@ Real wallEnergyForce(const TessellationView<Real>& view,
                      const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
                      const Kokkos::View<Real*, peclet::core::MemSpace>& weight, Real L,
                      const Kokkos::View<Real*, peclet::core::MemSpace>& force,
-                     const Kokkos::View<Real*, peclet::core::MemSpace>& forceW = {}) {
+                     const Kokkos::View<Real*, peclet::core::MemSpace>& forceW = {},
+                     detail::RouteScratch<Real>* scr = nullptr) {
   using Exec = peclet::core::ExecSpace;
   const int N = view.numCells();
+  const auto rb = detail::beginRoute<Real, Policy>(view, forceW, scr);
   Real E = 0;
   Kokkos::parallel_reduce(
       "energy.wall", Kokkos::RangePolicy<Exec>(0, N),
@@ -76,14 +78,13 @@ Real wallEnergyForce(const TessellationView<Real>& view,
           }
         }
         if (any) {
-          detail::routeCellGradient<Real, Policy>(view, i, gl, nf, pos, weight, L, sdf, force,
-                                                  forceW);
+          detail::routeCellGradient<Real, Policy>(view, i, gl, nf, pos, weight, L, sdf, rb);
           if (fd)
-            for (int c = 0; c < 3; ++c)
-              Kokkos::atomic_add(&force(3 * i + c), sig * view.wallDA(i, c));
+            rb.addOwn(i, sig * view.wallDA(i, 0), sig * view.wallDA(i, 1), sig * view.wallDA(i, 2));
         }
       },
       E);
+  detail::gatherRoute(view, rb, force, forceW, scr);
   return E;
 }
 
