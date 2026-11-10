@@ -1219,22 +1219,30 @@ struct ConvexCell {
   /// shared by its faces by triangle index); faceOrdered gathers the coordinates from it.
   KOKKOS_INLINE_FUNCTION int faceOrderedIdx(int k, int out[MAXFV]) const {
     int m = 0;
-    Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
     for (int t = 0; t < nt; ++t) {
       if (!alive[t])
         continue;
       if (t0[t] != k && t1[t] != k && t2[t] != k)
         continue;
-      if (m < MAXFV) {
-        out[m] = t;
-        fx[m] = vx[t];
-        fy[m] = vy[t];
-        fz[m] = vz[t];
-        ++m;
-      }
+      if (m < MAXFV)
+        out[m++] = t;
     }
+    return orderFaceIdx(k, m, out);
+  }
+
+  /// faceOrderedIdx's ordering step: out[0..m) holds face k's alive triangles in ascending index
+  /// (the gather order, at most MAXFV); reorders them CCW in place and returns m, or <3 as
+  /// faceOrderedIdx. For a caller that gathers every face of the cell in one sweep of its
+  /// triangles (lagrangian/facets.hpp) — the same lists, hence the same order.
+  KOKKOS_INLINE_FUNCTION int orderFaceIdx(int k, int m, int out[MAXFV]) const {
     if (m < 3)
       return m;
+    Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
+    for (int i = 0; i < m; ++i) {
+      fx[i] = vx[out[i]];
+      fy[i] = vy[out[i]];
+      fz[i] = vz[out[i]];
+    }
     const Real nx = n[k][0], ny = n[k][1], nz = n[k][2];
     const Real nlen = Kokkos::sqrt(nx * nx + ny * ny + nz * nz);
     if (nlen == Real(0))

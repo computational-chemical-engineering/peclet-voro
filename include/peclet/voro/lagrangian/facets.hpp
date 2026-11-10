@@ -35,6 +35,7 @@
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/convex_cell.hpp"
+#include "peclet/voro/params.hpp"  // kFacetSlots
 #include "peclet/voro/plane_policy.hpp"
 #include "peclet/voro/sdf.hpp"        // WallStore
 #include "peclet/voro/tess_grid.hpp"  // persistentLeading
@@ -108,12 +109,13 @@ KOKKOS_INLINE_FUNCTION int sym3Index(int a, int b, int c) {
 /// tensor about the centroid, and the face's cone from the generator (signed volume and first
 /// moment). The polygon is fanned from its first vertex with SIGNED triangle areas projected on
 /// the outward unit normal, so a non-convex round-off sliver cannot flip a sign. Returns false for
-/// a degenerate face (fewer than three vertices or a zero plane normal).
+/// a degenerate face (fewer than three vertices or a zero plane normal). polygonMoments takes face
+/// k's vertices already gathered and ordered (c.faceOrdered's output, m of them); faceMoments
+/// gathers them itself.
 template <class Cell, class Real>
-KOKKOS_INLINE_FUNCTION bool faceMoments(const Cell& c, int k, Real& area, Real cen[3], Real sec[9],
-                                        Real& coneVol, Real coneMom[3]) {
-  Real fx[Cell::MAXFV], fy[Cell::MAXFV], fz[Cell::MAXFV];
-  const int m = c.faceOrdered(k, fx, fy, fz);
+KOKKOS_INLINE_FUNCTION bool polygonMoments(const Cell& c, int k, const Real fx[], const Real fy[],
+                                           const Real fz[], int m, Real& area, Real cen[3],
+                                           Real sec[9], Real& coneVol, Real coneMom[3]) {
   if (m < 3)
     return false;
   const Real nl = Kokkos::sqrt(c.nn[k]);
@@ -199,6 +201,39 @@ KOKKOS_INLINE_FUNCTION bool faceMoments(const Cell& c, int k, Real& area, Real c
   return true;
 }
 
+template <class Cell, class Real>
+KOKKOS_INLINE_FUNCTION bool faceMoments(const Cell& c, int k, Real& area, Real cen[3], Real sec[9],
+                                        Real& coneVol, Real coneMom[3]) {
+  Real fx[Cell::MAXFV], fy[Cell::MAXFV], fz[Cell::MAXFV];
+  const int m = c.faceOrdered(k, fx, fy, fz);
+  return polygonMoments(c, k, fx, fy, fz, m, area, cen, sec, coneVol, coneMom);
+}
+
+/// The area alone of polygonMoments (its first fan loop: the same signed triangles summed in the
+/// same order, so the same A) and the same validity test; for the light export, which stores no
+/// centroid, second moment or cone.
+template <class Cell, class Real>
+KOKKOS_INLINE_FUNCTION bool polygonArea(const Cell& c, int k, const Real fx[], const Real fy[],
+                                        const Real fz[], int m, Real& area) {
+  if (m < 3)
+    return false;
+  const Real nl = Kokkos::sqrt(c.nn[k]);
+  if (!(nl > Real(0)))
+    return false;
+  const Real u[3] = {c.n[k][0] / nl, c.n[k][1] / nl, c.n[k][2] / nl};
+  Real A = 0;
+  for (int q = 1; q + 1 < m; ++q) {
+    const Real a[3] = {fx[q] - fx[0], fy[q] - fy[0], fz[q] - fz[0]};
+    const Real b[3] = {fx[q + 1] - fx[0], fy[q + 1] - fy[0], fz[q + 1] - fz[0]};
+    const Real at =
+        Real(0.5) * ((a[1] * b[2] - a[2] * b[1]) * u[0] + (a[2] * b[0] - a[0] * b[2]) * u[1] +
+                     (a[0] * b[1] - a[1] * b[0]) * u[2]);
+    A += at;
+  }
+  area = A;
+  return A > Real(0);
+}
+
 /// Higher moments of face k of cell `c` about the point `cen` (vertices generator-relative), on
 /// the same signed fan as faceMoments: the third moment ∫_f (y−cen)^{⊗3} dA (ten symmetric
 /// components, sym3Index order) and the second moment of the face's cone from the generator,
@@ -275,6 +310,56 @@ KOKKOS_INLINE_FUNCTION bool isFace(const Cell& c, int k) {
   return cnt >= 3;
 }
 
+/// Every face of a loaded cell from ONE sweep of its triangles (M7 WO-S1): plane k's alive
+/// triangles in ascending index — faceOrderedIdx's gather, capped at MAXFV like it — and their
+/// full count — isFace's. O(nt) per cell instead of the O(np·nt) of isFace and faceOrderedIdx per
+/// plane; the same lists, so the same faces, vertex order and moments.
+template <class Cell>
+struct CellFaceLists {
+  static_assert(Cell::kMaxT <= 256, "a triangle index must fit a byte");
+  static constexpr int MAXFV = Cell::MAXFV;
+  unsigned char tri[Cell::kMaxP][MAXFV];
+  int cnt[Cell::kMaxP];
+
+  KOKKOS_INLINE_FUNCTION explicit CellFaceLists(const Cell& c) {
+    for (int k = 0; k < c.np; ++k)
+      cnt[k] = 0;
+    for (int t = 0; t < c.nt; ++t) {
+      if (!c.alive[t])
+        continue;
+      const int a = c.t0[t], b = c.t1[t], d = c.t2[t];
+      add(a, t);  // a triangle counts once per plane, as in isFace's test
+      if (b != a)
+        add(b, t);
+      if (d != a && d != b)
+        add(d, t);
+    }
+  }
+  KOKKOS_INLINE_FUNCTION void add(int k, int t) {
+    if (cnt[k] < MAXFV)
+      tri[k][cnt[k]] = static_cast<unsigned char>(t);
+    ++cnt[k];
+  }
+  /// isFace(c, k).
+  KOKKOS_INLINE_FUNCTION bool isFace(int k) const { return cnt[k] >= 3; }
+  /// c.faceOrdered(k, fx, fy, fz).
+  template <class Real>
+  KOKKOS_INLINE_FUNCTION int ordered(const Cell& c, int k, Real fx[MAXFV], Real fy[MAXFV],
+                                     Real fz[MAXFV]) const {
+    int idx[MAXFV];
+    int m = cnt[k] < MAXFV ? cnt[k] : MAXFV;
+    for (int q = 0; q < m; ++q)
+      idx[q] = tri[k][q];
+    m = c.orderFaceIdx(k, m, idx);
+    for (int q = 0; q < m; ++q) {
+      fx[q] = c.vx[idx[q]];
+      fy[q] = c.vy[idx[q]];
+      fz[q] = c.vz[idx[q]];
+    }
+    return m;
+  }
+};
+
 /// Load slot i of the store and re-evaluate it under `Policy` on the current positions (and the
 /// resident weights for Power), restoring the resident SDF wall planes first (as reevalPublish).
 template <class Policy, class Store, class Real, class Cell>
@@ -318,6 +403,20 @@ struct FacetBuffer {
   }
 };
 
+/// The per-cell facet slots of the single-pass export (M7 WO-S1, DESIGN_NOTE_VARIANTS §5.4): cell
+/// i owns slots [i·cap, (i+1)·cap), its interior facets from the bottom, its wall facets from the
+/// top (a wall facet's normal in `conn`). The pass writes every facet into its cell's slots and
+/// counts them; a scan of the counts then places them in the CSR. A cell with more than `cap`
+/// facets grows every cell's slots and the pass is redone (a count pass only on overflow).
+/// Persistent in a FacetPool; grown on demand, never shrunk.
+template <class Real>
+struct FacetSlots {
+  using Mem = peclet::core::MemSpace;
+  int cap = kFacetSlots;
+  Kokkos::View<int*, Mem> nbr;
+  Kokkos::View<Real*, Mem> area, centroid, conn, second, third;
+};
+
 /// A pool of FacetBuffers for a caller that exports every step (the NHV-W integrator, the OT weight
 /// solve). An export takes an IDLE buffer — one that no live CellFacets still references (Kokkos'
 /// reference count is the liveness test) — so it never overwrites arrays a live CellFacets reads:
@@ -336,14 +435,19 @@ class FacetPool {
   }
   int size() const { return static_cast<int>(bufs_.size()); }
   Kokkos::View<int*, peclet::core::MemSpace> keep;  ///< matchFacets' per-facet flags (per call)
+  FacetSlots<Real> slots;                           ///< the export's per-cell slots (WO-S1)
 
  private:
   std::vector<std::unique_ptr<FacetBuffer<Real>>> bufs_;
 };
 
 namespace detail {
-/// exportCellFacets (Light = false) and exportFacetsLight (Light = true): one count kernel, so the
-/// facet set and its order are the same; the light fill stores only nbr, area and conn.
+/// exportCellFacets (Light = false) and exportFacetsLight (Light = true), in ONE pass over the
+/// cells (M7 WO-S1): each cell's facets go to its slots (FacetSlots) with its counts, a scan of the
+/// counts gives the CSR offsets, and a copy compacts the slots into the CSR. The facet set, its
+/// order and every value are those of the former count + fill passes (CellFaceLists,
+/// polygonMoments); the light pass computes only the area (polygonArea, the same A and the same
+/// validity) and stores only nbr, area and conn.
 template <class Real, class Policy, bool Light, int MAXP, int MAXT>
 CellFacets<Real> exportFacets(const TopologyStore<MAXP, MAXT>& store,
                               const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
@@ -355,8 +459,7 @@ CellFacets<Real> exportFacets(const TopologyStore<MAXP, MAXT>& store,
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   using Cell = ConvexCell<Real, MAXP, MAXT, false>;
-  using Kokkos::view_alloc;
-  using Kokkos::WithoutInitializing;
+  constexpr int MAXFV = Cell::MAXFV;
   const Real Lx = L[0], Ly = L[1], Lz = L[2];
   const Real Lxh = Real(0.5) * Lx, Lyh = Real(0.5) * Ly, Lzh = Real(0.5) * Lz;
   const TopologyStore<MAXP, MAXT> st = store;
@@ -364,39 +467,136 @@ CellFacets<Real> exportFacets(const TopologyStore<MAXP, MAXT>& store,
   const bool hasEV = engineVol.extent(0) > 0;
   const WallStore<Real> Wl = wall;
   const Kokkos::Array<Real, 3> L3 = {Lx, Ly, Lz};
+  const bool hm = !Light && withHigherMoments;
+  const std::size_t sN = static_cast<std::size_t>(N);
 
-  // ---- 1. count interior / wall faces per cell ----
   FacetBuffer<Real>* B = pool ? &pool->acquire() : nullptr;
-  const auto fOff = scratchView(B ? &B->facetOffset : nullptr, static_cast<std::size_t>(N) + 1,
-                                "lag.facetOffset", true);
-  const auto wOff = Light ? Kokkos::View<int*, Mem>()
-                          : scratchView(B ? &B->wallOffset : nullptr,
-                                        static_cast<std::size_t>(N) + 1, "lag.wallOffset", true);
-  Kokkos::parallel_for(
-      Light ? "lagrangian.facets.countLight" : "lagrangian.facets.count",
-      Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
-        Cell c;
-        detail::loadCell<Policy>(st, Wl, P, W, XR, L3, i, c);
-        int ni = 0, nw = 0;
-        for (int k = 0; k < c.np; ++k) {
-          if (!detail::isFace(c, k))
-            continue;
-          Real a, cen[3], sec[9], cv, cm[3];
-          if (!faceMoments(c, k, a, cen, sec, cv, cm))
-            continue;
-          const int j = c.pnbr[k];
-          if (j >= 0 && (!hasEV || EV(j) > Real(0)))
-            ++ni;
-          else
-            ++nw;
-        }
-        fOff(i + 1) = ni;
-        if constexpr (!Light)
-          wOff(i + 1) = nw;
-      });
+  FacetSlots<Real> own;
+  FacetSlots<Real>& S = pool ? pool->slots : own;
+  const auto fOff = scratchView(B ? &B->facetOffset : nullptr, sN + 1, "lag.facetOffset", true);
+  const auto wOff = Light
+                        ? Kokkos::View<int*, Mem>()
+                        : scratchView(B ? &B->wallOffset : nullptr, sN + 1, "lag.wallOffset", true);
+  CellFacets<Real> F;
+  F.nCells = N;
+  F.facetOffset = fOff;
+  F.wallOffset = wOff;
+  if constexpr (!Light) {
+    F.volume = scratchView(B ? &B->volume : nullptr, sN, "lag.volume", true);
+    F.cellCentroid = scratchView(B ? &B->cellCentroid : nullptr, 3 * sN, "lag.cellCen", true);
+    if (hm)
+      F.cellSecond = scratchView(B ? &B->cellSecond : nullptr, 9 * sN, "lag.cellSec", true);
+  }
+
+  // ---- 1. the pass: every cell's facets into its slots, its counts into the offsets ----
+  int need = 0;
+  for (;;) {
+    const int K = S.cap;
+    const std::size_t sS = sN * static_cast<std::size_t>(K);
+    const auto sNbr = persistentLeading(S.nbr, sS, "lag.slotNbr", false);
+    const auto sArea = persistentLeading(S.area, sS, "lag.slotArea", false);
+    const auto sConn = persistentLeading(S.conn, 3 * sS, "lag.slotConn", false);
+    const auto sCen = Light ? Kokkos::View<Real*, Mem>()
+                            : persistentLeading(S.centroid, 3 * sS, "lag.slotCen", false);
+    const auto sSec = Light ? Kokkos::View<Real*, Mem>()
+                            : persistentLeading(S.second, 9 * sS, "lag.slotSec", false);
+    const auto sThd = hm ? persistentLeading(S.third, 10 * sS, "lag.slotThird", false)
+                         : Kokkos::View<Real*, Mem>();
+    const CellFacets<Real> G = F;
+    Kokkos::parallel_reduce(
+        Light ? "lagrangian.facets.fillLight" : "lagrangian.facets.fill",
+        Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(const int i, int& mx) {
+          Cell c;
+          detail::loadCell<Policy>(st, Wl, P, W, XR, L3, i, c);
+          const CellFaceLists<Cell> fl(c);
+          const std::size_t base = static_cast<std::size_t>(i) * K;
+          int ni = 0, nw = 0;
+          Real V = 0, M[3] = {0, 0, 0}, Q[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+          for (int k = 0; k < c.np; ++k) {
+            if (!fl.isFace(k))
+              continue;
+            Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
+            const int m = fl.ordered(c, k, fx, fy, fz);
+            Real a, cen[3], sec[9], cv, cm[3];
+            if constexpr (Light) {
+              if (!polygonArea(c, k, fx, fy, fz, m, a))
+                continue;
+            } else {
+              if (!polygonMoments(c, k, fx, fy, fz, m, a, cen, sec, cv, cm))
+                continue;
+              V += cv;
+              M[0] += cm[0];
+              M[1] += cm[1];
+              M[2] += cm[2];
+            }
+            Real th[10], cq[9];
+            if (hm) {
+              faceHigherMoments(c, k, cen, th, cq);
+              for (int e = 0; e < 9; ++e)
+                Q[e] += cq[e];
+            }
+            const int j = c.pnbr[k];
+            const bool fits = ni + nw < K;  // interior from the bottom, wall from the top
+            if (j >= 0 && (!hasEV || EV(j) > Real(0))) {
+              if (fits) {
+                const std::size_t s = base + ni;
+                sNbr(s) = j;
+                sArea(s) = a;
+                Real r[3] = {P(3 * j) - P(3 * i), P(3 * j + 1) - P(3 * i + 1),
+                             P(3 * j + 2) - P(3 * i + 2)};
+                r[0] = r[0] > Lxh ? r[0] - Lx : (r[0] < -Lxh ? r[0] + Lx : r[0]);
+                r[1] = r[1] > Lyh ? r[1] - Ly : (r[1] < -Lyh ? r[1] + Ly : r[1]);
+                r[2] = r[2] > Lzh ? r[2] - Lz : (r[2] < -Lzh ? r[2] + Lz : r[2]);
+                for (int d = 0; d < 3; ++d)
+                  sConn(3 * s + d) = r[d];
+                if constexpr (!Light) {
+                  for (int d = 0; d < 3; ++d)
+                    sCen(3 * s + d) = cen[d];
+                  for (int e = 0; e < 9; ++e)
+                    sSec(9 * s + e) = sec[e];
+                  if (hm)
+                    for (int e = 0; e < 10; ++e)
+                      sThd(10 * s + e) = th[e];
+                }
+              }
+              ++ni;
+            } else if constexpr (!Light) {
+              if (fits) {
+                const std::size_t s = base + (K - 1 - nw);
+                const Real nl = Kokkos::sqrt(c.nn[k]);
+                sArea(s) = a;
+                for (int d = 0; d < 3; ++d) {
+                  sCen(3 * s + d) = cen[d];
+                  sConn(3 * s + d) = c.n[k][d] / nl;
+                }
+              }
+              ++nw;
+            }
+          }
+          G.facetOffset(i + 1) = ni;
+          if constexpr (!Light) {
+            G.wallOffset(i + 1) = nw;
+            G.volume(i) = V;
+            const Real iv = V > Real(0) ? Real(1) / V : Real(0);
+            for (int d = 0; d < 3; ++d)
+              G.cellCentroid(3 * i + d) = M[d] * iv;
+            if (hm)
+              for (int e = 0; e < 9; ++e)
+                G.cellSecond(9 * i + e) = Q[e];
+          }
+          mx = ni + nw > mx ? ni + nw : mx;
+        },
+        Kokkos::Max<int>(need));
+    if (need <= K)
+      break;
+    S.cap = need + need / 4;  // overflow: grow every cell's slots and redo the pass
+  }
+
+  // ---- 2. offsets ----
   int nF = 0, nW = 0;
   Kokkos::parallel_scan(
-      "lagrangian.facets.scan", N + 1,
+      Light ? "lagrangian.facets.scanLight" : "lagrangian.facets.scan", N + 1,
       KOKKOS_LAMBDA(const int i, int& upd, const bool fin) {
         const int v = fOff(i);
         upd += v;
@@ -415,123 +615,59 @@ CellFacets<Real> exportFacets(const TopologyStore<MAXP, MAXT>& store,
         },
         nW);
 
-  // ---- 2. fill ----
-  CellFacets<Real> F;
-  F.nCells = N;
+  // ---- 3. compact the slots into the CSR ----
   F.nFacets = nF;
   F.nWall = nW;
-  F.facetOffset = fOff;
-  F.wallOffset = wOff;
   const std::size_t sF = static_cast<std::size_t>(nF), sW = static_cast<std::size_t>(nW);
-  const std::size_t sN = static_cast<std::size_t>(N);
-  if constexpr (Light) {
-    // what H reads (applyWeightHessian, pinnedHostH): the same values as the full export's
-    F.nbr = scratchView(B ? &B->nbr : nullptr, sF, "lag.nbr", false);
-    F.area = scratchView(B ? &B->area : nullptr, sF, "lag.area", false);
-    F.conn = scratchView(B ? &B->conn : nullptr, 3 * sF, "lag.conn", false);
-    const CellFacets<Real> G = F;
-    Kokkos::parallel_for(
-        "lagrangian.facets.fillLight", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
-          Cell c;
-          detail::loadCell<Policy>(st, Wl, P, W, XR, L3, i, c);
-          int fi = G.facetOffset(i);
-          for (int k = 0; k < c.np; ++k) {
-            if (!detail::isFace(c, k))
-              continue;
-            Real a, cen[3], sec[9], cv, cm[3];
-            if (!faceMoments(c, k, a, cen, sec, cv, cm))
-              continue;
-            const int j = c.pnbr[k];
-            if (j >= 0 && (!hasEV || EV(j) > Real(0))) {
-              G.nbr(fi) = j;
-              G.area(fi) = a;
-              Real r[3] = {P(3 * j) - P(3 * i), P(3 * j + 1) - P(3 * i + 1),
-                           P(3 * j + 2) - P(3 * i + 2)};
-              r[0] = r[0] > Lxh ? r[0] - Lx : (r[0] < -Lxh ? r[0] + Lx : r[0]);
-              r[1] = r[1] > Lyh ? r[1] - Ly : (r[1] < -Lyh ? r[1] + Ly : r[1]);
-              r[2] = r[2] > Lzh ? r[2] - Lz : (r[2] < -Lzh ? r[2] + Lz : r[2]);
-              for (int d = 0; d < 3; ++d)
-                G.conn(3 * fi + d) = r[d];
-              ++fi;
-            }
-          }
-        });
-    return F;
-  }
   F.nbr = scratchView(B ? &B->nbr : nullptr, sF, "lag.nbr", false);
   F.area = scratchView(B ? &B->area : nullptr, sF, "lag.area", false);
-  F.centroid = scratchView(B ? &B->centroid : nullptr, 3 * sF, "lag.cen", false);
   F.conn = scratchView(B ? &B->conn : nullptr, 3 * sF, "lag.conn", false);
-  F.second = scratchView(B ? &B->second : nullptr, 9 * sF, "lag.sec", false);
-  F.wallArea = scratchView(B ? &B->wallArea : nullptr, sW, "lag.wArea", false);
-  F.wallCentroid = scratchView(B ? &B->wallCentroid : nullptr, 3 * sW, "lag.wCen", false);
-  F.wallNormal = scratchView(B ? &B->wallNormal : nullptr, 3 * sW, "lag.wNormal", false);
-  F.volume = scratchView(B ? &B->volume : nullptr, sN, "lag.volume", true);
-  F.cellCentroid = scratchView(B ? &B->cellCentroid : nullptr, 3 * sN, "lag.cellCen", true);
-  if (withHigherMoments) {
-    F.third = scratchView(B ? &B->third : nullptr, 10 * sF, "lag.third", false);
-    F.cellSecond = scratchView(B ? &B->cellSecond : nullptr, 9 * sN, "lag.cellSec", true);
+  if constexpr (!Light) {
+    F.centroid = scratchView(B ? &B->centroid : nullptr, 3 * sF, "lag.cen", false);
+    F.second = scratchView(B ? &B->second : nullptr, 9 * sF, "lag.sec", false);
+    F.wallArea = scratchView(B ? &B->wallArea : nullptr, sW, "lag.wArea", false);
+    F.wallCentroid = scratchView(B ? &B->wallCentroid : nullptr, 3 * sW, "lag.wCen", false);
+    F.wallNormal = scratchView(B ? &B->wallNormal : nullptr, 3 * sW, "lag.wNormal", false);
+    if (hm)
+      F.third = scratchView(B ? &B->third : nullptr, 10 * sF, "lag.third", false);
   }
-  const bool hm = withHigherMoments;
+  const int K = S.cap;
+  const FacetSlots<Real> T = S;
   const CellFacets<Real> G = F;
   Kokkos::parallel_for(
-      "lagrangian.facets.fill", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
-        Cell c;
-        detail::loadCell<Policy>(st, Wl, P, W, XR, L3, i, c);
-        int fi = G.facetOffset(i), wi = G.wallOffset(i);
-        Real V = 0, M[3] = {0, 0, 0}, Q[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
-        for (int k = 0; k < c.np; ++k) {
-          if (!detail::isFace(c, k))
-            continue;
-          Real a, cen[3], sec[9], cv, cm[3];
-          if (!faceMoments(c, k, a, cen, sec, cv, cm))
-            continue;
-          V += cv;
-          M[0] += cm[0];
-          M[1] += cm[1];
-          M[2] += cm[2];
-          Real th[10], cq[9];
-          if (hm) {
-            faceHigherMoments(c, k, cen, th, cq);
+      Light ? "lagrangian.facets.compactLight" : "lagrangian.facets.compact",
+      Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        const std::size_t base = static_cast<std::size_t>(i) * K;
+        const int f0 = G.facetOffset(i), ni = G.facetOffset(i + 1) - f0;
+        for (int q = 0; q < ni; ++q) {
+          const std::size_t s = base + q;
+          const int f = f0 + q;
+          G.nbr(f) = T.nbr(s);
+          G.area(f) = T.area(s);
+          for (int d = 0; d < 3; ++d)
+            G.conn(3 * f + d) = T.conn(3 * s + d);
+          if constexpr (!Light) {
+            for (int d = 0; d < 3; ++d)
+              G.centroid(3 * f + d) = T.centroid(3 * s + d);
             for (int e = 0; e < 9; ++e)
-              Q[e] += cq[e];
-          }
-          const int j = c.pnbr[k];
-          if (j >= 0 && (!hasEV || EV(j) > Real(0))) {
+              G.second(9 * f + e) = T.second(9 * s + e);
             if (hm)
               for (int e = 0; e < 10; ++e)
-                G.third(10 * fi + e) = th[e];
-            G.nbr(fi) = j;
-            G.area(fi) = a;
-            Real r[3] = {P(3 * j) - P(3 * i), P(3 * j + 1) - P(3 * i + 1),
-                         P(3 * j + 2) - P(3 * i + 2)};
-            r[0] = r[0] > Lxh ? r[0] - Lx : (r[0] < -Lxh ? r[0] + Lx : r[0]);
-            r[1] = r[1] > Lyh ? r[1] - Ly : (r[1] < -Lyh ? r[1] + Ly : r[1]);
-            r[2] = r[2] > Lzh ? r[2] - Lz : (r[2] < -Lzh ? r[2] + Lz : r[2]);
-            for (int d = 0; d < 3; ++d) {
-              G.centroid(3 * fi + d) = cen[d];
-              G.conn(3 * fi + d) = r[d];
-            }
-            for (int e = 0; e < 9; ++e)
-              G.second(9 * fi + e) = sec[e];
-            ++fi;
-          } else {
-            const Real nl = Kokkos::sqrt(c.nn[k]);
-            G.wallArea(wi) = a;
-            for (int d = 0; d < 3; ++d) {
-              G.wallCentroid(3 * wi + d) = cen[d];
-              G.wallNormal(3 * wi + d) = c.n[k][d] / nl;
-            }
-            ++wi;
+                G.third(10 * f + e) = T.third(10 * s + e);
           }
         }
-        G.volume(i) = V;
-        const Real iv = V > Real(0) ? Real(1) / V : Real(0);
-        for (int d = 0; d < 3; ++d)
-          G.cellCentroid(3 * i + d) = M[d] * iv;
-        if (hm)
-          for (int e = 0; e < 9; ++e)
-            G.cellSecond(9 * i + e) = Q[e];
+        if constexpr (!Light) {
+          const int w0 = G.wallOffset(i), nw = G.wallOffset(i + 1) - w0;
+          for (int q = 0; q < nw; ++q) {
+            const std::size_t s = base + (K - 1 - q);
+            const int w = w0 + q;
+            G.wallArea(w) = T.area(s);
+            for (int d = 0; d < 3; ++d) {
+              G.wallCentroid(3 * w + d) = T.centroid(3 * s + d);
+              G.wallNormal(3 * w + d) = T.conn(3 * s + d);
+            }
+          }
+        }
       });
   return F;
 }
@@ -560,8 +696,10 @@ CellFacets<Real> exportCellFacets(const TopologyStore<MAXP, MAXT>& store,
 
 /// The LIGHT export of an OT evaluation (M7 WO-PERF3 P3.1, DESIGN_NOTE §14.4.6 item 2): only what
 /// the weight Hessian H reads — nCells, nFacets, facetOffset, nbr, area, conn — bit-identical to
-/// exportCellFacets' (the same count kernel and faceMoments per face; the other stores are
-/// skipped). Every other member is empty (nWall = 0): not a CellFacets for any other consumer.
+/// exportCellFacets' (the same faces in the same order; per face only the area, polygonArea, whose
+/// A and validity are polygonMoments'). Every other member is empty (nWall = 0): not a CellFacets
+/// for any other consumer. Its only consumers are the weight Newton steps' H (solvePinnedH:
+/// applyWeightHessian, pinnedHostH); the volumes they need come from the engine (mt.vol).
 template <class Real, class Policy, int MAXP, int MAXT>
 CellFacets<Real> exportFacetsLight(const TopologyStore<MAXP, MAXT>& store,
                                    const Kokkos::View<Real*, peclet::core::MemSpace>& pos,

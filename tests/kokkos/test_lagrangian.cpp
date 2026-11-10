@@ -30,7 +30,9 @@
  *       facetOffset, nbr, area and conn bit-identical to the full export's, on a walled power
  *       tessellation (SDF sphere solid) with seeds inside the solid (empty cells, whose faces are
  *       exported as wall facets of their live neighbours); and a FacetPool export bit-identical to
- *       a one-shot one in every array.
+ *       a one-shot one in every array; and the single pass's slot overflow (M7 WO-S1: a pool
+ *       whose slots hold 4 facets per cell grows them and redoes the pass) bit-identical to a
+ *       one-shot export in every array, higher moments included, light and full.
  */
 #include <algorithm>
 #include <cmath>
@@ -863,13 +865,39 @@ int checkLightExport() {
       sameBits(fullP.wallCentroid, full.wallCentroid) &&
       sameBits(fullP.wallNormal, full.wallNormal) && sameBits(fullP.volume, full.volume) &&
       sameBits(fullP.cellCentroid, full.cellCentroid);
+  // slot overflow (M7 WO-S1): a pool whose slots hold 4 facets per cell grows them and redoes
+  // the pass; every array (higher moments included) as the one-shot export's
+  lag::FacetPool<real_t> tight;
+  tight.slots.cap = 4;
+  const auto fullH = lag::exportCellFacets<real_t, Power>(mt.store, pos, w, N, Larr, mt.wall,
+                                                          mt.xRef, mt.vol, true);
+  const auto fullT = lag::exportCellFacets<real_t, Power>(mt.store, pos, w, N, Larr, mt.wall,
+                                                          mt.xRef, mt.vol, true, &tight);
+  const int capT = tight.slots.cap;
+  tight.slots.cap = 4;
+  const auto lightT = lag::exportFacetsLight<real_t, Power>(mt.store, pos, w, N, Larr, mt.wall,
+                                                            mt.xRef, mt.vol, &tight);
+  const bool okT =
+      capT > 4 && tight.slots.cap > 4 && fullT.nFacets == fullH.nFacets &&
+      fullT.nWall == fullH.nWall && sameBits(fullT.facetOffset, fullH.facetOffset) &&
+      sameBits(fullT.nbr, fullH.nbr) && sameBits(fullT.area, fullH.area) &&
+      sameBits(fullT.centroid, fullH.centroid) && sameBits(fullT.conn, fullH.conn) &&
+      sameBits(fullT.second, fullH.second) && sameBits(fullT.third, fullH.third) &&
+      sameBits(fullT.wallOffset, fullH.wallOffset) && sameBits(fullT.wallArea, fullH.wallArea) &&
+      sameBits(fullT.wallCentroid, fullH.wallCentroid) &&
+      sameBits(fullT.wallNormal, fullH.wallNormal) && sameBits(fullT.volume, fullH.volume) &&
+      sameBits(fullT.cellCentroid, fullH.cellCentroid) &&
+      sameBits(fullT.cellSecond, fullH.cellSecond) && sameBits(fullH.area, full.area) &&
+      lightT.nFacets == full.nFacets && sameBits(lightT.facetOffset, full.facetOffset) &&
+      sameBits(lightT.nbr, full.nbr) && sameBits(lightT.area, full.area) &&
+      sameBits(lightT.conn, full.conn);
   std::printf(
       "  (G) light export N=%d facets=%d wall facets=%d empty cells=%d: light == full %s, "
-      "pooled == one-shot %s (pool %d buffers)\n",
+      "pooled == one-shot %s (pool %d buffers), slot overflow (4 -> %d) == one-shot %s\n",
       N, full.nFacets, full.nWall, nEmpty, okL ? "bit-identical" : "DIFFERS",
-      okP ? "bit-identical" : "DIFFERS", pool.size());
+      okP ? "bit-identical" : "DIFFERS", pool.size(), capT, okT ? "bit-identical" : "DIFFERS");
   const double ez = checkZetaPlan(full, {}, true, "walled (SDF)");
-  return (okL && okP && full.nWall > 0 && ez <= 1e-14) ? 0 : 1;
+  return (okL && okP && okT && full.nWall > 0 && ez <= 1e-14) ? 0 : 1;
 }
 
 /// S₀ assembled on the device (detail::SchurAssembly) equals schurHost bit for bit — diagonal,

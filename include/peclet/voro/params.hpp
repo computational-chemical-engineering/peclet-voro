@@ -18,6 +18,11 @@ namespace peclet::voro {
 constexpr int kMaxPlanes = 64;
 constexpr int kMaxTriangles = 112;
 
+/// Facet slots per cell of the Lagrangian facet export's single pass (lagrangian/facets.hpp,
+/// FacetSlots): interior plus wall facets. Above a Lloyd-relaxed cell's ≤ 20 and below a Poisson
+/// cell's ≤ 33; an export that finds more grows its slots and redoes the pass.
+constexpr int kFacetSlots = 24;
+
 /// Capacity of the pore-space (SDF-walled interstitial) cell reconstruction: wall-cut cells
 /// carry more planes than a Poisson–Voronoi cell.
 constexpr int kPoreMaxPlanes = 128;
