@@ -852,6 +852,19 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["gauge_factor"] = col([](const auto& r) { return r.gaugeFactor; });
     d["gauge_beta"] = col([](const auto& r) { return r.gaugeBeta; });
     d["gauge_weight_residual"] = col([](const auto& r) { return r.gaugeWeightRes; });
+    // the step's energy ledger by stage (diagnostics, M7 WO-EB; StepReport::ebK1 ff.)
+    d["eb_k1"] = col([](const auto& r) { return r.ebK1; });
+    d["eb_heat1"] = col([](const auto& r) { return r.ebHeat1; });
+    d["eb_qc1"] = col([](const auto& r) { return r.ebQc1; });
+    d["eb_work1"] = col([](const auto& r) { return r.ebWork1; });
+    d["eb_grad1"] = col([](const auto& r) { return r.ebGrad1; });
+    d["eb_k2"] = col([](const auto& r) { return r.ebK2; });
+    d["eb_heat2"] = col([](const auto& r) { return r.ebHeat2; });
+    d["eb_qc2"] = col([](const auto& r) { return r.ebQc2; });
+    d["eb_work2"] = col([](const auto& r) { return r.ebWork2; });
+    d["eb_grad2"] = col([](const auto& r) { return r.ebGrad2; });
+    d["eb_dU"] = col([](const auto& r) { return r.ebDU; });
+    d["eb_trap"] = col([](const auto& r) { return r.ebTrap; });
     withInteg([&](auto& I) {
       d["gauge_potential_total"] = I.gaugePotential();
       d["gauge_kinetic_total"] = I.gaugeKinetic();
