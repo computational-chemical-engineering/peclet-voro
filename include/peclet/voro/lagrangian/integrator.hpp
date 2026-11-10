@@ -557,7 +557,7 @@ class SchurAssembly {
 
 /// Where the gauge's displacement goes (M7 WO-PERF3 P3.3a, DESIGN_NOTE §14.4.4).
 enum class GaugeMode {
-  kTrial,  ///< G″ (§12.3.2): a trial OT after kick 2, Ũ-guarded, then an M-projection (gauge())
+  kTrial,  ///< a trial OT after kick 2, validity-only (D16.3), then an M-projection (gauge())
   kDrift,  ///< δ added in the next step's drift, posterior-monitored (driftGauge(), §14.4.4)
 };
 
@@ -1490,13 +1490,13 @@ struct IntegratorParams {
   /// gaugeAlphaMax) and the shift scale s_* of the ŝ-feedback (1 + (ŝ_i/s_*)²)
   double gaugeAlphaMaxDrift = 0.5, gaugeShiftScale = 0.15;
   /// the fallback G‴+W (§14.4.4; M7 WO-PERF3 P3.3b): every gaugeWeightEvery-th step (0: off) the
-  /// drift gauge adds δ^W = M⁻¹J_xᵀS_J⁻¹(β H w), S_J = J_xM⁻¹J_xᵀ, β = f_G min(gaugeWeightBetaMax,
+  /// drift gauge adds δ^W = M⁻¹J_xᵀS_J⁻¹(β H w), S_J = J_xM⁻¹J_xᵀ, β = min(gaugeWeightBetaMax,
   /// 4 c_g τ ε̄), S_J⁻¹ by gaugeWeightIters PCG iterations preconditioned by the S₀ hierarchy
   int gaugeWeightEvery = 4, gaugeWeightIters = 5;
   double gaugeWeightBetaMax = 0.2;
   /// kTrial: G″'s trial after kick 2; kDrift: δ in the next drift with G‴'s activation (P3.3b:
-  /// the ε̄ floor, the ŝ-feedback, α_max = gaugeAlphaMaxDrift, times the posterior-monitor factor
-  /// f_G; no trial OT, no Ũ trial, no M-projection)
+  /// the ε̄ floor, the ŝ-feedback, α_max = gaugeAlphaMaxDrift; no trial OT, no M-projection;
+  /// the posterior monitor's f_G was removed by D16.3, M7 WO-G2)
   GaugeMode gaugeMode = GaugeMode::kTrial;
   double kernelLength = 2;         ///< ℓ/h_i of the interface-normal kernel (§2.2; support 3ℓ)
   double normalLloydShift = 0.25;  ///< W-Q2: a cell of I with an unlike |s|/d above this also
@@ -1553,18 +1553,16 @@ struct StepReport {
   int gaugeProjected = 0;      ///< cells whose ∇Ũ component was removed (step 3, D15.5)
   int gaugeCapped = 0;         ///< cells scaled down by the margin cap (step 4)
   double gaugeAlphaMax = 0;    ///< max_i α_i (computed also when the gauge is skipped)
-  double gaugePotential = 0;   ///< ΔŨ of the accepted trial (≤ 0)
+  double gaugePotential = 0;   ///< ΔŨ_G of the accepted trial (either sign since D16.3)
   double gaugeKinetic = 0;     ///< ΔK of the momentum projection (≤ 0)
   int gaugeSolveFails = 0;     ///< trials whose weight solve failed
   int gaugeMarginRejects = 0;  ///< trials with a seed on or behind its own facet
-  int gaugeEnergyRejects = 0;  ///< trials with Ũ(x̃) > Ũ(x)
   double gaugeTrialDU = 0;     ///< ΔŨ of the last evaluated trial (diagnostics)
   // the drift gauge (GaugeMode::kDrift, §14.4.4): gaugePotential is then the posterior ΔŨ_G of
   // the δⁿ this step's drift added, gaugeKinetic 0; gaugeAlphaMax and gaugeCapped describe δⁿ⁺¹
-  int gaugeApplied = 0;    ///< δⁿ was added in this step's drift (1) or not (0)
-  int gaugeRedos = 0;      ///< drifts redone with δⁿ = 0 (OT failure or min_i m_i ≤ 0)
-  int gaugeActive = 0;     ///< cells with δⁿ⁺¹_i ≠ 0
-  double gaugeFactor = 0;  ///< f_G after this step's monitor update
+  int gaugeApplied = 0;  ///< δⁿ was added in this step's drift (1) or not (0)
+  int gaugeRedos = 0;    ///< drifts redone (OT failure or min_i m_i ≤ 0): with δⁿ/2, then 0
+  int gaugeActive = 0;   ///< cells with δⁿ⁺¹_i ≠ 0
   double gaugeBeta = 0;  ///< β of the weight relaxation W added to δⁿ⁺¹ (0: none this step)
   double gaugeWeightRes = 0;  ///< W's PCG residual ‖r₅‖₂/‖r₀‖₂ (0: none this step)
   /// the last gaugeDisplacement's δ (before a trial's halvings): max_i |δ_i|/h_i and
@@ -2057,10 +2055,6 @@ class Integrator {
     prm_.gaugeMode = mode;
     deltaPending_ = false;
   }
-  /// f_G of the drift gauge's posterior monitor (§14.4.4; 1 at construction): a re-prepared
-  /// integrator continues the old run's factor.
-  double gaugeFactor() const { return gaugeFactor_; }
-  void setGaugeFactor(double f) { gaugeFactor_ = f; }
   /// G⁗'s Ũ debt B (§16.5; 0 at construction): a re-prepared integrator continues the old run's B.
   double gaugeDebt() const { return gaugeDebt_; }
   void setGaugeDebt(double b) { gaugeDebt_ = b; }
@@ -2119,7 +2113,7 @@ class Integrator {
   }
   /// The drift gauge's pending δⁿ (GaugeMode::kDrift; (3N) in this integrator's cell order, empty
   /// when none is pending) and its restore: a re-prepared integrator (the relabelling of
-  /// LagrangianFlow) continues the old run's δⁿ, as it continues f_G. Call setPendingDelta after
+  /// LagrangianFlow) continues the old run's δⁿ, as it continues B. Call setPendingDelta after
   /// setGauge/setGaugeMode, which drop a pending δ.
   std::vector<Real> pendingDelta() const {
     std::vector<Real> d;
@@ -2505,7 +2499,8 @@ class Integrator {
     rep.tKick1 = t.seconds();
     t.reset();
     // ---- the drift gauge's δⁿ (GaugeMode::kDrift, §14.4.1 step 2): dⁿ = τ v^{½} + δⁿ; on an OT
-    // failure or a seed on/behind its own facet the drift is redone from here with δⁿ = 0 ----
+    // failure or a seed on/behind its own facet the drift is redone from here with δⁿ/2, then
+    // with δⁿ = 0 (G⁗ §16.5 step 10) ----
     const bool withDelta = deltaPending_;
     deltaPending_ = false;
     deltaUsed_ = false;
@@ -2515,7 +2510,24 @@ class Integrator {
     CellFacets<Real> Fnext;
     FacetMatch mNext;
     bool nextReady = false;
-    for (bool useDelta = withDelta;; useDelta = false) {
+    // a failed attempt with δⁿ: the next one with δⁿ/2 (gd_ and the monitor's first half
+    // halved in place, both exactly), then with δⁿ = 0
+    int deltaTries = 0;
+    const auto redoDelta = [&](bool& useDelta) {
+      ++rep.gaugeRedos;
+      driftEvals = rep.driftEvaluations;
+      restoreEngine();
+      if (++deltaTries == 1) {
+        const LView<Real> g = gd_;
+        Kokkos::parallel_for(
+            "nhvw.driftHalve", Kokkos::RangePolicy<Exec>(0, 3 * N_),
+            KOKKOS_LAMBDA(const int k) { g(k) *= Real(0.5); });
+        gaugeGradDelta0_ *= 0.5;
+      } else {
+        useDelta = false;
+      }
+    };
+    for (bool useDelta = withDelta;;) {
       // ---- warm start H δw = −τ J_x v^{½} (at x^n); with δⁿ: H δw = −J_x dⁿ ----
       if (useDelta) {
         const LView<Real> dd = dd_, v = vh_, g = gd_;
@@ -2623,10 +2635,8 @@ class Integrator {
       Kokkos::fence();
       rep.tWeights = t.seconds() - ws.evalSeconds;
       if (!ws.converged) {
-        if (useDelta) {  // §14.4.1 step 3: redo the drift with δⁿ = 0
-          ++rep.gaugeRedos;
-          driftEvals = rep.driftEvaluations;
-          restoreEngine();
+        if (useDelta) {  // §14.4.1 step 3: redo the drift with δⁿ/2, then δⁿ = 0
+          redoDelta(useDelta);
           continue;
         }
         heat_ = heat0;
@@ -2650,9 +2660,7 @@ class Integrator {
         rep.weightErr = wr.maxRelErr;
         if (!wr.converged) {
           if (useDelta) {
-            ++rep.gaugeRedos;
-            driftEvals = rep.driftEvaluations;
-            restoreEngine();
+            redoDelta(useDelta);
             continue;
           }
           heat_ = heat0;
@@ -2674,10 +2682,8 @@ class Integrator {
             KOKKOS_LAMBDA(const int i, Real& acc) { acc = m(i) < acc ? m(i) : acc; },
             Kokkos::Min<Real>(mmin));
         if (!(mmin > Real(0))) {
-          ++rep.gaugeRedos;
-          driftEvals = rep.driftEvaluations;
           Fnext = CellFacets<Real>();  // release the pool buffers
-          restoreEngine();
+          redoDelta(useDelta);
           continue;
         }
         nextReady = true;
@@ -2744,17 +2750,17 @@ class Integrator {
   /// §16.5 steps 1-4): ε̇_i = ‖sym(G_i v)‖_F, ε̂_i its max over i and i's face neighbours,
   /// ŝ_i = max_{f∋i} |s_f|/d_f (the facets to neighbour cells, as shifts()) and the margins m_i
   /// (cellMargins into mG_, which gaugeDisplacement reuses).
-  ///  rate, G″ (§12.3.2 step 1; g3 false): α_rate,i = fG · min(α_max, c_g τ ε̂_i), fG = 1.
+  ///  rate, G″ (§12.3.2 step 1; g3 false): α_rate,i = min(α_max, c_g τ ε̂_i).
   ///  rate, G‴ (§14.4.4; g3 true, the drift gauge): ε̄ = (Σ_i V_i ε̇_i² / Σ_i V_i)^{1/2} over the
-  ///  non-band cells (no unlike facet; D15.5) (V_i the held volumes V⁰_i), α_rate,i = fG ·
+  ///  non-band cells (no unlike facet; D15.5) (V_i the held volumes V⁰_i), α_rate,i =
   ///  min(α_max, c_g τ max(ε̂_i, ε̄)(1 + (ŝ_i/s_*)²)), α_max = gaugeAlphaMaxDrift, s_* =
-  ///  gaugeShiftScale, fG the posterior monitor's f_G.
+  ///  gaugeShiftScale.
   ///  state (G⁗, IntegratorParams::gaugeClamp): q_i = clip(max((ŝ_i − s_on)/(s_full − s_on),
   ///  (ℓ_on − ℓ_i)/ℓ_on), 0, 1), ℓ_i = m_i/h_i, q̂_i = its max over i and i's face neighbours;
   ///  α_i = min(α_max, α_rate,i + α_q q̂_i). Clamp off: q̂ ≡ 0 and α_i = α_rate,i.
   /// Logs max_i α_i, min_i ℓ_i, max_i ŝ_i and the rate / state / critical cell counts into `rep`.
   /// Returns max_i α_rate,i (the activity gate, §16.5 step 2).
-  double gaugeActivation(double tau, double fG, bool g3, StepReport& rep) {
+  double gaugeActivation(double tau, bool g3, StepReport& rep) {
     cellGradient(F_, vel_, gs_);
     {
       const LView<Real> gs = gs_, e = tmpN_;
@@ -2831,7 +2837,7 @@ class Integrator {
     const CellFacets<Real> G = F_;
     const LView<Real> e = tmpN_, al = aG_, sv = sG_, qv = qG_, qh = qhG_;
     const Real cg = prm_.gaugeStrain * tau,
-               amax = g3 ? prm_.gaugeAlphaMaxDrift : prm_.gaugeAlphaMax, fg = fG, eb = ebar,
+               amax = g3 ? prm_.gaugeAlphaMaxDrift : prm_.gaugeAlphaMax, eb = ebar,
                sinv = g3 ? Real(1) / prm_.gaugeShiftScale : Real(0), gq = prm_.gaugeStateGain,
                qc = prm_.gaugeCritical;
     Real arm = 0, am = 0;
@@ -2847,7 +2853,7 @@ class Integrator {
             qm = qv(j) > qm ? qv(j) : qm;
           }
           const Real r = sv(i) * sinv, c = cg * m * (Real(1) + r * r);
-          const Real ar = fg * (c < amax ? c : amax);
+          const Real ar = c < amax ? c : amax;
           Real a = ar;
           if (clamp) {
             a = ar + gq * qm;
@@ -2873,8 +2879,9 @@ class Integrator {
     return arm;
   }
 
-  /// The gauge G″ (DESIGN_NOTE §12.3.2) at x = x^{n+1}, v = v^{n+1}: strain-activated, Lloyd-only,
-  /// first-order Ũ-neutral (D15.5) and Ũ-guarded; it never descends Ũ (D12.1, D12.2).
+  /// The trial gauge (DESIGN_NOTE §12.3.2, G⁗'s trial placement §16.5 step 10) at x = x^{n+1},
+  /// v = v^{n+1}: strain-activated, Lloyd-only, first-order Ũ-neutral (D15.5); accepted on
+  /// validity only (D16.3), its ΔŨ_G goes to the debt B.
   ///  1. activation  ε̇_i = ‖sym(G_i v)‖_F (the linear-exact cell gradient), ε̂_i = its max over i
   ///                 and i's face neighbours, α_i = min(α_max, c_g τ ε̂_i). max_i α_i < gaugeSkip:
   ///                 nothing else runs, the state is untouched bit for bit.
@@ -2889,19 +2896,19 @@ class Integrator {
   ///                 (D15.5; until M7 WO-S3 only when g_i·δ_i > 0), so ΔŨ = 0 to first
   ///                 order, cell by cell: the gauge does no first-order work.
   ///  4. margin cap  |δ_i| ≤ ½ m_i (cellMargins; δ_i = 0 if m_i ≤ 0).
-  ///  5. trial       x̃ = x + δ, OT warm-started from w^{n+1} (moveAndSolve); reject if OT fails,
-  ///                 min_i m_i(x̃) ≤ 0 or Ũ(x̃) > Ũ(x) (with the periodic-in-g wrap jump); on a
-  ///                 rejection halve all α_i (δ scales linearly), at most gaugeRetries times, then
-  ///                 skip (x, w and the engine restored).
+  ///  5. trial       x̃ = x + δ, OT warm-started from w^{n+1} (moveAndSolve); reject only if OT
+  ///                 fails or min_i m_i(x̃) ≤ 0 (D16.3: the Ũ guard is removed); on a rejection
+  ///                 halve all α_i (δ scales linearly), at most gaugeRetries times, then skip (x,
+  ///                 w and the engine restored).
   ///  6. acceptance  v_i travels with its cell; the M-projection onto C(x̃)v = 0 (one saddle with
   ///                 A = M); ∇Ũ(x̃) recomputed (evalState).
-  /// dU, dK: the accepted trial's ΔŨ ≤ 0 and ΔK ≤ 0 (0 when skipped).
+  /// dU, dK: the accepted trial's exact ΔŨ_G and ΔK_G ≤ 0 (0 when skipped).
   void gauge(double tau, StepReport& rep, double& dU, double& dK) {
     Kokkos::Timer t;
     dU = dK = 0;
     // ---- 1. activation ----
     {
-      const double am = gaugeActivation(tau, 1, false, rep);
+      const double am = gaugeActivation(tau, false, rep);
       if (!(am >= prm_.gaugeSkip)) {
         rep.tGauge = t.seconds();
         return;
@@ -2925,20 +2932,13 @@ class Integrator {
             "nhvw.gaugeTrialMargin", Kokkos::RangePolicy<Exec>(0, N_),
             KOKKOS_LAMBDA(const int i, Real& acc) { acc = mg(i) < acc ? mg(i) : acc; },
             Kokkos::Min<Real>(mmin));
-        if (mmin > Real(0)) {
-          Kokkos::deep_copy(gx_, Real(0));
-          Kokkos::deep_copy(gw_, Real(0));
-          const PotentialParts pt =
-              partitionPotential(*mt_, Ft, pos_, weight_, L_, spec_, gx_, gw_, &pots_);
-          rep.gaugeTrialDU = pt.total() + wrapOffset_ - wrapJump() - U0;
-          if (pt.total() + wrapOffset_ - wrapJump() <= U0) {
-            accumulateWrap();
-            evalState();
-            dU = parts_.total() + wrapOffset_ - U0;
-            rep.gaugeAccepted = true;
-            break;
-          }
-          ++rep.gaugeEnergyRejects;
+        if (mmin > Real(0)) {  // validity only (D16.3): no Ũ guard
+          accumulateWrap();
+          evalState();
+          dU = parts_.total() + wrapOffset_ - U0;
+          rep.gaugeTrialDU = dU;
+          rep.gaugeAccepted = true;
+          break;
         } else {
           ++rep.gaugeMarginRejects;
         }
@@ -2968,23 +2968,20 @@ class Integrator {
 
   /// The drift gauge's posterior monitor (§14.4.4) for the δⁿ this step's drift added (nothing
   /// when it added none): ΔŨ_G = ½ Σ_i (∇_iŨⁿ + ∇_iŨⁿ⁺¹)·δⁿ_i, the δ-share of the trapezoidal
-  /// path integral; Q_G −= ΔŨ_G (gaugeU_ += ΔŨ_G, the ledger's gauge counter); f_G ← max(f_G/2,
-  /// ⅛) if ΔŨ_G > 0, else min(1, 2 f_G).
+  /// path integral; Q_G −= ΔŨ_G (gaugeU_ += ΔŨ_G, the ledger's gauge counter) and B += ΔŨ_G
+  /// (G⁗ §16.5 step 9; the f_G throttle was removed by D16.3).
   void gaugeMonitor(StepReport& rep) {
     if (deltaUsed_) {
       const double dU = 0.5 * (gaugeGradDelta0_ + double(detail::dotView(grad_, gd_)));
       gaugeU_ += dU;
       gaugeDebt_ += dU;  // G⁗'s B (§16.5 step 9)
       rep.gaugePotential = dU;
-      gaugeFactor_ =
-          dU > 0 ? std::max(0.5 * gaugeFactor_, 0.125) : std::min(1.0, 2.0 * gaugeFactor_);
     }
-    rep.gaugeFactor = gaugeFactor_;
   }
 
   /// The weight-relaxation displacement of G‴+W (§14.4.4) into dW_, at x^{n+1}, w^{n+1}:
-  /// δ^W = M⁻¹J_xᵀ y, S_J y = β H w, S_J = J_xM⁻¹J_xᵀ (matrix-free), β = f_G min(β_max, 4 c_g τ ε̄)
-  /// (f_G the posterior monitor's: it throttles all of δ; review of WO-PERF3 F3),
+  /// δ^W = M⁻¹J_xᵀ y, S_J y = β H w, S_J = J_xM⁻¹J_xᵀ (matrix-free), β = min(β_max, 4 c_g τ ε̄)
+  /// (until M7 WO-G2 times f_G, which D16.3 removed),
   /// y by gaugeWeightIters PCG iterations from 0, preconditioned by one V-cycle of the saddle's
   /// last S₀ (or L_ρ) hierarchy, no tolerance. That hierarchy is reused across steps (D14.6: up
   /// to amgMaxAge accepted steps, built at an earlier geometry), so with a fixed iteration count
@@ -2994,7 +2991,7 @@ class Integrator {
   /// projection and the margin cap to the sum δ = α r + δ^W.)
   void weightRelaxation(double tau, StepReport& rep) {
     const double beta =
-        gaugeFactor_ * std::min(prm_.gaugeWeightBetaMax, 4.0 * prm_.gaugeStrain * tau * gaugeEbar_);
+        std::min(prm_.gaugeWeightBetaMax, 4.0 * prm_.gaugeStrain * tau * gaugeEbar_);
     rep.gaugeBeta = beta;
     const LView<Real> r = wr_, z = wz_, p = wp_, q = wq_, y = wy_, m = mass_, u = dW_;
     applyWeightHessian(F_, weight_, r);
@@ -3050,7 +3047,7 @@ class Integrator {
   /// Ũ trial, no M-projection: the state is untouched here.
   void driftGauge(double tau, StepReport& rep) {
     Kokkos::Timer t;
-    const double am = gaugeActivation(tau, gaugeFactor_, true, rep);
+    const double am = gaugeActivation(tau, true, rep);
     if (am >= prm_.gaugeSkip) {
       const bool withW = prm_.gaugeWeightEvery > 0 && stepCount_ % prm_.gaugeWeightEvery == 0;
       if (withW)
@@ -3516,9 +3513,9 @@ class Integrator {
   double evalSplit_[4] = {0, 0, 0, 0};  ///< evalState: facets, energy, H AMG setup, adjoint (s)
   double gaugeU_ = 0, gaugeK_ = 0;
   // the drift gauge (GaugeMode::kDrift): δⁿ (gd_) is pending for the next drift; whether this
-  // step's drift used it; Σ_i ∇_iŨⁿ·δⁿ_i (the monitor's first half); f_G
+  // step's drift used it; Σ_i ∇_iŨⁿ·δⁿ_i (the monitor's first half)
   bool deltaPending_ = false, deltaUsed_ = false;
-  double gaugeGradDelta0_ = 0, gaugeFactor_ = 1;
+  double gaugeGradDelta0_ = 0;
   double gaugeEbar_ = 0;  ///< ε̄ of the last G‴ activation (W's β)
   double gaugeDebt_ = 0;  ///< G⁗'s Ũ debt B (§16.5 steps 7, 9): Σ ΔŨ_G not yet compensated
   // persistent scratch (M7 WO-PERF3 P3.1, DESIGN_NOTE §14.4.6 item 1): the facet exports (a pool:

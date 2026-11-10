@@ -860,12 +860,10 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["gauge_alpha_max"] = col([](const auto& r) { return r.gaugeAlphaMax; });
     d["t_gauge"] = col([](const auto& r) { return r.tGauge; });
     d["gauge_solve_fails"] = col([](const auto& r) { return r.gaugeSolveFails; });
-    d["gauge_energy_rejects"] = col([](const auto& r) { return r.gaugeEnergyRejects; });
     d["gauge_trial_dU"] = col([](const auto& r) { return r.gaugeTrialDU; });
     d["gauge_applied"] = col([](const auto& r) { return r.gaugeApplied; });
     d["gauge_redos"] = col([](const auto& r) { return r.gaugeRedos; });
     d["gauge_active"] = col([](const auto& r) { return r.gaugeActive; });
-    d["gauge_factor"] = col([](const auto& r) { return r.gaugeFactor; });
     d["gauge_beta"] = col([](const auto& r) { return r.gaugeBeta; });
     d["gauge_weight_residual"] = col([](const auto& r) { return r.gaugeWeightRes; });
     // the step's energy ledger by stage (diagnostics, M7 WO-EB; StepReport::ebK1 ff.)
@@ -958,7 +956,6 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       time_ = I.time();
       acc_ = {I.heat(),       I.constraintWork(), I.bodyWork(),
               I.wrapOffset(), I.gaugePotential(), I.gaugeKinetic()};
-      gaugeFactor_ = I.gaugeFactor();
       gaugeDebt_ = I.gaugeDebt();
     });
   }
@@ -1126,7 +1123,6 @@ class LagrangianFlow : public peclet::core::python::Releasable {
               I->setPerfOptions(method_, rotational_, amgReuse_, warmTol_, newtonTol_);
               I->setGaugeMode(gaugeMode_);
             }
-            I->setGaugeFactor(gaugeFactor_);
             I->setGaugeDebt(gaugeDebt_);
             if (gaugeOpts_)
               I->setGaugeOptions((*gaugeOpts_)[0], (*gaugeOpts_)[1], (*gaugeOpts_)[2]);
@@ -1164,8 +1160,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   real_t warmTol_ = 1e-4, newtonTol_ = 1e-3;
   bool perfSet_ = false;  // false: the integrator's defaults
   peclet::voro::lagrangian::GaugeMode gaugeMode_ = peclet::voro::lagrangian::GaugeMode::kTrial;
-  real_t gaugeFactor_ = 1;  // the drift gauge's f_G, carried across a re-preparation
-  double gaugeDebt_ = 0;    // G⁗'s Ũ debt B, carried across a re-preparation
+  double gaugeDebt_ = 0;  // G⁗'s Ũ debt B, carried across a re-preparation
   std::optional<std::array<bool, 3>> gaugeOpts_;  // _set_gauge_options (unset: the defaults)
   // Morton relabelling: -1 off, 0 once at the first preparation, K > 0 also every K steps. K = 100
   // (M7 WO-PERF2): a re-sort costs ~0.7 step (N 32768); a frozen order loses 66 % of its locality

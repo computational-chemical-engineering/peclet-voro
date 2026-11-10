@@ -679,10 +679,9 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
       cj = std::max(cj, std::fabs(c) * tau / maxV);
     std::printf(
         "  (F) drift gauge: step 1 max alpha=%.2e active=%d applied=%d; step 2 applied=%d redos=%d "
-        "dU_G=%.2e f_G=%.3f tries=%d min margin/h=%.3f |dP|/sum m|v|=%.1e |Cv| tau/maxV=%.1e\n",
+        "dU_G=%.2e B=%.2e tries=%d min margin/h=%.3f |dP|/sum m|v|=%.1e |Cv| tau/maxV=%.1e\n",
         r1.gaugeAlphaMax, r1.gaugeActive, r1.gaugeApplied, r2.gaugeApplied, r2.gaugeRedos,
-        r2.gaugePotential, r2.gaugeFactor, r1.gaugeTries + r2.gaugeTries, r2.minMargin / h, dPj,
-        cj);
+        r2.gaugePotential, r2.gaugeDebt, r1.gaugeTries + r2.gaugeTries, r2.minMargin / h, dPj, cj);
     rc |= (r1.gaugeActive > 0 && r1.gaugeApplied == 0 && r2.gaugeApplied == 1 &&
            r2.gaugeRedos == 0 && r1.gaugeTries + r2.gaugeTries == 0 && r2.minMargin > 0 &&
            dPj <= 1e-12 && cj <= 10 * lag::SaddleParams{}.tol)
