@@ -813,6 +813,9 @@ class SaddleSolver {
   }
 
   bool viscous() const { return viscous_; }
+  /// z = one V-cycle of the last setup's S₀ (or L_ρ) hierarchy on r, without the Cahouet–Chabard
+  /// term: the preconditioner of the drift gauge's weight relaxation W (§14.4.4).
+  void applySchurHierarchy(const LView<Real>& r, const LView<Real>& z) const { lrho_.apply(r, z); }
   void setAssembled(bool on) { assembled_ = on; }  ///< SaddleParams::schurAssembled (next setup)
   const CellFacets<Real>& facets() const { return F_; }
   DissipationScratch<Real>& scratch() { return scr_; }
@@ -1223,6 +1226,11 @@ struct IntegratorParams {
   /// G‴'s activation (§14.4.4; the drift gauge's since M7 WO-PERF3 P3.3b): α_max of G‴ (G″ keeps
   /// gaugeAlphaMax) and the shift scale s_* of the ŝ-feedback (1 + (ŝ_i/s_*)²)
   double gaugeAlphaMaxDrift = 0.5, gaugeShiftScale = 0.15;
+  /// the fallback G‴+W (§14.4.4; M7 WO-PERF3 P3.3b): every gaugeWeightEvery-th step (0: off) the
+  /// drift gauge adds δ^W = M⁻¹J_xᵀS_J⁻¹(β H w), S_J = J_xM⁻¹J_xᵀ, β = min(gaugeWeightBetaMax,
+  /// 4 c_g τ ε̄), S_J⁻¹ by gaugeWeightIters PCG iterations preconditioned by the S₀ hierarchy
+  int gaugeWeightEvery = 4, gaugeWeightIters = 5;
+  double gaugeWeightBetaMax = 0.2;
   /// kTrial: G″'s trial after kick 2; kDrift: δ in the next drift with G‴'s activation (P3.3b:
   /// the ε̄ floor, the ŝ-feedback, α_max = gaugeAlphaMaxDrift, times the posterior-monitor factor
   /// f_G; no trial OT, no Ũ trial, no M-projection)
@@ -1279,6 +1287,8 @@ struct StepReport {
   int gaugeRedos = 0;      ///< drifts redone with δⁿ = 0 (OT failure or min_i m_i ≤ 0)
   int gaugeActive = 0;     ///< cells with δⁿ⁺¹_i ≠ 0
   double gaugeFactor = 0;  ///< f_G after this step's monitor update
+  double gaugeBeta = 0;  ///< β of the weight relaxation W added to δⁿ⁺¹ (0: none this step)
+  double gaugeWeightRes = 0;  ///< W's PCG residual ‖r₅‖₂/‖r₀‖₂ (0: none this step)
   double tGauge = 0;
 };
 
@@ -1367,6 +1377,12 @@ class Integrator {
     w0_ = LView<Real>("nhvw.w0", n);
     wrapS_ = LView<Real>("nhvw.wrap", n3);
     gd_ = LView<Real>("nhvw.gaugeDelta", n3);
+    dW_ = LView<Real>("nhvw.gaugeWeightDisp", n3);
+    wr_ = LView<Real>("nhvw.gaugeWeightR", n);
+    wz_ = LView<Real>("nhvw.gaugeWeightZ", n);
+    wp_ = LView<Real>("nhvw.gaugeWeightP", n);
+    wq_ = LView<Real>("nhvw.gaugeWeightQ", n);
+    wy_ = LView<Real>("nhvw.gaugeWeightY", n);
     dd_ = LView<Real>("nhvw.driftDisp", n3);
     aI_ = LView<Real>("nhvw.areaVec", n3);
     lamG_ = LView<Real>("nhvw.lamGauge", n);
@@ -2301,6 +2317,7 @@ class Integrator {
           sve, sv);
       ebar = sv > 0 ? std::sqrt(double(sve) / double(sv)) : 0.0;
     }
+    gaugeEbar_ = ebar;
     const CellFacets<Real> G = F_;
     const LView<Real> e = tmpN_, al = aG_, w = weight_;
     const Real cg = prm_.gaugeStrain * tau, amax = prm_.gaugeAlphaMaxDrift, fg = fG, eb = ebar,
@@ -2436,6 +2453,62 @@ class Integrator {
     rep.gaugeFactor = gaugeFactor_;
   }
 
+  /// The weight-relaxation displacement of G‴+W (§14.4.4) into dW_, at x^{n+1}, w^{n+1}:
+  /// δ^W = M⁻¹J_xᵀ y, S_J y = β H w, S_J = J_xM⁻¹J_xᵀ (matrix-free), β = min(β_max, 4 c_g τ ε̄),
+  /// y by gaugeWeightIters PCG iterations from 0, preconditioned by one V-cycle of kick 2's S₀
+  /// hierarchy at x^{n+1}, no tolerance. Linearised, H δw = −J_xδ^W = −βHw: δw = −βw.
+  /// (gaugeDisplacement then makes it tangential on I and 0 on CL, and applies the ascent
+  /// projection and the margin cap to the sum δ = α r + δ^W.)
+  void weightRelaxation(double tau, StepReport& rep) {
+    const double beta =
+        std::min(prm_.gaugeWeightBetaMax, 4.0 * prm_.gaugeStrain * tau * gaugeEbar_);
+    rep.gaugeBeta = beta;
+    const LView<Real> r = wr_, z = wz_, p = wp_, q = wq_, y = wy_, m = mass_, u = dW_;
+    applyWeightHessian(F_, weight_, r);
+    const Real b = beta;
+    Kokkos::parallel_for(
+        "nhvw.gaugeWRhs", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
+          r(i) *= b;
+          y(i) = 0;
+        });
+    const double r0 = std::sqrt(double(detail::dotView(r, r)));
+    double rz = 0;
+    for (int k = 0; k < prm_.gaugeWeightIters && r0 > 0; ++k) {
+      saddle_.applySchurHierarchy(r, z);
+      const double rzNew = double(detail::dotView(r, z));
+      const Real bt = k == 0 ? Real(0) : Real(rzNew / rz);
+      rz = rzNew;
+      Kokkos::parallel_for(
+          "nhvw.gaugeWDir", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i) { p(i) = z(i) + bt * p(i); });
+      applyWeightSchur(p, q);
+      const double pq = double(detail::dotView(p, q));
+      if (!(pq > 0))
+        break;
+      const Real al = Real(rz / pq);
+      Kokkos::parallel_for(
+          "nhvw.gaugeWUpd", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
+            y(i) += al * p(i);
+            r(i) -= al * q(i);
+          });
+    }
+    rep.gaugeWeightRes = r0 > 0 ? std::sqrt(double(detail::dotView(r, r))) / r0 : 0.0;
+    applyVolumeJacobianT(F_, y, u);
+    Kokkos::parallel_for(
+        "nhvw.gaugeWDisp", Kokkos::RangePolicy<Exec>(0, 3 * N_),
+        KOKKOS_LAMBDA(const int k) { u(k) /= m(k / 3); });
+  }
+
+  /// out = S_J x = J_x M⁻¹ J_xᵀ x (dW_ as the 3N scratch).
+  void applyWeightSchur(const LView<Real>& x, const LView<Real>& out) {
+    const LView<Real> u = dW_, m = mass_;
+    applyVolumeJacobianT(F_, x, u);
+    Kokkos::parallel_for(
+        "nhvw.gaugeWMinv", Kokkos::RangePolicy<Exec>(0, 3 * N_),
+        KOKKOS_LAMBDA(const int k) { u(k) /= m(k / 3); });
+    applyVolumeJacobian(F_, u, out);
+  }
+
   /// The drift gauge (GaugeMode::kDrift; DESIGN_NOTE §14.4.4, M7 WO-PERF3 P3.3a/b) at
   /// x = x^{n+1}, v = v^{n+1}: G‴'s α_i (gaugeActivation, g3); max_i α_i < gaugeSkip:
   /// δⁿ⁺¹ ≡ 0 and the next drift adds nothing (bit for bit). Otherwise δⁿ⁺¹ = G″ steps 2-4
@@ -2447,7 +2520,10 @@ class Integrator {
     const double am = gaugeActivation(tau, gaugeFactor_, true);
     rep.gaugeAlphaMax = am;
     if (am >= prm_.gaugeSkip) {
-      rep.gaugeInterface = gaugeDisplacement(rep);
+      const bool withW = prm_.gaugeWeightEvery > 0 && stepCount_ % prm_.gaugeWeightEvery == 0;
+      if (withW)
+        weightRelaxation(tau, rep);
+      rep.gaugeInterface = gaugeDisplacement(rep, withW);
       const LView<Real> d = gd_;
       int nA = 0;
       Kokkos::parallel_reduce(
@@ -2466,11 +2542,11 @@ class Integrator {
 
   /// G″ steps 2-4 (see gauge()): δ (gd_) from α (aG_); returns |I| and counts the normal-part,
   /// projected and capped cells into `rep`.
-  int gaugeDisplacement(StepReport& rep) {
+  int gaugeDisplacement(StepReport& rep, bool withW = false) {
     const CellFacets<Real> G = F_;
     const auto T = spec_.types;
     const LView<Real> a = aI_, g = grad_, d = gd_, h = h_, P = pos_, w = weight_, al = aG_,
-                      mg = mG_;
+                      mg = mG_, dW = dW_;
     const Kokkos::View<int*, Mem> cls = cls_, list = iList_;
     // classes: 0 the rest, 1 I, 2 CL (an unlike and a wall facet)
     Kokkos::parallel_for(
@@ -2512,7 +2588,7 @@ class Integrator {
     Kokkos::parallel_reduce(
         "nhvw.gaugeDelta", Kokkos::RangePolicy<Exec>(0, N_),
         KOKKOS_LAMBDA(const int i, int& cN, int& cP, int& cC) {
-          Real di[3] = {0, 0, 0};
+          Real di[3] = {0, 0, 0}, tn[3] = {0, 0, 0};  // tn: I's unit normal (0: none)
           if (cls(i) == 0) {
             for (int c = 0; c < 3; ++c)
               di[c] = G.cellCentroid(3 * i + c);
@@ -2550,6 +2626,8 @@ class Integrator {
               Real nh[3];
               for (int c = 0; c < 3; ++c)
                 nh[c] = m[c] / mn;
+              for (int c = 0; c < 3; ++c)
+                tn[c] = nh[c];
               bool normal = false;
               for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
                 const int j = G.nbr(f);
@@ -2573,6 +2651,13 @@ class Integrator {
           // δ_i = α_i r_i
           for (int c = 0; c < 3; ++c)
             di[c] *= al(i);
+          // G‴+W: + δ^W_i, tangential on I, 0 on CL
+          if (withW && cls(i) != 2) {
+            Real e[3] = {dW(3 * i), dW(3 * i + 1), dW(3 * i + 2)};
+            const Real en = tn[0] * e[0] + tn[1] * e[1] + tn[2] * e[2];
+            for (int c = 0; c < 3; ++c)
+              di[c] += e[c] - en * tn[c];
+          }
           // 3. remove the ascent component
           const Real gi[3] = {g(3 * i), g(3 * i + 1), g(3 * i + 2)};
           const Real gd = gi[0] * di[0] + gi[1] * di[1] + gi[2] * di[2];
@@ -2743,7 +2828,7 @@ class Integrator {
   double maxV0_ = 0;
   LView<Real> V0_, rho_, mu_, mass_, h_, vel_, vh_, b_, zo_, zn_, grad_, gx_, gw_, pi_, lam1_,
       lam2_, tmpN_, dw_, pos0_, w0_, wrapS_, gd_, aI_, lamG_, gs_, fw_, aG_, mG_, wLin_, carry_,
-      dd_;
+      dd_, dW_, wr_, wz_, wp_, wq_, wy_;
   // the carry predictor (IntegratorParams::carryCap): ‖dⁿ⁻¹‖_∞ and whether cⁿ is valid (false
   // after construction and after a failed attempt); π holds a previous solve (the adjoint warm
   // start)
@@ -2763,6 +2848,7 @@ class Integrator {
   // step's drift used it; Σ_i ∇_iŨⁿ·δⁿ_i (the monitor's first half); f_G
   bool deltaPending_ = false, deltaUsed_ = false;
   double gaugeGradDelta0_ = 0, gaugeFactor_ = 1;
+  double gaugeEbar_ = 0;  ///< ε̄ of the last G‴ activation (W's β)
   // persistent scratch (M7 WO-PERF3 P3.1, DESIGN_NOTE §14.4.6 item 1): the facet exports (a pool:
   // an export takes a buffer no live CellFacets references — F_, fc_, the option-S copy of x^n, the
   // saddle's copy, a gauge trial), the weight solve / H solves / adjoint, the band publish
