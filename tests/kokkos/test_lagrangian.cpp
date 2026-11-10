@@ -361,13 +361,44 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
       rn += r * r;
       bn += b[k] * b[k];
     }
-    const double cons = st.constraint * tau / maxV, mom = std::sqrt(rn / bn);
+    const double mom = std::sqrt(rn / bn);
+    // D14.3 (M7 WO-PERF3 P3.2): ‖C v‖_∞ ≤ η_K ‖C‖ v_ref, η_K = 1e-9. Checked here independently of
+    // the solver (WO-PERF3-R1, review F2a: st.constraint ≤ st.tolUsed is the solver's own exit
+    // test, so it cannot fail): ‖C v‖_∞ recomputed from the returned v by applyDivergence, ‖C‖ =
+    // max_i (Σ_f A_f |c_f|/|d_f| + Σ_wall A_w) and v_ref = max_i |b_i|/m_i from the export and b
+    // on the host, η_K the D14.3 literal (a changed SaddleParams default fails here)
+    DV cvd("e.cv", N);
+    lag::applyDivergence(F, dv, cvd);
+    const auto cv = toHost(cvd), Ah = toHost(F.area), ch3 = toHost(F.centroid),
+               dh3 = toHost(F.conn), Aw = toHost(F.wallArea);
+    const auto fo = peclet::core::toVector(F.facetOffset),
+               wo = peclet::core::toVector(F.wallOffset);
+    double cvInf = 0, cNorm = 0, vRef = 0;
+    for (int i = 0; i < N; ++i) {
+      cvInf = std::max(cvInf, std::fabs(double(cv[i])));
+      double ai = 0;
+      for (int f = fo[i]; f < fo[i + 1]; ++f) {
+        double c2 = 0, d2 = 0;
+        for (int e = 0; e < 3; ++e) {
+          c2 += double(ch3[3 * f + e]) * ch3[3 * f + e];
+          d2 += double(dh3[3 * f + e]) * dh3[3 * f + e];
+        }
+        ai += Ah[f] * std::sqrt(c2 / d2);
+      }
+      for (int f = wo[i]; f < wo[i + 1]; ++f)
+        ai += Aw[f];
+      cNorm = std::max(cNorm, ai);
+      vRef = std::max(vRef,
+                      std::sqrt(double(b[3 * i]) * b[3 * i] + double(b[3 * i + 1]) * b[3 * i + 1] +
+                                double(b[3 * i + 2]) * b[3 * i + 2]) /
+                          mass[i]);
+    }
+    const double etaK = 1e-9, bound = etaK * cNorm * vRef;
     std::printf(
-        "  (E) saddle: outer=%d inner=%d |Cv|_inf tau/maxV=%.1e (bound %.1e) momentum resid=%.1e\n",
-        st.outer, st.inner, cons, st.tolUsed * tau / maxV, mom);
-    // D14.3 (M7 WO-PERF3 P3.2): the stop is relative, ‖C v‖_∞ ≤ η_K ‖C‖ v_ref (st.tolUsed); the
-    // former absolute 1e-12 τ/max V is no longer the criterion
-    rc |= (st.constraint <= st.tolUsed && mom <= 1e-8) ? 0 : 1;
+        "  (E) saddle: outer=%d inner=%d |Cv|_inf recomputed %.2e <= eta_K |C| v_ref = %.2e (%.3f "
+        "of it; solver's own bound %.2e) momentum resid=%.1e\n",
+        st.outer, st.inner, cvInf, bound, cvInf / bound, double(st.tolUsed), mom);
+    rc |= (cvInf <= bound && mom <= 1e-8) ? 0 : 1;
   }
 
   // --- a viscous drop with tension over T = 8e-3 at τ and τ/2 (option S: kick 1 constrained at
@@ -466,6 +497,85 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     rc |= (worstV <= 1e-12 && restarts == 3 && err[0] / err[1] >= 3.5 && err[1] / err[2] >= 3.5)
               ? 0
               : 1;
+  }
+
+  // --- trajectory self-convergence (M7 WO-PERF3-R1, review F2d): the ledger above closes to the
+  // trapezoid error of Ũ whatever the pressures are, so its ratio is blind to an O(τ) pressure
+  // error. Here the state (x, v) at T = 8e-3 for τ, τ/2, τ/4: e_k = max|q_τk − q_τk/2| (x by
+  // minimum image), e_0/e_1 ≥ 3.5 for a second-order trajectory. The pressure field comes from
+  // facet gravity on the 1:10 drop, not tension: raw-facet E_σ is not smooth in x (DESIGN_NOTE §12,
+  // the reason for E_M) and with σ = 1 the velocity converges at first order in both kick modes
+  // (measured ratio 2.0); E_M needs a larger box than 12³. The start is on the constraint (v after
+  // one 1e-7 step). Gated: the default 'pressure' kick. Reported only: 'midpoint' (option S), whose
+  // velocity ratio falls with τ (2.83, 2.21 at 12³; 4.10, 3.11 at 16³ for τ/2, τ/4 and τ/4, τ/8;
+  // 'pressure' 3.89, 3.95 and 3.90, 3.96) — WO-PERF3-R1 reports it to the orchestrator ---
+  {
+    lag::PotentialSpec<real_t> spec;
+    spec.types = dty;
+    spec.nTypes = 2;
+    spec.density = toDev({1.0, 10.0}, "et.rho");
+    spec.gravity[2] = -1.0;
+    lag::FlowParams fp;
+    fp.density = {1.0, 10.0};
+    fp.viscosity = {0.1, 0.3};
+    lag::IntegratorParams ip;
+    ip.gaugeEvery = 0;
+    std::vector<real_t> xs, ws, vs;  // the projected start
+    {
+      DV p2 = toDev(x, "et.pos0"), w2 = toDev(w0, "et.w0");
+      MT m2;
+      m2.alloc(N, Larr, real_t(1e-10) * h, real_t(0.25) * h, 4, N);
+      m2.setWeights(w2);
+      m2.rebuild(p2);
+      ip.kickConstraint = lag::KickConstraint::kMidpoint;
+      lag::Integrator<MT> I(m2, p2, w2, Larr, V0, spec, fp, v, ip);
+      I.step(1e-7);
+      xs = toHost(p2);
+      ws = toHost(w2);
+      vs = toHost(I.velocity());
+      xs.resize(3 * N);
+      ws.resize(N);
+      vs.resize(3 * N);
+    }
+    const lag::KickConstraint modes[2] = {lag::KickConstraint::kPressure,
+                                          lag::KickConstraint::kMidpoint};
+    const char* names[2] = {"pressure", "midpoint"};
+    for (int md = 0; md < 2; ++md) {
+      ip.kickConstraint = modes[md];
+      std::vector<real_t> xT[3], vT[3];
+      for (int run = 0; run < 3; ++run) {
+        DV p2 = toDev(xs, "et.pos"), w2 = toDev(ws, "et.w");
+        MT m2;
+        m2.alloc(N, Larr, real_t(1e-10) * h, real_t(0.25) * h, 4, N);
+        m2.setWeights(w2);
+        m2.rebuild(p2);
+        lag::Integrator<MT> I(m2, p2, w2, Larr, V0, spec, fp, vs, ip);
+        const int n = 4 << run;
+        for (int s = 0; s < n; ++s)
+          I.step(8e-3 / n);
+        xT[run] = toHost(p2);
+        vT[run] = toHost(I.velocity());
+      }
+      double ex[2] = {0, 0}, ev[2] = {0, 0}, dxMax = 0, vMax = 0;
+      const auto mi = [L](double d) { return d - L * std::nearbyint(d / L); };
+      for (int k = 0; k < 3 * N; ++k) {
+        dxMax = std::max(dxMax, std::fabs(mi(xT[2][k] - xs[k])));
+        vMax = std::max(vMax, std::fabs(double(vT[2][k])));
+        for (int e = 0; e < 2; ++e) {
+          ex[e] = std::max(ex[e], std::fabs(mi(xT[e][k] - xT[e + 1][k])));
+          ev[e] = std::max(ev[e], std::fabs(double(vT[e][k]) - vT[e + 1][k]));
+        }
+      }
+      const double rx = ex[0] / ex[1], rv = ev[0] / ev[1];
+      std::printf(
+          "  (E) trajectory at T, %s kick: |dx|/max|x-x0| = %.2e, %.2e (ratio %.2f), |dv|/max|v| "
+          "= %.2e, %.2e (ratio %.2f); ratios >= 3.5%s\n",
+          names[md], ex[0] / dxMax, ex[1] / dxMax, rx, ev[0] / vMax, ev[1] / vMax, rv,
+          modes[md] == lag::KickConstraint::kPressure ? "" : " (reported, not gated)");
+      // the differences must also stand far above the η_K = 1e-9 solve noise
+      if (modes[md] == lag::KickConstraint::kPressure)
+        rc |= (rx >= 3.5 && rv >= 3.5 && ex[1] >= 1e-6 * dxMax && ev[1] >= 1e-6 * vMax) ? 0 : 1;
+    }
   }
 
   // --- (F) R0 (DESIGN_NOTE §12.3.1): the Voronoi-cell descent of F = E_σ + volume penalty from
