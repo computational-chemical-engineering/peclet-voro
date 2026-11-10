@@ -552,11 +552,18 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     dirty_ = true;  // the θ rule reads the step bound
   }
   void set_kick_constraint(const std::string& mode) {
-    if (mode != "start" && mode != "midpoint")
+    namespace lg = peclet::voro::lagrangian;
+    if (mode == "midpoint")
+      kick1_ = lg::KickConstraint::kMidpoint;
+    else if (mode == "start")
+      kick1_ = lg::KickConstraint::kStart;
+    else if (mode == "pressure")
+      kick1_ = lg::KickConstraint::kPressure;
+    else
       throw std::invalid_argument(
           "voro: LagrangianFlow.set_kick_constraint(mode) takes 'midpoint' (C of kick 1 at x^n + "
-          "dt/2 v^n, option S, the default) or 'start' (at x^n)");
-    midpoint_ = mode == "midpoint";
+          "dt/2 v^n, option S, the default), 'start' (at x^n) or 'pressure' (no constraint: the "
+          "last pressures in kick 1)");
     dirty_ = true;
   }
   // M7 WO4a solver trials (private): the assembled Schur preconditioner, the π-solve tolerance
@@ -796,6 +803,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["weight_error"] = col([](const auto& r) { return r.weightErr; });
     d["adjoint_iterations"] = col([](const auto& r) { return r.adjIters; });
     d["halvings"] = col([](const auto& r) { return r.halvings; });
+    d["kick_restart"] = col([](const auto& r) { return r.kickRestart; });
     d["unmatched_facets"] = col([](const auto& r) { return r.unmatched; });
     d["repair_fallbacks"] = col([](const auto& r) { return r.repairFallbacks; });
     d["weight_restarts"] = col([](const auto& r) { return r.coldStarts; });
@@ -940,14 +948,20 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   }
 
   /// The periodic re-sort of a running flow: relabel, re-prepare, and carry λ₂ (kick 1's warm
-  /// start), the gauge's step count and the drift gauge's pending δⁿ into the new integrator.
+  /// start), the gauge's step count, the drift gauge's pending δⁿ and the 'pressure' kick's
+  /// history (λⁿ⁻¹, v^{n−½}, τ_prev) into the new integrator.
   void resort() {
-    std::vector<real_t> lam, delta;
+    std::vector<real_t> lam, delta, lamPrev, vHalf;
     long count = 0;
+    double tauPrev = 0;
     withInteg([&](auto& I) {
       lam = peclet::core::toVector(I.lambda());
       count = I.stepCount();
       delta = I.pendingDelta();
+      auto h = I.kickHistory();
+      lamPrev = std::move(h.lamPrev);
+      vHalf = std::move(h.vHalf);
+      tauPrev = h.tauPrev;
     });
     const std::vector<int> order = relabelCells();
     if (order.empty())
@@ -956,9 +970,14 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     lam = cellsToInternal(order, std::move(lam), 1);
     if (!delta.empty())
       delta = cellsToInternal(order, std::move(delta), 3);
+    if (!lamPrev.empty()) {
+      lamPrev = cellsToInternal(order, std::move(lamPrev), 1);
+      vHalf = cellsToInternal(order, std::move(vHalf), 3);
+    }
     withInteg([&](auto& I) {
       I.setWarmStart(lam, count);
       I.setPendingDelta(delta);
+      I.setKickHistory({std::move(lamPrev), std::move(vHalf), tauPrev});
     });
   }
 
@@ -1047,7 +1066,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
               tauMax = std::min(tauMax, I->capillaryStep(cap_));
             theta_ = (std::isfinite(tauMax) && I->maxNuOverH2() * tauMax > 1.0) ? 1.0 : 0.5;
             I->setTheta(theta_);
-            I->setMidpointConstraint(midpoint_);
+            I->setKickConstraint(kick1_);
             I->setTime(time_);
             I->setAccumulators(acc_[0], acc_[1], acc_[2], acc_[3], acc_[4], acc_[5]);
             I->setGauge(gaugeOn_ ? gaugeEvery_ : 0, strain_, alphaMax_);
@@ -1082,7 +1101,9 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   lag::InterfaceEnergy interfaceEnergy_ = lag::InterfaceEnergy::Facet;
   std::vector<real_t> vel_;
   std::array<real_t, 3> gravity_{0, 0, 0}, bodyAmp_{0, 0, 0}, bodyWave_{0, 0, 0};
-  bool hasGravity_ = false, midpoint_ = true, schurAssembled_ = false;
+  bool hasGravity_ = false, schurAssembled_ = false;
+  peclet::voro::lagrangian::KickConstraint kick1_ =
+      peclet::voro::lagrangian::KickConstraint::kMidpoint;
   real_t adjointTol_ = 0, saddleTol_ = 0;  // 0: not set (the integrator's defaults)
   peclet::voro::lagrangian::SaddleMethod method_ = peclet::voro::lagrangian::SaddleMethod::kCoupled;
   real_t rotational_ = 1;
@@ -1184,8 +1205,11 @@ void bindLagrangian(nb::module_& m) {
            "Step-size constants C_cfl, C_sigma (0 switches a limit off).")
       .def("set_kick_constraint", &LagrangianFlow::set_kick_constraint, nb::arg("mode"),
            "Where kick 1's velocity constraint is taken: 'midpoint' (x^n + dt/2 v^n with the\n"
-           "weights solved there; DESIGN_NOTE option S; the default: second order in the energy)\n"
-           "or 'start' (x^n; first order).")
+           "weights solved there; DESIGN_NOTE option S; the default: second order in the energy),\n"
+           "'start' (x^n; first order), or 'pressure' (no constraint and no saddle: the last\n"
+           "pressures 3/4 lambda^n + 1/4 lambda^(n-1) act in kick 1's implicit solve, one saddle\n"
+           "per step; restart steps - the first, and the retry after a step halving - use option\n"
+           "S; DESIGN_NOTE D14.1).")
       .def(
           "_set_perf_options", &LagrangianFlow::set_perf_options, nb::arg("method") = "coupled",
           nb::arg("rotational") = 1.0, nb::arg("amg_reuse") = 10, nb::arg("warm_tol") = 1e-3,

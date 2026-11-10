@@ -5,8 +5,10 @@
  *
  *   1. kick 1 at x^n, friction fused (θ-midpoint), velocity constraint C^n v^{½} = 0 (by default
  *      C and ζ of kick 1 at x^n + (τ/2) v^n instead, option S,
- * IntegratorParams::midpointConstraint): (M + θ(τ/2)ζ^n) v^{½} + (τ/2) C^{nᵀ} λ₁ = (M −
- * (1−θ)(τ/2)ζ^n) v^n − (τ/2)(∇Ũ^n − M a(x^n));
+ * IntegratorParams::kickConstraint): (M + θ(τ/2)ζ^n) v^{½} + (τ/2) C^{nᵀ} λ₁ = (M −
+ * (1−θ)(τ/2)ζ^n) v^n − (τ/2)(∇Ũ^n − M a(x^n)); with KickConstraint::kPressure (D14.1) no
+ * constraint and no saddle: λ₁ is replaced by λ̄ = ¾λⁿ + ¼λⁿ⁻¹ (the last two kick-2 multipliers)
+ * on the right-hand side, and Q_c += (τ/4) λ̄ᵀCⁿ(vⁿ + v^{½}); a restart step is option S;
  *   2. drift x^{n+1} = x^n + τ v^{½} (wrapped into the box); weights warm-started by
  *      H δw = −τ J_x v^{½} (at x^n) and solved by the damped Newton of weight_solve.hpp, every
  *      iterate an incremental REPAIR of the resident engine (no cold rebuild); then π^{n+1} and
@@ -476,6 +478,18 @@ enum class GaugeMode {
   kDrift,  ///< δ added in the next step's drift, posterior-monitored (driftGauge(), §14.4.4)
 };
 
+/// Kick 1 of a step (IntegratorParams::kickConstraint; LagrangianFlow.set_kick_constraint).
+enum class KickConstraint {
+  kStart,     ///< a saddle with C (and ζ) at x^n: first order in the energy
+  kMidpoint,  ///< option S (§10.3.6): the saddle with C and ζ at x^n + (τ/2)v^n, weights solved
+              ///< there
+  /// D14.1 (§14.4.1, M7 WO-PERF3 P3.4): no constraint and no saddle; the last pressures
+  /// λ̄ = ¾λⁿ + ¼λⁿ⁻¹ act through Cⁿᵀ inside the CN A-solve at x^n. A restart step (the first after
+  /// construction or setKickConstraint, and the retry after a τ-halving) is an option-S step, and
+  /// sets λⁿ⁻¹ = λⁿ = its λ₂.
+  kPressure,
+};
+
 /// The kick's saddle solver (M7 WO-PERF).
 enum class SaddleMethod {
   kSchurCG,  ///< Schur-complement CG with an exact inner A-solve per iteration (WO4 default)
@@ -663,30 +677,7 @@ class SaddleSolver {
     const int N = F_.nCells;
     SaddleStats st;
     Kokkos::Timer tAll, tPart;
-    st.tSetup = setupSeconds_;  // charged once, to the first solve after setup()
-    setupSeconds_ = 0;
-    st.viscNumber = nuH2_ * 2 * halfTau;
-    useAmg_ = viscous_ && a > Real(0) && st.viscNumber > prm.amgSwitch;
-    st.amgInner = useAmg_;
-    if (useAmg_) {
-      tPart.reset();
-      peclet::core::solver::AmgParams ap;
-      ap.ndofPerNode = 1;
-      detail::hostCopy(mass_, massH_);
-      const std::vector<double>& mh = massH_;
-      const auto& muh = mh_;
-      const double aa = a;
-      visc_.build(detail::twoPointHost(
-                      F_,
-                      [&](int i, int j, double A, double d) {
-                        const double muf =
-                            muh[i] + muh[j] > 0 ? 2 * muh[i] * muh[j] / (muh[i] + muh[j]) : 0.0;
-                        return aa * (4.0 / 9.0) * muf * A / d;
-                      },
-                      [&](int i) { return mh[i]; }, /*pin=*/false, &hostF_),
-                  ap);
-      st.tSetup += tPart.seconds();
-    }
+    prepareInner(a, halfTau, prm, st);
     const LView<Real> r = r_, z = z_, zo = zOld_, p = p_, s = s_, q = q_, vv = v, mu = lam;
     {  // the stop, physically scaled (M7 WO4a): ‖C v‖_∞ ≤ tol · ‖C‖ · v_ref, with v_ref =
        // max_i |b_i|/m_i the velocity the kick would produce unconstrained; relative alone since
@@ -812,6 +803,23 @@ class SaddleSolver {
     return st;
   }
 
+  /// x = A⁻¹ b, A = M + a ζ, with no constraint: kick 1 of the 'pressure' step (DESIGN_NOTE §14.4.1
+  /// step 1, D14.1), whose λ̄ the caller has put into b. PCG from the guess in `x` to
+  /// ‖b − A x‖₂ ≤ prm.innerTol ‖b‖₂ (η_K), with solve()'s inner preconditioner (Jacobi, or the
+  /// scalar viscous AMG above prm.amgSwitch); inviscid or a = 0: x = M⁻¹ b. `halfTau` = τ/2.
+  SaddleStats solveMomentum(Real a, Real halfTau, const LView<Real>& b, const LView<Real>& x,
+                            const SaddleParams& prm) {
+    SaddleStats st;
+    Kokkos::Timer tAll, tPart;
+    prepareInner(a, halfTau, prm, st);
+    tPart.reset();
+    st.inner = solveA(a, b, x, prm, /*fromGuess=*/true);
+    Kokkos::fence();
+    st.tInner = tPart.seconds();
+    st.tTotal = tAll.seconds();
+    return st;
+  }
+
   bool viscous() const { return viscous_; }
   /// z = one V-cycle of the last setup's S₀ (or L_ρ) hierarchy on r, without the Cahouet–Chabard
   /// term: the preconditioner of the drift gauge's weight relaxation W (§14.4.4).
@@ -821,6 +829,37 @@ class SaddleSolver {
   DissipationScratch<Real>& scratch() { return scr_; }
 
  private:
+  /// The inner A-solve preconditioner of a solve at a = θτ/2: AMG on the scalar two-point viscous
+  /// operator (built here, its time charged to st.tSetup) when max ν τ/h² exceeds prm.amgSwitch,
+  /// else Jacobi; st.tSetup also takes the last setup()'s time (charged once).
+  void prepareInner(Real a, Real halfTau, const SaddleParams& prm, SaddleStats& st) {
+    Kokkos::Timer tPart;
+    st.tSetup = setupSeconds_;  // charged once, to the first solve after setup()
+    setupSeconds_ = 0;
+    st.viscNumber = nuH2_ * 2 * halfTau;
+    useAmg_ = viscous_ && a > Real(0) && st.viscNumber > prm.amgSwitch;
+    st.amgInner = useAmg_;
+    if (useAmg_) {
+      tPart.reset();
+      peclet::core::solver::AmgParams ap;
+      ap.ndofPerNode = 1;
+      detail::hostCopy(mass_, massH_);
+      const std::vector<double>& mh = massH_;
+      const auto& muh = mh_;
+      const double aa = a;
+      visc_.build(detail::twoPointHost(
+                      F_,
+                      [&](int i, int j, double A, double d) {
+                        const double muf =
+                            muh[i] + muh[j] > 0 ? 2 * muh[i] * muh[j] / (muh[i] + muh[j]) : 0.0;
+                        return aa * (4.0 / 9.0) * muf * A / d;
+                      },
+                      [&](int i) { return mh[i]; }, /*pin=*/false, &hostF_),
+                  ap);
+      st.tSetup += tPart.seconds();
+    }
+  }
+
   /// z = (L_ρ⁻¹ + a·2μ/V) r (Cahouet–Chabard; the viscous term only with viscosity and a > 0).
   void schurPrecond(Real a, const LView<Real>& r, const LView<Real>& z) {
     lrho_.apply(r, z);
@@ -1067,8 +1106,10 @@ class SaddleSolver {
     return iters;
   }
 
-  /// x = A⁻¹ rhs, A = M + a ζ, by PCG to the relative residual prm.innerTol. Returns iterations.
-  int solveA(Real a, const LView<Real>& rhs, const LView<Real>& x, const SaddleParams& prm) {
+  /// x = A⁻¹ rhs, A = M + a ζ, by PCG to the relative residual ‖rhs − A x‖₂ ≤ prm.innerTol ‖rhs‖₂,
+  /// from x = 0, or from the guess in x when `fromGuess`. Returns iterations.
+  int solveA(Real a, const LView<Real>& rhs, const LView<Real>& x, const SaddleParams& prm,
+             bool fromGuess = false) {
     using Exec = peclet::core::ExecSpace;
     const int N = F_.nCells, n3 = 3 * N;
     const LView<Real> m = mass_, X = x, B = rhs;
@@ -1079,11 +1120,26 @@ class SaddleSolver {
       return 0;
     }
     const LView<Real> r = ir_, z = iz_, p = ip_, q = iq_, zd = zdiag_;
-    Kokkos::deep_copy(X, Real(0));
-    Kokkos::deep_copy(r, B);
-    const Real r0 = std::sqrt(detail::dotView(r, r));
-    if (!(r0 > Real(0)))
-      return 0;
+    Real r0 = 0;
+    if (fromGuess) {  // r = rhs − (M + a ζ) x; the stop stays relative to ‖rhs‖₂
+      r0 = std::sqrt(detail::dotView(B, B));
+      if (!(r0 > Real(0))) {
+        Kokkos::deep_copy(X, Real(0));
+        return 0;
+      }
+      applyDissipation(F_, mu_, X, q, scr_);
+      Kokkos::parallel_for(
+          "sd.r0", Kokkos::RangePolicy<Exec>(0, n3),
+          KOKKOS_LAMBDA(const int k) { r(k) = B(k) - (m(k / 3) * X(k) + a * q(k)); });
+      if (std::sqrt(detail::dotView(r, r)) <= prm.innerTol * r0)
+        return 0;
+    } else {
+      Kokkos::deep_copy(X, Real(0));
+      Kokkos::deep_copy(r, B);
+      r0 = std::sqrt(detail::dotView(r, r));
+      if (!(r0 > Real(0)))
+        return 0;
+    }
     auto precond = [&]() {
       if (!useAmg_) {
         Kokkos::parallel_for(
@@ -1192,9 +1248,10 @@ struct IntegratorParams {
   /// first solve after construction has no previous π: from zero to adjointTol, as before P3.2)
   double adjointWarmTol = 1e-8;
   int maxHalvings = 4;  ///< τ halvings when the weight solve fails (W-Q7)
-  /// option S (the default since M7 WO4′, orchestrator decision 2026-11-08: second order in the
-  /// energy, ×4.2 per τ halving vs ×2.4 at x^n): kick 1's C at x^n + (τ/2) v^n; false: at x^n
-  bool midpointConstraint = true;
+  /// kick 1: option S (kMidpoint, the default since M7 WO4′, orchestrator decision 2026-11-08:
+  /// second order in the energy, ×4.2 per τ halving vs ×2.4 at x^n, kStart), or D14.1's pressure
+  /// kick (kPressure, M7 WO-PERF3 P3.4)
+  KickConstraint kickConstraint = KickConstraint::kMidpoint;
   double repairTol = 1e-10;  ///< repaired-topology volume check (cone fan vs engine), relative
   /// AMG reuse (M7 WO-PERF): the S₀ (L_ρ) and H hierarchies are kept as preconditioners for at most
   /// this many further setups, and rebuilt early when their solve needs more than 1.5× (+2) the
@@ -1256,9 +1313,10 @@ struct StepReport {
   double otR0 = 0, carryRho = 0, otR0Lin = 0;  ///< otR0Lin: r₀ at w_lin when the carry was dropped
   int carryDrops = 0;
   int halvings = 0;
-  int unmatched = 0;          ///< one-sided facets dropped at x^{n+1} (matchFacets)
-  int repairFallbacks = 0;    ///< cold rebuilds after the repaired topology failed the check
-  int coldStarts = 0;         ///< weight solves restarted from w^n after the warm start failed
+  int kickRestart = 0;      ///< KickConstraint::kPressure: 1 if this step was a restart (option S)
+  int unmatched = 0;        ///< one-sided facets dropped at x^{n+1} (matchFacets)
+  int repairFallbacks = 0;  ///< cold rebuilds after the repaired topology failed the check
+  int coldStarts = 0;       ///< weight solves restarted from w^n after the warm start failed
   double repairMismatch = 0;  ///< that check's value (max relative volume difference)
   double unmatchedArea = 0;   ///< largest such area
   double tKick1 = 0, tKick2 = 0, tRepair = 0, tWeights = 0, tPotential = 0, tTotal = 0;
@@ -1369,6 +1427,7 @@ class Integrator {
     pi_ = LView<Real>("nhvw.pi", n);
     lam1_ = LView<Real>("nhvw.lam1", n);
     lam2_ = LView<Real>("nhvw.lam2", n);
+    lamPrev_ = LView<Real>("nhvw.lamPrev", n);
     tmpN_ = LView<Real>("nhvw.tmpN", n);
     dw_ = LView<Real>("nhvw.dw", n);
     wLin_ = LView<Real>("nhvw.wLin", n);
@@ -1418,8 +1477,15 @@ class Integrator {
       restoreEngine();
       tau *= 0.5;
       ++rep.halvings;
+      kickRestart_ = true;  // kPressure: the retry is an option-S step
     }
     time_ += tau;
+    if (prm_.kickConstraint == KickConstraint::kPressure) {
+      if (kickRestart_)  // §14.4.1 step 0: λⁿ⁻¹ := λⁿ := the restart step's λ₂
+        Kokkos::deep_copy(lamPrev_, lam2_);
+      kickRestart_ = false;
+      tauPrev_ = tau;
+    }
     if (prm_.gaugeMode == GaugeMode::kDrift) {
       Kokkos::Timer tg;
       gaugeMonitor(rep);
@@ -1679,7 +1745,11 @@ class Integrator {
   }
 
   void setTheta(double th) { prm_.theta = th; }
-  void setMidpointConstraint(bool on) { prm_.midpointConstraint = on; }
+  /// Kick 1's mode; the next step is a restart (kPressure: an option-S step).
+  void setKickConstraint(KickConstraint k) {
+    prm_.kickConstraint = k;
+    kickRestart_ = true;
+  }
   /// Solver knobs of the M7 WO4a trials (no numerics default changes): the assembled Schur
   /// preconditioner and the relative tolerance of the π (adjoint) solve.
   void setSolverOptions(bool schurAssembled, double adjointTol, double saddleTol) {
@@ -1732,6 +1802,35 @@ class Integrator {
       throw std::logic_error("voro: NHV-W setWarmStart: lambda is not (N,)");
     Kokkos::deep_copy(lam2_, Kokkos::View<const Real*, Kokkos::HostSpace>(lambda.data(), N_));
     stepCount_ = stepCount;
+  }
+  /// The 'pressure' kick's history (KickConstraint::kPressure, §14.4.1): λⁿ⁻¹ (N), v^{n−½} (3N,
+  /// kick 1's guess) and τ_prev, in this integrator's cell order; empty when the next step is a
+  /// restart anyway (another mode, or a restart pending). A re-prepared integrator (the relabelling
+  /// of LagrangianFlow) continues it, as it continues λⁿ (setWarmStart); call setKickHistory after
+  /// setKickConstraint, which makes the next step a restart.
+  struct KickHistory {
+    std::vector<Real> lamPrev, vHalf;
+    double tauPrev = 0;
+  };
+  KickHistory kickHistory() const {
+    KickHistory h;
+    if (prm_.kickConstraint != KickConstraint::kPressure || kickRestart_)
+      return h;
+    h.lamPrev = peclet::core::toVector(lamPrev_);
+    h.vHalf = peclet::core::toVector(vh_);
+    h.tauPrev = tauPrev_;
+    return h;
+  }
+  void setKickHistory(const KickHistory& h) {
+    if (h.lamPrev.empty())
+      return;
+    if (static_cast<int>(h.lamPrev.size()) != N_ || static_cast<int>(h.vHalf.size()) != 3 * N_)
+      throw std::logic_error("voro: NHV-W setKickHistory: lamPrev is not (N,) or vHalf not (N, 3)");
+    Kokkos::deep_copy(lamPrev_, Kokkos::View<const Real*, Kokkos::HostSpace>(h.lamPrev.data(), N_));
+    Kokkos::deep_copy(vh_,
+                      Kokkos::View<const Real*, Kokkos::HostSpace>(h.vHalf.data(), h.vHalf.size()));
+    tauPrev_ = h.tauPrev;
+    kickRestart_ = false;
   }
   /// The drift gauge's pending δⁿ (GaugeMode::kDrift; (3N) in this integrator's cell order, empty
   /// when none is pending) and its restore: a re-prepared integrator (the relabelling of
@@ -1935,8 +2034,10 @@ class Integrator {
   }
 
   /// One kick at the current state: vNew, lam from vOld; adds the heat and the body work.
+  /// `pressure` (kick 1 of a KickConstraint::kPressure step, §14.4.1 step 1): no constraint;
+  /// `lam` is λ̄ (input), (τ/2)Cᵀλ̄ joins the right-hand side and vNew holds the A-solve's guess.
   SaddleStats kick(double tau, const LView<Real>& vOld, const LView<Real>& vNew,
-                   const LView<Real>& lam, const LView<Real>& posForce) {
+                   const LView<Real>& lam, const LView<Real>& posForce, bool pressure = false) {
     const Real th = prm_.theta, ht = Real(0.5) * tau;
     const bool visc = saddle_.viscous();
     const LView<Real> m = mass_, vo = vOld, b = b_, zo = zo_, g = grad_, P = posForce;
@@ -1964,13 +2065,24 @@ class Integrator {
               b(k) += ht * fw(k);
           }
         });
-    const Real tolAbs = prm_.saddle.tol * maxV0_ / tau;
-    SaddleStats st = saddle_.solve(th * ht, ht, tolAbs, b_, vNew, lam, prm_.saddle);
-    if (sRef_ < 0)
-      sRef_ = st.outer;
-    else if (st.outer > 1.5 * sRef_ + 2)
-      sStale_ = true;
-    st.constraint *= tau / maxV0_;
+    SaddleStats st;
+    if (pressure) {
+      // b −= (τ/2) Cᵀλ̄ (zn_ is free until the heat below); A v = b, no constraint
+      applyDivergenceT(F_, lam, zn_);
+      const LView<Real> ct = zn_;
+      Kokkos::parallel_for(
+          "nhvw.rhsLam", Kokkos::RangePolicy<Exec>(0, 3 * N_),
+          KOKKOS_LAMBDA(const int k) { b(k) -= ht * ct(k); });
+      st = saddle_.solveMomentum(th * ht, ht, b_, vNew, prm_.saddle);
+    } else {
+      const Real tolAbs = prm_.saddle.tol * maxV0_ / tau;
+      st = saddle_.solve(th * ht, ht, tolAbs, b_, vNew, lam, prm_.saddle);
+      if (sRef_ < 0)
+        sRef_ = st.outer;
+      else if (st.outer > 1.5 * sRef_ + 2)
+        sStale_ = true;
+      st.constraint *= tau / maxV0_;
+    }
     // heat (τ/2) v̄_θᵀ ζ (v_old + v_new)/2 and body work (τ/2) (M a)ᵀ (v_old + v_new)/2
     const LView<Real> vn = vNew, zn = zn_;
     if (visc)
@@ -2008,31 +2120,59 @@ class Integrator {
     const bool carryOk = carryOk_;
     carryOk_ = false;
     const double heat0 = heat_, work0 = work_, qc0 = qc_;  // kick 1's increments undone on a retry
-    // ---- kick 1 at x^n (λ₁ warm-started from the last λ₂, same geometry) ----
-    Kokkos::deep_copy(lam1_, lam2_);
-    if (prm_.midpointConstraint) {
-      // option S (DESIGN_NOTE §10.3.6): C of kick 1 (and its ζ) at x^n + (τ/2)v^n, the weights
-      // solved there (repair, warm start H δw = −(τ/2) J_x v^n); ∇Ũ and the body force stay at x^n
-      const CellFacets<Real> Fn = F_;
-      if (!moveAndSolve(0.5 * tau, vel_, rep)) {
-        heat_ = heat0;
-        work_ = work0;
-        qc_ = qc0;
-        return false;
+    const bool pressure = prm_.kickConstraint == KickConstraint::kPressure && !kickRestart_;
+    rep.kickRestart = prm_.kickConstraint == KickConstraint::kPressure && kickRestart_ ? 1 : 0;
+    if (pressure) {
+      // ---- kick 1, D14.1 (§14.4.1 step 1): λ̄ = ¾λⁿ + ¼λⁿ⁻¹ through Cⁿᵀ inside the CN A-solve at
+      // x^n, no constraint; guess v^{n−½} + (1 + τ/τ_prev)(vⁿ − v^{n−½}); constraint work
+      // Q_c += (τ/4) λ̄ᵀCⁿ(vⁿ + v^{½}) ----
+      {
+        const LView<Real> lb = lam1_, ln = lam2_, lp = lamPrev_, vh = vh_, v = vel_;
+        Kokkos::parallel_for(
+            "nhvw.lamBar", Kokkos::RangePolicy<Exec>(0, N_),
+            KOKKOS_LAMBDA(const int i) { lb(i) = Real(0.75) * ln(i) + Real(0.25) * lp(i); });
+        const Real c = Real(1) + Real(tau / tauPrev_);
+        Kokkos::parallel_for(
+            "nhvw.kickGuess", Kokkos::RangePolicy<Exec>(0, 3 * N_),
+            KOKKOS_LAMBDA(const int k) { vh(k) += c * (v(k) - vh(k)); });
       }
-      F_ = currentFacets();
-      fcValid_ = false;  // pos/weight return to x^n below
-      matchFacets(F_, &pool_);
-      setupSaddle();
-      rep.kick1 = kick(tau, vel_, vh_, lam1_, pos0_);
-      // kick 1's constraint work (τ/4) λ₁ᵀ C^s v^n (C^s v^{½} = 0, C^s v^n ≠ 0)
-      applyDivergence(F_, vel_, tmpN_);
-      qc_ += 0.25 * tau * detail::dotView(lam1_, tmpN_);
-      F_ = Fn;
-      Kokkos::deep_copy(pos_, pos0_);
-      Kokkos::deep_copy(weight_, w0_);
+      rep.kick1 = kick(tau, vel_, vh_, lam1_, pos_, /*pressure=*/true);
+      {
+        const LView<Real> s = b_, v = vel_, vh = vh_;
+        Kokkos::parallel_for(
+            "nhvw.vSum", Kokkos::RangePolicy<Exec>(0, 3 * N_),
+            KOKKOS_LAMBDA(const int k) { s(k) = v(k) + vh(k); });
+        applyDivergence(F_, b_, tmpN_);
+        qc_ += 0.25 * tau * detail::dotView(lam1_, tmpN_);
+      }
     } else {
-      rep.kick1 = kick(tau, vel_, vh_, lam1_, pos_);
+      // ---- kick 1 at x^n (λ₁ warm-started from the last λ₂, same geometry) ----
+      Kokkos::deep_copy(lam1_, lam2_);
+      if (prm_.kickConstraint != KickConstraint::kStart) {  // option S (also a kPressure restart)
+        // option S (DESIGN_NOTE §10.3.6): C of kick 1 (and its ζ) at x^n + (τ/2)v^n, the weights
+        // solved there (repair, warm start H δw = −(τ/2) J_x v^n); ∇Ũ and the body force stay at
+        // x^n
+        const CellFacets<Real> Fn = F_;
+        if (!moveAndSolve(0.5 * tau, vel_, rep)) {
+          heat_ = heat0;
+          work_ = work0;
+          qc_ = qc0;
+          return false;
+        }
+        F_ = currentFacets();
+        fcValid_ = false;  // pos/weight return to x^n below
+        matchFacets(F_, &pool_);
+        setupSaddle();
+        rep.kick1 = kick(tau, vel_, vh_, lam1_, pos0_);
+        // kick 1's constraint work (τ/4) λ₁ᵀ C^s v^n (C^s v^{½} = 0, C^s v^n ≠ 0)
+        applyDivergence(F_, vel_, tmpN_);
+        qc_ += 0.25 * tau * detail::dotView(lam1_, tmpN_);
+        F_ = Fn;
+        Kokkos::deep_copy(pos_, pos0_);
+        Kokkos::deep_copy(weight_, w0_);
+      } else {
+        rep.kick1 = kick(tau, vel_, vh_, lam1_, pos_);
+      }
     }
     Kokkos::fence();
     rep.tKick1 = t.seconds();
@@ -2245,7 +2385,10 @@ class Integrator {
     accumulateWrap();
     // ---- kick 2 at x^{n+1}; constraint work (τ/4) λ₂ᵀ C^{n+1} v^{½} ----
     t.reset();
-    Kokkos::deep_copy(lam2_, lam1_);
+    if (pressure)  // λⁿ⁻¹ := λⁿ; kick 2 warm-started from λⁿ (D14.7)
+      Kokkos::deep_copy(lamPrev_, lam2_);
+    else
+      Kokkos::deep_copy(lam2_, lam1_);
     rep.kick2 = kick(tau, vh_, vel_, lam2_, pos_);
     applyDivergence(F_, vh_, tmpN_);
     qc_ += 0.25 * tau * detail::dotView(lam2_, tmpN_);
@@ -2828,7 +2971,11 @@ class Integrator {
   double maxV0_ = 0;
   LView<Real> V0_, rho_, mu_, mass_, h_, vel_, vh_, b_, zo_, zn_, grad_, gx_, gw_, pi_, lam1_,
       lam2_, tmpN_, dw_, pos0_, w0_, wrapS_, gd_, aI_, lamG_, gs_, fw_, aG_, mG_, wLin_, carry_,
-      dd_, dW_, wr_, wz_, wp_, wq_, wy_;
+      dd_, dW_, wr_, wz_, wp_, wq_, wy_, lamPrev_;
+  // the 'pressure' kick (KickConstraint::kPressure): the next step is a restart (option S), and the
+  // previous step's τ (kick 1's guess v^{n−½} + (1 + τ/τ_prev)(vⁿ − v^{n−½})); λⁿ⁻¹ in lamPrev_
+  bool kickRestart_ = true;
+  double tauPrev_ = 0;
   // the carry predictor (IntegratorParams::carryCap): ‖dⁿ⁻¹‖_∞ and whether cⁿ is valid (false
   // after construction and after a failed attempt); π holds a previous solve (the adjoint warm
   // start)

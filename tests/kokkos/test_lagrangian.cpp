@@ -19,7 +19,9 @@
  *       momentum equation to 1e-8; a viscous two-phase drop with tension, integrated at τ and τ/2
  *       with option S, holds every volume to 1e-12 (each Newton iterate a REPAIR, checked against
  *       a cold rebuild to 1e-9) and its K + Ũ + Q + Q_c error falls ≥ 3× at τ/2 (second order);
- *       a force-free state stays exactly at rest.
+ *       a force-free state stays exactly at rest. The same drop with the 'pressure' kick 1
+ *       (KickConstraint::kPressure, D14.1: one saddle per step, restart steps by option S) at τ,
+ *       τ/2, τ/4: volumes to 1e-12 and the energy error falling ≥ 3.5× per halving.
  *   (G) The light export of an OT evaluation (exportFacetsLight, M7 WO-PERF3 P3.1): nFacets,
  *       facetOffset, nbr, area and conn bit-identical to the full export's, on a walled power
  *       tessellation (SDF sphere solid) with seeds inside the solid (empty cells, whose faces are
@@ -281,7 +283,7 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     fp.density = {1.0, 10.0};
     fp.viscosity = {0.1, 0.3};
     lag::IntegratorParams ip;
-    ip.midpointConstraint = true;
+    ip.kickConstraint = lag::KickConstraint::kMidpoint;
     ip.gaugeEvery = 0;  // the integrator's own order (the gauge is checked in (F))
     double err[2] = {0, 0}, worstV = 0, worstCold = 0;
     int fallbacks = 0;
@@ -317,6 +319,54 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
         "tau/2 = %.2e, %.2e (ratio %.2f)\n",
         worstV, worstCold, fallbacks, err[0], err[1], err[0] / err[1]);
     rc |= (worstV <= 1e-12 && worstCold <= 1e-9 && err[0] / err[1] >= 3.0) ? 0 : 1;
+  }
+
+  // --- the same drop with the 'pressure' kick 1 (D14.1, M7 WO-PERF3 P3.4; restart = option S):
+  // one saddle per step, volumes held, K + Ũ + Q + Q_c second order at three τ (≥ 3.5× per
+  // halving, DESIGN_NOTE §14.7) ---
+  {
+    lag::PotentialSpec<real_t> spec;
+    spec.types = dty;
+    spec.nTypes = 2;
+    spec.tension = toDev({0.0, 1.0, 1.0, 0.0}, "ep.ten");
+    lag::FlowParams fp;
+    fp.density = {1.0, 10.0};
+    fp.viscosity = {0.1, 0.3};
+    lag::IntegratorParams ip;
+    ip.kickConstraint = lag::KickConstraint::kPressure;
+    ip.gaugeEvery = 0;
+    double err[3] = {0, 0, 0}, worstV = 0;
+    int restarts = 0, saddles = 0, steps = 0;
+    for (int run = 0; run < 3; ++run) {
+      DV p2 = toDev(x, "ep.pos2"), w2 = toDev(w0, "ep.w2");
+      MT m2;
+      m2.alloc(N, Larr, real_t(1e-10) * h, real_t(0.25) * h, 4, N);
+      m2.setWeights(w2);
+      m2.rebuild(p2);
+      lag::Integrator<MT> I(m2, p2, w2, Larr, V0, spec, fp, v, ip);
+      const double E0 = I.kinetic() + I.potential().total();
+      const int n = 4 << run;
+      const double tau = 8e-3 / n;
+      for (int s = 0; s < n; ++s) {
+        const auto r = I.step(tau);
+        restarts += r.kickRestart;
+        saddles += 1 + (r.kick1.outer > 0 ? 1 : 0);
+        ++steps;
+        const double E = r.kinetic + r.potential + r.heat + r.constraintWork;
+        err[run] = std::max(err[run], std::fabs(E - E0) / E0);
+        const auto Vh = toHost(Kokkos::subview(m2.vol, std::make_pair(0, N)));
+        for (int i = 0; i < N; ++i)
+          worstV = std::max(worstV, std::fabs(Vh[i] - V0[i]) / V0[i]);
+      }
+    }
+    std::printf(
+        "  (E) drop, pressure kick: max|V-V0|/V0=%.1e restarts=%d saddles/step=%.2f |dE|/E0 at "
+        "tau, tau/2, tau/4 = %.2e, %.2e, %.2e (ratios %.2f, %.2f)\n",
+        worstV, restarts, double(saddles) / steps, err[0], err[1], err[2], err[0] / err[1],
+        err[1] / err[2]);
+    rc |= (worstV <= 1e-12 && restarts == 3 && err[0] / err[1] >= 3.5 && err[1] / err[2] >= 3.5)
+              ? 0
+              : 1;
   }
 
   // --- (F) R0 (DESIGN_NOTE §12.3.1): the Voronoi-cell descent of F = E_σ + volume penalty from
