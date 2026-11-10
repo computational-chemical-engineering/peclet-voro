@@ -1488,7 +1488,7 @@ struct IntegratorParams {
   /// gaugeAlphaMax) and the shift scale s_* of the ŝ-feedback (1 + (ŝ_i/s_*)²)
   double gaugeAlphaMaxDrift = 0.5, gaugeShiftScale = 0.15;
   /// the fallback G‴+W (§14.4.4; M7 WO-PERF3 P3.3b): every gaugeWeightEvery-th step (0: off) the
-  /// drift gauge adds δ^W = M⁻¹J_xᵀS_J⁻¹(β H w), S_J = J_xM⁻¹J_xᵀ, β = min(gaugeWeightBetaMax,
+  /// drift gauge adds δ^W = M⁻¹J_xᵀS_J⁻¹(β H w), S_J = J_xM⁻¹J_xᵀ, β = f_G min(gaugeWeightBetaMax,
   /// 4 c_g τ ε̄), S_J⁻¹ by gaugeWeightIters PCG iterations preconditioned by the S₀ hierarchy
   int gaugeWeightEvery = 4, gaugeWeightIters = 5;
   double gaugeWeightBetaMax = 0.2;
@@ -2655,8 +2655,8 @@ class Integrator {
   /// The gauge's activation into aG_: ε̇_i = ‖sym(G_i v)‖_F, ε̂_i its max over i and i's face
   /// neighbours.
   ///  G″ (§12.3.2 step 1; g3 false): α_i = fG · min(α_max, c_g τ ε̂_i), fG = 1.
-  ///  G‴ (§14.4.4; g3 true, the drift gauge): ε̄ = (Σ_i V_i ε̇_i² / Σ_i V_i)^{1/2} (V_i the held
-  ///  volumes V⁰_i), ŝ_i = max_{f∋i} |s_f|/d_f (the facets to neighbour cells, as shifts()),
+  ///  G‴ (§14.4.4; g3 true, the drift gauge): ε̄ = (Σ_i V_i ε̇_i² / Σ_i V_i)^{1/2} over the
+  ///  non-band cells (no unlike facet; D15.5) (V_i the held volumes V⁰_i), ŝ_i = max_{f∋i} |s_f|/d_f (the facets to neighbour cells, as shifts()),
   ///  α_i = fG · min(α_max, c_g τ max(ε̂_i, ε̄)(1 + (ŝ_i/s_*)²)), α_max = gaugeAlphaMaxDrift,
   ///  s_* = gaugeShiftScale, fG the posterior monitor's f_G.
   /// Returns max_i α_i.
@@ -2703,11 +2703,18 @@ class Integrator {
   double gaugeActivationG3(double tau, double fG) {
     double ebar = 0;
     {
+      // over the non-band cells (D15.5): a cell with an unlike facet does not count, so an
+      // interface's parasitic currents do not set the floor of the whole flow
+      const CellFacets<Real> G = F_;
+      const auto T = spec_.types;
       const LView<Real> e = tmpN_, V = V0_;
       Real sve = 0, sv = 0;
       Kokkos::parallel_reduce(
           "nhvw.gaugeStrainMean", Kokkos::RangePolicy<Exec>(0, N_),
           KOKKOS_LAMBDA(const int i, Real& a, Real& b) {
+            for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f)
+              if (T(G.nbr(f)) != T(i))
+                return;
             a += V(i) * e(i) * e(i);
             b += V(i);
           },
@@ -2853,7 +2860,8 @@ class Integrator {
   }
 
   /// The weight-relaxation displacement of G‴+W (§14.4.4) into dW_, at x^{n+1}, w^{n+1}:
-  /// δ^W = M⁻¹J_xᵀ y, S_J y = β H w, S_J = J_xM⁻¹J_xᵀ (matrix-free), β = min(β_max, 4 c_g τ ε̄),
+  /// δ^W = M⁻¹J_xᵀ y, S_J y = β H w, S_J = J_xM⁻¹J_xᵀ (matrix-free), β = f_G min(β_max, 4 c_g τ ε̄)
+  /// (f_G the posterior monitor's: it throttles all of δ; review of WO-PERF3 F3),
   /// y by gaugeWeightIters PCG iterations from 0, preconditioned by one V-cycle of the saddle's
   /// last S₀ (or L_ρ) hierarchy, no tolerance. That hierarchy is reused across steps (D14.6: up
   /// to amgMaxAge accepted steps, built at an earlier geometry), so with a fixed iteration count
@@ -2863,7 +2871,7 @@ class Integrator {
   /// projection and the margin cap to the sum δ = α r + δ^W.)
   void weightRelaxation(double tau, StepReport& rep) {
     const double beta =
-        std::min(prm_.gaugeWeightBetaMax, 4.0 * prm_.gaugeStrain * tau * gaugeEbar_);
+        gaugeFactor_ * std::min(prm_.gaugeWeightBetaMax, 4.0 * prm_.gaugeStrain * tau * gaugeEbar_);
     rep.gaugeBeta = beta;
     const LView<Real> r = wr_, z = wz_, p = wp_, q = wq_, y = wy_, m = mass_, u = dW_;
     applyWeightHessian(F_, weight_, r);
