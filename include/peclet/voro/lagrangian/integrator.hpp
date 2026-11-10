@@ -1552,6 +1552,16 @@ struct StepReport {
   double gaugeBeta = 0;  ///< β of the weight relaxation W added to δⁿ⁺¹ (0: none this step)
   double gaugeWeightRes = 0;  ///< W's PCG residual ‖r₅‖₂/‖r₀‖₂ (0: none this step)
   double tGauge = 0;
+  /// The step's energy ledger by stage (diagnostics only, M7 WO-EB; the accepted attempt). Per kick
+  /// k: ΔK_k, its heat, Q_c and body-work increments, and its potential-force work
+  /// G_k = (τ/2) ∇Ũᵀ(v_old + v_new)/2 with the ∇Ũ the kick used; the momentum balance gives
+  /// ΔK_k + heat_k + Q_c,k + G_k − W_k = the solve residual's work. The drift: ΔŨ = Ũⁿ⁺¹ − Ũⁿ
+  /// (wrap offset included, before the gauge) and its trapezoidal path integral
+  /// T = ½(∇Ũⁿ + ∇Ũⁿ⁺¹)·dⁿ (dⁿ = τ v^{½} + δⁿ). Then Δ(K + Ũ + Q + Q_c − W) over the step, before
+  /// the gauge, = Σ_k residual_k + (ΔŨ − T) + (T − G₁ − G₂).
+  double ebK1 = 0, ebHeat1 = 0, ebQc1 = 0, ebWork1 = 0, ebGrad1 = 0;
+  double ebK2 = 0, ebHeat2 = 0, ebQc2 = 0, ebWork2 = 0, ebGrad2 = 0;
+  double ebDU = 0, ebTrap = 0;
 };
 
 /// Parameters of the t = 0 relaxation R0 (DESIGN_NOTE §12.3.1; the values of the P4 pilot).
@@ -2349,6 +2359,7 @@ class Integrator {
     const bool carryOk = carryOk_;
     carryOk_ = false;
     const double heat0 = heat_, work0 = work_, qc0 = qc_;  // kick 1's increments undone on a retry
+    const double ebK0 = kineticEnergyOf(vel_), ebU0 = parts_.total() + wrapOffset_;  // WO-EB ledger
     const bool pressure = prm_.kickConstraint == KickConstraint::kPressure && !kickRestart_;
     const bool zetaReady = zetaValid_;  // zn_ = ζ vel_ at F_ (the last kick 2), consumed here
     zetaValid_ = false;
@@ -2410,6 +2421,12 @@ class Integrator {
         rep.kick1 = kick(tau, vel_, vh_, lam1_, pos_);
       }
     }
+    // ledger, kick 1 (∇Ũ is grad_ at x^n in every mode: option S keeps it there)
+    rep.ebK1 = kineticEnergyOf(vh_) - ebK0;
+    rep.ebHeat1 = heat_ - heat0;
+    rep.ebQc1 = qc_ - qc0;
+    rep.ebWork1 = work_ - work0;
+    rep.ebGrad1 = 0.25 * tau * double(detail::dotView(grad_, vel_) + detail::dotView(grad_, vh_));
     Kokkos::fence();
     rep.tKick1 = t.seconds();
     t.reset();
@@ -2604,6 +2621,9 @@ class Integrator {
       rep.gaugeApplied = useDelta ? 1 : 0;
       break;
     }
+    // ledger, drift: ∇Ũⁿ·dⁿ (grad_ is still at x^n; dd_ holds dⁿ when δⁿ was added)
+    const double ebG0 = deltaUsed_ ? double(detail::dotView(grad_, dd_))
+                                   : tau * double(detail::dotView(grad_, vh_));
     // ---- π, ∇Ũ and the hierarchies at x^{n+1} ----
     double tPot = 0;
     if (nextReady)
@@ -2619,6 +2639,10 @@ class Integrator {
     rep.unmatched = match_.dropped;
     rep.unmatchedArea = match_.maxArea;
     accumulateWrap();
+    rep.ebDU = parts_.total() + wrapOffset_ - ebU0;
+    rep.ebTrap = 0.5 * (ebG0 + (deltaUsed_ ? double(detail::dotView(grad_, dd_))
+                                           : tau * double(detail::dotView(grad_, vh_))));
+    const double heat1 = heat_, work1 = work_, qc1 = qc_, ebKh = kineticEnergyOf(vh_);
     // ---- kick 2 at x^{n+1}; constraint work (τ/4) λ₂ᵀ C^{n+1} v^{½} ----
     t.reset();
     if (pressure)  // λⁿ⁻¹ := λⁿ; kick 2 warm-started from λⁿ (D14.7)
@@ -2630,6 +2654,11 @@ class Integrator {
     applyDivergence(F_, vh_, tmpN_);
     qc_ += 0.25 * tau * detail::dotView(lam2_, tmpN_);
     kinetic_ = kineticEnergy();
+    rep.ebK2 = kinetic_ - ebKh;
+    rep.ebHeat2 = heat_ - heat1;
+    rep.ebQc2 = qc_ - qc1;
+    rep.ebWork2 = work_ - work1;
+    rep.ebGrad2 = 0.25 * tau * double(detail::dotView(grad_, vh_) + detail::dotView(grad_, vel_));
     Kokkos::fence();
     rep.tKick2 = t.seconds();
     return true;
@@ -3146,8 +3175,10 @@ class Integrator {
 
   void accumulateWrap() { wrapOffset_ -= wrapJump(); }
 
-  double kineticEnergy() const {
-    const LView<Real> v = vel_, m = mass_;
+  double kineticEnergy() const { return kineticEnergyOf(vel_); }
+
+  double kineticEnergyOf(const LView<Real>& vv) const {
+    const LView<Real> v = vv, m = mass_;
     Real k = 0;
     Kokkos::parallel_reduce(
         "nhvw.K", Kokkos::RangePolicy<Exec>(0, N_),
