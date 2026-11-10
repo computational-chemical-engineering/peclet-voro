@@ -638,6 +638,30 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     volumeTol_ = tol;
     withIntegIfAny([&](auto& I) { I.setVolumeTolerance(volumeTol_); });
   }
+  // M7 WO-G0 (private, diagnostics only): the gauge's per-cell record (Integrator::gaugeRecord)
+  void set_gauge_record(bool on) {
+    gaugeRecord_ = on;
+    withIntegIfAny([&](auto& I) { I.setGaugeRecord(gaugeRecord_); });
+  }
+  nb::dict get_gauge_record() {
+    prepare();
+    nb::dict d;
+    withInteg([&](auto& I) {
+      constexpr std::size_t K = std::decay_t<decltype(I)>::kGaugeRecord;
+      std::vector<real_t> v = peclet::core::toVector(I.gaugeRecord());
+      const std::size_t n = v.size() / K;
+      v = cellsToCaller(t_->perm_, std::move(v), K);
+      if (!t_->perm_.empty() &&
+          t_->perm_.size() == n)  // column 18 is a cell index: to caller order
+        for (std::size_t r = 0; r < n; ++r)
+          if (v[K * r + 18] >= 0)
+            v[K * r + 18] = real_t(t_->perm_[static_cast<std::size_t>(v[K * r + 18])]);
+      d["record"] = peclet::core::python::vector_to_ndarray(std::move(v), {n, K},
+                                                            {static_cast<std::int64_t>(K), 1});
+      d["step"] = I.gaugeRecordStep();
+    });
+    return d;
+  }
   void set_gauge_enabled(bool on) {
     gaugeOn_ = on;
     withIntegIfAny([&](auto& I) { I.setGauge(gaugeOn_ ? gaugeEvery_ : 0, strain_, alphaMax_); });
@@ -1100,6 +1124,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
               I->setGaugeMode(gaugeMode_);
             }
             I->setGaugeFactor(gaugeFactor_);
+            I->setGaugeRecord(gaugeRecord_);
             if (kickTol_ > 0)
               I->setKickTolerance(kickTol_);
             if (volumeTol_ > 0)
@@ -1149,6 +1174,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   real_t strain_ = 3, alphaMax_ = 0.2;
   int gaugeEvery_ = 1;
   bool gaugeOn_ = true;                 // _set_gauge_enabled (every_ kept while off)
+  bool gaugeRecord_ = false;            // _set_gauge_record (M7 WO-G0, diagnostics only)
   real_t kickTol_ = 0, volumeTol_ = 0;  // accuracy knobs; 0: the integrator's defaults
   bool dirty_ = true;
   const real_t* posData_ = nullptr;
@@ -1259,6 +1285,17 @@ void bindLagrangian(nb::module_& m) {
       .def("_set_gauge_enabled", &LagrangianFlow::set_gauge_enabled, nb::arg("on"),
            "M7 WO-PERF3 accuracy knob (provisional, not public API): the gauge on (default) or\n"
            "off, keeping set_gauge's cadence and parameters.")
+      .def("_set_gauge_record", &LagrangianFlow::set_gauge_record, nb::arg("on"),
+           "M7 WO-G0 diagnostics (not public API): record the gauge's per-cell stages at every\n"
+           "gauge application (default off; output only).")
+      .def("_get_gauge_record", &LagrangianFlow::get_gauge_record,
+           "M7 WO-G0 diagnostics (not public API): the last gauge record, {'record': (N, 23),\n"
+           "'step': the integrator's step count then (-1: none)}; columns: 0-2 delta before the\n"
+           "ascent projection, 3-5 after it, 6-8 after the margin cap, 9-11 grad U~, 12 alpha,\n"
+           "13 |b - x|, 14 h, 15 class (0 rest, 1 interface, 2 contact line), 16 margin m_i, 17\n"
+           "d_f and 18 neighbour j at the critical facet, 19 max |s|/d, 20-22 (b - x), delta "
+           "before the\n"
+           "projection and delta used along the critical facet normal (Integrator::gaugeRecord).")
       .def("_set_solver_options", &LagrangianFlow::set_solver_options, nb::arg("schur_assembled"),
            nb::arg("adjoint_tol"), nb::arg("saddle_tol") = 1e-9,
            "M7 WO4a solver trials (not public API): AMG on the assembled C M^-1 C^T as the Schur\n"

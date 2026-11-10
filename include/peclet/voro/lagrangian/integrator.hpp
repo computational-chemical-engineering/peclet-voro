@@ -2128,6 +2128,20 @@ class Integrator {
   }
   const LView<Real>& lambda() const { return lam2_; }
   const LView<Real>& gradient() const { return grad_; }
+  /// M7 WO-G0 (diagnostics only, inert: stores, no arithmetic of the step changes): record the
+  /// gauge's per-cell inputs and stages at every gaugeDisplacement (both gauge modes).
+  void setGaugeRecord(bool on) { gRecOn_ = on; }
+  static constexpr int kGaugeRecord = 23;
+  /// The last gauge record, kGaugeRecord values per cell (this integrator's cell order; empty
+  /// before the first), all at the gauge point (x, w, F_, ∇Ũ before the gauge moves anything):
+  ///  0-2 δ_i before the ascent projection (α_i r_i, plus δ^W), 3-5 after it, 6-8 after the
+  ///  margin cap (the δ_i used); 9-11 g_i = ∇_iŨ; 12 α_i; 13 |b_i − x_i| (the full Lloyd
+  ///  offset); 14 h_i; 15 the class (0 the rest, 1 I, 2 CL); 16 m_i = min_f m_{i,f}; at the
+  ///  critical facet f* = argmin_f m_{i,f}: 17 d_f, 18 the neighbour j; 19 max_f |s_f|/d_f;
+  ///  along f*'s unit connector n̂ (i → j): 20 (b_i − x_i)·n̂, 21 δ_i before the projection ·n̂,
+  ///  22 the δ_i used ·n̂.
+  const LView<Real>& gaugeRecord() const { return gRec_; }
+  long gaugeRecordStep() const { return gRecStep_; }  ///< stepCount at the last record (-1: none)
   const CellFacets<Real>& facets() const { return F_; }
   int numCells() const { return N_; }
 
@@ -2973,6 +2987,11 @@ class Integrator {
     const LView<Real> a = aI_, g = grad_, d = gd_, h = h_, P = pos_, w = weight_, al = aG_,
                       mg = mG_, dW = dW_;
     const Kokkos::View<int*, Mem> cls = cls_, list = iList_;
+    constexpr int K = kGaugeRecord;
+    if (gRecOn_ && gRec_.extent(0) != std::size_t(K) * std::size_t(N_))
+      gRec_ = LView<Real>("nhvw.gaugeRecord", std::size_t(K) * std::size_t(N_));
+    const bool rc = gRecOn_;
+    const LView<Real> rec = gRec_;
     // classes: 0 the rest, 1 I, 2 CL (an unlike and a wall facet)
     Kokkos::parallel_for(
         "nhvw.gaugeSets", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
@@ -3083,6 +3102,9 @@ class Integrator {
             for (int c = 0; c < 3; ++c)
               di[c] += e[c] - en * tn[c];
           }
+          if (rc)
+            for (int c = 0; c < 3; ++c)
+              rec(K * i + c) = di[c];
           // 3. remove the ascent component
           const Real gi[3] = {g(3 * i), g(3 * i + 1), g(3 * i + 2)};
           const Real gd = gi[0] * di[0] + gi[1] * di[1] + gi[2] * di[2];
@@ -3092,6 +3114,9 @@ class Integrator {
               di[c] -= gd / gg * gi[c];
             ++cP;
           }
+          if (rc)
+            for (int c = 0; c < 3; ++c)
+              rec(K * i + 3 + c) = di[c];
           // 4. the margin cap |δ_i| ≤ ½ m_i
           const Real dn = Kokkos::sqrt(di[0] * di[0] + di[1] * di[1] + di[2] * di[2]);
           const Real cap = Real(0.5) * mg(i);
@@ -3105,10 +3130,65 @@ class Integrator {
             d(3 * i + c) = di[c];
         },
         nNormal, nProj, nCap);
+    if (rc)
+      gaugeRecordFill();
     rep.gaugeNormal = nNormal;
     rep.gaugeProjected = nProj;
     rep.gaugeCapped = nCap;
     return n;
+  }
+
+  /// The rest of the gauge record (see gaugeRecord()) at the gauge point, after
+  /// gaugeDisplacement's kernel wrote 0-5: reads only.
+  void gaugeRecordFill() {
+    constexpr int K = kGaugeRecord;
+    const CellFacets<Real> G = F_;
+    const LView<Real> rec = gRec_, g = grad_, d = gd_, h = h_, w = weight_, al = aG_, mg = mG_;
+    const Kokkos::View<int*, Mem> cls = cls_;
+    Kokkos::parallel_for(
+        "nhvw.gaugeRecord", Kokkos::RangePolicy<Exec>(0, N_), KOKKOS_LAMBDA(const int i) {
+          Real b2 = 0, df = 0, mf = Kokkos::Experimental::finite_max_v<Real>, smax = 0;
+          Real bn = 0, pn = 0, un = 0;
+          int jf = -1;
+          for (int c = 0; c < 3; ++c) {
+            rec(K * i + 6 + c) = d(3 * i + c);
+            rec(K * i + 9 + c) = g(3 * i + c);
+            b2 += G.cellCentroid(3 * i + c) * G.cellCentroid(3 * i + c);
+          }
+          for (int f = G.facetOffset(i); f < G.facetOffset(i + 1); ++f) {
+            Real d2 = 0;
+            for (int c = 0; c < 3; ++c)
+              d2 += G.conn(3 * f + c) * G.conn(3 * f + c);
+            const Real dd = Kokkos::sqrt(d2), s = (w(i) - w(G.nbr(f))) / (Real(2) * dd);
+            const Real q = Real(0.5) * dd + s;
+            if (q < mf) {
+              mf = q;
+              df = dd;
+              jf = G.nbr(f);
+              bn = pn = un = 0;
+              for (int c = 0; c < 3; ++c) {
+                const Real nc = G.conn(3 * f + c) / dd;
+                bn += G.cellCentroid(3 * i + c) * nc;
+                pn += rec(K * i + c) * nc;
+                un += d(3 * i + c) * nc;
+              }
+            }
+            smax = Kokkos::fabs(s) / dd > smax ? Kokkos::fabs(s) / dd : smax;
+          }
+          rec(K * i + 12) = al(i);
+          rec(K * i + 13) = Kokkos::sqrt(b2);
+          rec(K * i + 14) = h(i);
+          rec(K * i + 15) = Real(cls(i));
+          rec(K * i + 16) = mg(i);
+          rec(K * i + 17) = df;
+          rec(K * i + 18) = Real(jf);
+          rec(K * i + 19) = smax;
+          rec(K * i + 20) = bn;
+          rec(K * i + 21) = pn;
+          rec(K * i + 22) = un;
+        });
+    Kokkos::fence();
+    gRecStep_ = stepCount_;
   }
 
   /// pos ← pos0_, weight ← w0_ and the engine back to them: a repair, or a cold rebuild when the
@@ -3297,6 +3377,10 @@ class Integrator {
   bool deltaPending_ = false, deltaUsed_ = false;
   double gaugeGradDelta0_ = 0, gaugeFactor_ = 1;
   double gaugeEbar_ = 0;  ///< ε̄ of the last G‴ activation (W's β)
+  // the gauge record (M7 WO-G0; diagnostics only, off by default): see gaugeRecord()
+  bool gRecOn_ = false;
+  LView<Real> gRec_;
+  long gRecStep_ = -1;
   // persistent scratch (M7 WO-PERF3 P3.1, DESIGN_NOTE §14.4.6 item 1): the facet exports (a pool:
   // an export takes a buffer no live CellFacets references — F_, fc_, the option-S copy of x^n, the
   // saddle's copy, a gauge trial), the weight solve / H solves / adjoint, the band publish
