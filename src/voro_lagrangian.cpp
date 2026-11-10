@@ -642,6 +642,22 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     gaugeOn_ = on;
     withIntegIfAny([&](auto& I) { I.setGauge(gaugeOn_ ? gaugeEvery_ : 0, strain_, alphaMax_); });
   }
+  void set_gauge_options(std::optional<bool> clamp, std::optional<bool> directional_cap,
+                         std::optional<bool> compensate) {
+    namespace lg = peclet::voro::lagrangian;
+    if (!gaugeOpts_) {  // start from the integrator's defaults
+      const lg::IntegratorParams p;
+      gaugeOpts_ = {p.gaugeClamp, p.gaugeDirectionalCap, p.gaugeCompensate};
+    }
+    auto& o = *gaugeOpts_;
+    if (clamp)
+      o[0] = *clamp;
+    if (directional_cap)
+      o[1] = *directional_cap;
+    if (compensate)
+      o[2] = *compensate;
+    withIntegIfAny([&](auto& I) { I.setGaugeOptions(o[0], o[1], o[2]); });
+  }
   void set_wall_velocity(std::array<real_t, 3> offset,
                          std::optional<nb::ndarray<real_t, nb::c_contig>> gradient) {
     wallU_ = offset;
@@ -873,6 +889,14 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["eb_psic2"] = col([](const auto& r) { return r.ebPsiC2; });
     d["gauge_disp_max"] = col([](const auto& r) { return r.gaugeDispMax; });
     d["gauge_disp_rms"] = col([](const auto& r) { return r.gaugeDispRms; });
+    // G⁗'s per-step log (M7 WO-G2; StepReport::gaugeRateCells ff.)
+    d["gauge_rate_cells"] = col([](const auto& r) { return r.gaugeRateCells; });
+    d["gauge_state_cells"] = col([](const auto& r) { return r.gaugeStateCells; });
+    d["gauge_critical_cells"] = col([](const auto& r) { return r.gaugeCriticalCells; });
+    d["gauge_cap_min"] = col([](const auto& r) { return r.gaugeCapMin; });
+    d["gauge_ell_min"] = col([](const auto& r) { return r.gaugeEllMin; });
+    d["gauge_shift_max"] = col([](const auto& r) { return r.gaugeShiftMax; });
+    d["gauge_debt"] = col([](const auto& r) { return r.gaugeDebt; });
     withInteg([&](auto& I) {
       d["gauge_potential_total"] = I.gaugePotential();
       d["gauge_kinetic_total"] = I.gaugeKinetic();
@@ -935,6 +959,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       acc_ = {I.heat(),       I.constraintWork(), I.bodyWork(),
               I.wrapOffset(), I.gaugePotential(), I.gaugeKinetic()};
       gaugeFactor_ = I.gaugeFactor();
+      gaugeDebt_ = I.gaugeDebt();
     });
   }
 
@@ -1102,6 +1127,9 @@ class LagrangianFlow : public peclet::core::python::Releasable {
               I->setGaugeMode(gaugeMode_);
             }
             I->setGaugeFactor(gaugeFactor_);
+            I->setGaugeDebt(gaugeDebt_);
+            if (gaugeOpts_)
+              I->setGaugeOptions((*gaugeOpts_)[0], (*gaugeOpts_)[1], (*gaugeOpts_)[2]);
             if (kickTol_ > 0)
               I->setKickTolerance(kickTol_);
             if (volumeTol_ > 0)
@@ -1137,6 +1165,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   bool perfSet_ = false;  // false: the integrator's defaults
   peclet::voro::lagrangian::GaugeMode gaugeMode_ = peclet::voro::lagrangian::GaugeMode::kTrial;
   real_t gaugeFactor_ = 1;  // the drift gauge's f_G, carried across a re-preparation
+  double gaugeDebt_ = 0;    // G⁗'s Ũ debt B, carried across a re-preparation
+  std::optional<std::array<bool, 3>> gaugeOpts_;  // _set_gauge_options (unset: the defaults)
   // Morton relabelling: -1 off, 0 once at the first preparation, K > 0 also every K steps. K = 100
   // (M7 WO-PERF2): a re-sort costs ~0.7 step (N 32768); a frozen order loses 66 % of its locality
   // over 180 Taylor-Green steps (gamma 6), the step time within noise of K = 20 over that run
@@ -1261,6 +1291,11 @@ void bindLagrangian(nb::module_& m) {
       .def("_set_gauge_enabled", &LagrangianFlow::set_gauge_enabled, nb::arg("on"),
            "M7 WO-PERF3 accuracy knob (provisional, not public API): the gauge on (default) or\n"
            "off, keeping set_gauge's cadence and parameters.")
+      .def("_set_gauge_options", &LagrangianFlow::set_gauge_options, nb::arg("clamp") = nb::none(),
+           nb::arg("directional_cap") = nb::none(), nb::arg("compensate") = nb::none(),
+           "M7 WO-G2 knob (provisional, not public API): the gauge G4's state clamp,\n"
+           "directional cap and U-debt compensation on or off (DESIGN_NOTE_GAUGE_INTEGRATOR\n"
+           "§16.5); None keeps the current setting. A pending drift displacement is dropped.")
       .def("_set_solver_options", &LagrangianFlow::set_solver_options, nb::arg("schur_assembled"),
            nb::arg("adjoint_tol"), nb::arg("saddle_tol") = 1e-9,
            "M7 WO4a solver trials (not public API): AMG on the assembled C M^-1 C^T as the Schur\n"
