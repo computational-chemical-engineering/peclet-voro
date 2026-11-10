@@ -371,13 +371,19 @@ struct DissipationPlan {
 /// gathers: G_i = Σ_f (v_j − v_i) ⊗ gOwn_f; per facet S_f = k2_f sym(Ḡ_f P_f + (v_j − v_i)/d ⊗ n̂)
 /// with its direct adjoint −S_f n̂/d and Γ_i = Σ_f ½ S_f P_f, plus W_i v_i; then
 /// Σ_f Γ_j gNbr_f − Γ_i gSum_i.
+/// With `mass` (N) given, the last gather also applies the epilogue of the kicks' operators:
+/// out = M v + a ζ v (+ `add`, 3N, when given) — M7 §14.4.5's vector update fused with the
+/// operator pass (applyMassDissipation).
 template <class Real>
 void applyDissipation(const DissipationPlan<Real>& P, const LView<Real>& v, const LView<Real>& out,
-                      DissipationScratch<Real>& scr) {
+                      DissipationScratch<Real>& scr, Real aZeta = Real(1),
+                      const LView<Real>& mass = LView<Real>(),
+                      const LView<Real>& add = LView<Real>()) {
   using Exec = peclet::core::ExecSpace;
   const CellFacets<Real> G = P.F;
   const LView<Real> gs = scr.gs, gam = scr.gam, go = P.gOwn, gn = P.gNbr, nr = P.nrm, id = P.invD,
                     kk = P.k2, gsum = P.gSum, wb = P.wall;
+  const bool epi = mass.extent(0) > 0, withAdd = add.extent(0) > 0;
   Kokkos::parallel_for(
       "lagrangian.zplan.grad", Kokkos::RangePolicy<Exec>(0, G.nCells), KOKKOS_LAMBDA(const int i) {
         Real g[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -449,10 +455,30 @@ void applyDissipation(const DissipationPlan<Real>& P, const LView<Real>& v, cons
                     gam(9 * j + 3 * a + 2) * g[2];
         }
         const Real s[3] = {gsum(3 * k), gsum(3 * k + 1), gsum(3 * k + 2)};
-        for (int a = 0; a < 3; ++a)
-          out(3 * k + a) += o[a] - (gam(9 * k + 3 * a) * s[0] + gam(9 * k + 3 * a + 1) * s[1] +
-                                    gam(9 * k + 3 * a + 2) * s[2]);
+        if (!epi) {
+          for (int c = 0; c < 3; ++c)
+            out(3 * k + c) += o[c] - (gam(9 * k + 3 * c) * s[0] + gam(9 * k + 3 * c + 1) * s[1] +
+                                      gam(9 * k + 3 * c + 2) * s[2]);
+          return;
+        }
+        for (int c = 0; c < 3; ++c) {
+          const Real z = out(3 * k + c) + o[c] -
+                         (gam(9 * k + 3 * c) * s[0] + gam(9 * k + 3 * c + 1) * s[1] +
+                          gam(9 * k + 3 * c + 2) * s[2]);
+          Real r = mass(k) * v(3 * k + c) + aZeta * z;
+          if (withAdd)
+            r += add(3 * k + c);
+          out(3 * k + c) = r;
+        }
       });
+}
+
+/// out (3N) = M v + a ζ v (+ add) by the plan: the A = M + aζ apply of the kicks in three passes.
+template <class Real>
+void applyMassDissipation(const DissipationPlan<Real>& P, const LView<Real>& mass, Real a,
+                          const LView<Real>& v, const LView<Real>& out,
+                          DissipationScratch<Real>& scr, const LView<Real>& add = LView<Real>()) {
+  applyDissipation(P, v, out, scr, a, mass, add);
 }
 
 }  // namespace peclet::voro::lagrangian

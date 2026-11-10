@@ -520,8 +520,11 @@ struct SaddleParams {
   /// at any contrast); χ = 2 is the whole gradient part of the stress-form ζ (the Cahouet–Chabard
   /// 2μ/V). 0: plain incremental
   double rotational = 1.0;
-  int restart = 40;      ///< A: FGMRES restart length
-  int coupledInner = 2;  ///< A: Jacobi-PCG iterations of Â⁻¹ in the preconditioner (0: Jacobi)
+  int restart = 40;  ///< A: FGMRES restart length
+  /// A: Â⁻¹ of the preconditioner and the guess. 0 (default since M7 WO-PERF3 P3.5, D14.7): Jacobi,
+  /// or one viscous V-cycle per component above amgSwitch; k > 0: k Jacobi-PCG iterations (the
+  /// pre-P3.5 Â, 2)
+  int coupledInner = 0;
 };
 
 struct SaddleStats {
@@ -568,7 +571,6 @@ class SaddleSolver {
       c1_ = LView<Real>("sd.c1", n);
       rStar_ = LView<Real>("sd.rStar", n);
       scr_ = DissipationScratch<Real>(N);
-      kv_.clear();
     }
     detail::hostCopy(rho, rhoH_);
     detail::hostCopy(mu, muH_);
@@ -714,11 +716,19 @@ class SaddleSolver {
           KOKKOS_LAMBDA(const int k) { w(k) = B(k) - w(k); });
     }
     tPart.reset();
+    if (prm.method == SaddleMethod::kCoupled && viscous_ && a > Real(0)) {
+      // A's guess (D14.7, §14.4.5): v₀ = Â⁻¹(b − Cᵀμ₀), not an A-solve (λ₀ = λⁿ by the caller)
+      if (prm.coupledInner > 0)
+        st.inner += solveAcap(a, w_, v, prm.coupledInner);
+      else
+        applyAhat(a, w_, v);
+      Kokkos::fence();
+      st.tInner += tPart.seconds();
+      return solveCoupled(a, halfTau, tolAbs, b, v, lam, prm, st, tAll);
+    }
     st.inner += solveA(a, w_, v, prm);
     Kokkos::fence();
     st.tInner += tPart.seconds();
-    if (prm.method == SaddleMethod::kCoupled && viscous_ && a > Real(0))
-      return solveCoupled(a, halfTau, tolAbs, b, v, lam, prm, st, tAll);
     const bool proj = prm.method == SaddleMethod::kProjection;
     applyDivergence(F_, v, r_);
     if (proj)
@@ -891,9 +901,12 @@ class SaddleSolver {
   }
 
   /// A (SaddleMethod::kCoupled): right-preconditioned restarted FGMRES on K = [A, Cᵀ; C, 0] from
-  /// the predictor (v = A⁻¹(b − Cᵀμ₀), μ₀) the caller computed. Block upper-triangular
+  /// the guess (v₀ = Â⁻¹(b − Cᵀμ₀), μ₀) the caller computed (D14.7). Block upper-triangular
   /// preconditioner P = [Â, Cᵀ; 0, −Ŝ]: z_μ = −Ŝ⁻¹ r_μ, z_v = Â⁻¹(r_v − Cᵀ z_μ), Ŝ⁻¹ = the Schur
-  /// preconditioner (AMG on S₀ + Cahouet–Chabard), Â⁻¹ = prm.coupledInner Jacobi-PCG iterations.
+  /// preconditioner (AMG on S₀ + Cahouet–Chabard), Â⁻¹ = applyAhat (prm.coupledInner 0: Jacobi,
+  /// or one viscous V-cycle per component above amgSwitch; k > 0: k Jacobi-PCG iterations, the
+  /// pre-P3.5 Â). Orthogonalisation by CGS2 (§14.4.5): two fused multi-dot and two fused
+  /// multi-axpy passes per iteration whatever the basis size, the second axpy also giving the norm.
   /// The constraint rows are scaled by ς = ε_m / tolAbs (ε_m = innerTol ‖b‖₂) so that the 2-norm
   /// target ε_m bounds ‖C v‖_∞ ≤ tolAbs; converged on the true residuals ‖C v‖_∞ ≤ tolAbs and
   /// ‖b − A v − Cᵀμ‖₂ ≤ 10 ε_m. The exact saddle solution to that tolerance.
@@ -902,58 +915,68 @@ class SaddleSolver {
                            SaddleStats st, Kokkos::Timer& tAll) {
     using Exec = peclet::core::ExecSpace;
     const int N = F_.nCells, n3 = 3 * N, m = prm.restart;
-    if (static_cast<int>(kv_.size()) != m + 1) {
-      kv_.clear();
-      km_.clear();
-      zv_.clear();
-      zm_.clear();
-      for (int j = 0; j <= m; ++j) {
-        kv_.emplace_back("sd.kv", n3);
-        km_.emplace_back("sd.km", N);
-        if (j < m) {
-          zv_.emplace_back("sd.zv", n3);
-          zm_.emplace_back("sd.zm", N);
-        }
-      }
+    // the bases as columns of two flat Views: velocity (3N per column) and multiplier (N)
+    const std::size_t nv = static_cast<std::size_t>(n3) * (m + 1),
+                      nm = static_cast<std::size_t>(N) * (m + 1);
+    if (KV_.extent(0) != nv || KM_.extent(0) != nm) {
+      KV_ = LView<Real>("sd.KV", nv);
+      KM_ = LView<Real>("sd.KM", nm);
+      ZV_ = LView<Real>("sd.ZV", static_cast<std::size_t>(n3) * m);
+      ZM_ = LView<Real>("sd.ZM", static_cast<std::size_t>(N) * m);
+      hd_ = LView<Real>("sd.hd", static_cast<std::size_t>(m + 1));
     }
+    auto kv = [&](int j) { return LView<Real>(KV_.data() + static_cast<std::size_t>(j) * n3, n3); };
+    auto km = [&](int j) { return LView<Real>(KM_.data() + static_cast<std::size_t>(j) * N, N); };
+    auto zv = [&](int j) { return LView<Real>(ZV_.data() + static_cast<std::size_t>(j) * n3, n3); };
+    auto zm = [&](int j) { return LView<Real>(ZM_.data() + static_cast<std::size_t>(j) * N, N); };
     const LView<Real> M = mass_;
     const Real em = Real(prm.innerTol) * std::sqrt(detail::dotView(b, b));
     if (!(em > Real(0)) || !(tolAbs > Real(0)))
       return finishCoupled(halfTau, v, mu, st, tAll);
     const Real sc = em / tolAbs;
     Kokkos::Timer tPart;
-    // out = K' (xv, xm): (M + aζ) xv + Cᵀxm, ς C xv
+    // out = K' (xv, xm): (M + aζ) xv + Cᵀxm (the ζ-plan's last gather adds M xv and Cᵀxm), ς C xv
     auto applyK = [&](const LView<Real>& xv, const LView<Real>& xm, const LView<Real>& ov,
                       const LView<Real>& om) {
-      applyDissipation(plan_, xv, ov, scr_);
       applyDivergenceT(F_, xm, w_);
-      const LView<Real> W = w_;
-      Kokkos::parallel_for(
-          "sd.Kv", Kokkos::RangePolicy<Exec>(0, n3),
-          KOKKOS_LAMBDA(const int k) { ov(k) = M(k / 3) * xv(k) + a * ov(k) + W(k); });
+      applyMassDissipation(plan_, M, a, xv, ov, scr_, w_);
       applyDivergence(F_, xv, om);
       Kokkos::parallel_for(
           "sd.Km", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) { om(i) *= sc; });
     };
-    // the true residual (b − A v − Cᵀμ, −ς C v) into (kv_[0], km_[0]); returns ‖C v‖_∞, ‖r_v‖₂
-    auto residual = [&](Real& cinf, Real& rv2) {
-      applyK(v, mu, kv_[0], km_[0]);
-      const LView<Real> rv = kv_[0], rm = km_[0];
-      Kokkos::parallel_for(
-          "sd.Rv", Kokkos::RangePolicy<Exec>(0, n3),
-          KOKKOS_LAMBDA(const int k) { rv(k) = b(k) - rv(k); });
-      Kokkos::parallel_for(
-          "sd.Rm", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) { rm(i) = -rm(i); });
-      cinf = detail::maxAbsView(rm) / sc;
-      rv2 = std::sqrt(detail::dotView(rv, rv));
+    // the true residual (b − A v − Cᵀμ, −ς C v) into column 0; returns ‖C v‖_∞, ‖r‖₂ of both
+    // blocks, ‖r_v‖₂
+    auto residual = [&](Real& cinf, Real& beta, Real& rv2) {
+      const LView<Real> rv = kv(0), rm = km(0);
+      applyK(v, mu, rv, rm);
+      Real sv = 0, sm = 0, cm = 0;
+      Kokkos::parallel_reduce(
+          "sd.R", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i, Real& av, Real& am, Real& ac) {
+            for (int c = 0; c < 3; ++c) {
+              const Real r = b(3 * i + c) - rv(3 * i + c);
+              rv(3 * i + c) = r;
+              av += r * r;
+            }
+            const Real q = -rm(i);
+            rm(i) = q;
+            am += q * q;
+            const Real aq = Kokkos::fabs(q);
+            ac = aq > ac ? aq : ac;
+          },
+          sv, sm, Kokkos::Max<Real>(cm));
+      cinf = cm / sc;
+      rv2 = std::sqrt(sv);
+      beta = std::sqrt(sv + sm);
     };
     std::vector<double> H(static_cast<std::size_t>((m + 1) * m)), cs(m), sn(m), g(m + 1), y(m);
+    std::vector<Real> hv(m + 1), h2(m + 1);
     auto Hij = [&](int i, int j) -> double& {
       return H[static_cast<std::size_t>(j * (m + 1) + i)];
     };
-    Real cinf = 0, rv2 = 0;
+    Real cinf = 0, rv2 = 0, beta = 0;
     for (int cycle = 0;; ++cycle) {
-      residual(cinf, rv2);
+      residual(cinf, beta, rv2);
       if (cinf <= tolAbs && rv2 <= Real(10) * em)
         break;
       if (st.outer >= prm.maxOuter) {
@@ -964,9 +987,7 @@ class SaddleSolver {
                       st.outer, double(cinf), double(tolAbs), double(rv2), double(10 * em));
         throw std::runtime_error(msg);
       }
-      const double beta =
-          std::sqrt(detail::dotView(kv_[0], kv_[0]) + detail::dotView(km_[0], km_[0]));
-      scaleBlk(kv_[0], km_[0], Real(1.0 / beta));
+      scaleCol(kv(0), km(0), Real(1.0 / beta));
       std::fill(g.begin(), g.end(), 0.0);
       g[0] = beta;
       int j = 0;
@@ -974,7 +995,7 @@ class SaddleSolver {
         // z_j = P⁻¹ v_j
         tPart.reset();
         {
-          const LView<Real> vm = km_[j], zmj = zm_[j], z = z_, S = s_;
+          const LView<Real> vm = km(j), zmj = zm(j), z = z_, S = s_;
           Kokkos::parallel_for(
               "sd.Pm", Kokkos::RangePolicy<Exec>(0, N),
               KOKKOS_LAMBDA(const int i) { S(i) = vm(i) / sc; });
@@ -983,7 +1004,7 @@ class SaddleSolver {
               "sd.Pz", Kokkos::RangePolicy<Exec>(0, N),
               KOKKOS_LAMBDA(const int i) { zmj(i) = -z(i); });
           applyDivergenceT(F_, zmj, w_);
-          const LView<Real> vv = kv_[j], W = w_, q = q_;
+          const LView<Real> vv = kv(j), W = w_, q = q_;
           Kokkos::parallel_for(
               "sd.Pv", Kokkos::RangePolicy<Exec>(0, n3),
               KOKKOS_LAMBDA(const int k) { q(k) = vv(k) - W(k); });
@@ -991,21 +1012,24 @@ class SaddleSolver {
         Kokkos::fence();
         st.tPrecond += tPart.seconds();
         tPart.reset();
-        st.inner += solveAcap(a, q_, zv_[j], prm.coupledInner);
+        if (prm.coupledInner > 0)
+          st.inner += solveAcap(a, q_, zv(j), prm.coupledInner);
+        else
+          applyAhat(a, q_, zv(j));
         Kokkos::fence();
         st.tInner += tPart.seconds();
-        applyK(zv_[j], zm_[j], kv_[j + 1], km_[j + 1]);
-        for (int i = 0; i <= j; ++i) {  // modified Gram–Schmidt
-          const double hij =
-              detail::dotView(kv_[j + 1], kv_[i]) + detail::dotView(km_[j + 1], km_[i]);
-          Hij(i, j) = hij;
-          axpyBlk(kv_[j + 1], km_[j + 1], kv_[i], km_[i], Real(-hij));
-        }
-        const double hn = std::sqrt(detail::dotView(kv_[j + 1], kv_[j + 1]) +
-                                    detail::dotView(km_[j + 1], km_[j + 1]));
+        applyK(zv(j), zm(j), kv(j + 1), km(j + 1));
+        // CGS2: h = Vᵀw, w −= V h, twice; the second axpy returns ‖w‖²
+        multiDot(j + 1, kv(j + 1), km(j + 1), hv);
+        multiAxpy(j + 1, KV_, KM_, hv, kv(j + 1), km(j + 1), false);
+        multiDot(j + 1, kv(j + 1), km(j + 1), h2);
+        const double hn =
+            std::sqrt(double(multiAxpy(j + 1, KV_, KM_, h2, kv(j + 1), km(j + 1), true)));
+        for (int i = 0; i <= j; ++i)
+          Hij(i, j) = double(hv[i]) + double(h2[i]);
         Hij(j + 1, j) = hn;
         if (hn > 0)
-          scaleBlk(kv_[j + 1], km_[j + 1], Real(1.0 / hn));
+          scaleCol(kv(j + 1), km(j + 1), Real(1.0 / hn));
         for (int i = 0; i < j; ++i) {  // the earlier Givens rotations
           const double t = cs[i] * Hij(i, j) + sn[i] * Hij(i + 1, j);
           Hij(i + 1, j) = -sn[i] * Hij(i, j) + cs[i] * Hij(i + 1, j);
@@ -1024,13 +1048,15 @@ class SaddleSolver {
           break;
         }
       }
-      for (int i = j - 1; i >= 0; --i) {  // y = H⁻¹ g, x += Z y
+      for (int i = j - 1; i >= 0; --i) {  // y = H⁻¹ g
         double t = g[i];
         for (int k = i + 1; k < j; ++k)
           t -= Hij(i, k) * y[k];
         y[i] = t / Hij(i, i);
-        axpyBlk(v, mu, zv_[i], zm_[i], Real(y[i]));
       }
+      for (int i = 0; i < j; ++i)  // x += Z y, one fused pass (multiAxpy subtracts)
+        hv[i] = Real(-y[i]);
+      multiAxpy(j, ZV_, ZM_, hv, v, mu, false);
     }
     return finishCoupled(halfTau, v, mu, st, tAll);
   }
@@ -1049,23 +1075,102 @@ class SaddleSolver {
     return st;
   }
 
-  static void scaleBlk(const LView<Real>& xv, const LView<Real>& xm, Real c) {
+  /// (xv, xm) *= c, one pass
+  void scaleCol(const LView<Real>& xv, const LView<Real>& xm, Real c) const {
     Kokkos::parallel_for(
-        "sd.scv", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, xv.extent(0)),
-        KOKKOS_LAMBDA(const int k) { xv(k) *= c; });
-    Kokkos::parallel_for(
-        "sd.scm", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, xm.extent(0)),
-        KOKKOS_LAMBDA(const int k) { xm(k) *= c; });
+        "sd.scl", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, F_.nCells),
+        KOKKOS_LAMBDA(const int i) {
+          for (int e = 0; e < 3; ++e)
+            xv(3 * i + e) *= c;
+          xm(i) *= c;
+        });
   }
-  /// (xv, xm) += c (yv, ym)
-  static void axpyBlk(const LView<Real>& xv, const LView<Real>& xm, const LView<Real>& yv,
-                      const LView<Real>& ym, Real c) {
-    Kokkos::parallel_for(
-        "sd.axv", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, xv.extent(0)),
-        KOKKOS_LAMBDA(const int k) { xv(k) += c * yv(k); });
-    Kokkos::parallel_for(
-        "sd.axm", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, xm.extent(0)),
-        KOKKOS_LAMBDA(const int k) { xm(k) += c * ym(k); });
+
+  /// The fused multi-dot of CGS2: h_c = ⟨(KV_c, KM_c), (wv, wm)⟩ for the first `cnt` basis
+  /// columns, in one pass over the cells (an array reduction).
+  struct MultiDot {
+    using value_type = Real[];
+    using size_type = int;
+    int value_count, n3, N;
+    LView<Real> V, Mm, wv, wm;
+    KOKKOS_INLINE_FUNCTION void operator()(const int i, value_type acc) const {
+      const Real w0 = wv(3 * i), w1 = wv(3 * i + 1), w2 = wv(3 * i + 2), wq = wm(i);
+      for (int c = 0; c < value_count; ++c) {
+        const std::size_t o = static_cast<std::size_t>(c) * n3 + 3 * i;
+        acc[c] += V(o) * w0 + V(o + 1) * w1 + V(o + 2) * w2 +
+                  Mm(static_cast<std::size_t>(c) * N + i) * wq;
+      }
+    }
+    KOKKOS_INLINE_FUNCTION void init(value_type acc) const {
+      for (int c = 0; c < value_count; ++c)
+        acc[c] = 0;
+    }
+    KOKKOS_INLINE_FUNCTION void join(value_type dst, const value_type src) const {
+      for (int c = 0; c < value_count; ++c)
+        dst[c] += src[c];
+    }
+  };
+  void multiDot(int cnt, const LView<Real>& wv, const LView<Real>& wm, std::vector<Real>& h) {
+    const int N = F_.nCells;
+    MultiDot f{cnt, 3 * N, N, KV_, KM_, wv, wm};
+    Kokkos::View<Real*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged> res(h.data(), cnt);
+    Kokkos::parallel_reduce("sd.mdot", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N), f, res);
+  }
+  /// The fused multi-axpy: (wv, wm) −= Σ_{c < cnt} h_c (V_c, Mm_c) over the columns of the flat
+  /// bases (V, Mm) (3N and N per column), one pass; `norm`: also returns ‖(wv, wm)‖² after it.
+  Real multiAxpy(int cnt, const LView<Real>& V, const LView<Real>& Mm, const std::vector<Real>& h,
+                 const LView<Real>& wv, const LView<Real>& wm, bool norm) {
+    const int N = F_.nCells, n3 = 3 * N;
+    Kokkos::deep_copy(
+        Kokkos::subview(hd_, std::make_pair(0, cnt)),
+        Kokkos::View<const Real*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>(h.data(), cnt));
+    const LView<Real> hd = hd_;
+    Real s = 0;
+    Kokkos::parallel_reduce(
+        "sd.maxpy", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, N),
+        KOKKOS_LAMBDA(const int i, Real& acc) {
+          Real x[4] = {wv(3 * i), wv(3 * i + 1), wv(3 * i + 2), wm(i)};
+          for (int c = 0; c < cnt; ++c) {
+            const Real hc = hd(c);
+            const std::size_t o = static_cast<std::size_t>(c) * n3 + 3 * i;
+            x[0] -= hc * V(o);
+            x[1] -= hc * V(o + 1);
+            x[2] -= hc * V(o + 2);
+            x[3] -= hc * Mm(static_cast<std::size_t>(c) * N + i);
+          }
+          for (int e = 0; e < 3; ++e)
+            wv(3 * i + e) = x[e];
+          wm(i) = x[3];
+          if (norm)
+            acc += x[0] * x[0] + x[1] * x[1] + x[2] * x[2] + x[3] * x[3];
+        },
+        s);
+    return s;
+  }
+
+  /// z = Â⁻¹ r (§14.4.5): Jacobi D_A⁻¹ = (m + a diag ζ)⁻¹, or above prm.amgSwitch (useAmg_, set by
+  /// prepareInner) one V-cycle of the viscous hierarchy per Cartesian component. The
+  /// preconditioner of kick 1's PCG, of the coupled FGMRES and its guess.
+  void applyAhat(Real a, const LView<Real>& r, const LView<Real>& z) {
+    using Exec = peclet::core::ExecSpace;
+    const int N = F_.nCells, n3 = 3 * N;
+    const LView<Real> m = mass_, zd = zdiag_, R = r, Z = z;
+    if (!useAmg_) {
+      Kokkos::parallel_for(
+          "sd.jacobi", Kokkos::RangePolicy<Exec>(0, n3),
+          KOKKOS_LAMBDA(const int k) { Z(k) = R(k) / (m(k / 3) + a * zd(k)); });
+      return;
+    }
+    const LView<Real> c0 = c0_, c1 = c1_;
+    for (int c = 0; c < 3; ++c) {
+      Kokkos::parallel_for(
+          "sd.split", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i) { c0(i) = R(3 * i + c); });
+      visc_.apply(c0, c1);
+      Kokkos::parallel_for(
+          "sd.merge", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i) { Z(3 * i + c) = c1(i); });
+    }
   }
 
   /// x ≈ A⁻¹ rhs by exactly `iters` Jacobi-PCG iterations from x = 0 (0: one Jacobi apply), the
@@ -1126,7 +1231,7 @@ class SaddleSolver {
           KOKKOS_LAMBDA(const int k) { X(k) = B(k) / m(k / 3); });
       return 0;
     }
-    const LView<Real> r = ir_, z = iz_, p = ip_, q = iq_, zd = zdiag_;
+    const LView<Real> r = ir_, z = iz_, p = ip_, q = iq_;
     Real r0 = 0;
     if (fromGuess) {  // r = rhs − (M + a ζ) x; the stop stays relative to ‖rhs‖₂
       r0 = std::sqrt(detail::dotView(B, B));
@@ -1134,10 +1239,10 @@ class SaddleSolver {
         Kokkos::deep_copy(X, Real(0));
         return 0;
       }
-      applyDissipation(plan_, X, q, scr_);
+      applyMassDissipation(plan_, m, a, X, q, scr_);
       Kokkos::parallel_for(
           "sd.r0", Kokkos::RangePolicy<Exec>(0, n3),
-          KOKKOS_LAMBDA(const int k) { r(k) = B(k) - (m(k / 3) * X(k) + a * q(k)); });
+          KOKKOS_LAMBDA(const int k) { r(k) = B(k) - q(k); });
       if (std::sqrt(detail::dotView(r, r)) <= prm.innerTol * r0)
         return 0;
     } else {
@@ -1147,32 +1252,12 @@ class SaddleSolver {
       if (!(r0 > Real(0)))
         return 0;
     }
-    auto precond = [&]() {
-      if (!useAmg_) {
-        Kokkos::parallel_for(
-            "sd.jacobi", Kokkos::RangePolicy<Exec>(0, n3),
-            KOKKOS_LAMBDA(const int k) { z(k) = r(k) / (m(k / 3) + a * zd(k)); });
-        return;
-      }
-      const LView<Real> c0 = c0_, c1 = c1_;
-      for (int c = 0; c < 3; ++c) {
-        Kokkos::parallel_for(
-            "sd.split", Kokkos::RangePolicy<Exec>(0, N),
-            KOKKOS_LAMBDA(const int i) { c0(i) = r(3 * i + c); });
-        visc_.apply(c0, c1);
-        Kokkos::parallel_for(
-            "sd.merge", Kokkos::RangePolicy<Exec>(0, N),
-            KOKKOS_LAMBDA(const int i) { z(3 * i + c) = c1(i); });
-      }
-    };
+    auto precond = [&]() { applyAhat(a, r, z); };
     precond();
     Kokkos::deep_copy(p, z);
     Real rz = detail::dotView(r, z);
     for (int it = 0; it < prm.maxInner; ++it) {
-      applyDissipation(plan_, p, q, scr_);
-      Kokkos::parallel_for(
-          "sd.Ap", Kokkos::RangePolicy<Exec>(0, n3),
-          KOKKOS_LAMBDA(const int k) { q(k) = m(k / 3) * p(k) + a * q(k); });
+      applyMassDissipation(plan_, m, a, p, q, scr_);  // q = (M + aζ) p, one fused apply
       const Real pq = detail::dotView(p, q);
       if (!(pq > Real(0)))
         throw std::runtime_error("voro: NHV-W saddle: inner A-solve broke down");
@@ -1223,7 +1308,7 @@ class SaddleSolver {
   LView<Real> cc_, ccMin_, r_, z_, zOld_, p_, s_, w_, q_, ir_, iz_, ip_, iq_, zdiag_, c0_, c1_,
       rStar_;
   /// A: FGMRES bases, Krylov (V) and preconditioned (Z), velocity (3N) and multiplier (N) blocks
-  std::vector<LView<Real>> kv_, km_, zv_, zm_;
+  LView<Real> KV_, KM_, ZV_, ZM_, hd_;  ///< flat column-major bases (m + 1 / m columns), H column
   DissipationScratch<Real> scr_;
   DissipationPlan<Real> plan_;  ///< the ζ-plan of the last setup (D14.5; viscous only)
 };
