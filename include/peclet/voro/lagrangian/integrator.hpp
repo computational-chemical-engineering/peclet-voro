@@ -1480,22 +1480,23 @@ struct IntegratorParams {
   double carryCap = 0, carryDrop = 1e-2;
   // ---- the gauge G″ (DESIGN_NOTE §12.3.2) ----
   int gaugeEvery = 1;      ///< the gauge after kick 2 every this many steps (0: off)
-  double gaugeStrain = 3;  ///< c_g: α_i = min(α_max, c_g τ ε̂_i)
-  /// α_max: 0.5 since M7 WO-G1 (DESIGN_NOTE_GAUGE_INTEGRATOR D16.6, interim until G2): at 0.2 the
-  /// W3 Taylor-Green run (N 4096, γ 100) saturates α on every step and dies at γ 45 (WO-S3 B)
+  double gaugeStrain = 3;  ///< c_g of the rate (gaugeActivation)
+  /// α_max of both placements (one rule since M7 WO-G2, §16.5; until then 'drift' had its own,
+  /// also 0.5). 0.5 since M7 WO-G1 (DESIGN_NOTE_GAUGE_INTEGRATOR D16.6): at 0.2 the W3
+  /// Taylor-Green run (N 4096, γ 100) saturates α on every step and dies at γ 45 (WO-S3 B)
   double gaugeAlphaMax = 0.5;
   double gaugeSkip = 1e-6;  ///< skip the gauge (state untouched) when max_i α_i < this
   int gaugeRetries = 3;     ///< halvings of all α_i on a rejected trial before the skip
-  /// G‴'s activation (§14.4.4; the drift gauge's since M7 WO-PERF3 P3.3b): α_max of G‴ (G″ keeps
-  /// gaugeAlphaMax) and the shift scale s_* of the ŝ-feedback (1 + (ŝ_i/s_*)²)
-  double gaugeAlphaMaxDrift = 0.5, gaugeShiftScale = 0.15;
+  /// the shift scale s_* of the rate's ŝ-feedback (1 + (ŝ_i/s_*)²) (G‴, §14.4.4; both placements
+  /// since M7 WO-G2)
+  double gaugeShiftScale = 0.15;
   /// the fallback G‴+W (§14.4.4; M7 WO-PERF3 P3.3b): every gaugeWeightEvery-th step (0: off) the
   /// drift gauge adds δ^W = M⁻¹J_xᵀS_J⁻¹(β H w), S_J = J_xM⁻¹J_xᵀ, β = min(gaugeWeightBetaMax,
   /// 4 c_g τ ε̄), S_J⁻¹ by gaugeWeightIters PCG iterations preconditioned by the S₀ hierarchy
   int gaugeWeightEvery = 4, gaugeWeightIters = 5;
   double gaugeWeightBetaMax = 0.2;
   /// kTrial: G″'s trial after kick 2; kDrift: δ in the next drift with G‴'s activation (P3.3b:
-  /// the ε̄ floor, the ŝ-feedback, α_max = gaugeAlphaMaxDrift; no trial OT, no M-projection;
+  /// the ε̄ floor, the ŝ-feedback (the trial's too since M7 WO-G2); no trial OT, no M-projection;
   /// the posterior monitor's f_G was removed by D16.3, M7 WO-G2)
   GaugeMode gaugeMode = GaugeMode::kTrial;
   double kernelLength = 2;         ///< ℓ/h_i of the interface-normal kernel (§2.2; support 3ℓ)
@@ -2750,17 +2751,16 @@ class Integrator {
   /// §16.5 steps 1-4): ε̇_i = ‖sym(G_i v)‖_F, ε̂_i its max over i and i's face neighbours,
   /// ŝ_i = max_{f∋i} |s_f|/d_f (the facets to neighbour cells, as shifts()) and the margins m_i
   /// (cellMargins into mG_, which gaugeDisplacement reuses).
-  ///  rate, G″ (§12.3.2 step 1; g3 false): α_rate,i = min(α_max, c_g τ ε̂_i).
-  ///  rate, G‴ (§14.4.4; g3 true, the drift gauge): ε̄ = (Σ_i V_i ε̇_i² / Σ_i V_i)^{1/2} over the
-  ///  non-band cells (no unlike facet; D15.5) (V_i the held volumes V⁰_i), α_rate,i =
-  ///  min(α_max, c_g τ max(ε̂_i, ε̄)(1 + (ŝ_i/s_*)²)), α_max = gaugeAlphaMaxDrift, s_* =
-  ///  gaugeShiftScale.
+  ///  rate (G‴'s, §14.4.4, for both placements since M7 WO-G2; §16.5 step 1): ε̄ = (Σ_i V_i ε̇_i²
+  ///  / Σ_i V_i)^{1/2} over the non-band cells (no unlike facet; D15.5) (V_i the held volumes
+  ///  V⁰_i), α_rate,i = min(α_max, c_g τ max(ε̂_i, ε̄)(1 + (ŝ_i/s_*)²)), s_* = gaugeShiftScale.
+  ///  (Until M7 WO-G2 the trial used G″'s α_i = min(α_max, c_g τ ε̂_i).)
   ///  state (G⁗, IntegratorParams::gaugeClamp): q_i = clip(max((ŝ_i − s_on)/(s_full − s_on),
   ///  (ℓ_on − ℓ_i)/ℓ_on), 0, 1), ℓ_i = m_i/h_i, q̂_i = its max over i and i's face neighbours;
   ///  α_i = min(α_max, α_rate,i + α_q q̂_i). Clamp off: q̂ ≡ 0 and α_i = α_rate,i.
   /// Logs max_i α_i, min_i ℓ_i, max_i ŝ_i and the rate / state / critical cell counts into `rep`.
   /// Returns max_i α_rate,i (the activity gate, §16.5 step 2).
-  double gaugeActivation(double tau, bool g3, StepReport& rep) {
+  double gaugeActivation(double tau, StepReport& rep) {
     cellGradient(F_, vel_, gs_);
     {
       const LView<Real> gs = gs_, e = tmpN_;
@@ -2776,7 +2776,7 @@ class Integrator {
           });
     }
     double ebar = 0;
-    if (g3) {
+    {
       // over the non-band cells (D15.5): a cell with an unlike facet does not count, so an
       // interface's parasitic currents do not set the floor of the whole flow
       const CellFacets<Real> G = F_;
@@ -2836,9 +2836,8 @@ class Integrator {
     // ---- α_i ----
     const CellFacets<Real> G = F_;
     const LView<Real> e = tmpN_, al = aG_, sv = sG_, qv = qG_, qh = qhG_;
-    const Real cg = prm_.gaugeStrain * tau,
-               amax = g3 ? prm_.gaugeAlphaMaxDrift : prm_.gaugeAlphaMax, eb = ebar,
-               sinv = g3 ? Real(1) / prm_.gaugeShiftScale : Real(0), gq = prm_.gaugeStateGain,
+    const Real cg = prm_.gaugeStrain * tau, amax = prm_.gaugeAlphaMax, eb = ebar,
+               sinv = Real(1) / prm_.gaugeShiftScale, gq = prm_.gaugeStateGain,
                qc = prm_.gaugeCritical;
     Real arm = 0, am = 0;
     int nRate = 0, nState = 0, nCrit = 0;
@@ -2882,8 +2881,8 @@ class Integrator {
   /// The trial gauge (DESIGN_NOTE §12.3.2, G⁗'s trial placement §16.5 step 10) at x = x^{n+1},
   /// v = v^{n+1}: strain-activated, Lloyd-only, first-order Ũ-neutral (D15.5); accepted on
   /// validity only (D16.3), its ΔŨ_G goes to the debt B.
-  ///  1. activation  ε̇_i = ‖sym(G_i v)‖_F (the linear-exact cell gradient), ε̂_i = its max over i
-  ///                 and i's face neighbours, α_i = min(α_max, c_g τ ε̂_i). max_i α_i < gaugeSkip:
+  ///  1. activation  gaugeActivation (the rate from ε̇_i = ‖sym(G_i v)‖_F, the linear-exact cell
+  ///                 gradient, as the drift's since M7 WO-G2). max_i α_rate,i < gaugeSkip:
   ///                 nothing else runs, the state is untouched bit for bit.
   ///  2. raw move    sets: CL = cells with both a wall facet and an unlike facet; I = the other
   ///                 cells with an unlike facet; the rest. CL: r_i = 0. I: r_i = P_i(b_i − x_i),
@@ -2908,7 +2907,7 @@ class Integrator {
     dU = dK = 0;
     // ---- 1. activation ----
     {
-      const double am = gaugeActivation(tau, false, rep);
+      const double am = gaugeActivation(tau, rep);
       if (!(am >= prm_.gaugeSkip)) {
         rep.tGauge = t.seconds();
         return;
@@ -3040,14 +3039,14 @@ class Integrator {
   }
 
   /// The drift gauge (GaugeMode::kDrift; DESIGN_NOTE §14.4.4, M7 WO-PERF3 P3.3a/b) at
-  /// x = x^{n+1}, v = v^{n+1}: G‴'s α_i (gaugeActivation, g3); max_i α_i < gaugeSkip:
+  /// x = x^{n+1}, v = v^{n+1}: G‴'s α_i (gaugeActivation); max_i α_i < gaugeSkip:
   /// δⁿ⁺¹ ≡ 0 and the next drift adds nothing (bit for bit). Otherwise δⁿ⁺¹ = G″ steps 2-4
   /// (gaugeDisplacement: the raw Lloyd move, the per-cell ∇Ũ projection with ∇Ũⁿ⁺¹, the
   /// ½-margin cap from this state's export) into gd_, pending for the next drift. No trial OT, no
   /// Ũ trial, no M-projection: the state is untouched here.
   void driftGauge(double tau, StepReport& rep) {
     Kokkos::Timer t;
-    const double am = gaugeActivation(tau, true, rep);
+    const double am = gaugeActivation(tau, rep);
     if (am >= prm_.gaugeSkip) {
       const bool withW = prm_.gaugeWeightEvery > 0 && stepCount_ % prm_.gaugeWeightEvery == 0;
       if (withW)
