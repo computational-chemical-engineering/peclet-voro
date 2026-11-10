@@ -2187,6 +2187,9 @@ class Integrator {
   }
   const LView<Real>& lambda() const { return lam2_; }
   const LView<Real>& gradient() const { return grad_; }
+  /// G⁗'s q̂_i of the last gauge activation (§16.5 step 3; 0 before the first, and with the clamp
+  /// off): a cell with q̂_i ≥ IntegratorParams::gaugeCritical was not ∇Ũ-projected
+  const LView<Real>& gaugeStateMax() const { return qhG_; }
   const CellFacets<Real>& facets() const { return F_; }
   int numCells() const { return N_; }
 

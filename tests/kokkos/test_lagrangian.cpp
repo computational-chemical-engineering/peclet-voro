@@ -581,8 +581,10 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
   }
 
   // --- (F) R0 (DESIGN_NOTE §12.3.1): the Voronoi-cell descent of F = E_σ + volume penalty from
-  // the Voronoi volumes, then OT; F and the area fall, the closing checks hold. Then the gauge:
-  // one gauged inviscid step keeps Σ m v and C v = 0, with ΔŨ, ΔK ≤ 0 ---
+  // the Voronoi volumes, then OT; F and the area fall, the closing checks hold. Then the gauge G⁗
+  // (DESIGN_NOTE_GAUGE_INTEGRATOR §16.5, §16.9 G-gauge 8): one gauged inviscid step keeps Σ m v
+  // and C v = 0; the trial is accepted on validity alone (ΔŨ_G > 0 allowed, D16.3) with ΔK_G ≤ 0;
+  // the drift gauge's δ does no first-order work on the non-critical cells ---
   {
     lag::PotentialSpec<real_t> spec;
     spec.types = dty;
@@ -621,7 +623,7 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     m2.setWeights(w2);
     m2.rebuild(p2);
     lag::Integrator<MT> I(m2, p2, w2, Larr, V0, spec, fp, v);
-    I.setGaugeMode(lag::GaugeMode::kTrial);  // G″'s trial (the default; set so the test says so)
+    I.setGaugeMode(lag::GaugeMode::kTrial);  // the trial placement (the default; set so it says so)
     double P0[3] = {0, 0, 0}, P1[3] = {0, 0, 0}, pn = 0, maxV = 0;
     for (int i = 0; i < N; ++i) {
       const double m = (ty[i] ? 10.0 : 1.0) * V0[i];
@@ -646,12 +648,17 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     for (double c : toHost(cv))
       cmax = std::max(cmax, std::fabs(c) * tau / maxV);
     std::printf(
-        "  (F) gauge G'' step: max alpha=%.2e |I|=%d projected=%d capped=%d tries=%d accepted=%d "
-        "dU=%.2e dK=%.2e min margin/h=%.3f |dP|/sum m|v|=%.1e |Cv| tau/maxV=%.1e\n",
-        r.gaugeAlphaMax, r.gaugeInterface, r.gaugeProjected, r.gaugeCapped, r.gaugeTries,
-        int(r.gaugeAccepted), r.gaugePotential, r.gaugeKinetic, r.minMargin / h, dP, cmax);
-    rc |= (r.gaugeTries > 0 && r.gaugeAccepted && r.gaugePotential <= 0 && r.gaugeKinetic <= 0 &&
-           r.minMargin > 0 && dP <= 1e-12 && cmax <= 10 * lag::SaddleParams{}.tol)
+        "  (F) trial gauge step: max alpha=%.2e |I|=%d projected=%d capped=%d state=%d critical=%d "
+        "tries=%d accepted=%d dU_G=%.2e (> 0 accepted) dK_G=%.2e B=%.2e min margin/h=%.3f "
+        "|dP|/sum m|v|=%.1e |Cv| tau/maxV=%.1e\n",
+        r.gaugeAlphaMax, r.gaugeInterface, r.gaugeProjected, r.gaugeCapped, r.gaugeStateCells,
+        r.gaugeCriticalCells, r.gaugeTries, int(r.gaugeAccepted), r.gaugePotential, r.gaugeKinetic,
+        r.gaugeDebt, r.minMargin / h, dP, cmax);
+    // the 12³ drop's trial raises Ũ (ΔŨ_G 5.1e-6; WO-S3: G″'s guard rejected it 4/4 times):
+    // accepted
+    rc |= (r.gaugeTries == 1 && r.gaugeAccepted && (N != 1728 || r.gaugePotential > 0) &&
+           r.gaugeDebt == r.gaugePotential && r.gaugeKinetic <= 0 && r.minMargin > 0 &&
+           dP <= 1e-12 && cmax <= 10 * lag::SaddleParams{}.tol)
               ? 0
               : 1;
     // the drift gauge (GaugeMode::kDrift, §14.4.4) from the same state: step 1 computes δ¹ (no
@@ -664,6 +671,33 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
     lag::Integrator<MT> J(m4, p4, w4, Larr, V0, spec, fp, v);
     J.setGaugeMode(lag::GaugeMode::kDrift);
     const auto r1 = J.step(tau);
+    // §16.9 G-gauge 8: |Σ g·δ| ≤ 10⁻¹² Σ |g||δ| over the non-critical cells, at the gauge point of
+    // step 1 (∇Ũ there, δ¹ pending; B = 0, so no compensation)
+    double sgd = 0, sabs = 0;
+    int nGD = 0;
+    {
+      const auto d1 = J.pendingDelta();
+      const auto g1 = toHost(J.gradient());
+      const auto q1 = toHost(J.gaugeStateMax());
+      for (int i = 0; i < N && !d1.empty(); ++i) {
+        if (q1[i] >= lag::IntegratorParams{}.gaugeCritical)
+          continue;
+        double gd = 0, gn = 0, dn = 0;
+        for (int a = 0; a < 3; ++a) {
+          gd += double(g1[3 * i + a]) * double(d1[3 * i + a]);
+          gn += double(g1[3 * i + a]) * double(g1[3 * i + a]);
+          dn += double(d1[3 * i + a]) * double(d1[3 * i + a]);
+        }
+        sgd += gd;
+        sabs += std::sqrt(gn * dn);
+        nGD += gn > 0 && dn > 0 ? 1 : 0;
+      }
+    }
+    std::printf(
+        "  (F) drift gauge, step 1: |sum g.delta| = %.2e <= 1e-12 sum |g||delta| = %.2e (%d cells "
+        "with g, delta != 0; critical %d)\n",
+        std::fabs(sgd), 1e-12 * sabs, nGD, r1.gaugeCriticalCells);
+    rc |= (nGD > 0 && std::fabs(sgd) <= 1e-12 * sabs) ? 0 : 1;
     const auto r2 = J.step(tau);
     const auto vj = toHost(J.velocity());
     double Pj[3] = {0, 0, 0};
@@ -706,11 +740,22 @@ int checkIntegrator(const std::vector<real_t>& x, const std::vector<real_t>& w0,
       vmax = std::max(vmax, r.maxSpeed);
       tries += r.gaugeTries;
     }
+    // the drift placement at rest: δ ≡ 0, nothing pending (§16.5 step 2's activity gate)
+    lag::Integrator<MT> Jr(mt, pos, w, Larr, V0, spec, fp, std::vector<real_t>(3 * N, 0.0));
+    Jr.setGaugeMode(lag::GaugeMode::kDrift);
+    int active = 0, applied = 0;
+    for (int s = 0; s < 3; ++s) {
+      const auto r = Jr.step(0.01);
+      vmax = std::max(vmax, r.maxSpeed);
+      active += r.gaugeActive;
+      applied += r.gaugeApplied;
+    }
+    const bool pending = !Jr.pendingDelta().empty();
     std::printf(
         "  (E) rest: max|v| after 3 steps = %.1e (exactly 0 expected), gauge trials %d (0: "
-        "skipped at rest)\n",
-        vmax, tries);
-    rc |= (vmax == 0.0 && tries == 0) ? 0 : 1;
+        "skipped at rest); drift: active cells %d, applied %d, pending %d (all 0)\n",
+        vmax, tries, active, applied, int(pending));
+    rc |= (vmax == 0.0 && tries == 0 && active == 0 && applied == 0 && !pending) ? 0 : 1;
   }
   return rc;
 }
