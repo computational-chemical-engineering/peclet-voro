@@ -714,6 +714,10 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     auto v = fromInteg([](auto& I) { return I.pi(); });
     return toNumpy1(cellsToCaller(t_->perm_, std::move(v), 1));
   }
+  nb::ndarray<nb::numpy, real_t> get_static_pressure() {
+    auto v = fromInteg([](auto& I) { return I.staticPressure(); });
+    return toNumpy1(cellsToCaller(t_->perm_, std::move(v), 1));
+  }
   nb::ndarray<nb::numpy, real_t> get_lambda() {
     auto v = fromInteg([](auto& I) { return I.lambda(); });
     return toNumpy1(cellsToCaller(t_->perm_, std::move(v), 1));
@@ -1272,6 +1276,10 @@ void bindLagrangian(nb::module_& m) {
       .def("get_positions", &LagrangianFlow::get_positions)
       .def("get_pi", &LagrangianFlow::get_pi,
            "pi of the current state (H pi = -dU/dw; the Laplace and hydrostatic part).")
+      .def("_get_static_pressure", &LagrangianFlow::get_static_pressure,
+           "The static pressure P = -(pi - e) of the current state (M7 D15.2): the total volume\n"
+           "derivative dU~/dV0, e = dU/dV0 at fixed (x, w) (E_M only; facet energies: P = -pi).\n"
+           "Up to a uniform constant; the reported pressure is P - lambda. Output only.")
       .def("get_lambda", &LagrangianFlow::get_lambda,
            "lambda of the last kick 2 (the dynamic pressure multiplier); p = -(pi + lambda).")
       .def("get_potential_gradient", &LagrangianFlow::get_potential_gradient,

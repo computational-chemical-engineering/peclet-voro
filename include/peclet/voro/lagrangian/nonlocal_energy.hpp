@@ -37,6 +37,15 @@
  * exportCellFacets(..., withHigherMoments = true)); everything is expanded about the facet
  * centroid. Wall facets are fixed and contribute nothing.
  *
+ * The static pressure (M7 DESIGN_NOTE_VARIANTS D15.2) needs e_i = ∂E_M/∂V⁰_i at fixed x and w:
+ * the pair prefactor and the moment normalisation (c = M/V⁰ and Σ = Q/V⁰ − c cᵀ, so that
+ * ∂c_i/∂V⁰_i = −c_i/V⁰_i and ∂Σ_i/∂V⁰_i = (c_i c_iᵀ − Σ_i)/V⁰_i):
+ *
+ *   e_i = [ Σ_k e_ik − g_i·c_i + G_i:(c_i c_iᵀ − Σ_i) ] / V⁰_i.
+ *
+ * The widths' dependence on V⁰ (through h = (Σ V⁰/N)^{1/3}) adds the same term to every cell and
+ * is left out: a uniform shift of the pressure. e_i = 0 on a cell without pairs.
+ *
  * Pairs: unlike (i, k) (σ_{t_i t_k} ≠ 0) with |x_i − x_k|_min-image < r_c + 2h, kept if |z| < r_c,
  * found through a uniform bin grid (cell size ≥ r_c + 2h, contents sorted by index so that every
  * sum is in a fixed order: the result is deterministic). The min image is unique while
@@ -173,14 +182,16 @@ NonlocalParams<Real> nonlocalParams(const std::vector<double>& V0, double kappaS
 /// E_M on the facets `F` (exported WITH higher moments) at positions `pos` (3N): `types` (N) index
 /// `tension` (nTypes², σ_ab), `V0` (N) the reference volumes, `prm` the widths, `L` the periodic
 /// box. ADDS ∂E_M/∂x into `gradX` (3N) and ∂E_M/∂w into `gradW` (N; may be empty: Voronoi) and
-/// returns E_M. `nPairs` (optional) receives the number of kept (ordered) pairs.
+/// returns E_M. `nPairs` (optional) receives the number of kept (ordered) pairs; `dEdV0` (optional,
+/// N) receives e_i = ∂E_M/∂V⁰_i at fixed (x, w) (see the file comment; output only — every other
+/// result is unchanged by it).
 template <class Real>
 Real nonlocalInterfaceEnergy(const CellFacets<Real>& F, const LView<Real>& pos,
                              const Kokkos::View<int*, peclet::core::MemSpace>& types,
                              const LView<Real>& tension, int nTypes, const LView<Real>& V0,
                              const NonlocalParams<Real>& prm, const Real L[3],
                              const LView<Real>& gradX, const LView<Real>& gradW,
-                             long* nPairs = nullptr) {
+                             long* nPairs = nullptr, const LView<Real>& dEdV0 = LView<Real>()) {
   using Mem = peclet::core::MemSpace;
   using Exec = peclet::core::ExecSpace;
   if (!F.hasHigherMoments())
@@ -197,9 +208,9 @@ Real nonlocalInterfaceEnergy(const CellFacets<Real>& F, const LView<Real>& pos,
           " exceeds half the box (" + std::to_string(0.5 * L[a]) +
           "); the minimum image would not be unique (more cells needed)");
   const CellFacets<Real> G = F;
-  const LView<Real> P = pos, ten = tension, v0 = V0, gx = gradX, gw = gradW;
+  const LView<Real> P = pos, ten = tension, v0 = V0, gx = gradX, gw = gradW, ev = dEdV0;
   const Kokkos::View<int*, Mem> T = types;
-  const bool hasW = gradW.extent(0) > 0;
+  const bool hasW = gradW.extent(0) > 0, hasE = dEdV0.extent(0) > 0;
   const int nT = nTypes;
   const Kokkos::Array<Real, 3> L3 = {L[0], L[1], L[2]};
   const std::size_t sN = static_cast<std::size_t>(N);
@@ -373,6 +384,14 @@ Real nonlocalInterfaceEnergy(const CellFacets<Real>& F, const LView<Real>& pos,
         }
         for (int e = 0; e < 6; ++e)
           bv(6 * i + e) = Gs[e] * iv0;
+        if (hasE) {  // e_i = [E_i − g·c + G:(c cᵀ − Σ)] / V⁰ (Σ, G symmetric: off-diagonals twice)
+          const Real D[6] = {ci[0] * ci[0] - sg(6 * i),     ci[0] * ci[1] - sg(6 * i + 1),
+                             ci[0] * ci[2] - sg(6 * i + 2), ci[1] * ci[1] - sg(6 * i + 3),
+                             ci[1] * ci[2] - sg(6 * i + 4), ci[2] * ci[2] - sg(6 * i + 5)};
+          const Real GD = Gs[0] * D[0] + Gs[3] * D[3] + Gs[5] * D[5] +
+                          Real(2) * (Gs[1] * D[1] + Gs[2] * D[2] + Gs[4] * D[4]);
+          ev(i) = (Ei - (g[0] * ci[0] + g[1] * ci[1] + g[2] * ci[2]) + GD) * iv0;
+        }
       },
       E, np);
   if (nPairs)

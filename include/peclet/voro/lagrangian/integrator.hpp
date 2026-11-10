@@ -2082,6 +2082,33 @@ class Integrator {
   const PotentialParts& potential() const { return parts_; }
   const LView<Real>& velocity() const { return vel_; }
   const LView<Real>& pi() const { return pi_; }
+  /// The static pressure P = −(π − e) of the current state (M7 DESIGN_NOTE_VARIANTS D15.2), the
+  /// total derivative dŨ/dV⁰_i: e_i = ∂U/∂V⁰_i at fixed (x, w), which only E_M has (facet energies:
+  /// P = −π exactly). Output only: E_M is re-evaluated on a fresh export with the higher moments
+  /// into scratch, and no state, counter or cache of the integrator is touched. The reported
+  /// pressure is P − λ.
+  LView<Real> staticPressure() {
+    LView<Real> out("nhvw.staticP", N_);
+    const LView<Real> p = pi_;
+    const bool nonlocal =
+        spec_.tension.extent(0) > 0 && spec_.interfaceEnergy == InterfaceEnergy::Nonlocal;
+    if (!nonlocal) {
+      Kokkos::parallel_for(
+          "nhvw.staticP", Kokkos::RangePolicy<Exec>(0, N_),
+          KOKKOS_LAMBDA(const int i) { out(i) = -p(i); });
+      return out;
+    }
+    CellFacets<Real> Fm = exportCellFacets<Real, Power>(mt_->store, pos_, weight_, N_, L_,
+                                                        mt_->wall, mt_->xRef, mt_->vol, true);
+    matchFacets(Fm);
+    LView<Real> gx("nhvw.staticP.gx", 3 * static_cast<std::size_t>(N_)), e("nhvw.staticP.e", N_);
+    nonlocalInterfaceEnergy(Fm, pos_, spec_.types, spec_.tension, spec_.nTypes, spec_.refVolume,
+                            spec_.nonlocal, L_, gx, LView<Real>(), nullptr, e);
+    Kokkos::parallel_for(
+        "nhvw.staticP", Kokkos::RangePolicy<Exec>(0, N_),
+        KOKKOS_LAMBDA(const int i) { out(i) = -(p(i) - e(i)); });
+    return out;
+  }
   const LView<Real>& lambda() const { return lam2_; }
   const LView<Real>& gradient() const { return grad_; }
   const CellFacets<Real>& facets() const { return F_; }
