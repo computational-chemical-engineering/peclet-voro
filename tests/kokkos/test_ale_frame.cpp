@@ -549,6 +549,23 @@ int partG(const Scene& s, int frames, bool full, bool timeIt, const std::string&
         checksBad += ok ? 0 : 1;
         std::printf("CHECK enforce=%d k=%d %s nbrDiffCells=%ld missedNbr=%ld maxVolRel=%.3e\n",
                     enforce, k, ok ? "PASS" : "FAIL", diffCells, d.missedNbr, d.maxVolRelErr);
+        {
+          // localization: the cold build's volume sum, buried (emptied) power seeds, empty cells
+          const auto cst = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cold.status);
+          auto cv = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cold.view.cellVolume);
+          auto mv = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mt.vol);
+          double cs = 0;
+          int buried = 0, emptyCold = 0, emptyRep = 0;
+          for (int i = 0; i < s.N; ++i) {
+            cs += cv(i);
+            buried += (cst(i) & peclet::voro::kBuried) ? 1 : 0;
+            emptyCold += cv(i) <= 0 ? 1 : 0;
+            emptyRep += mv(i) <= 0 ? 1 : 0;
+          }
+          std::printf(
+              "PROBE enforce=%d k=%d coldSumVrel=%.3e buried=%d emptyCold=%d emptyRepair=%d\n",
+              enforce, k, std::abs(cs - boxVol) / boxVol, buried, emptyCold, emptyRep);
+        }
         if (!ok)
           explainDiff<true>(enforce ? "enforce=1" : "enforce=0", k, mt, cold.view, f.mesh, s.N,
                             s.h);
@@ -594,6 +611,7 @@ int main(int argc, char** argv) {
     int n = 16;
     std::string part = "all", opts = "auto", dumpDir;
     bool full = false, timeIt = false;
+    int gframes = 0;
     for (int a = 1; a < argc; ++a) {
       const std::string s = argv[a];
       if (s == "--part" && a + 1 < argc)
@@ -602,6 +620,8 @@ int main(int argc, char** argv) {
         opts = argv[++a];
       else if (s == "--dump" && a + 1 < argc)
         dumpDir = argv[++a];
+      else if (s == "--gframes" && a + 1 < argc)
+        gframes = std::atoi(argv[++a]);
       else if (s == "--full")
         full = true;
       else if (s == "--time")
@@ -624,7 +644,7 @@ int main(int argc, char** argv) {
       if (all || part == "f")
         rc |= partF(s);
       if (all || part == "g")
-        rc |= partG(s, full ? 500 : 50, full, timeIt, dumpDir);
+        rc |= partG(s, gframes > 0 ? gframes : (full ? 500 : 50), full, timeIt, dumpDir);
     }
     if (all || part == "b")
       rc |= partB(n, full ? 100 : 20, optsB, dumpDir);
