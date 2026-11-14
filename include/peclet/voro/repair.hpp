@@ -828,8 +828,11 @@ struct MovingTessellation {
       certifyList<false>(pos, list, n, outMask);
   }
 
-  /// One moving-point update step. Updates store + vol in place from `pos`.
-  RepairStats step(const Kokkos::View<Real*, Mem>& pos) {
+  /// One moving-point update step. Updates store + vol in place from `pos`. `forced[0..nForced)`
+  /// (cell slots in [0, nProc)) are rebuilt in Pass 1 whatever their certificate says; with no
+  /// list the step is the unforced one, bitwise.
+  RepairStats step(const Kokkos::View<Real*, Mem>& pos,
+                   const Kokkos::View<const int*, Mem>& forced = {}, int nForced = 0) {
     RepairStats s;
     auto grid = buildTessGrid<Real, Weighted>(pos, weight, N, L, sw, densityCount,
                                               Kokkos::View<long*, Mem>());
@@ -844,6 +847,13 @@ struct MovingTessellation {
     // Pass 1: detect (flagged ∪ partners ∪ skin-movers). flagged-commons + their violated-plane
     // partners (the gaining cells) fully cover an isolated flip — no Pass 2 for flips.
     certifyDispatch(pos, mask, mover, /*useSkin=*/true);
+    if (nForced > 0) {
+      auto Msk = mask;
+      auto F = forced;
+      Kokkos::parallel_for(
+          "mt.forced", Kokkos::RangePolicy<Exec>(0, nForced),
+          KOKKOS_LAMBDA(int j) { Msk(F(j)) = 1; });
+    }
     int n1 = compact(mask, wl1);
     s.pass1Raw = n1;
     if constexpr (kHasSdf)
