@@ -37,6 +37,9 @@
  * Usage: test_ale_frame [n=16] [--part a|b|f|g|all] [--full] [--opts auto|default|frame|det]
  *                       [--dump DIR] [--time]
  * Without --full (the ctest): (a) 20 frames, (b) 20 steps, (g) variant Z, 60 frames.
+ *        test_ale_frame --export DIR [--mesh M1|M2|M3|all]
+ * writes the meshes of WO-S0.3 (gate G0.3, tools/ale_gates/G0_3.sh) for the Python reference
+ * tests/python/ale_reference.py and runs nothing else (exportMesh() documents the files).
  */
 #include <algorithm>
 #include <chrono>
@@ -683,6 +686,188 @@ int partG(const Scene& s, int frames, bool full, bool timeIt, const std::string&
   return rc;
 }
 
+// ---- --export DIR: the meshes of WO-S0.3 for the Python reference (tests/python/ale_reference.py)
+// -------------------------------------------------------------------------------------------------
+/// makeScene with the seed jitter as a parameter: same generator, same draw order.
+Scene exportScene(int n, Real jitter) {
+  Scene s;
+  s.n = n;
+  s.N = n * n * n;
+  s.h = Real(1) / n;
+  std::mt19937 rng(20261114u);
+  std::uniform_real_distribution<Real> U(-1, 1), U01(0, 1);
+  std::vector<Real> x(3 * s.N), w(s.N);
+  for (int k = 0; k < n; ++k)
+    for (int j = 0; j < n; ++j)
+      for (int i = 0; i < n; ++i) {
+        const int c = i + n * (j + n * k);
+        const int ijk[3] = {i, j, k};
+        for (int d = 0; d < 3; ++d) {
+          Real p = (ijk[d] + Real(0.5)) * s.h + jitter * s.h * U(rng);
+          p = p < 0 ? p + 1 : (p >= 1 ? p - 1 : p);
+          x[3 * c + d] = p;
+        }
+      }
+  for (auto& v : w)
+    v = Real(0.15) * s.h * s.h * U01(rng);
+  s.pos = up(x, "pos");
+  s.weight = up(w, "w");
+  return s;
+}
+
+/// A cold frame (fresh power engine, initialFrame with the default frame options).
+Frame coldFrame(const Scene& s, const DV& pos, const DV& weight) {
+  Engine<true> mt;
+  allocEngine<true>(mt, s.N, s.L, s.h, weight);
+  return ale::initialFrame(mt, pos, weight, s.L, FrameOpts{});
+}
+
+/// Per cell, the sorted list of the other cells of its faces.
+std::vector<std::vector<int>> neighbourSets(const FM& m) {
+  const auto A = down(m.faceCellA), B = down(m.faceCellB), off = down(m.cellFaceOffset),
+             cf = down(m.cellFace);
+  std::vector<std::vector<int>> out(m.nCells);
+  for (int i = 0; i < m.nCells; ++i) {
+    for (int k = off[i]; k < off[i + 1]; ++k)
+      out[i].push_back(A[cf[k]] == i ? B[cf[k]] : A[cf[k]]);
+    std::sort(out[i].begin(), out[i].end());
+  }
+  return out;
+}
+
+template <class T>
+void writeVec(const std::string& path, const std::vector<T>& v) {
+  const char* p = reinterpret_cast<const char*>(v.data());
+  writeFile(path, std::vector<char>(p, p + v.size() * sizeof(T)));
+}
+
+/// One mesh of the export: `<dir>/<name>.<array>` raw little-endian arrays, the FaceMesh arrays
+/// of meshArrays() plus pos (3N), weight (N), L (3); and for each rate variant v the swept-flux
+/// data xdot_v (3N), wdot_v (N), tau_v (8: τ0, τ0/2, τ0/4, τ0/8, then the same negated),
+/// vol_v (8N, τ-major: cell volumes of the cold rebuild at pos + τ ẋ, weight + τ ẇ) and
+/// changed_v (8N int32: 1 where the cell's neighbour set differs from the base mesh).
+/// ẋ_i = (sin 2πy, sin 2πz, sin 2πx)(x_i) + frac · r_i, r_i uniform in [−1, 1]³ (fixed seed);
+/// τ0 max_i |ẋ_i| = 0.02 h; ẇ_i = (0.02 h²/τ0) s_i, s_i uniform in [−1, 1], on weighted meshes.
+/// Variants: full (frac 0.2, ẇ on the weighted mesh), smooth (frac 0), nowdot (frac 0.2, ẇ = 0;
+/// weighted mesh only). Returns nonzero if a frame has an empty cell.
+int exportMesh(const std::string& dir, const std::string& name, const Scene& s, bool weighted) {
+  const int N = s.N;
+  const DV w = weighted ? s.weight : DV("w0", N);  // zero weights: the power engine (§11 A4)
+  const Frame base = coldFrame(s, s.pos, w);
+  if (base.numEmptyCells > 0) {
+    std::printf("EXPORT %s FAIL base numEmptyCells=%d\n", name.c_str(), base.numEmptyCells);
+    return 1;
+  }
+  dumpArrays(dir, name, meshArrays(base.mesh));
+  const std::vector<Real> x = down(s.pos), wv = down(w);
+  writeVec(dir + "/" + name + ".pos", x);
+  writeVec(dir + "/" + name + ".weight", wv);
+  writeVec(dir + "/" + name + ".L", std::vector<Real>(s.L, s.L + 3));
+  const auto nb0 = neighbourSets(base.mesh);
+
+  std::mt19937 rng(20261115u);
+  std::uniform_real_distribution<Real> U(-1, 1);
+  const Real k = Real(6.283185307179586) / s.L[0];
+  std::vector<Real> smooth(3 * N), rnd(3 * N), wr(N);
+  for (int i = 0; i < N; ++i) {
+    smooth[3 * i] = std::sin(k * x[3 * i + 1]);
+    smooth[3 * i + 1] = std::sin(k * x[3 * i + 2]);
+    smooth[3 * i + 2] = std::sin(k * x[3 * i]);
+  }
+  for (auto& v : rnd)
+    v = U(rng);
+  for (auto& v : wr)
+    v = U(rng);
+
+  struct Variant {
+    const char* tag;
+    Real frac;
+    bool wdot;
+  };
+  std::vector<Variant> variants = {{"full", Real(0.2), weighted}, {"smooth", Real(0), weighted}};
+  if (weighted)
+    variants.push_back({"nowdot", Real(0.2), false});
+  int rc = 0;
+  for (const Variant& v : variants) {
+    std::vector<Real> xdot(3 * N), wdot(N, Real(0));
+    Real vmax = 0;
+    for (int i = 0; i < N; ++i) {
+      for (int d = 0; d < 3; ++d)
+        xdot[3 * i + d] = smooth[3 * i + d] + v.frac * rnd[3 * i + d];
+      vmax =
+          std::max(vmax, std::sqrt(xdot[3 * i] * xdot[3 * i] + xdot[3 * i + 1] * xdot[3 * i + 1] +
+                                   xdot[3 * i + 2] * xdot[3 * i + 2]));
+    }
+    const Real tau0 = Real(0.02) * s.h / vmax;
+    if (v.wdot)
+      for (int i = 0; i < N; ++i)
+        wdot[i] = Real(0.02) * s.h * s.h / tau0 * wr[i];
+    std::vector<Real> taus(8), vols(8 * (std::size_t)N);
+    std::vector<int> changed(8 * (std::size_t)N, 0);
+    int nChanged[8], empty = 0;
+    for (int t = 0; t < 8; ++t) {
+      taus[t] = (t < 4 ? 1 : -1) * tau0 / Real(1 << (t % 4));
+      std::vector<Real> xt(3 * N), wt(N);
+      for (int i = 0; i < 3 * N; ++i) {
+        Real p = x[i] + taus[t] * xdot[i];
+        if (p >= s.L[0])
+          p -= s.L[0];
+        if (p < 0) {
+          p += s.L[0];
+          if (p >= s.L[0])
+            p = 0;
+        }
+        xt[i] = p;
+      }
+      for (int i = 0; i < N; ++i)
+        wt[i] = wv[i] + taus[t] * wdot[i];
+      const Frame f = coldFrame(s, up(xt, "pos_t"), up(wt, "w_t"));
+      empty += f.numEmptyCells;
+      const auto vol = down(f.mesh.cellVolume);
+      const auto nb = neighbourSets(f.mesh);
+      nChanged[t] = 0;
+      for (int i = 0; i < N; ++i) {
+        vols[(std::size_t)t * N + i] = vol[i];
+        changed[(std::size_t)t * N + i] = nb[i] != nb0[i] ? 1 : 0;
+        nChanged[t] += changed[(std::size_t)t * N + i];
+      }
+    }
+    const std::string p = dir + "/" + name + ".";
+    writeVec(p + "xdot_" + v.tag, xdot);
+    writeVec(p + "wdot_" + v.tag, wdot);
+    writeVec(p + "tau_" + v.tag, taus);
+    writeVec(p + "vol_" + v.tag, vols);
+    writeVec(p + "changed_" + v.tag, changed);
+    std::printf(
+        "EXPORT %s %s variant=%s tau0=%.6e emptyCells=%d changedCells(+tau)=%d,%d,%d,%d "
+        "(-tau)=%d,%d,%d,%d\n",
+        name.c_str(), empty ? "FAIL" : "ok", v.tag, (double)tau0, empty, nChanged[0], nChanged[1],
+        nChanged[2], nChanged[3], nChanged[4], nChanged[5], nChanged[6], nChanged[7]);
+    rc |= empty ? 1 : 0;
+  }
+  std::printf(
+      "EXPORT %s N=%d nFaces=%d nInterior=%d nDropped=%d numNegativeHeight=%d "
+      "maxNormalConnSine=%.3e\n",
+      name.c_str(), N, base.mesh.nFaces, base.mesh.nInterior, base.mesh.nDropped,
+      base.mesh.generatorDiag.numNegativeHeight, (double)base.mesh.generatorDiag.maxNormalConnSine);
+  return rc;
+}
+
+/// The three meshes of gate G0.3, 8³ cells in the periodic unit box: M1 seeds jittered ±0.3h,
+/// weights zero; M2 the same seeds with weights uniform in [0, 0.15h²]; M3 jitter ±0.45h,
+/// weights zero.
+int exportMeshes(const std::string& dir, const std::string& which) {
+  int rc = 0;
+  const Scene s3 = exportScene(8, Real(0.3)), s45 = exportScene(8, Real(0.45));
+  if (which == "all" || which == "M1")
+    rc |= exportMesh(dir, "M1", s3, false);
+  if (which == "all" || which == "M2")
+    rc |= exportMesh(dir, "M2", s3, true);
+  if (which == "all" || which == "M3")
+    rc |= exportMesh(dir, "M3", s45, false);
+  return rc;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -691,7 +876,7 @@ int main(int argc, char** argv) {
   int rc = 0;
   {
     int n = 16;
-    std::string part = "all", opts = "auto", dumpDir;
+    std::string part = "all", opts = "auto", dumpDir, exportDir, exportWhich = "all";
     bool full = false, timeIt = false;
     int gframes = 0;
     for (int a = 1; a < argc; ++a) {
@@ -702,6 +887,10 @@ int main(int argc, char** argv) {
         opts = argv[++a];
       else if (s == "--dump" && a + 1 < argc)
         dumpDir = argv[++a];
+      else if (s == "--export" && a + 1 < argc)
+        exportDir = argv[++a];
+      else if (s == "--mesh" && a + 1 < argc)
+        exportWhich = argv[++a];
       else if (s == "--gframes" && a + 1 < argc)
         gframes = std::atoi(argv[++a]);
       else if (s == "--full")
@@ -710,6 +899,12 @@ int main(int argc, char** argv) {
         timeIt = true;
       else if (s.rfind("--", 0) != 0)
         n = std::atoi(s.c_str());
+    }
+    if (!exportDir.empty()) {
+      rc = exportMeshes(exportDir, exportWhich);
+      std::printf("=== S0.3 export %s ===\n", rc ? "FAIL" : "PASS");
+      Kokkos::finalize();
+      return rc;
     }
     const bool serial = Exec().concurrency() == 1;
     const std::string optsA = opts == "auto" ? (serial ? "default" : "frame") : opts;
