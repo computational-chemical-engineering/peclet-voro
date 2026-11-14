@@ -803,3 +803,38 @@ s.set_dt(dt); s.step(n=1); s.max_stable_dt()
 - New names are added to NAMING.md §2 when they land.
 
 **Register entries to add when each lands** (`docs/decisions/voro.md`): D1, D3, D4, D5, D6, D8 (with the flow rejection of numeric-only refresh cited as consistent), D9, D11, D12, D13, D14, and the V0 interpretation. Each records its rejected alternative from §0.
+
+---
+
+## 11. Amendments after phase A (orchestrator; each one replaces the text it names)
+
+### A1 (2026-11-14): centroids and the weighted publish (replaces §1.5 item 4 and the rows of §6.2 for `convex_cell.hpp`, `reeval_tessellation.hpp`, `tessellation_view.hpp` under S0.1)
+Facts found when stage 0 started:
+- `ConvexCell::reevalGeometry` re-evaluates planes and vertices only. The facet geometry is `facetGeometry`
+  (area vector, dV, connector), called in the fill kernel of `reevalPublish`.
+- For every plane policy the published connector is r = 2·foot and dV = (|A|/|r|)(r − c), with c the facet
+  centroid relative to the owner seed. So the builder's present formula c = conn − dV·|conn|/|A| gives the
+  centroid for power cells as well. What is Voronoi-only in today's builder is d = |conn| and h_B = d − h_A.
+- On main `reevalPublish` was Voronoi-only. Commit 0516c00 (cherry-pick of 4219392, session `voronoi`) adds the
+  plane policy and `weight`; the Voronoi default is byte-identical.
+
+Decision: S0.1 changes `fv/mesh.hpp` only.
+- The facet centroid stays the builder's formula. It is verified against a host polygon oracle on power meshes
+  (gate G0.1 (b)). Only if that fails by more than 1e-13 h does S0.1 publish centroids from
+  `facetMomentsPerVertex` through `reevalPublish`; that step needs a new decision first.
+- The cell centroid is computed in the builder from the faces of the cell (pyramids with apex at the seed:
+  V_i (c_i − x_i) = ¼ Σ_f h_f A_f (c_f − x_i), h_f = n_f·(c_f − x_i) with n_f outward of cell i) and stored in an
+  optional `FaceMesh::cellCentroid` (3·N, relative to the seed), allocated only on request.
+- No view is added to `TessellationView`; nothing is added to `convex_cell.hpp` or `reeval_tessellation.hpp`.
+
+### A2 (2026-11-14): inputs of the builder options
+`FaceMeshOptions` carries: `deterministicOrder` (bool), `gidOrientation` (bool), `generatorGeometry` (bool),
+`cellCentroids` (bool), `gid` (int64 per combined cell; empty means the slot index), `pos` (3 per combined cell),
+`weight` (per combined cell; empty means zero), `L[3]` (box, for the minimum image). With `generatorGeometry` the
+face normal points from A to B (n_f·conn > 0), and `faceCentroid` is relative to the seed of A whichever cell
+emitted the face (emitter B: c − x_A = (c − x_B) + conn). All options off reproduces today's arrays bitwise.
+
+### A3 (2026-11-14): multigrid (replaces "no core change" of §6.4 for S0.4 only; to be written out with that work order)
+Core branch `amgpar` has a deterministic device setup (MIS-2 aggregation). S0.4 is re-scoped to a phase-respecting
+option on it (strength graph cut at unlike faces) after agreement with session `voronoi`; no second multigrid in
+`fv/` unless that fails.
