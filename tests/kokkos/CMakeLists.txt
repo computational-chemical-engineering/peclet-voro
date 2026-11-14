@@ -66,6 +66,11 @@ if(PECLET_VORO_BUILD_TESTS)
   # manufactured-solution convergence on a jittered lattice.
   add_voro_kokkos_test(test_fv_operators)
 
+  # Moving-grid stage 0 (docs/ale_design.md WO-S0.1): the opt-in FaceMeshOptions — deterministic
+  # order == default builder, generator geometry and centroids against a polygon oracle (16³ here;
+  # tools/ale_gates/G0_1.sh runs gate G0.1 at 32³).
+  add_voro_kokkos_test(test_ale_facemesh)
+
   # Track B, rung B1: centroidal (Lloyd) relaxation of a random grid — skewness / volume spread /
   # Poisson residual consistency all drop (grid quality is solver quality).
   add_voro_kokkos_test(test_grid_relax)
