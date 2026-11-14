@@ -883,3 +883,19 @@ one thread are bitwise identical in every FaceMesh array of the last frame; betw
 two runs at 8 threads the cell volumes of the last frame agree to 1e-9 relative (reported: the largest difference
 and the first frame at which the rebuilt counts differ). §3.8 is amended accordingly: bitwise reproducibility of a
 moving mesh is claimed at one thread only, until the repair engine is made independent of the schedule.
+
+### A6 (2026-11-14): what gate G0.3 found; the pressure force of a linear pressure; hydrostatic balance
+First run of G0.3 (61541cf; `build_s0/gate_logs/G0_3.py.log`): R0–R4 PASS (matrix against matrix-free 2e-15,
+adjointness 1e-15, linear exactness 3e-14, ζ(rigid) 6e-16, L_ρ symmetric with null space the constants at density
+ratio 1 and 1000). Two criteria of the brief were wrong:
+- **R5** asked C′ᵀp = −V_i ∇p per cell for a linear p. That is not a property of these operators: the per-cell
+  defect is 0.3–0.6 on jittered meshes, in 3D and in the 2D oracle alike (`G0_3.r5_2d.log`), while the sum over
+  cells is exact (1e-15). C′ᵀ is the adjoint of a consistent divergence and is consistent only in the weak sense.
+  R5′: the sum over cells equals −(Σ V_i) ∇p to 1e-13; the per-cell defect is reported.
+- **R6** compared τDΦᵐ of the old mesh with V(τ) − V(0), which is second order by construction (ratios 4.0).
+  R6′: against the central difference (V(τ) − V(−τ))/2, i.e. the swept flux of the mid mesh as the step uses it:
+  ratios 6.8–8.2 on the three meshes, third order.
+**Consequence for stage 1:** a body force ρ V_i g applied per cell cannot be balanced by a pressure through C′ᵀ on
+an irregular mesh, so gate G1.1-h as written (C′ᵀp + ρVg = 0 to 1e-13) cannot pass. The body force has to enter
+through the same adjoint map as the pressure (a face quantity under I_Fᵀ), inside the predictor. Its form with a
+density jump is an open formulation question (F13 in the campaign state); G1.1-h is rewritten when that is settled.
