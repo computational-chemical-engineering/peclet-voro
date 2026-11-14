@@ -7,6 +7,7 @@
 #   L2  tessellator               tessellator.hpp subset_gather.hpp pore_cells.hpp
 #   L3  repair / reeval           repair.hpp reeval_tessellation.hpp dynamic_validate.hpp
 #   L4  consumers                 physics/ energy/ fv/ mpi/ mesh_optimizer.hpp ot_optimizer.hpp
+#   L5  moving grid               ale/ (frame pipeline on repair + fv/; docs/ale_design.md)
 #
 # A header may include headers of its own layer or of a LOWER layer, never a higher one — so the
 # cutter (L0-L2) stays reusable without the physics, and a physics header can never be pulled
@@ -25,6 +26,7 @@ layer_of() {  # header path relative to INC_DIR -> layer number
     tessellator.hpp|subset_gather.hpp|pore_cells.hpp) echo 2 ;;
     repair.hpp|reeval_tessellation.hpp|dynamic_validate.hpp) echo 3 ;;
     physics/*|energy/*|fv/*|mpi/*|mesh_optimizer.hpp|ot_optimizer.hpp) echo 4 ;;
+    ale/*) echo 5 ;;
     *) echo "" ;;
   esac
 }
