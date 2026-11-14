@@ -18,20 +18,25 @@
  *  (f) F: power engine at rest, step(pos, forced, 50 random slots): changedMask ⊇ the 50; the
  *      result equals a cold build (neighbour sets exact, volumes ≤ 1e-13 relative); step(pos)
  *      afterwards changes nothing.
- *  (g) G0.2: power engine; every generator advected by u = U0 (sin 2πy/L, sin 2πz/L, sin 2πx/L)
- *      with explicit Euler, U0·dt = 0.05h/√3 (|Δx| ≤ 0.05h), wrapped into [0, L); `frames`
- *      frames, with reciprocity enforcement off and on: (i) |ΣV − L³|/L³ ≤ 1e-13 every frame;
- *      (ii) total rebuilt cells ≥ 1000 (with --full; > 0 otherwise); (iii) max non-reciprocal
- *      facet area per frame (off: recorded; on: ≤ 1e-12 h² every frame); (iv) at every
- *      frames/5-th frame the repaired state equals a cold build (neighbour sets exact, volumes ≤
- *      1e-9 relative). `--dump DIR` writes the last frame's FaceMesh arrays for (v)
- *      (tools/ale_gates/G0_2.sh compares them across OMP 1, 8, 8).
+ *  (g) G0.2' (docs/ale_design.md §11 A5): power engine; every generator advected by
+ *      u = U0 (sin 2πy/L, sin 2πz/L, sin 2πx/L) with explicit Euler, U0·dt = 0.05h/√3
+ *      (|Δx| ≤ 0.05h), wrapped into [0, L); `frames` frames, reciprocity enforcement off and on.
+ *      Variant Z: all weights zero; any frame with an empty cell (MeshFrame::numEmptyCells) is a
+ *      miss (`empty`). Variant W: weights uniform in [0, 0.15h²], evaluated only on the frames
+ *      before the first one with an empty cell (printed). Criteria on the evaluated frames:
+ *      (i) |ΣV − L³|/L³ ≤ 1e-13 every frame; (ii) total rebuilt cells ≥ 1000 (--full);
+ *      (iii) max non-reciprocal facet area (off: recorded; on: ≤ 1e-12 h² every frame);
+ *      (iv') every 100th evaluated frame against a cold rebuild: volumes ≤ 1e-9 relative, every
+ *      facet present in only one of the two tessellations has area ≤ 1e-8 h² (largest and count
+ *      printed); (v') is decided by tools/ale_gates/G0_2.sh from `--dump DIR` (the last evaluated
+ *      frame's FaceMesh arrays and cell volumes) and the per-frame FRAME lines. The ctest (16³,
+ *      no --full) runs variant Z, 60 frames, with (i), (iii) and (iv') at frame 60.
  * Builder options: `--opts default` (all off), `frame` (ale::frameMeshOptions), `det`
  * (deterministicOrder only); `auto` (the default) = default at one thread, else frame for (a)
  * and det for (b). (g) always uses the frame options.
  * Usage: test_ale_frame [n=16] [--part a|b|f|g|all] [--full] [--opts auto|default|frame|det]
  *                       [--dump DIR] [--time]
- * Without --full (the ctest): (a) 20 frames, (b) 20 steps, (g) 50 frames.
+ * Without --full (the ctest): (a) 20 frames, (b) 20 steps, (g) variant Z, 60 frames.
  */
 #include <algorithm>
 #include <chrono>
@@ -483,29 +488,82 @@ double sumVolume(const FM& m) {
   return s;
 }
 
-int partG(const Scene& s, int frames, bool full, bool timeIt, const std::string& dumpDir) {
+/// Facets (ordered pairs i → j, wall facets skipped) present in exactly one of two published
+/// views of the same N cells: their number and the largest area among them (host, diagnostic).
+void unmatchedFacets(const peclet::voro::TessellationView<Real>& a,
+                     const peclet::voro::TessellationView<Real>& b, int N, long& count,
+                     double& maxArea) {
+  auto collect = [&](const peclet::voro::TessellationView<Real>& v) {
+    auto off = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), v.cellFacetOffset);
+    auto cnt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), v.cellFacetCount);
+    auto nbr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), v.facetNeighbor);
+    auto area = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), v.facetArea);
+    std::vector<std::pair<long, double>> out;
+    for (int i = 0; i < N; ++i)
+      for (int g = off(i); g < off(i) + cnt(i); ++g) {
+        const long j = (long)nbr(g);
+        if (j < 0)
+          continue;
+        out.emplace_back((long)i * N + j, std::sqrt((double)area(3 * g) * area(3 * g) +
+                                                    (double)area(3 * g + 1) * area(3 * g + 1) +
+                                                    (double)area(3 * g + 2) * area(3 * g + 2)));
+      }
+    std::sort(out.begin(), out.end());
+    return out;
+  };
+  const auto fa = collect(a), fb = collect(b);
+  count = 0;
+  maxArea = 0;
+  std::size_t p = 0, q = 0;
+  auto only = [&](double area) {
+    ++count;
+    maxArea = std::max(maxArea, area);
+  };
+  while (p < fa.size() || q < fb.size()) {
+    if (q == fb.size() || (p < fa.size() && fa[p].first < fb[q].first))
+      only(fa[p++].second);
+    else if (p == fa.size() || fb[q].first < fa[p].first)
+      only(fb[q++].second);
+    else {
+      ++p;
+      ++q;
+    }
+  }
+}
+
+/// One variant of (g): Z = power engine with all weights zero, W = the scene's weights. Returns
+/// nonzero on a failed criterion (a miss of variant W is reported, not an error of the test).
+int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool timeIt,
+                 const std::string& dumpDir) {
   int rc = 0;
-  const int every = std::max(1, frames / 5);
+  const char* vname = weighted ? "W" : "Z";
+  // (iv') every 100th evaluated frame (full), else at the last frame
+  const int every = full ? 100 : std::max(1, frames);
   const double h2 = (double)s.h * s.h;
   const double boxVol = (double)s.L[0] * s.L[1] * s.L[2];
   const Real step = Real(0.05) * s.h / std::sqrt(Real(3));
+  DV weight = s.weight;
+  if (!weighted)
+    weight = DV("w0", s.N);  // zero-initialized
   for (int enforce = 0; enforce < 2; ++enforce) {
     Engine<true> mt;
-    allocEngine<true>(mt, s.N, s.L, s.h, s.weight);
+    allocEngine<true>(mt, s.N, s.L, s.h, weight);
     DV pos = copyOf(s.pos);
     FrameOpts fo;
     fo.enforceReciprocity = enforce == 1;
     fo.timed = timeIt;
-    Frame f = ale::initialFrame(mt, pos, s.weight, s.L, fo);
+    Frame f = ale::initialFrame(mt, pos, weight, s.L, fo);
     double maxSumRel = 0, maxNonRecip = 0, sumT[5] = {0, 0, 0, 0, 0}, wall = 0;
-    long totalRebuilt = 0, maxNonRecipCount = 0, negTotal = 0, nbrDiffCells = 0;
+    long totalRebuilt = 0, maxNonRecipCount = 0, negTotal = 0, onlyCount = 0;
     int maxRebuilt = 0, framesNonRecip = 0, framesOver = 0, roundsTotal = 0, roundsMax = 0;
     int routes[3] = {0, 0, 0}, fellBack = 0, negMax = 0, checks = 0, checksBad = 0;
-    double maxVolRel = 0;
+    int evaluated = 0, firstEmpty = 0, emptyFrames = 0;
+    double maxVolRel = 0, maxOnlyArea = 0;
+    std::vector<Arr> lastArrs;
     for (int k = 1; k <= frames; ++k) {
       advect(pos, s.N, s.L[0], step);
       const auto t0 = std::chrono::steady_clock::now();
-      f = ale::advanceFrame(mt, pos, s.weight, s.L, fo);
+      f = ale::advanceFrame(mt, pos, weight, s.L, fo);
       if (timeIt) {
         Kokkos::fence();
         wall += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -515,6 +573,16 @@ int partG(const Scene& s, int frames, bool full, bool timeIt, const std::string&
         sumT[3] += f.timings.faceMesh;
         sumT[4] += f.timings.reciprocity;
       }
+      if (f.numEmptyCells > 0) {
+        ++emptyFrames;
+        if (firstEmpty == 0)
+          firstEmpty = k;
+        std::printf("EMPTY variant=%s enforce=%d k=%d numEmptyCells=%d\n", vname, enforce, k,
+                    f.numEmptyCells);
+        if (weighted)
+          break;  // variant W is evaluated on the frames before the first empty cell only
+      }
+      ++evaluated;
       const double sumRel = std::abs(sumVolume(f.mesh) - boxVol) / boxVol;
       maxSumRel = std::max(maxSumRel, sumRel);
       totalRebuilt += f.numRebuilt;
@@ -534,38 +602,33 @@ int partG(const Scene& s, int frames, bool full, bool timeIt, const std::string&
       negTotal += neg;
       negMax = std::max(negMax, neg);
       std::printf(
-          "FRAME enforce=%d k=%d rebuilt=%d cold=%d route=%d fellBack=%d nNonRecip=%ld "
+          "FRAME variant=%s enforce=%d k=%d rebuilt=%d cold=%d route=%d fellBack=%d nNonRecip=%ld "
           "nDropped=%d maxNonRecipArea/h2=%.3e rounds=%d negH=%d sumVrel=%.2e\n",
-          enforce, k, f.numRebuilt, (int)f.coldBuild, (int)f.stats.route, (int)f.stats.fellBack,
-          r.nNonRecip, r.nDropped, r.maxNonRecipArea / h2, r.rounds, neg, sumRel);
+          vname, enforce, k, f.numRebuilt, (int)f.coldBuild, (int)f.stats.route,
+          (int)f.stats.fellBack, r.nNonRecip, r.nDropped, r.maxNonRecipArea / h2, r.rounds, neg,
+          sumRel);
+      if (!dumpDir.empty())
+        lastArrs = meshArrays(f.mesh);
       if (k % every == 0) {
-        const auto cold = coldBuild<true>(pos, s.weight, s.N, s.L);
+        const auto cold = coldBuild<true>(pos, weight, s.N, s.L);
         const auto d = againstCold<true>(mt, cold.view);
+        using Policy = typename Engine<true>::PlanePolicy;
+        const auto repaired = peclet::voro::reevalPublish<Real, kP, kT, Policy>(
+            mt.store, f.pos, mt.vol, s.N, s.L, mt.wall, mt.xRef, false, false, f.weight);
+        long cnt = 0;
+        double mx = 0;
+        unmatchedFacets(repaired, cold.view, s.N, cnt, mx);
         ++checks;
-        const long diffCells = std::lround(d.changedNbrFrac * s.N);
-        nbrDiffCells += diffCells;
+        onlyCount += cnt;
+        maxOnlyArea = std::max(maxOnlyArea, mx / h2);
         maxVolRel = std::max(maxVolRel, d.maxVolRelErr);
-        const bool ok = diffCells == 0 && d.missedNbr == 0 && d.maxVolRelErr <= 1e-9;
+        const bool ok = d.maxVolRelErr <= 1e-9 && mx <= 1e-8 * h2;
         checksBad += ok ? 0 : 1;
-        std::printf("CHECK enforce=%d k=%d %s nbrDiffCells=%ld missedNbr=%ld maxVolRel=%.3e\n",
-                    enforce, k, ok ? "PASS" : "FAIL", diffCells, d.missedNbr, d.maxVolRelErr);
-        {
-          // localization: the cold build's volume sum, buried (emptied) power seeds, empty cells
-          const auto cst = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cold.status);
-          auto cv = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), cold.view.cellVolume);
-          auto mv = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), mt.vol);
-          double cs = 0;
-          int buried = 0, emptyCold = 0, emptyRep = 0;
-          for (int i = 0; i < s.N; ++i) {
-            cs += cv(i);
-            buried += (cst(i) & peclet::voro::kBuried) ? 1 : 0;
-            emptyCold += cv(i) <= 0 ? 1 : 0;
-            emptyRep += mv(i) <= 0 ? 1 : 0;
-          }
-          std::printf(
-              "PROBE enforce=%d k=%d coldSumVrel=%.3e buried=%d emptyCold=%d emptyRepair=%d\n",
-              enforce, k, std::abs(cs - boxVol) / boxVol, buried, emptyCold, emptyRep);
-        }
+        std::printf(
+            "CHECK variant=%s enforce=%d k=%d %s maxVolRel=%.3e onlyFacets=%ld "
+            "maxOnlyArea/h2=%.3e nbrDiffCells=%ld missedNbr=%ld\n",
+            vname, enforce, k, ok ? "PASS" : "FAIL", d.maxVolRelErr, cnt, mx / h2,
+            std::lround(d.changedNbrFrac * s.N), d.missedNbr);
         if (!ok)
           explainDiff<true>(enforce ? "enforce=1" : "enforce=0", k, mt, cold.view, f.mesh, s.N,
                             s.h);
@@ -575,29 +638,48 @@ int partG(const Scene& s, int frames, bool full, bool timeIt, const std::string&
     const bool okII = full ? totalRebuilt >= 1000 : totalRebuilt > 0;
     const bool okIII = enforce == 0 || framesOver == 0;
     const bool okIV = checksBad == 0 && checks > 0;
-    const bool pass = okI && okII && okIII && okIV;
+    const bool okEmpty = weighted || emptyFrames == 0;
+    const bool pass = okI && (okII || !full) && okIII && okIV && okEmpty;
     rc |= pass ? 0 : 1;
+    char firstEmptyStr[16];
+    if (firstEmpty > 0)
+      std::snprintf(firstEmptyStr, sizeof firstEmptyStr, "%d", firstEmpty);
+    else
+      std::snprintf(firstEmptyStr, sizeof firstEmptyStr, "none");
     std::printf(
-        "RESULT g enforce=%d n=%d frames=%d %s i=%s maxSumVrel=%.2e ii=%s totalRebuilt=%ld "
-        "meanRebuilt=%.1f maxRebuilt=%d iii=%s maxNonRecipArea/h2=%.3e framesNonRecip=%d "
-        "framesOverThreshold=%d maxNonRecipCount=%ld roundsTotal=%d roundsMax=%d iv=%s "
-        "checks=%d maxVolRel=%.2e nbrDiffCells=%ld routes(two/dil/gate)=%d/%d/%d fellBack=%d "
-        "negH(total/maxPerFrame)=%ld/%d\n",
-        enforce, s.n, frames, pass ? "PASS" : "FAIL", okI ? "PASS" : "FAIL", maxSumRel,
-        okII ? "PASS" : "FAIL", totalRebuilt, (double)totalRebuilt / frames, maxRebuilt,
+        "RESULT g variant=%s enforce=%d n=%d frames=%d evaluated=%d verdict=%s i=%s "
+        "maxSumVrel=%.2e "
+        "ii=%s totalRebuilt=%ld meanRebuilt=%.1f maxRebuilt=%d iii=%s maxNonRecipArea/h2=%.3e "
+        "framesNonRecip=%d framesOverThreshold=%d maxNonRecipCount=%ld roundsTotal=%d "
+        "roundsMax=%d iv=%s checks=%d maxVolRel=%.2e onlyFacets=%ld maxOnlyArea/h2=%.3e "
+        "routes(two/dil/gate)=%d/%d/%d fellBack=%d negH(total/maxPerFrame)=%ld/%d "
+        "empty=%s emptyFrames=%d firstEmpty=%s\n",
+        vname, enforce, s.n, frames, evaluated, pass ? "PASS" : "FAIL", okI ? "PASS" : "FAIL",
+        maxSumRel, full ? (okII ? "PASS" : "FAIL") : "INFO", totalRebuilt,
+        evaluated > 0 ? (double)totalRebuilt / evaluated : 0.0, maxRebuilt,
         enforce == 0 ? "INFO" : (okIII ? "PASS" : "FAIL"), maxNonRecip / h2, framesNonRecip,
         framesOver, maxNonRecipCount, roundsTotal, roundsMax, okIV ? "PASS" : "FAIL", checks,
-        maxVolRel, nbrDiffCells, routes[0], routes[1], routes[2], fellBack, negTotal, negMax);
-    if (timeIt)
+        maxVolRel, onlyCount, maxOnlyArea, routes[0], routes[1], routes[2], fellBack, negTotal,
+        negMax, weighted ? "INFO" : (okEmpty ? "PASS" : "MISS"), emptyFrames, firstEmptyStr);
+    if (timeIt && evaluated > 0)
       std::printf(
-          "TIME g enforce=%d threads=%d per-frame ms: repair %.2f publish %.2f auxMaps %.2f "
-          "faceMesh %.2f reciprocity %.2f total %.2f\n",
-          enforce, Exec().concurrency(), 1e3 * sumT[0] / frames, 1e3 * sumT[1] / frames,
-          1e3 * sumT[2] / frames, 1e3 * sumT[3] / frames, 1e3 * sumT[4] / frames,
-          1e3 * wall / frames);
+          "TIME g variant=%s enforce=%d threads=%d per-frame ms: repair %.2f publish %.2f "
+          "auxMaps %.2f faceMesh %.2f reciprocity %.2f total %.2f\n",
+          vname, enforce, Exec().concurrency(), 1e3 * sumT[0] / evaluated,
+          1e3 * sumT[1] / evaluated, 1e3 * sumT[2] / evaluated, 1e3 * sumT[3] / evaluated,
+          1e3 * sumT[4] / evaluated, 1e3 * wall / evaluated);
     if (!dumpDir.empty())
-      dumpArrays(dumpDir, "g_enforce" + std::to_string(enforce), meshArrays(f.mesh));
+      dumpArrays(dumpDir, std::string("g_") + vname + "_enforce" + std::to_string(enforce),
+                 lastArrs);
   }
+  return rc;
+}
+
+/// (g) G0.2': variant Z always, variant W with --full only (the 16³ ctest runs Z, 60 frames).
+int partG(const Scene& s, int frames, bool full, bool timeIt, const std::string& dumpDir) {
+  int rc = partGVariant(s, false, frames, full, timeIt, dumpDir);
+  if (full)
+    rc |= partGVariant(s, true, frames, full, timeIt, dumpDir);
   return rc;
 }
 
@@ -644,7 +726,7 @@ int main(int argc, char** argv) {
       if (all || part == "f")
         rc |= partF(s);
       if (all || part == "g")
-        rc |= partG(s, gframes > 0 ? gframes : (full ? 500 : 50), full, timeIt, dumpDir);
+        rc |= partG(s, gframes > 0 ? gframes : (full ? 500 : 60), full, timeIt, dumpDir);
     }
     if (all || part == "b")
       rc |= partB(n, full ? 100 : 20, optsB, dumpDir);

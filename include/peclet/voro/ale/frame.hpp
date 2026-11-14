@@ -20,6 +20,9 @@
  * forced through `step(pos, forced, n)` (§5.1) and the frame is published again, at most
  * kMaxReciprocityRounds rounds; `reciprocity` records what remains and the rounds used.
  *
+ * `numEmptyCells` counts the cells of the published view with zero volume or no facet (an empty
+ * power cell); the frame is built regardless and the caller decides (§11 A5).
+ *
  * Single domain only (nProc == N); the distributed frame is a later work order.
  */
 #ifndef PECLET_VORO_ALE_FRAME_HPP
@@ -87,6 +90,9 @@ struct MeshFrame {
   RepairStats stats;       ///< of the repair step (default for the initial frame)
   bool coldBuild = false;  ///< every cell changed: the initial frame, a gate rebuild, the fallback
   int numRebuilt = 0;      ///< cells changed in this frame (step and reciprocity rounds)
+  /// Owned cells with zero volume or no facet in the published view (empty power cells): a frame
+  /// with any is an error the caller must act on (docs/ale_design.md §11 A5).
+  int numEmptyCells = 0;
   ReciprocityReport reciprocity;
   FrameTimings timings;
 };
@@ -188,6 +194,14 @@ void publish(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine, MeshFr
         }
       },
       Kokkos::Max<double>(maxA));
+  int nEmpty = 0;
+  Kokkos::parallel_reduce(
+      "ale.frame.empty", Kokkos::RangePolicy<Exec>(0, N),
+      KOKKOS_LAMBDA(const int i, int& a) {
+        a += (!((double)view.volume(i) > 0) || view.facetEnd(i) == view.facetBegin(i)) ? 1 : 0;
+      },
+      nEmpty);
+  f.numEmptyCells = nEmpty;
   f.reciprocity.maxAreaAsym = inv.maxAreaAsym;
   f.reciprocity.nNonRecip = inv.nNonRecip;
   f.reciprocity.nDropped = f.mesh.nDropped;
