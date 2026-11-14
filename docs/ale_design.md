@@ -857,3 +857,29 @@ Decision:
   the Voronoi view across runs is not a property of the builder; it is reported and passed to session `voronoi`.
 - The ALE solver publishes through the Power policy only (zero weights included); its reproducibility under
   repair is gated in S0.2.
+
+### A5 (2026-11-14): what gate G0.2 found, and its re-run G0.2′
+First run (fcf8a6b; logs `build_s0/gate_logs/S0_2.*`): V0.1 (a) and (b), F and base PASS. G0.2 FAIL on (i), (iii),
+(iv), (v), from three separate causes:
+1. **Empty power cells.** With fixed random weights (up to 0.15 h²) and generators carried 25 h by the flow,
+   generators come close enough that a power cell is empty (from frame 152). The cold build then loses volume
+   (3.5e-5 to 1.9e-3) and leaves one-sided facets up to 2 h² toward the empty cell; forcing cells cannot remove
+   them. This is a defect of the tessellation for empty power cells (passed to session `voronoi`) and a case the
+   stage 0–2 solver must not enter: its cells keep equal weights unless a later stage changes that with its own
+   gate. Until the frame pipeline has a rule for it, a frame with an empty cell is an error that `advanceFrame`
+   reports (count of cells with zero volume or no facet).
+2. **Degenerate facets.** Repair and cold build differ only in facets of area ≤ 2.4e-10 h² (volumes agree to
+   1.5e-12). "Exact neighbor sets" is not a property a certificate with a tolerance band can have.
+3. **The repair depends on the thread schedule.** The set of rebuilt cells differs between 1 and 8 threads from
+   frame 18 and between two runs at 8 threads at frame 452; volumes and face order then differ. §3.8 "bitwise at
+   fixed np and backend" does not hold for the repair engine as it is with more than one thread.
+
+G0.2′ (criteria fixed before the re-run): variant Z, power engine with all weights zero; variant W, weights as
+before, evaluated only up to the last frame without an empty cell (the first frame with one is reported).
+(i) Σ V = L³ to 1e-13 in every evaluated frame; (ii) ≥ 1000 rebuilt cells; (iii) with enforcement on, max
+non-reciprocal facet area ≤ 1e-12 h²; (iv′) against a cold rebuild every 100 frames: volumes ≤ 1e-9 relative, and
+every facet present in only one of the two has area ≤ 1e-8 h² (the largest such area is reported); (v′) two runs at
+one thread are bitwise identical in every FaceMesh array of the last frame; between 1 and 8 threads and between
+two runs at 8 threads the cell volumes of the last frame agree to 1e-9 relative (reported: the largest difference
+and the first frame at which the rebuilt counts differ). §3.8 is amended accordingly: bitwise reproducibility of a
+moving mesh is claimed at one thread only, until the repair engine is made independent of the schedule.
