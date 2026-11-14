@@ -899,3 +899,18 @@ ratio 1 and 1000). Two criteria of the brief were wrong:
 an irregular mesh, so gate G1.1-h as written (C′ᵀp + ρVg = 0 to 1e-13) cannot pass. The body force has to enter
 through the same adjoint map as the pressure (a face quantity under I_Fᵀ), inside the predictor. Its form with a
 density jump is an open formulation question (F13 in the campaign state); G1.1-h is rewritten when that is settled.
+
+### A7 (2026-11-14): the body force (replaces the body-force term of §4.2 and gate G1.1-h of WO-S1.1)
+Derivation D4 (campaign file `briefs/ALE_D4.md`, checked independently and measured in the 2D oracle): a force
+given as cell values with a gradient part leaves 18–21 % of itself after the projection on power cells with
+weights (3 % at zero weights), independent of h. Rule:
+- Write the body force per mass as g = ḡ − ∇ψ_per, with ḡ the mean part along periodic directions and ψ_per
+  single-valued (in a box closed along g, all of the gravity potential is ψ_per).
+- F = ρ_iV_iḡ (cell values) + I_Fᵀγ, γ_f = ρ_A[ψ_per(x_A) − ψ_per(c_f)] + ρ_B[ψ_per(c_f) − ψ_per(x_B)], inside the predictor.
+- Potential energy for the budget: Σ_i ρ_i ∫_cell ψ dV (for uniform g: the cell centroids). With two phases the
+  budget has a defect on turning unlike facets (not yet measured).
+- **G1.1-h, rewritten:** (i) periodic box, ψ_per = cos(2πy/L) at ρ = 1000, face form: C′ᵀp + F = 0 to 1e-13 with
+  p_i = −ρψ(x_i), and |U| ≤ 1e-12 (|∇ψ|h)^½ over 100 steps on a jittered mesh with weights; (ii) uniform ḡ along a
+  periodic direction, cell form, from a Taylor–Green start: the velocity equals that of the run without ḡ plus ḡt
+  to 1e-12 relative over 100 steps; (iii) control, reported not gated: (i) with the force as cell values (the
+  expected drift is the D4 number). Walls and the hydrostatic column in a closed box come with the wall work order.
