@@ -828,6 +828,11 @@ struct MovingTessellation {
       certifyList<false>(pos, list, n, outMask);
   }
 
+  /// The changed set of the last step(): 1 for every cell the step rebuilt (gathered), 0 for every
+  /// cell it kept. A cold rebuild() does not write it, so after a step that routed to kRebuildGate
+  /// or fellBack (and after rebuild() itself) every cell has changed, whatever the mask says.
+  const Kokkos::View<int*, Mem>& changedMask() const { return rebuilt; }
+
   /// One moving-point update step. Updates store + vol in place from `pos`. `forced[0..nForced)`
   /// (cell slots in [0, nProc)) are rebuilt in Pass 1 whatever their certificate says; with no
   /// list the step is the unforced one, bitwise.
