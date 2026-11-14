@@ -838,3 +838,22 @@ emitted the face (emitter B: c − x_A = (c − x_B) + conn). All options off re
 Core branch `amgpar` has a deterministic device setup (MIS-2 aggregation). S0.4 is re-scoped to a phase-respecting
 option on it (strength graph cut at unlike faces) after agreement with session `voronoi`; no second multigrid in
 `fv/` unless that fails.
+
+### A4 (2026-11-14): the face normal with generator geometry; what gate G0.1 can ask of the builder
+First run of G0.1 (e7fe644, bbd9501, a91807b): (a) and (d) pass; all identities of (b) pass (closure 3e-15,
+moment 1.4e-14, h_A + h_B − d 1 ulp, facet and cell centroid 4e-16 / 2e-15 h) except |n_f × conn|/d: 1.5e-7 on
+faces with A_f > 1e-10 h² (1.2e-13 for A_f > 1e-2 h²): round-off of the published polygon normal of sliver
+facets. (c) holds on the power mesh (32 arrays) and misses on the Voronoi mesh, because the published Voronoi
+view itself differs between two runs at 8 threads (facets permuted within cells, volumes at 1e-16).
+
+Decision:
+- With `generatorGeometry` the face normal **is** conn/d (radical planes are perpendicular to the connector); the
+  published area vector gives the magnitude A_f only. The angle between the published normal and conn stays a
+  reported diagnostic (`maxNormalConnSine`), with no threshold on sliver faces.
+- Gate G0.1 is recorded as FAIL for (b, sine) and (c, Voronoi). Its re-run after this change is G0.1′: (a), (d)
+  unchanged; (b′) the same identities with n_f = conn/d, and the published-normal sine ≤ 1e-12 on faces with
+  A_f > 1e-2 h² only; (c′) builder output bitwise equal for two builds from the **same** view in one process at 8
+  threads (Voronoi and power), and bitwise equal across OMP 1 / 8 / 8 on the power mesh. The reproducibility of
+  the Voronoi view across runs is not a property of the builder; it is reported and passed to session `voronoi`.
+- The ALE solver publishes through the Power policy only (zero weights included); its reproducibility under
+  repair is gated in S0.2.
