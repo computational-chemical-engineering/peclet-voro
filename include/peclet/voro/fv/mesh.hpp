@@ -30,8 +30,9 @@
  *    Requires `generatorGeometry`, which supplies the re-referenced geometry.
  *  - `generatorGeometry`: conn = minimum image of x_B − x_A, d = |conn|,
  *    h_A = (d² + w_A − w_B)/(2d), h_B = d − h_A (signed); the normal points A → B and the
- *    centroid is relative to the seed of A whichever cell emitted the face. Diagnostics in
- *    `FaceMesh::generatorDiag`.
+ *    centroid is relative to the seed of A whichever cell emitted the face. The face normal is
+ *    the connector direction conn/d (the published polygon normal gives only the area, and the
+ *    diagnostic `maxNormalConnSine`). Diagnostics in `FaceMesh::generatorDiag`.
  *  - `cellCentroids`: `FaceMesh::cellCentroid` (seed-relative), from the pyramids with apex at the
  *    seed: V_i (c_i − x_i) = ¼ Σ_f h_f A_f (c_f − x_i), h_f = n_f·(c_f − x_i), n_f outward of i.
  */
@@ -72,8 +73,9 @@ struct FaceMesh {
   Kokkos::View<Real*, Mem> cellCentroid;    // 3*nCells, seed-relative (FaceMeshOptions only)
   /// Of the `generatorGeometry` option (zero otherwise), over interior and interface faces.
   struct GeneratorDiagnostics {
-    Real maxNormalConnSine = 0;  ///< max |n_f × conn|/d over faces with A_f > 1e-10 h²,
-                                 ///< h³ = the mean volume of the owned cells
+    Real maxNormalConnSine = 0;  ///< published polygon normal against the connector (the face
+                                 ///< normal itself is conn/d): max |n_pub × conn|/d over faces
+                                 ///< with A_f > 1e-10 h², h³ = the mean volume of the owned cells
     int numNegativeHeight = 0;   ///< faces with h_A < 0 or h_B < 0
   } generatorDiag;
 
@@ -543,11 +545,18 @@ FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<R
             DS(g) = d;
             HA(g) = hA;
             HB(g) = d - hA;  // signed: a power seed may lie outside its cell
-            // the normal points A → B: flip the area vector if needed (emitter B)
+            // the face normal is the connector direction (radical planes are perpendicular to it);
+            // the published polygon normal (flipped to point A → B) stays only when d == 0; the
+            // diagnostic sine is taken from the published area vector below
             if (NM(3 * g) * cx + NM(3 * g + 1) * cy + NM(3 * g + 2) * cz < Real(0)) {
               NM(3 * g) = -NM(3 * g);
               NM(3 * g + 1) = -NM(3 * g + 1);
               NM(3 * g + 2) = -NM(3 * g + 2);
+            }
+            if (d > Real(0)) {
+              NM(3 * g) = cx / d;
+              NM(3 * g + 1) = cy / d;
+              NM(3 * g + 2) = cz / d;
             }
             if (flip) {  // c − x_A = (c − x_B) + conn
               CE(3 * g) += cx;
@@ -578,18 +587,22 @@ FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<R
     const Real h = Kokkos::cbrt(vsum / Real(nOwn > 0 ? nOwn : 1));
     const Real aMin = Real(1e-10) * h * h;
     auto AR = m.faceArea;
-    auto NM = m.faceNormal;
+    auto FF = m.faceFacet;
     auto CN = m.faceConn;
     auto DS = m.faceDist;
     auto HA = m.faceHa;
     auto HB = m.faceHb;
+    auto vw = view;
     Real sMax = 0;
     Kokkos::parallel_reduce(
         "fv.normalConnSine", Kokkos::RangePolicy<Exec>(0, nI),
         KOKKOS_LAMBDA(const int g, Real& acc) {
           if (!(AR(g) > aMin))
             return;
-          const Real nx = NM(3 * g), ny = NM(3 * g + 1), nz = NM(3 * g + 2);
+          // the published unit normal (the sign does not matter for the cross product)
+          const int f = FF(g);
+          const Real iar = Real(1) / AR(g);
+          const Real nx = vw.area(f, 0) * iar, ny = vw.area(f, 1) * iar, nz = vw.area(f, 2) * iar;
           const Real cx = CN(3 * g), cy = CN(3 * g + 1), cz = CN(3 * g + 2);
           const Real tx = ny * cz - nz * cy, ty = nz * cx - nx * cz, tz = nx * cy - ny * cx;
           const Real sn = Kokkos::sqrt(tx * tx + ty * ty + tz * tz) / DS(g);

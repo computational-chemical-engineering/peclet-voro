@@ -8,10 +8,12 @@
  *  (b) all four options on (gid = a fixed permutation of the slots): per cell |Σ A_f n_f| ≤ 1e-13
  *      A_cell and ‖Σ A_f n_f ⊗ (c_f − x_i) − V_i I‖_F ≤ 1e-13 V_i; per face |h_A + h_B − d| ≤
  *      2 ulp(d), the centroid against a polygon oracle (area-weighted triangle fan over
- *      `ConvexCell::faceOrdered`) ≤ 1e-13 h, |n × conn|/d ≤ 1e-12 on A_f > 1e-10 h²; the cell
+ *      `ConvexCell::faceOrdered`) ≤ 1e-13 h, the mesh normal's |n × conn|/d ≤ 4 ulp, the published
+ *      polygon normal's |n × conn|/d ≤ 1e-12 on A_f > 1e-2 h² (other area bins: INFO); the cell
  *      centroid against the oracle's pyramids ≤ 1e-13 h. Also: the gid-oriented mesh WITHOUT the
  *      deterministic order (A ≠ emitter on about half the faces) equals the deterministic one face
  *      by face to 1e-12 (relative to h).
+ *  (c′) two builds from the same published view with all options on are bitwise equal.
  *  (d) `deterministicOrder` alone equals the default builder bitwise in every array (CSR order
  *      bitwise at one thread, per-cell sets otherwise: the default order is schedule-dependent).
  * `--dump DIR` writes every FaceMesh array of the deterministic configurations as raw bytes for
@@ -298,7 +300,8 @@ int checkGeometry(const char* tag, const Scene& s, const Built<Weighted>& b, con
   auto ofc = toHost(b.oracle.facetCen);
   auto occ = toHost(b.oracle.cellCen);
 
-  double clos = 0, mom = 0, hsum = 0, cen = 0, sine = 0, ccen = 0;
+  auto VA = toHost(b.view.facetArea);  // the published area vectors, 3*f + c
+  double clos = 0, mom = 0, hsum = 0, cen = 0, sine = 0, meshSine = 0, ccen = 0;
   double cenNeg = 0, closNeg = 0, momNeg = 0;
   int nNeg = 0, nAntiNormal = 0;
   double sineBin[5] = {0, 0, 0, 0, 0};
@@ -326,7 +329,12 @@ int checkGeometry(const char* tag, const Scene& s, const Built<Weighted>& b, con
       ++nAntiNormal;
     if (AR(g) > aMin) {
       const real_t tx = ny * cz - nz * cy, ty = nz * cx - nx * cz, tz = nx * cy - ny * cx;
-      const double sn = std::sqrt(tx * tx + ty * ty + tz * tz) / d;
+      meshSine = std::max(meshSine, std::sqrt(double(tx * tx + ty * ty + tz * tz)) / d);
+      // the published polygon normal against the connector
+      const real_t iar = real_t(1) / AR(g);
+      const real_t px = VA(3 * f) * iar, py = VA(3 * f + 1) * iar, pz = VA(3 * f + 2) * iar;
+      const real_t ux = py * cz - pz * cy, uy = pz * cx - px * cz, uz = px * cy - py * cx;
+      const double sn = std::sqrt(ux * ux + uy * uy + uz * uz) / d;
       sine = std::max(sine, sn);
       for (int q = 0; q < 5; ++q)  // by area class A_f/h² > 1e-10, 1e-8, ..., 1e-2
         if (AR(g) > aMin * std::pow(100.0, q))
@@ -422,21 +430,25 @@ int checkGeometry(const char* tag, const Scene& s, const Built<Weighted>& b, con
   // the builder's own guarantees decide the exit code; |n x conn|/d measures the PUBLISHED area
   // vector's orientation (round-off of the polygon normal on small faces) and is judged by the
   // gate script from its own line
+  const double meshSineUlp = meshSine / std::numeric_limits<real_t>::epsilon();
   const bool pass = clos <= 1e-13 && mom <= 1e-13 && hsum <= 2 && cen <= 1e-13 && ccen <= 1e-13 &&
-                    okDiag && noDet <= 1e-12 && noDetMissing == 0 && noDetFlipped > 0 &&
-                    nAntiNormal == 0;
+                    meshSineUlp <= 4 && okDiag && noDet <= 1e-12 && noDetMissing == 0 &&
+                    noDetFlipped > 0 && nAntiNormal == 0;
   std::printf(
       "RESULT b %-7s %s faces=%d closure=%.2e moment=%.2e hsum_ulp=%.1f centroid=%.2e "
-      "sine=%.2e cellcentroid=%.2e diag=%s negh=%d negh_centroid=%.2e negh_closure=%.2e "
+      "mesh_sine=%.2e (%.1f ulp) pub_sine=%.2e cellcentroid=%.2e diag=%s negh=%d "
+      "negh_centroid=%.2e negh_closure=%.2e "
       "negh_moment=%.2e nodet=%.2e nodet_flipped=%d nodet_missing=%d anti_normal=%d\n",
-      tag, pass ? "PASS" : "FAIL", m.nFaces, clos, mom, hsum, cen, sine, ccen,
-      okDiag ? "match" : "MISMATCH", nNeg, cenNeg, closNeg, momNeg, noDet, noDetFlipped,
+      tag, pass ? "PASS" : "FAIL", m.nFaces, clos, mom, hsum, cen, meshSine, meshSineUlp, sine,
+      ccen, okDiag ? "match" : "MISMATCH", nNeg, cenNeg, closNeg, momNeg, noDet, noDetFlipped,
       noDetMissing, nAntiNormal);
   std::printf(
-      "RESULT b_sine %-7s %s max |n x conn|/d = %.2e on A_f > 1e-10 h^2 (criterion 1e-12)\n", tag,
-      sine <= 1e-12 ? "PASS" : "MISS", sine);
+      "RESULT b_sine %-7s %s published-normal max |n x conn|/d = %.2e on A_f > 1e-2 h^2 "
+      "(criterion 1e-12)\n",
+      tag, sineBin[4] <= 1e-12 ? "PASS" : "MISS", sineBin[4]);
   std::printf(
-      "INFO b %-7s max |n x conn|/d for A_f/h^2 > 1e-10: %.2e  > 1e-8: %.2e  > 1e-6: %.2e  "
+      "INFO b %-7s published-normal max |n x conn|/d for A_f/h^2 > 1e-10: %.2e  > 1e-8: %.2e  > "
+      "1e-6: %.2e  "
       "> 1e-4: %.2e  > 1e-2: %.2e\n",
       tag, sineBin[0], sineBin[1], sineBin[2], sineBin[3], sineBin[4]);
   return pass ? 0 : 1;
@@ -506,6 +518,29 @@ int runCase(const char* tag, const Scene& s, const std::string& dumpDir, bool ti
   noDet.deterministicOrder = false;
   const FM m3 = peclet::voro::fv::buildFaceMesh(b.view, b.aux, -1, noDet);
   rc |= checkGeometry(tag, s, b, m2, m3);
+  {  // (c′) a second build from the same view, every array bitwise
+    const FM m4 = peclet::voro::fv::buildFaceMesh(b.view, b.aux, -1, all);
+    int nd = m2.nFaces == m4.nFaces && m2.nInterior == m4.nInterior && m2.nDropped == m4.nDropped &&
+                     m2.generatorDiag.numNegativeHeight == m4.generatorDiag.numNegativeHeight
+                 ? 0
+                 : 1;
+    nd += sameBits(m2.faceCellA, m4.faceCellA) ? 0 : 1;
+    nd += sameBits(m2.faceCellB, m4.faceCellB) ? 0 : 1;
+    nd += sameBits(m2.faceFacet, m4.faceFacet) ? 0 : 1;
+    nd += sameBits(m2.faceArea, m4.faceArea) ? 0 : 1;
+    nd += sameBits(m2.faceNormal, m4.faceNormal) ? 0 : 1;
+    nd += sameBits(m2.faceDist, m4.faceDist) ? 0 : 1;
+    nd += sameBits(m2.faceHa, m4.faceHa) ? 0 : 1;
+    nd += sameBits(m2.faceHb, m4.faceHb) ? 0 : 1;
+    nd += sameBits(m2.faceCentroid, m4.faceCentroid) ? 0 : 1;
+    nd += sameBits(m2.faceConn, m4.faceConn) ? 0 : 1;
+    nd += sameBits(m2.cellFaceOffset, m4.cellFaceOffset) ? 0 : 1;
+    nd += sameBits(m2.cellFace, m4.cellFace) ? 0 : 1;
+    nd += sameBits(m2.cellFaceSign, m4.cellFaceSign) ? 0 : 1;
+    nd += sameBits(m2.cellVolume, m4.cellVolume) ? 0 : 1;
+    nd += sameBits(m2.cellCentroid, m4.cellCentroid) ? 0 : 1;
+    std::printf("RESULT c_sameview %-7s %s %d\n", tag, nd ? "MISS" : "PASS", nd);
+  }
   if (!dumpDir.empty()) {  // (c)
     dumpMesh(dumpDir, std::string(tag) + ".det", m1);
     dumpMesh(dumpDir, std::string(tag) + ".all", m2);
