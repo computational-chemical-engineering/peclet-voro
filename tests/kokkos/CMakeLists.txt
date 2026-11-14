@@ -71,6 +71,11 @@ if(PECLET_VORO_BUILD_TESTS)
   # tools/ale_gates/G0_1.sh runs gate G0.1 at 32³).
   add_voro_kokkos_test(test_ale_facemesh)
 
+  # Moving-grid stage 0 (docs/ale_design.md WO-S0.2): the frame pipeline (ale/frame.hpp), the
+  # forced worklist and the changed set — V0.1 (zero motion changes nothing, mesh and CollocatedNS
+  # bitwise), F, G0.2 short (16³; tools/ale_gates/G0_2.sh runs the gate at 16³/32³, 500 frames).
+  add_voro_kokkos_test(test_ale_frame)
+
   # Track B, rung B1: centroidal (Lloyd) relaxation of a random grid — skewness / volume spread /
   # Poisson residual consistency all drop (grid quality is solver quality).
   add_voro_kokkos_test(test_grid_relax)
