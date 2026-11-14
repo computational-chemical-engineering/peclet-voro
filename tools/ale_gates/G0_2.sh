@@ -197,11 +197,6 @@ GZ="$gzverdict($gz,v'=$vz)"
 GW="$gwverdict($gw,v'=$vw,firstEmpty=$fe,evaluated<=$cap)"
 
 verdict=PASS
-for x in "$gi" "$gii" "$giii" "$giv" "$gv"; do
-  [[ $x == PASS* ]] || gverdict=FAIL
-done
-
-verdict=PASS
 for x in "$a" "$b" "$f" "$gzverdict" "$base"; do
   [[ $x == PASS* ]] || verdict=FAIL
 done
