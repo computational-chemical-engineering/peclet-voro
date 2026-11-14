@@ -914,3 +914,13 @@ weights (3 % at zero weights), independent of h. Rule:
   periodic direction, cell form, from a Taylor–Green start: the velocity equals that of the run without ḡ plus ḡt
   to 1e-12 relative over 100 steps; (iii) control, reported not gated: (i) with the force as cell values (the
   expected drift is the D4 number). Walls and the hydrostatic column in a closed box come with the wall work order.
+
+### A8 (2026-11-14): the mesh energy of the front (lifts the block on WO-S2.4 and WO-S3.3; Frank's decision, desk card `ale-mesh-energy-2`)
+The mesh energy is the full umbrella Q = χσ Σ_k |x̄_k − x_k|² (x̄_k the mean of the dual-triangle neighbors of point
+k), with χ = 0.7 in 3D (0.1 in the 2D oracle), normals the geometric normals of the flat dual triangles, force the
+total derivative (D2). It stays a pluggable per-point energy (§4.6). Booked error, second order in h/R: l = 2
+frequency about +2.3 % at R/h 5 and +1.1 % at R/h 8 (stiffness for normal point motion +4.7 / +2.2 %), Laplace
+pressure +0.28 / +0.12 %. Rejected by their gates (campaign log, 2026-11-14: A2i, R1, A2j, A2k): the umbrella along
+the surface only (no rest state: an l = 1 slide of the points), a weaker full umbrella (χ ≤ 0.5), an anchor of the
+surface centroid. No further work on the mesh energy until 3D runs in time exist; the gates of WO-S2.4 take their
+thresholds from the booked error above, not from the 2D scheme.
