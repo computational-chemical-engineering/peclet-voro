@@ -10,15 +10,17 @@ meshes M1, M2, M3 exported by `test_ale_frame --export DIR`:
       the terms that cancel) <= 1e-13; zeta symmetric <= 1e-14; lambda_min >= -1e-12 lambda_max
   R4  L_rho symmetric <= 1e-14, lambda_min >= -1e-12 lambda_max, second smallest eigenvalue > 0, at rho uniform
       and at density ratio 1000 (rho = 1 within L/4 of the box center, 1000 elsewhere)
-  R5  p linear (differences b.conn): C'^T p = -V_i b on every cell, relative to V_i |b|   <= 1e-13
-  R6  on cells whose neighbor set is unchanged at all four tau > 0: max_i |tau (D Phi^m)_i - Delta V_i|, the
-      ratio per halving of tau in [6, 10] (three ratios), variant 'full', every mesh
+  R5' p linear (differences b.conn): |sum_i (C'^T p)_i + (sum_i V_i) b| / ((sum_i V_i)|b|)   <= 1e-13
+      (amendment A6 of the design note; the per-cell form of the former R5 is reported as INFO R5cell)
+  R6' on cells whose neighbor set is unchanged at both +tau and -tau: max_i |tau (D Phi^m)_i - (V_i(tau) -
+      V_i(-tau))/2|, the ratio per halving of tau in [6, 10] (three ratios), variant 'full', every mesh
 
-Reported without threshold: conditioning of L_rho, sum_f A_f d_f/(6 V_i), cells used in R6, negative heights; and
-for R6 the same errors on the other rate variants and with the central difference (V(tau) - V(-tau))/2.
+Reported without threshold: conditioning of L_rho, sum_f A_f d_f/(6 V_i), cells used in R6', negative heights; the
+per-cell R5 quantity (R5cell); and for R6' the forward-difference errors (V(tau) - V(0)) and the other rate
+variants.
 
 Usage: python test_ale_reference.py DIR [M1 M2 M3]. Prints one line per check and mesh, then the summary line
-`G0.3 PASS|FAIL R0=... R6=...`; exit status 1 on FAIL.
+`G0.3' PASS|FAIL R0=... R6'=...`; exit status 1 on FAIL.
 """
 import os
 import sys
@@ -183,10 +185,19 @@ def check_mesh(directory, name, rng):
         'twopass': float((np.abs(ar.CpT_mf(m, None, dp, twopass=True) - target) / sc5).max()),
         'matrix': float((np.abs((-(mats.IF.T @ dp)).reshape(-1, 3) - target) / sc5).max()),
     }
-    res['R5'] = max(r5.values())
-    print(f'R5 {name} {"PASS" if res["R5"] <= TOL_R5 else "FAIL"} max={res["R5"]:.2e} '
-          + ' '.join(f'{k}={v:.1e}' for k, v in r5.items()))
-    if res['R5'] > TOL_R5:   # localize: plain part of -I_F^T dp against the gradient correction
+    res['R5cell'] = max(r5.values())
+    print(f'INFO R5cell {name} max={res["R5cell"]:.2e} ' + ' '.join(f'{k}={v:.1e}' for k, v in r5.items()))
+    Vsum = float(m.V.sum())
+    tot5 = {
+        'scatter': ar.CpT_mf(m, None, dp).sum(0),
+        'twopass': ar.CpT_mf(m, None, dp, twopass=True).sum(0),
+        'matrix': (-(mats.IF.T @ dp)).reshape(-1, 3).sum(0),
+    }
+    r5s = {k: float(np.linalg.norm(v + Vsum * b) / (Vsum * np.linalg.norm(b))) for k, v in tot5.items()}
+    res['R5'] = max(r5s.values())
+    print(f"R5' {name} {'PASS' if res['R5'] <= TOL_R5 else 'FAIL'} max={res['R5']:.2e} "
+          + ' '.join(f'{k}={v:.1e}' for k, v in r5s.items()))
+    if res['R5'] > TOL_R5:   # localize (per cell): plain part of -I_F^T dp against the gradient correction
         plain = np.zeros((N, 3))
         np.add.at(plain, m.A, -(m.area * m.hB / m.d * dp)[:, None] * m.n)
         np.add.at(plain, m.B, -(m.area * m.hA / m.d * dp)[:, None] * m.n)
@@ -213,14 +224,15 @@ def check_mesh(directory, name, rng):
         rf = ef[:-1] / ef[1:]
         rc = ec[:-1] / ec[1:]
         if v == 'full':
-            ok6 = bool(np.all((rf >= R6_LO) & (rf <= R6_HI)))
-            res['R6'] = (rf, ok6, int(keep.sum()))
+            ok6 = bool(np.all((rc >= R6_LO) & (rc <= R6_HI)))
+            res['R6'] = (rc, ok6, int(keepc.sum()))
             verdict = 'PASS' if ok6 else 'FAIL'
         else:
             verdict = 'info'
-        print(f'R6 {name} {v} {verdict} cells={int(keep.sum())} err/h3={",".join(f"{e / m.h ** 3:.3e}" for e in ef)} '
-              f'ratios={",".join(f"{r:.2f}" for r in rf)} | central cells={int(keepc.sum())} '
+        print(f"R6' {name} {v} {verdict} cells={int(keepc.sum())} "
               f'err/h3={",".join(f"{e / m.h ** 3:.3e}" for e in ec)} ratios={",".join(f"{r:.2f}" for r in rc)}')
+        print(f'INFO R6fwd {name} {v} cells={int(keep.sum())} err/h3={",".join(f"{e / m.h ** 3:.3e}" for e in ef)} '
+              f'ratios={",".join(f"{r:.2f}" for r in rf)}')
 
     # ---------------------------------------------------------------- reported without threshold
     ratio = np.zeros(N)
@@ -251,9 +263,9 @@ def main():
     l2 = min(min(x[2] for x in r['R4'].values()) for r in allres.values())
     r6 = ';'.join(f'{nm}:' + ','.join(f'{x:.2f}' for x in r['R6'][0]) for nm, r in allres.items())
     word = lambda k: 'PASS' if ok[k] else 'FAIL'  # noqa: E731
-    print(f'G0.3 {"PASS" if all(ok.values()) else "FAIL"} R0={word("R0")}({r0:.1e}) R1={word("R1")}({r1:.1e}) '
-          f'R2={word("R2")}({r2:.1e}) R3={word("R3")}({r3:.1e}) R4={word("R4")}(lambda2min={l2:.2e}) '
-          f'R5={word("R5")}({r5:.1e}) R6={word("R6")}({r6})')
+    print(f"G0.3' {'PASS' if all(ok.values()) else 'FAIL'} R0={word('R0')}({r0:.1e}) R1={word('R1')}({r1:.1e}) "
+          f"R2={word('R2')}({r2:.1e}) R3={word('R3')}({r3:.1e}) R4={word('R4')}(lambda2min={l2:.2e}) "
+          f"R5'={word('R5')}({r5:.1e}) R6'={word('R6')}({r6})")
     return 0 if all(ok.values()) else 1
 
 
