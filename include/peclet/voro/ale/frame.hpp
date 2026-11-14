@@ -155,6 +155,10 @@ void publish(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine, MeshFr
   for (int d = 0; d < 3; ++d)
     mo.L[d] = L[d];
   f.mesh = fv::buildFaceMesh(view, aux, -1, mo);
+  // The published cellVolume IS the engine's live `vol` (reevalPublish reuses it); the frame owns
+  // a copy, so a later step of the engine does not rewrite this frame's volumes (§1.4).
+  if (f.mesh.cellVolume.data() == engine.vol.data())
+    f.mesh.cellVolume = snapshot(engine.vol, "ale.frame.cellVolume");
   f.timings.faceMesh += clk.lap();
 
   // reciprocity: the invariants of the published view, the largest non-reciprocal facet area
