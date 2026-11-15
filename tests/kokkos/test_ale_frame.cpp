@@ -40,6 +40,10 @@
  *        test_ale_frame --export DIR [--mesh M1|M2|M3|all]
  * writes the meshes of WO-S0.3 (gate G0.3, tools/ale_gates/G0_3.sh) for the Python reference
  * tests/python/ale_reference.py and runs nothing else (exportMesh() documents the files).
+ *        test_ale_frame --export DIR --cells N
+ * writes the base arrays only (no rate variants) of mesh M1 (jitter ±0.3h, zero weights) at N³
+ * cells under the name M1_N, for the pressure-operator export of WO-S0.4
+ * (tools/ale_gates/export_lrho.py, gate G0.4).
  */
 #include <algorithm>
 #include <chrono>
@@ -853,6 +857,26 @@ int exportMesh(const std::string& dir, const std::string& name, const Scene& s, 
   return rc;
 }
 
+/// Mesh M1 (jitter ±0.3h, zero weights) at n³ cells, base arrays only, as `<dir>/M1_<n>.<array>`
+/// (WO-S0.4: the pressure operator of tools/ale_gates/export_lrho.py). Same seeds as exportScene.
+int exportBase(const std::string& dir, int n) {
+  const Scene s = exportScene(n, Real(0.3));
+  const DV w("w0", s.N);
+  const Frame base = coldFrame(s, s.pos, w);
+  const std::string name = "M1_" + std::to_string(n);
+  if (base.numEmptyCells > 0) {
+    std::printf("EXPORT %s FAIL base numEmptyCells=%d\n", name.c_str(), base.numEmptyCells);
+    return 1;
+  }
+  dumpArrays(dir, name, meshArrays(base.mesh));
+  writeVec(dir + "/" + name + ".pos", down(s.pos));
+  writeVec(dir + "/" + name + ".weight", down(w));
+  writeVec(dir + "/" + name + ".L", std::vector<Real>(s.L, s.L + 3));
+  std::printf("EXPORT %s ok N=%d nFaces=%d nInterior=%d numNegativeHeight=%d\n", name.c_str(), s.N,
+              base.mesh.nFaces, base.mesh.nInterior, base.mesh.generatorDiag.numNegativeHeight);
+  return 0;
+}
+
 /// The three meshes of gate G0.3, 8³ cells in the periodic unit box: M1 seeds jittered ±0.3h,
 /// weights zero; M2 the same seeds with weights uniform in [0, 0.15h²]; M3 jitter ±0.45h,
 /// weights zero.
@@ -878,7 +902,7 @@ int main(int argc, char** argv) {
     int n = 16;
     std::string part = "all", opts = "auto", dumpDir, exportDir, exportWhich = "all";
     bool full = false, timeIt = false;
-    int gframes = 0;
+    int gframes = 0, exportCells = 0;
     for (int a = 1; a < argc; ++a) {
       const std::string s = argv[a];
       if (s == "--part" && a + 1 < argc)
@@ -891,6 +915,8 @@ int main(int argc, char** argv) {
         exportDir = argv[++a];
       else if (s == "--mesh" && a + 1 < argc)
         exportWhich = argv[++a];
+      else if (s == "--cells" && a + 1 < argc)
+        exportCells = std::atoi(argv[++a]);
       else if (s == "--gframes" && a + 1 < argc)
         gframes = std::atoi(argv[++a]);
       else if (s == "--full")
@@ -901,7 +927,8 @@ int main(int argc, char** argv) {
         n = std::atoi(s.c_str());
     }
     if (!exportDir.empty()) {
-      rc = exportMeshes(exportDir, exportWhich);
+      rc = exportCells > 0 ? exportBase(exportDir, exportCells)
+                           : exportMeshes(exportDir, exportWhich);
       std::printf("=== S0.3 export %s ===\n", rc ? "FAIL" : "PASS");
       Kokkos::finalize();
       return rc;
