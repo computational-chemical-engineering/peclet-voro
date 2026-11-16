@@ -721,6 +721,26 @@ struct CellBuilder {
   }
 };
 
+/// Copy a per-facet array of `stride` entries from a cell-contiguous over-buffer (cell i's
+/// facets at `from(i)`) to a CSR at `to(i)`, `count(i)` facets per cell — the cold build's
+/// finish-order to cell-order pack.
+template <class D, class S>
+void packFacetsByCell(const char* label, const Kokkos::View<D*, peclet::core::MemSpace>& dst,
+                      const Kokkos::View<S*, peclet::core::MemSpace>& src, int stride,
+                      const Kokkos::View<int*, peclet::core::MemSpace>& from,
+                      const Kokkos::View<int*, peclet::core::MemSpace>& to,
+                      const Kokkos::View<int*, peclet::core::MemSpace>& count) {
+  using Exec = peclet::core::ExecSpace;
+  const int N = static_cast<int>(count.extent(0));
+  Kokkos::parallel_for(
+      label, Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        const size_t o = (size_t)from(i) * stride, p = (size_t)to(i) * stride;
+        const size_t n = (size_t)count(i) * stride;
+        for (size_t k = 0; k < n; ++k)
+          dst(p + k) = static_cast<D>(src(o + k));
+      });
+}
+
 /**
  * Build the full tessellation on device.
  *
@@ -1027,17 +1047,30 @@ TessellatorResult<Real> buildTessellation(
     ptimer.reset();
   }
 
-  // --- pack the over-buffer prefix [0,nFacets) into a compact CSR ---
-  // The atomic packing already produced a gapless CSR (in cell-finish order, with each
-  // cell's facets contiguous at cellFacetBase(i)); we only copy its used prefix into a
-  // right-sized view (a contiguous read+write — no exclusive scan, no strided gather,
-  // no minimal-image recompute that the old temp->CSR compaction paid).
-  // Clamp to capacity: if the over-buffer overflowed (rare; flagged per-cell above),
-  // the cursor ran past the end and only [0,facetCap) holds valid, indexable facets.
-  const int nFacets = (size_t)nFacetsRaw > facetCap ? (int)facetCap : nFacetsRaw;
-
+  // --- pack the over-buffer into a compact CSR ordered by cell index ---
+  // The atomic packing leaves each cell's facets contiguous at cellFacetBase(i), but the cells in
+  // finish order, which depends on the thread schedule. The published CSR is ordered by cell index
+  // instead: a deterministic exclusive prefix sum of the per-cell facet counts (the base
+  // reevalPublish uses too), and each cell's facets are copied from its over-buffer base to its
+  // published base. A cell the over-buffer could not hold (count 0, flagged kOverflow) publishes
+  // no facets.
+  Kokkos::View<int*, MemSpace> pubBase(
+      view_alloc(std::string("cellFacetOffset"), WithoutInitializing), N);
+  int nFacets = 0;
+  {
+    auto fc = facetCount;
+    auto pb = pubBase;
+    Kokkos::parallel_scan(
+        "tess.facetScan", Kokkos::RangePolicy<Exec>(0, N),
+        KOKKOS_LAMBDA(const int i, int& upd, const bool fin) {
+          if (fin)
+            pb(i) = upd;
+          upd += fc(i);
+        },
+        nFacets);
+  }
   TessellationView<Real> view;
-  view.cellFacetOffset = cellFacetBase;
+  view.cellFacetOffset = pubBase;
   view.cellFacetCount = facetCount;
   view.cellVolume = cellVol;
   view.cellSeedId =
@@ -1057,58 +1090,26 @@ TessellatorResult<Real> buildTessellation(
   // copy completed before the source is released.
   view.facetNeighbor = Kokkos::View<gid_t*, MemSpace>(
       view_alloc(std::string("facetNeighbor"), WithoutInitializing), nFacets);
-  {
-    auto v = view.facetNeighbor;
-    auto src = oNbr;
-    Kokkos::parallel_for(
-        "tess.packNbr", Kokkos::RangePolicy<Exec>(0, nFacets),
-        KOKKOS_LAMBDA(const int g) { v(g) = (gid_t)src(g); });
-  }
+  packFacetsByCell("tess.packNbr", view.facetNeighbor, oNbr, 1, cellFacetBase, pubBase, facetCount);
   Kokkos::fence();
   oNbr = Kokkos::View<int*, MemSpace>();
 
   view.facetArea = Kokkos::View<Real*, MemSpace>(
       view_alloc(std::string("facetArea"), WithoutInitializing), (size_t)nFacets * 3);
-  {
-    auto v = view.facetArea;
-    auto src = oArea;
-    Kokkos::parallel_for(
-        "tess.packArea", Kokkos::RangePolicy<Exec>(0, nFacets), KOKKOS_LAMBDA(const int g) {
-          for (int cc = 0; cc < 3; ++cc)
-            v(3 * g + cc) = src(3 * (size_t)g + cc);
-        });
-  }
+  packFacetsByCell("tess.packArea", view.facetArea, oArea, 3, cellFacetBase, pubBase, facetCount);
   Kokkos::fence();
   oArea = Kokkos::View<Real*, MemSpace>();
 
   view.facetConnect = Kokkos::View<Real*, MemSpace>(
       view_alloc(std::string("facetConnect"), WithoutInitializing), (size_t)nFacets * 3);
-  {
-    auto v = view.facetConnect;
-    auto src = oDV;
-    Kokkos::parallel_for(
-        "tess.packDV", Kokkos::RangePolicy<Exec>(0, nFacets), KOKKOS_LAMBDA(const int g) {
-          for (int cc = 0; cc < 3; ++cc)
-            v(3 * g + cc) = src(3 * (size_t)g + cc);
-        });
-  }
+  packFacetsByCell("tess.packDV", view.facetConnect, oDV, 3, cellFacetBase, pubBase, facetCount);
   Kokkos::fence();
   oDV = Kokkos::View<Real*, MemSpace>();
 
   view.facetConnVec = Kokkos::View<Real*, MemSpace>(
       view_alloc(std::string("facetConnVec"), WithoutInitializing), (size_t)nFacets * 3);
-  {
-    auto v = view.facetConnVec;
-    auto src = oConn;
-    Kokkos::parallel_for(
-        "tess.packConn", Kokkos::RangePolicy<Exec>(0, nFacets), KOKKOS_LAMBDA(const int g) {
-          for (int cc = 0; cc < 3; ++cc)
-            v(3 * g + cc) = src(3 * (size_t)g + cc);
-        });
-  }
-  // Rung A3: pack the facet-edge area-Jacobian CSR (prefix [0,nEdges) of the over-buffer). The
-  // per-facet offsets are already global into the over-buffer and the pack keeps indices, so
-  // they carry over unchanged; the facet permutation of the pack (facet g -> g) is the identity.
+  packFacetsByCell("tess.packConn", view.facetConnVec, oConn, 3, cellFacetBase, pubBase,
+                   facetCount);
   if (oWallDV.extent(0) > 0) {
     view.cellWallDV = oWallDV;
     view.cellWallDA = oWallDA;
@@ -1116,32 +1117,71 @@ TessellatorResult<Real> buildTessellation(
   if (withMoments) {
     view.facetMoment2 = Kokkos::View<Real*, MemSpace>(
         view_alloc(std::string("facetMoment2"), WithoutInitializing), nFacets);
-    Kokkos::deep_copy(view.facetMoment2, Kokkos::subview(oMoment2, std::make_pair(0, nFacets)));
+    packFacetsByCell("tess.packMoment2", view.facetMoment2, oMoment2, 1, cellFacetBase, pubBase,
+                     facetCount);
   }
+  // Rung A3: the facet-edge area-Jacobian CSR. Each cell's edges are contiguous in the edge
+  // over-buffer (one reservation per cell, starting at its first facet's offset); they move to a
+  // per-cell prefix sum of the edge counts, and the facet indices they hold move with their cell.
   if (withAreaGrad) {
-    const int nEdges = (size_t)nEdgesRaw > edgeCap ? (int)edgeCap : nEdgesRaw;
+    Kokkos::View<int*, MemSpace> pubEBase(
+        view_alloc(std::string("tess.edgeBase"), WithoutInitializing), N);
+    int nEdges = 0;
+    {
+      auto ob = cellFacetBase;
+      auto fc = facetCount;
+      auto ec = oEdgeCnt;
+      auto pe = pubEBase;
+      Kokkos::parallel_scan(
+          "tess.edgeScan", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i, int& upd, const bool fin) {
+            int ne = 0;
+            for (int k = 0; k < fc(i); ++k)
+              ne += ec(ob(i) + k);
+            if (fin)
+              pe(i) = upd;
+            upd += ne;
+          },
+          nEdges);
+    }
     view.facetEdgeOffset = Kokkos::View<int*, MemSpace>(
         view_alloc(std::string("facetEdgeOffset"), WithoutInitializing), nFacets);
     view.facetEdgeCount = Kokkos::View<int*, MemSpace>(
         view_alloc(std::string("facetEdgeCount"), WithoutInitializing), nFacets);
-    Kokkos::deep_copy(view.facetEdgeOffset, Kokkos::subview(oEdgeOff, std::make_pair(0, nFacets)));
-    Kokkos::deep_copy(view.facetEdgeCount, Kokkos::subview(oEdgeCnt, std::make_pair(0, nFacets)));
     view.edgeFacet = Kokkos::View<int*, MemSpace>(
         view_alloc(std::string("edgeFacet"), WithoutInitializing), nEdges);
     view.edgeAreaGrad = Kokkos::View<Real*, MemSpace>(
         view_alloc(std::string("edgeAreaGrad"), WithoutInitializing), (size_t)nEdges * 3);
-    Kokkos::deep_copy(view.edgeFacet, Kokkos::subview(oEdgeFacet, std::make_pair(0, nEdges)));
-    Kokkos::deep_copy(view.edgeAreaGrad,
-                      Kokkos::subview(oEdgeGrad, std::make_pair((size_t)0, (size_t)nEdges * 3)));
     view.edgeLength = Kokkos::View<Real*, MemSpace>(
         view_alloc(std::string("edgeLength"), WithoutInitializing), nEdges);
-    {
-      auto el = view.edgeLength;
-      auto src = oEdgeLen;
-      Kokkos::parallel_for(
-          "edgeLength", Kokkos::RangePolicy<Exec>(0, nEdges),
-          KOKKOS_LAMBDA(const int e) { el(e) = src((size_t)e * 4); });
-    }
+    auto ob = cellFacetBase;
+    auto pb = pubBase;
+    auto fc = facetCount;
+    auto pe = pubEBase;
+    auto sOff = oEdgeOff, sCnt = oEdgeCnt, sFacet = oEdgeFacet;
+    auto sGrad = oEdgeGrad, sLen = oEdgeLen;
+    auto dOff = view.facetEdgeOffset, dCnt = view.facetEdgeCount, dFacet = view.edgeFacet;
+    auto dGrad = view.edgeAreaGrad, dLen = view.edgeLength;
+    Kokkos::parallel_for(
+        "tess.packEdges", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          const int n = fc(i);
+          if (n == 0)
+            return;
+          const int o = ob(i), p = pb(i), shift = p - o;
+          const int e0 = sOff(o), pe0 = pe(i);
+          int ne = 0;
+          for (int k = 0; k < n; ++k) {
+            dOff(p + k) = sOff(o + k) - e0 + pe0;
+            dCnt(p + k) = sCnt(o + k);
+            ne += sCnt(o + k);
+          }
+          for (int e = 0; e < ne; ++e) {
+            dFacet(pe0 + e) = sFacet(e0 + e) + shift;
+            for (int cc = 0; cc < 3; ++cc)
+              dGrad((size_t)(pe0 + e) * 3 + cc) = sGrad((size_t)(e0 + e) * 3 + cc);
+            dLen(pe0 + e) = sLen((size_t)(e0 + e) * 4);
+          }
+        });
   }
   Kokkos::fence();
   oConn = Kokkos::View<Real*, MemSpace>();
