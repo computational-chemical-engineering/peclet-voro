@@ -108,6 +108,11 @@ if(PECLET_VORO_BUILD_TESTS)
   # (both branches, the switch, device = host) against a long-double cubature reference.
   add_voro_kokkos_test(test_polygon_transform)
 
+  # M7 statics (DESIGN_NOTE_STATICS §17.4–§17.5, G-S.1(b)–(f) unit form): the set-based nonlocal
+  # perimeter E_Γ — device = host, FD of the partials and of U~ (OT re-solved), exact zeros off Γ,
+  # translation invariance, the default spec untouched.
+  add_voro_kokkos_test(test_nonlocal_perimeter)
+
   # P5: differentiable SDF wall force (seed-foot J_wall). FD-vs-analytic — flat wall exact, sphere
   # first-order.
   add_voro_kokkos_test(test_sdf_policy)

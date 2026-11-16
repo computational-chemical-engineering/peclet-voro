@@ -231,6 +231,16 @@ void bindTessellation(nb::module_& m) {
            "interface_energy='nonlocal' replaces the facet area by the moment-blob Gaussian\n"
            "nonlocal perimeter E_M (C^{1,1}; width s = h, cutoff 5s), whose pair weights are the\n"
            "reference `volumes` (N,) (default: the current cell volumes).")
+      .def("_reduced_potential", &Tess::reduced_potential_private, nb::arg("types"),
+           nb::arg("tension") = nb::none(), nb::arg("sigma_wall") = nb::none(),
+           nb::arg("density") = nb::none(), nb::arg("gravity") = nb::none(),
+           nb::arg("reference_density") = 0.0, nb::arg("tol") = 1e-12,
+           nb::arg("interface_energy") = "facet", nb::arg("volumes") = nb::none(),
+           nb::arg("kappa_s") = 1.0, nb::arg("eps_g") = 1e-10, nb::arg("rc_over_s") = 5.0,
+           "PRIVATE (M7 statics): reduced_potential plus interface_energy='nonlocal_exact' (the\n"
+           "set-based nonlocal perimeter E_Gamma, spectral direct sum, periodic, two types; its\n"
+           "'volumes' are V0) and the widths: s = kappa_s h (E_M and E_Gamma), E_Gamma's mode\n"
+           "cut-off eps_g, E_M's r_c/s. With 'nonlocal_exact' the result adds 'perimeter_stats'.")
       .def_prop_ro("num_particles", &Tess::num_particles,
                    "Particle count N set by the last `build` (0 before it).")
       .def_prop_ro(

@@ -132,14 +132,15 @@ KOKKOS_INLINE_FUNCTION void nonlocalTaper(Real q, Real& T, Real& dT) {
 
 }  // namespace detail
 
-/// I_s / s = π ∫_0^{5} ρ³ (2π)^{−3/2} e^{−ρ²/2} T(ρ/5) dρ (the integral in units of s, r_c = 5s),
+/// I_s / s = π ∫_0^{5} ρ³ (2π)^{−3/2} e^{−ρ²/2} T(ρ/5) dρ (the integral in units of s, r_c = 5s;
+/// `rcs` = r_c/s, private setter for the κ_s/r_c study, DESIGN_NOTE_STATICS §17.9 R8),
 /// by composite Gauss–Legendre on the two smooth pieces [0, 3.75] and [3.75, 5] (`panels` panels
 /// of `order` points each). The taper is C² only at 3.75, so the split is what makes the rule
 /// converge to round-off; the defaults agree with twice the panels to ≤ 1e-15 relative.
-inline double nonlocalUnitIntegral(int panels = 16, int order = 20) {
+inline double nonlocalUnitIntegral(int panels = 16, int order = 20, double rcs = 5.0) {
   std::vector<double> gx, gw;
   detail::gaussLegendre(order, gx, gw);
-  const double pi = 3.14159265358979323846, rcs = 5.0;
+  const double pi = 3.14159265358979323846;
   const double pref = pi * std::pow(2 * pi, -1.5);
   double I = 0;
   const double br[3] = {0.0, 0.75 * rcs, rcs};
@@ -161,9 +162,10 @@ inline double nonlocalUnitIntegral(int panels = 16, int order = 20) {
 }
 
 /// The E_M widths from the reference volumes: h = (Σ V⁰/N)^{1/3}, s = κ_s h, r_c = 5 s,
-/// C_s = 1/I_s (I_s = s · nonlocalUnitIntegral()).
+/// C_s = 1/I_s (I_s = s · nonlocalUnitIntegral()). `rcOverS` = r_c/s (5).
 template <class Real>
-NonlocalParams<Real> nonlocalParams(const std::vector<double>& V0, double kappaS = 1.0) {
+NonlocalParams<Real> nonlocalParams(const std::vector<double>& V0, double kappaS = 1.0,
+                                    double rcOverS = 5.0) {
   if (V0.empty())
     throw std::invalid_argument("voro: nonlocal interface energy needs the reference volumes");
   double sum = 0;
@@ -174,8 +176,8 @@ NonlocalParams<Real> nonlocalParams(const std::vector<double>& V0, double kappaS
   const double s = kappaS * h;
   p.h = static_cast<Real>(h);
   p.s = static_cast<Real>(s);
-  p.rc = static_cast<Real>(5.0 * s);
-  p.Cs = static_cast<Real>(1.0 / (s * nonlocalUnitIntegral()));
+  p.rc = static_cast<Real>(rcOverS * s);
+  p.Cs = static_cast<Real>(1.0 / (s * nonlocalUnitIntegral(16, 20, rcOverS)));
   return p;
 }
 

@@ -45,6 +45,7 @@
 #include "peclet/voro/energy/wall.hpp"
 #include "peclet/voro/lagrangian/facets.hpp"
 #include "peclet/voro/lagrangian/nonlocal_energy.hpp"
+#include "peclet/voro/lagrangian/nonlocal_perimeter.hpp"
 #include "peclet/voro/lagrangian/operators.hpp"
 #include "peclet/voro/lagrangian/weight_solve.hpp"
 #include "peclet/voro/reeval_tessellation.hpp"
@@ -113,8 +114,10 @@ Real facetGravity(const CellFacets<Real>& F, const LView<Real>& pos,
 }
 
 /// Which capillary energy carries `tension` (DESIGN_NOTE §12.2 D12.4): the raw unlike-facet area
-/// (the default) or the moment-blob nonlocal energy E_M (§12.3.3, lagrangian/nonlocal_energy.hpp).
-enum class InterfaceEnergy { Facet, Nonlocal };
+/// (the default), the moment-blob nonlocal energy E_M (§12.3.3, lagrangian/nonlocal_energy.hpp) or
+/// the set-based nonlocal perimeter E_Γ (DESIGN_NOTE_STATICS §17.4,
+/// lagrangian/nonlocal_perimeter.hpp; private placeholder 'nonlocal_exact').
+enum class InterfaceEnergy { Facet, Nonlocal, NonlocalExact };
 
 /// The physical inputs of U(x, w) = E_σ + E_w + U_g (DESIGN_NOTE §2.2 items 1–3) as device
 /// tables indexed by the cell type: `tension` (nTypes², σ_ab; empty: no interface energy),
@@ -130,8 +133,10 @@ struct PotentialSpec {
   Real gravity[3] = {0, 0, 0};
   Real rhoRef = 0;
   InterfaceEnergy interfaceEnergy = InterfaceEnergy::Facet;
-  LView<Real> refVolume;          ///< N, V⁰ (Nonlocal only)
-  NonlocalParams<Real> nonlocal;  ///< E_M widths (Nonlocal only)
+  LView<Real> refVolume;                     ///< N, V⁰ (Nonlocal, NonlocalExact)
+  NonlocalParams<Real> nonlocal;             ///< E_M widths (Nonlocal only)
+  PerimeterParams<Real> perimeter;           ///< E_Γ width and mode cut-off (NonlocalExact only)
+  PerimeterStats* perimeterStats = nullptr;  ///< optional: E_Γ sizes and fenced timings
 };
 
 struct PotentialParts {
@@ -210,12 +215,13 @@ PotentialParts partitionPotential(MT& mt, const CellFacets<Real>& F, const LView
   PotentialParts e;
   const int N = F.nCells;
   const bool nonlocal = s.tension.extent(0) > 0 && s.interfaceEnergy == InterfaceEnergy::Nonlocal;
-  if ((s.tension.extent(0) > 0 && !nonlocal) || s.sigmaWall.extent(0) > 0) {
+  const bool exact = s.tension.extent(0) > 0 && s.interfaceEnergy == InterfaceEnergy::NonlocalExact;
+  if ((s.tension.extent(0) > 0 && !nonlocal && !exact) || s.sigmaWall.extent(0) > 0) {
     auto view = detail::publishPower<Real, Policy>(
         mt.store, pos, mt.vol, N, L, mt.wall, mt.xRef, weight,
         detail::energyBand(F, s.types, s.sigmaWall.extent(0) > 0, scr),
         scr ? &scr->publish : nullptr);
-    if (s.tension.extent(0) > 0 && !nonlocal)
+    if (s.tension.extent(0) > 0 && !nonlocal && !exact)
       e.interface = energy::interfaceEnergyForce<Real, Policy>(view, s.types, s.tension, s.nTypes,
                                                                pos, weight, L[0], gradX, gradW,
                                                                mt.sdf, scr ? &scr->route : nullptr);
@@ -238,6 +244,9 @@ PotentialParts partitionPotential(MT& mt, const CellFacets<Real>& F, const LView
                                             s.nonlocal, L, gradX, gradW);
     }
   }
+  if (exact)
+    e.interface = nonlocalPerimeter(mt, N, pos, weight, L, s.types, s.tension, s.nTypes,
+                                    s.refVolume, s.perimeter, gradX, gradW, s.perimeterStats);
   if (s.density.extent(0) > 0)
     e.gravity = facetGravity(F, pos, s.types, s.density, s.gravity, s.rhoRef, L, gradX, gradW);
   return e;

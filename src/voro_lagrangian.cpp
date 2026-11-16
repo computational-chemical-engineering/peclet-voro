@@ -248,12 +248,17 @@ nb::dict Tess::solve_weights(nb::ndarray<real_t, nb::c_contig> volumes, real_t t
 
 namespace {
 /// The validated `interface_energy` mode: 'facet' (the raw unlike-facet area, the default) or
-/// 'nonlocal' (the moment-blob energy E_M, DESIGN_NOTE §12.3.3).
-lag::InterfaceEnergy interfaceEnergyMode(const std::string& m, const char* where) {
+/// 'nonlocal' (the moment-blob energy E_M, DESIGN_NOTE §12.3.3); with `allowPrivate` also the
+/// private placeholder 'nonlocal_exact' (the set-based E_Γ, DESIGN_NOTE_STATICS §17.4; its public
+/// name waits for Frank, Q-S2).
+lag::InterfaceEnergy interfaceEnergyMode(const std::string& m, const char* where,
+                                         bool allowPrivate = false) {
   if (m == "facet")
     return lag::InterfaceEnergy::Facet;
   if (m == "nonlocal")
     return lag::InterfaceEnergy::Nonlocal;
+  if (allowPrivate && m == "nonlocal_exact")
+    return lag::InterfaceEnergy::NonlocalExact;
   throw std::invalid_argument(std::string("voro: ") + where +
                               ": interface_energy must be 'facet' or 'nonlocal', got '" + m + "'");
 }
@@ -267,6 +272,28 @@ nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
                                  real_t reference_density, real_t tol,
                                  const std::string& interface_energy,
                                  std::optional<nb::ndarray<real_t, nb::c_contig>> volumes) {
+  return reduced_potential_impl(types, tension, sigma_wall, density, gravity, reference_density,
+                                tol, interface_energy, volumes, false, 1.0, 1e-10, 5.0);
+}
+
+nb::dict Tess::reduced_potential_private(
+    nb::ndarray<int, nb::c_contig> types, std::optional<nb::ndarray<real_t, nb::c_contig>> tension,
+    std::optional<nb::ndarray<real_t, nb::c_contig>> sigma_wall,
+    std::optional<nb::ndarray<real_t, nb::c_contig>> density,
+    std::optional<std::array<real_t, 3>> gravity, real_t reference_density, real_t tol,
+    const std::string& interface_energy, std::optional<nb::ndarray<real_t, nb::c_contig>> volumes,
+    double kappa_s, double eps_g, double rc_over_s) {
+  return reduced_potential_impl(types, tension, sigma_wall, density, gravity, reference_density,
+                                tol, interface_energy, volumes, true, kappa_s, eps_g, rc_over_s);
+}
+
+nb::dict Tess::reduced_potential_impl(
+    nb::ndarray<int, nb::c_contig> types, std::optional<nb::ndarray<real_t, nb::c_contig>> tension,
+    std::optional<nb::ndarray<real_t, nb::c_contig>> sigma_wall,
+    std::optional<nb::ndarray<real_t, nb::c_contig>> density,
+    std::optional<std::array<real_t, 3>> gravity, real_t reference_density, real_t tol,
+    const std::string& interface_energy, std::optional<nb::ndarray<real_t, nb::c_contig>> volumes,
+    bool allow_private, double kappa_s, double eps_g, double rc_over_s) {
   if (N_ == 0 || !weighted_)
     throw std::runtime_error(
         "voro: reduced_potential() needs a built POWER tessellation (set_weights, build, "
@@ -313,8 +340,10 @@ nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
     for (int a = 0; a < 3; ++a)
       spec.gravity[a] = (*gravity)[a];
   spec.rhoRef = reference_density;
-  spec.interfaceEnergy = interfaceEnergyMode(interface_energy, "reduced_potential");
-  if (spec.interfaceEnergy == lag::InterfaceEnergy::Nonlocal) {
+  spec.interfaceEnergy = interfaceEnergyMode(interface_energy, "reduced_potential", allow_private);
+  lag::PerimeterStats pstats;
+  if (spec.interfaceEnergy == lag::InterfaceEnergy::Nonlocal ||
+      spec.interfaceEnergy == lag::InterfaceEnergy::NonlocalExact) {
     // V⁰ of E_M: the given reference volumes, else the current cell volumes
     std::vector<double> V0 =
         volumes
@@ -324,7 +353,12 @@ nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
     if (static_cast<int>(V0.size()) != N)
       throw std::runtime_error("voro: reduced_potential(volumes) must be (N,)");
     spec.refVolume = peclet::core::toDevice<real_t>(V0, "rp.V0");
-    spec.nonlocal = lag::nonlocalParams<real_t>(V0);
+    if (spec.interfaceEnergy == lag::InterfaceEnergy::Nonlocal)
+      spec.nonlocal = lag::nonlocalParams<real_t>(V0, kappa_s, rc_over_s);
+    else {
+      spec.perimeter = lag::perimeterParams<real_t>(V0, kappa_s, eps_g);
+      spec.perimeterStats = &pstats;
+    }
   } else if (volumes) {
     throw std::invalid_argument(
         "voro: reduced_potential(volumes) is the V0 of interface_energy='nonlocal' only");
@@ -354,6 +388,16 @@ nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
   d["pi"] = toNumpy1(cellsToCaller(perm_, peclet::core::toVector(pi), 1));
   d["pcg_iterations"] = R.pcgIters;
   d["pcg_rel_residual"] = R.pcgRelRes;
+  if (spec.interfaceEnergy == lag::InterfaceEnergy::NonlocalExact) {
+    nb::dict st;
+    st["num_gamma"] = pstats.nGamma;
+    st["num_directed"] = pstats.nDirected;
+    st["num_modes"] = pstats.nModes;
+    st["seconds_export"] = pstats.tExport;
+    st["seconds_pass1"] = pstats.tPass1;
+    st["seconds_pass2"] = pstats.tPass2;
+    d["perimeter_stats"] = st;
+  }
   return d;
 }
 
@@ -522,6 +566,31 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   }
   void set_interface_energy(const std::string& mode) {
     interfaceEnergy_ = interfaceEnergyMode(mode, "LagrangianFlow.set_interface_energy()");
+    dirty_ = true;
+  }
+  // Private (DESIGN_NOTE_STATICS §17.4, §17.9 R8): the placeholder 'nonlocal_exact' (E_Γ) and the
+  // widths of the nonlocal energies. Public names wait for Frank (Q-S2).
+  void set_interface_energy_private(const std::string& mode) {
+    interfaceEnergy_ = interfaceEnergyMode(mode, "LagrangianFlow._set_interface_energy()", true);
+    dirty_ = true;
+  }
+  void set_spectral_tolerance(double eps) {
+    if (!(eps > 0 && eps < 1))
+      throw std::invalid_argument(
+          "voro: LagrangianFlow._set_spectral_tolerance() must be in (0, 1)");
+    epsG_ = eps;
+    dirty_ = true;
+  }
+  void set_nonlocal_width(double kappa) {
+    if (!(kappa > 0))
+      throw std::invalid_argument("voro: LagrangianFlow._set_nonlocal_width() must be > 0");
+    kappaS_ = kappa;
+    dirty_ = true;
+  }
+  void set_nonlocal_cutoff(double rcs) {
+    if (!(rcs > 0))
+      throw std::invalid_argument("voro: LagrangianFlow._set_nonlocal_cutoff() must be > 0");
+    rcOverS_ = rcs;
     dirty_ = true;
   }
   void set_wall_tension(nb::ndarray<real_t, nb::c_contig> v) {
@@ -1053,7 +1122,10 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     spec.interfaceEnergy = interfaceEnergy_;
     if (interfaceEnergy_ == lag::InterfaceEnergy::Nonlocal) {
       spec.refVolume = peclet::core::toDevice<real_t>(V0_, "lf.V0");
-      spec.nonlocal = lag::nonlocalParams<real_t>(V0_);
+      spec.nonlocal = lag::nonlocalParams<real_t>(V0_, kappaS_, rcOverS_);
+    } else if (interfaceEnergy_ == lag::InterfaceEnergy::NonlocalExact) {
+      spec.refVolume = peclet::core::toDevice<real_t>(V0_, "lf.V0");
+      spec.perimeter = lag::perimeterParams<real_t>(V0_, kappaS_, epsG_);
     }
     if (!sigmaWall_.empty())
       spec.sigmaWall = peclet::core::toDevice<real_t>(sigmaWall_, "lf.sigmaWall");
@@ -1148,6 +1220,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   int nT_ = 0;
   std::vector<double> V0_, rho_, mu_, tension_, sigmaWall_;
   lag::InterfaceEnergy interfaceEnergy_ = lag::InterfaceEnergy::Facet;
+  double kappaS_ = 1.0, epsG_ = 1e-10, rcOverS_ = 5.0;  // private: s/h, ε_G, E_M's r_c/s
   std::vector<real_t> vel_;
   std::array<real_t, 3> gravity_{0, 0, 0}, bodyAmp_{0, 0, 0}, bodyWave_{0, 0, 0};
   bool hasGravity_ = false, schurAssembled_ = false;
@@ -1241,6 +1314,16 @@ void bindLagrangian(nb::module_& m) {
            "The capillary energy that carries the tension table: 'facet' (the raw unlike-facet\n"
            "area, the default) or 'nonlocal' (the moment-blob Gaussian nonlocal perimeter E_M,\n"
            "C^{1,1} in the positions: width s = h, cutoff 5s, h = (sum V0 / N)^(1/3)).")
+      .def("_set_interface_energy", &LagrangianFlow::set_interface_energy_private, nb::arg("mode"),
+           "PRIVATE (placeholder name): as set_interface_energy, plus 'nonlocal_exact', the\n"
+           "set-based Gaussian nonlocal perimeter E_Gamma by the spectral direct sum\n"
+           "(periodic, two types; DESIGN_NOTE_STATICS 17.4).")
+      .def("_set_spectral_tolerance", &LagrangianFlow::set_spectral_tolerance, nb::arg("eps"),
+           "PRIVATE: E_Gamma's mode cut-off, G^(k_max) = eps (default 1e-10).")
+      .def("_set_nonlocal_width", &LagrangianFlow::set_nonlocal_width, nb::arg("kappa_s"),
+           "PRIVATE: the width s = kappa_s h of E_M and E_Gamma (default 1).")
+      .def("_set_nonlocal_cutoff", &LagrangianFlow::set_nonlocal_cutoff, nb::arg("rc_over_s"),
+           "PRIVATE: E_M's pair cutoff r_c / s (default 5).")
       .def("set_wall_tension", &LagrangianFlow::set_wall_tension, nb::arg("wall_tension"),
            "Solid-fluid tension per type (nTypes,) on wall facets (wetting).")
       .def("set_gravity", &LagrangianFlow::set_gravity, nb::arg("gravity"),
