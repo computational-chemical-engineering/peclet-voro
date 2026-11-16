@@ -17,7 +17,8 @@
  *         against the box, facets without a reciprocal (cell i has a facet to j, j none to i),
  *         and every empty cell published with zero volume and no facets.
  *
- * Usage: test_determinism [--n N] [--frames F] [--every K]
+ * Usage: test_determinism [--n N] [--frames F] [--every K] [--no-guard] [--detail]
+ *        (--detail: per-array hashes on every FRAME line too)
  * Exit status: nonzero if a guard check fails (hashes are compared by the script, not here).
  */
 #include <algorithm>
@@ -157,6 +158,13 @@ struct Digest {
   }
 };
 
+template <class T>
+Kokkos::View<T*, Mem> up(const std::vector<T>& h, const char* name) {
+  Kokkos::View<T*, Mem> d(name, h.size());
+  Kokkos::deep_copy(d, Kokkos::View<const T*, Kokkos::HostSpace>(h.data(), h.size()));
+  return d;
+}
+
 struct Scene {
   int n = 0, N = 0;
   Real L[3] = {1, 1, 1};
@@ -201,7 +209,7 @@ void allocEngine(Engine<W>& mt, const Scene& s) {
 template <bool W>
 peclet::voro::TessellatorResult<Real> coldBuild(const Scene& s, const DV& pos) {
   return peclet::voro::buildTessellation<Real, W, peclet::voro::NoSdf>(pos, W ? s.weight : DV(),
-                                                                      s.N, s.L);
+                                                                       s.N, s.L);
 }
 
 void addView(Digest& d, const std::string& pre, const peclet::voro::TessellationView<Real>& v) {
@@ -213,6 +221,49 @@ void addView(Digest& d, const std::string& pre, const peclet::voro::Tessellation
   d.add(pre + "facetArea", v.facetArea);
   d.add(pre + "facetConnect", v.facetConnect);
   d.add(pre + "facetConnVec", v.facetConnVec);
+}
+
+/// The view's facets in CELL order (cell 0's facets, then cell 1's, ...), each cell's in its own
+/// order: invariant under where the CSR places each cell, so it compares a finish-order CSR with
+/// a cell-ordered one.
+void addByCell(Digest& d, const std::string& pre, const peclet::voro::TessellationView<Real>& v) {
+  const auto off = down(v.cellFacetOffset), cnt = down(v.cellFacetCount);
+  const auto nbr = down(v.facetNeighbor);
+  const auto a = down(v.facetArea), c = down(v.facetConnect), q = down(v.facetConnVec);
+  std::vector<Real> rec;
+  for (std::size_t i = 0; i < off.size(); ++i)
+    for (int f = off[i]; f < off[i] + cnt[i]; ++f) {
+      rec.push_back(static_cast<Real>(nbr[f]));
+      for (int k = 0; k < 3; ++k) {
+        rec.push_back(a[3 * f + k]);
+        rec.push_back(c[3 * f + k]);
+        rec.push_back(q[3 * f + k]);
+      }
+    }
+  d.add(pre + "byCell", up(rec, "rec"));
+}
+
+/// The facet-edge area-Jacobian CSR in cell order with cell-relative facet indices (placement
+/// invariant, like addByCell).
+void addEdgesByCell(Digest& d, const std::string& pre,
+                    const peclet::voro::TessellationView<Real>& v) {
+  const auto off = down(v.cellFacetOffset), cnt = down(v.cellFacetCount);
+  const auto eo = down(v.facetEdgeOffset), ec = down(v.facetEdgeCount);
+  const auto ef = down(v.edgeFacet);
+  const auto eg = down(v.edgeAreaGrad), el = down(v.edgeLength), m2 = down(v.facetMoment2);
+  std::vector<Real> rec;
+  for (std::size_t i = 0; i < off.size(); ++i)
+    for (int f = off[i]; f < off[i] + cnt[i]; ++f) {
+      rec.push_back(m2[f]);
+      rec.push_back(static_cast<Real>(ec[f]));
+      for (int e = eo[f]; e < eo[f] + ec[f]; ++e) {
+        rec.push_back(static_cast<Real>(ef[e] - off[i]));
+        for (int k = 0; k < 3; ++k)
+          rec.push_back(eg[3 * e + k]);
+        rec.push_back(el[e]);
+      }
+    }
+  d.add(pre + "edgesByCell", up(rec, "rec"));
 }
 
 void addMesh(Digest& d, const fv::FaceMesh<Real>& m) {
@@ -231,21 +282,38 @@ void addMesh(Digest& d, const fv::FaceMesh<Real>& m) {
   d.add("mesh.cellFaceSign", m.cellFaceSign);
 }
 
+/// The resident topology, live slots only (the store is allocated without initialization, so
+/// the slots past np / nt hold whatever was there).
+void addStore(Digest& d, const peclet::voro::TopologyStore<kP, kT>& st) {
+  const auto np = down(st.np), nt = down(st.nt);
+  const auto pnbr = down(st.pnbr);
+  const auto tri = down(st.tri);
+  std::vector<int> p;
+  std::vector<unsigned> t;
+  for (std::size_t i = 0; i < np.size(); ++i) {
+    for (int k = 0; k < np[i]; ++k)
+      p.push_back(pnbr[i * kP + k]);
+    for (int k = 0; k < nt[i]; ++k)
+      t.push_back(tri[i * kT + k]);
+  }
+  d.add("store.np", st.np);
+  d.add("store.nt", st.nt);
+  d.add("store.pnbr", Kokkos::View<int*, Mem>(up<int>(p, "pnbr")));
+  d.add("store.tri", Kokkos::View<unsigned*, Mem>(up<unsigned>(t, "tri")));
+}
+
 /// The resident engine's publish: store → reevalPublish → aux maps → face mesh.
 template <bool W>
 void addPublish(Digest& d, Engine<W>& mt, const Scene& s, const DV& pos) {
-  auto view = peclet::voro::reevalPublish<Real, kP, kT>(mt.store, pos, mt.vol, s.N, s.L, mt.wall,
-                                                        mt.xRef);
+  auto view =
+      peclet::voro::reevalPublish<Real, kP, kT>(mt.store, pos, mt.vol, s.N, s.L, mt.wall, mt.xRef);
   auto aux = peclet::voro::buildAuxMaps(view);
   auto mesh = fv::buildFaceMesh(view, aux);
   addView(d, "pub.", view);
   d.add("aux.recip", aux.recip);
   d.add("aux.cellOfFacet", aux.cellOfFacet);
   addMesh(d, mesh);
-  d.add("store.np", mt.store.np);
-  d.add("store.nt", mt.store.nt);
-  d.add("store.pnbr", mt.store.pnbr);
-  d.add("store.tri", mt.store.tri);
+  addStore(d, mt.store);
 }
 
 template <bool W>
@@ -254,6 +322,22 @@ void coldHashes(const Scene& s, const char* tag) {
   auto res = coldBuild<W>(s, s.pos);
   addView(d, "raw.", res.view);
   d.add("raw.status", res.status);
+  addByCell(d, "raw.", res.view);
+  {  // the opt-in facet-edge area-Jacobian CSR and facet moments of the cold build
+    auto ag = peclet::voro::buildTessellation<Real, W, peclet::voro::NoSdf>(
+        s.pos, W ? s.weight : DV(), s.N, s.L, peclet::voro::kSearchWindow, -1, {}, {}, true, -1, {},
+        {}, {}, {}, {}, {}, 0, nullptr, {}, /*withAreaGrad=*/true, {}, {}, 0, Real(0), false,
+        /*withMoments=*/true);
+    addView(d, "rawAG.", ag.view);
+    addByCell(d, "rawAG.", ag.view);
+    addEdgesByCell(d, "rawAG.", ag.view);
+    d.add("rawAG.facetEdgeOffset", ag.view.facetEdgeOffset);
+    d.add("rawAG.facetEdgeCount", ag.view.facetEdgeCount);
+    d.add("rawAG.edgeFacet", ag.view.edgeFacet);
+    d.add("rawAG.edgeAreaGrad", ag.view.edgeAreaGrad);
+    d.add("rawAG.edgeLength", ag.view.edgeLength);
+    d.add("rawAG.facetMoment2", ag.view.facetMoment2);
+  }
   Engine<W> mt;
   allocEngine<W>(mt, s);
   mt.rebuild(s.pos);
@@ -265,12 +349,12 @@ void coldHashes(const Scene& s, const char* tag) {
 
 /// Partition invariants of one cold build (host-side).
 struct GuardStats {
-  double volRel = 0;      // |Σ V − L³| / L³
-  long nonRecip = 0;      // facets i→j (|A| > 0) with no facet j→i
-  double nonRecipA = 0;   // the largest such |A|, in h²
-  long empty = 0;         // cells with status kEmpty
-  long buried = 0;        // power seeds outside their own cell (kBuried)
-  long emptyBad = 0;      // empty cells published with a volume or facets
+  double volRel = 0;     // |Σ V − L³| / L³
+  long nonRecip = 0;     // facets i→j (|A| > 0) with no facet j→i
+  double nonRecipA = 0;  // the largest such |A|, in h²
+  long empty = 0;        // cells with status kEmpty
+  long buried = 0;       // power seeds outside their own cell (kBuried)
+  long emptyBad = 0;     // empty cells published with a volume or facets
 };
 
 GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& res) {
@@ -317,7 +401,7 @@ GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& re
 }
 
 template <bool W>
-int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard) {
+int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard, bool detail) {
   Engine<W> mt;
   allocEngine<W>(mt, s);
   DV pos("pos", 3 * s.N);
@@ -361,6 +445,9 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard)
       d.add("rebuilt", mt.rebuilt);
       addPublish<W>(d, mt, s, pos);
       std::printf("FRAME %s %d %s rebuilt=%ld\n", tag, k, d.all.hex().c_str(), nReb);
+      if (detail)
+        for (const auto& p : d.parts)
+          std::printf("FRAME %s %d %s %s\n", tag, k, p.first.c_str(), p.second.c_str());
     }
     if (doGuard) {
       const auto g = guard(s, coldBuild<W>(s, pos));
@@ -395,7 +482,7 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard)
 
 int main(int argc, char** argv) {
   int n = 16, frames = 40, every = 1;
-  bool doGuard = true;
+  bool doGuard = true, detail = false;
   for (int a = 1; a < argc; ++a) {
     if (!std::strcmp(argv[a], "--n") && a + 1 < argc)
       n = std::atoi(argv[++a]);
@@ -405,6 +492,8 @@ int main(int argc, char** argv) {
       every = std::max(1, std::atoi(argv[++a]));
     else if (!std::strcmp(argv[a], "--no-guard"))
       doGuard = false;
+    else if (!std::strcmp(argv[a], "--detail"))
+      detail = true;
   }
   int rc = 0;
   Kokkos::initialize(argc, argv);
@@ -414,8 +503,8 @@ int main(int argc, char** argv) {
     const Scene s = makeScene(n);
     coldHashes<false>(s, "voronoi");
     coldHashes<true>(s, "power");
-    moving<false>(s, "voronoi", frames, every, false);
-    rc |= moving<true>(s, "power", frames, every, doGuard);
+    moving<false>(s, "voronoi", frames, every, false, detail);
+    rc |= moving<true>(s, "power", frames, every, doGuard, detail);
   }
   Kokkos::finalize();
   return rc;
