@@ -117,6 +117,19 @@ if(PECLET_VORO_BUILD_TESTS)
   # 1e-15-jittered variants, power policy, and the moving-point repair — the invariants must hold.
   add_voro_kokkos_test(test_cospherical)
 
+  # Thread-count determinism: the published arrays of a cold Voronoi / power build and of a moving
+  # repaired power run hashed at OMP 1 and 4 (must be equal), plus the cold build's partition guard
+  # (volume sum, facet reciprocity, empty cells) on every frame of the moving run.
+  add_executable(test_determinism test_determinism.cpp)
+  target_link_libraries(test_determinism PRIVATE Kokkos::kokkos)
+  target_include_directories(test_determinism PRIVATE ${_voro_test_includes})
+  target_compile_definitions(test_determinism PRIVATE MORTON_ENABLE_KOKKOS=1 PECLET_CORE_HAVE_MORTON=1)
+  target_compile_features(test_determinism PRIVATE cxx_std_20)
+  add_test(NAME test_determinism
+           COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/determinism_check.sh $<TARGET_FILE:test_determinism>
+                   "1 4" --n 16 --frames 40)
+  set_tests_properties(test_determinism PROPERTIES ENVIRONMENT "OMP_PROC_BIND=false")
+
   # Part II: consolidated moving-point UPDATE driver. Its Phase-1 gates double as a self-test (GATE 0
   # corruption catch, GATE 1 subset/partner/skin), so the FP64 binary is always built with the tests;
   # the timing modes (strategy sweep, phase-0 characterisation) are `bench`-labelled below.
