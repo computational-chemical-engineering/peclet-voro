@@ -18,7 +18,8 @@
  *         and every empty cell published with zero volume and no facets.
  *
  * Usage: test_determinism [--n N] [--frames F] [--every K] [--no-guard] [--detail]
- *        (--detail: per-array hashes on every FRAME line too)
+ *        [--dump K FILE]  (--detail: per-array hashes on every FRAME line too; --dump: the power
+ *        run's positions then weights at frame K, raw doubles)
  * Exit status: nonzero if a guard check fails (hashes are compared by the script, not here).
  */
 #include <algorithm>
@@ -401,7 +402,8 @@ GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& re
 }
 
 template <bool W>
-int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard, bool detail) {
+int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard, bool detail,
+           int dumpFrame = -1, const std::string& dumpPath = "") {
   Engine<W> mt;
   allocEngine<W>(mt, s);
   DV pos("pos", 3 * s.N);
@@ -449,6 +451,14 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
         for (const auto& p : d.parts)
           std::printf("FRAME %s %d %s %s\n", tag, k, p.first.c_str(), p.second.c_str());
     }
+    if (k == dumpFrame && !dumpPath.empty()) {  // positions then weights, raw doubles
+      const auto hp = down(pos), hw = down(s.weight);
+      if (FILE* fp = std::fopen(dumpPath.c_str(), "wb")) {
+        std::fwrite(hp.data(), sizeof(Real), hp.size(), fp);
+        std::fwrite(hw.data(), sizeof(Real), hw.size(), fp);
+        std::fclose(fp);
+      }
+    }
     if (doGuard) {
       const auto g = guard(s, coldBuild<W>(s, pos));
       const bool ok = g.volRel <= 1e-12 && g.nonRecip == 0 && g.emptyBad == 0;
@@ -483,6 +493,8 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
 int main(int argc, char** argv) {
   int n = 16, frames = 40, every = 1;
   bool doGuard = true, detail = false;
+  int dumpFrame = -1;
+  std::string dumpPath;
   for (int a = 1; a < argc; ++a) {
     if (!std::strcmp(argv[a], "--n") && a + 1 < argc)
       n = std::atoi(argv[++a]);
@@ -494,6 +506,10 @@ int main(int argc, char** argv) {
       doGuard = false;
     else if (!std::strcmp(argv[a], "--detail"))
       detail = true;
+    else if (!std::strcmp(argv[a], "--dump") && a + 2 < argc) {
+      dumpFrame = std::atoi(argv[++a]);
+      dumpPath = argv[++a];
+    }
   }
   int rc = 0;
   Kokkos::initialize(argc, argv);
@@ -504,7 +520,7 @@ int main(int argc, char** argv) {
     coldHashes<false>(s, "voronoi");
     coldHashes<true>(s, "power");
     moving<false>(s, "voronoi", frames, every, false, detail);
-    rc |= moving<true>(s, "power", frames, every, doGuard, detail);
+    rc |= moving<true>(s, "power", frames, every, doGuard, detail, dumpFrame, dumpPath);
   }
   Kokkos::finalize();
   return rc;
