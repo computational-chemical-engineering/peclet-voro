@@ -244,6 +244,25 @@ FaceMesh<Real> buildFaceMesh(const TessellationView<Real>& view, const AuxMaps<R
             CS(pb) = Real(-1);
           }
         });
+    // The atomic cursor leaves each cell's list in thread-arrival order, and the operators sum
+    // over it in list order (rounding), so a threaded build differed run to run. Sort each list
+    // by face index — the serial fill's order, so a 1-thread build is unchanged. Lists hold ~15
+    // faces: an insertion sort per cell, the sign travelling with its face.
+    Kokkos::parallel_for(
+        "fv.sortCells", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          const int b = off(i), e = off(i + 1);
+          for (int s = b + 1; s < e; ++s) {
+            const int g = CF(s);
+            const Real sg = CS(s);
+            int t = s - 1;
+            for (; t >= b && CF(t) > g; --t) {
+              CF(t + 1) = CF(t);
+              CS(t + 1) = CS(t);
+            }
+            CF(t + 1) = g;
+            CS(t + 1) = sg;
+          }
+        });
   }
   m.cellVolume = view.cellVolume;
   Kokkos::fence();
