@@ -316,6 +316,10 @@ struct CellBuilder {
   // Optional (track B, rung B1): per-facet second moment ∫|s|² dA about the foot point (over-buffer
   // like oArea; packed with the facet CSR). Emitted only when oMoment2 is sized.
   Kokkos::View<Real*, MemSpace> oMoment2;
+  // Original seed index -> grid-sorted slot (TessGrid::slotOf). Read only by a Power build's
+  // publish: a radical plane's connector is the generator connector relVec(slotOf(pnbr)), not
+  // 2·foot. Unused (may be empty) for Voronoi.
+  Kokkos::View<int*, MemSpace> slotOf;
 
   /// Rung A3: publish the per-facet area Jacobians of finalised cell `c` (facets `faces[0..nf)`
   /// at CSR base `base`) into the facet-edge CSR: one atomic reservation on `edgeCursor`, then
@@ -520,8 +524,19 @@ struct CellBuilder {
       conn[0] = Real(2) * c.n[k][0];
       conn[1] = Real(2) * c.n[k][1];
       conn[2] = Real(2) * c.n[k][2];
-      if (withForceGeom)
-        c.facetGeometry(k, area, dv, conn);  // area vector + dV + connector
+      if constexpr (Weighted) {
+        // Power: the connector is the generator connector the radical plane was clipped with
+        // (the same relVec), not 2·foot: the plane is shifted by the weight difference (and a
+        // re-evaluated cell whose seed lies outside it has its foot pointing AWAY from the
+        // neighbour, see reevalPublish). Box and wall planes (pnbr < 0) keep 2·foot.
+        if (c.pnbr[k] >= 0)
+          relVec(slotOf(c.pnbr[k]), pix, piy, piz, conn);
+        if (withForceGeom)
+          c.facetGeometryFrom(k, conn, area, dv);  // area vector (along conn) + dV
+      } else {
+        if (withForceGeom)
+          c.facetGeometry(k, area, dv, conn);  // area vector + dV + connector
+      }
       if (oMoment2.extent(0) > 0)
         oMoment2((size_t)base + idx) = c.faceMoment2(k);
       oNbr((size_t)base + idx) = c.pnbr[k];
@@ -947,7 +962,8 @@ TessellatorResult<Real> buildTessellation(
                                                          nearMargin,
                                                          oWallDV,
                                                          oWallDA,
-                                                         oMoment2};
+                                                         oMoment2,
+                                                         grid.slotOf};
   const int nBuildL = nBuildEff;
   auto binnedV0 = grid.binned;
   int nFacetsRaw = 0, nEdgesRaw = 0;

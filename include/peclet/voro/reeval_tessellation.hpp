@@ -11,7 +11,8 @@
  * and this reeval for the forces, instead of a full rebuild every step.
  *
  * It reproduces buildCell's publish half exactly (the >=3-incident-live-triangle face criterion,
- * the facetGeometry(k) call with conn = 2·n[k]), differing only in that the per-cell facet base is
+ * the facetGeometry(k) call with conn = 2·n[k] — for a Power policy facetGeometryFrom with the
+ * generator connector), differing only in that the per-cell facet base is
  * a deterministic exclusive prefix sum (contiguous by cell index) rather than the build's atomic
  * cell-finish order — both are valid facetBegin/facetEnd bases, and the physics + buildAuxMaps are
  * agnostic to which. The repair's already-computed volumes are reused for cellVolume.
@@ -190,7 +191,23 @@ TessellationView<Real> reevalPublish(const TopologyStore<MAXP, MAXT>& store,
             conn[0] = Real(2) * c.n[k][0];
             conn[1] = Real(2) * c.n[k][1];
             conn[2] = Real(2) * c.n[k][2];
-            c.facetGeometry(k, area, dv, conn);  // zeros for a degenerate face (matches buildCell)
+            if constexpr (Policy::kHasWeightDof) {
+              // Power: the generator connector the radical plane was rebuilt from (the same
+              // cubic min-image as reevalGeometry), not 2·foot; box/wall planes keep 2·foot.
+              const int gk = c.pnbr[k];
+              if (gk >= 0) {
+                const Real Lh = Real(0.5) * Lx;
+                Real rx = P(3 * gk) - P(3 * i), ry = P(3 * gk + 1) - P(3 * i + 1),
+                     rz = P(3 * gk + 2) - P(3 * i + 2);
+                conn[0] = rx > Lh ? rx - Lx : (rx < -Lh ? rx + Lx : rx);
+                conn[1] = ry > Lh ? ry - Lx : (ry < -Lh ? ry + Lx : ry);
+                conn[2] = rz > Lh ? rz - Lx : (rz < -Lh ? rz + Lx : rz);
+              }
+              c.facetGeometryFrom(k, conn, area, dv);  // zeros for a degenerate face
+            } else {
+              // zeros for a degenerate face (matches buildCell)
+              c.facetGeometry(k, area, dv, conn);
+            }
             const std::size_t g = static_cast<std::size_t>(b + idx);
             fNbr(g) = static_cast<gid_t>(c.pnbr[k]);
             for (int cc = 0; cc < 3; ++cc) {

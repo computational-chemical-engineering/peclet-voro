@@ -2074,25 +2074,44 @@ struct ConvexCell {
     vol = V * (Real(1) / Real(6));
   }
 
-  /// Per-facet physics geometry (G2 tier) for plane k: the outward face area VECTOR, the
-  /// volume gradient dV = ∂V/∂r_k, and the connecting vector r_k (= the plane normal). Matches
-  /// the half-edge facetArea / facetConnect / facetConnVec. Returns false if k is not a face.
-  ///
-  /// Derivation of dV: the cell is { r_k·x ≤ ½|r_k|² }. Perturbing r_k → r_k+δ moves a point x
-  /// on face k off the plane by δ·(x−r_k); the outward normal displacement is −δ·(x−r_k)/|r_k|,
-  /// so δV = ∫_face (−δ·(x−r_k)/|r_k|) dA = (area/|r_k|) δ·(r_k − c_k), with c_k the face
-  /// centroid. Holding all other planes fixed, this is first-order exact ⇒
-  ///   dV = ∂V/∂r_k = (area/|r_k|)·(r_k − c_k).
+  /// Per-facet physics geometry (G2 tier) for plane k of a VORONOI cell: the outward face area
+  /// VECTOR, the volume gradient dV = ∂V/∂r_k, and the connecting vector r_k = 2·n[k] (the
+  /// bisector's foot point is exactly half the neighbour's relative position). Matches the
+  /// half-edge facetArea / facetConnect / facetConnVec. Returns false if k is not a face.
+  /// A POWER cell's connector is not 2·n[k] (its plane is shifted by the weight difference, and
+  /// n[k] points away from the neighbour when the seed lies outside its own cell): call
+  /// facetGeometryFrom with the generator connector instead.
   KOKKOS_INLINE_FUNCTION bool facetGeometry(int k, Real areaVec[3], Real dv[3],
                                             Real conn[3]) const {
+    const Real r[3] = {Real(2) * n[k][0], Real(2) * n[k][1],
+                       Real(2) * n[k][2]};  // connector r = 2·foot
+    if (!facetGeometryFrom(k, r, areaVec, dv))
+      return false;
+    conn[0] = r[0];
+    conn[1] = r[1];
+    conn[2] = r[2];
+    return true;
+  }
+
+  /// Per-facet physics geometry for plane k given its generator connector r = p_j − p_i (the
+  /// neighbour's min-image relative position the plane was built from): the face area VECTOR
+  /// oriented along r (out of the cell, toward the neighbour) and dV = ∂V/∂r. Valid for both
+  /// plane policies; returns false if k is not a face.
+  ///
+  /// Derivation of dV: the cell is { r·x ≤ ½(|r|² + c) } with c = w_i − w_j (0 for Voronoi).
+  /// Perturbing r → r+δ at fixed weights moves a point x on face k off the plane by δ·(x−r); the
+  /// outward normal displacement is −δ·(x−r)/|r|, so δV = ∫_face (−δ·(x−r)/|r|) dA =
+  /// (area/|r|) δ·(r − c_k), with c_k the face centroid. Holding all other planes fixed, this is
+  /// first-order exact ⇒
+  ///   dV = ∂V/∂r = (area/|r|)·(r − c_k).
+  KOKKOS_INLINE_FUNCTION bool facetGeometryFrom(int k, const Real r[3], Real areaVec[3],
+                                                Real dv[3]) const {
     Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
     const int m = faceOrdered(k, fx, fy, fz);
     if (m < 3)
       return false;
     Real A[3];
     polyAreaVec(fx, fy, fz, m, A);
-    const Real r[3] = {Real(2) * n[k][0], Real(2) * n[k][1],
-                       Real(2) * n[k][2]};                    // connector r = 2·foot
     if (A[0] * r[0] + A[1] * r[1] + A[2] * r[2] < Real(0)) {  // orient outward (toward neighbour)
       A[0] = -A[0];
       A[1] = -A[1];
@@ -2122,9 +2141,6 @@ struct ConvexCell {
     dv[0] = s * (r[0] - cx);
     dv[1] = s * (r[1] - cy);
     dv[2] = s * (r[2] - cz);
-    conn[0] = r[0];
-    conn[1] = r[1];
-    conn[2] = r[2];
     return true;
   }
 };
