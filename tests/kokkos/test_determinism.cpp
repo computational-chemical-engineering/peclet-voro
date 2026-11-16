@@ -306,8 +306,9 @@ void addStore(Digest& d, const peclet::voro::TopologyStore<kP, kT>& st) {
 /// The resident engine's publish: store → reevalPublish → aux maps → face mesh.
 template <bool W>
 void addPublish(Digest& d, Engine<W>& mt, const Scene& s, const DV& pos) {
-  auto view =
-      peclet::voro::reevalPublish<Real, kP, kT>(mt.store, pos, mt.vol, s.N, s.L, mt.wall, mt.xRef);
+  using Policy = typename Engine<W>::PlanePolicy;
+  auto view = peclet::voro::reevalPublish<Real, kP, kT, Policy>(
+      mt.store, pos, mt.vol, s.N, s.L, mt.wall, mt.xRef, false, false, W ? s.weight : DV());
   auto aux = peclet::voro::buildAuxMaps(view);
   auto mesh = fv::buildFaceMesh(view, aux);
   addView(d, "pub.", view);
@@ -533,8 +534,8 @@ void timing(const Scene& s, const char* tag, int reps, int frames) {
     Kokkos::fence();
     const double tr = 1e3 * t.seconds();
     t.reset();
-    auto view = peclet::voro::reevalPublish<Real, kP, kT>(mt.store, pos, mt.vol, s.N, s.L, mt.wall,
-                                                          mt.xRef);
+    auto view = peclet::voro::reevalPublish<Real, kP, kT, typename Engine<W>::PlanePolicy>(
+        mt.store, pos, mt.vol, s.N, s.L, mt.wall, mt.xRef, false, false, W ? s.weight : DV());
     auto aux = peclet::voro::buildAuxMaps(view);
     auto mesh = fv::buildFaceMesh(view, aux);
     Kokkos::fence();
