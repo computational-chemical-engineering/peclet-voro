@@ -18,9 +18,9 @@
  *         and every empty cell published with zero volume and no facets.
  *
  * Usage: test_determinism [--n N] [--frames F] [--every K] [--no-guard] [--detail]
- *        [--dump K FILE]  (--detail: per-array hashes on every FRAME line too; --dump: the power
- *        run's positions then weights at frame K, raw doubles)
- * Exit status: nonzero if a guard check fails (hashes are compared by the script, not here).
+ *        [--dump K FILE] [--time]  (--detail: per-array hashes on every FRAME line too; --dump: the
+ * power run's positions then weights at frame K, raw doubles; --time: wall times only) Exit status:
+ * nonzero if a guard check fails (hashes are compared by the script, not here).
  */
 #include <algorithm>
 #include <array>
@@ -401,6 +401,25 @@ GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& re
   return g;
 }
 
+/// One frame of the S0.2 motion: x += U0·dt (sin 2πy, sin 2πz, sin 2πx), U0·dt = 0.05h/√3,
+/// wrapped into [0,1).
+void advect(const Scene& s, const DV& pos) {
+  const Real twoPi = Real(2) * Real(M_PI);
+  const Real step = Real(0.05) * s.h / std::sqrt(Real(3));
+  auto P = pos;
+  Kokkos::parallel_for(
+      "det.advect", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, s.N),
+      KOKKOS_LAMBDA(const int i) {
+        const Real x = P(3 * i), y = P(3 * i + 1), z = P(3 * i + 2);
+        Real q[3] = {x + step * Kokkos::sin(twoPi * y), y + step * Kokkos::sin(twoPi * z),
+                     z + step * Kokkos::sin(twoPi * x)};
+        for (int d = 0; d < 3; ++d) {
+          q[d] = q[d] < Real(0) ? q[d] + Real(1) : (q[d] >= Real(1) ? q[d] - Real(1) : q[d]);
+          P(3 * i + d) = q[d];
+        }
+      });
+}
+
 template <bool W>
 int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard, bool detail,
            int dumpFrame = -1, const std::string& dumpPath = "") {
@@ -409,27 +428,12 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
   DV pos("pos", 3 * s.N);
   Kokkos::deep_copy(pos, s.pos);
   mt.rebuild(pos);
-  const Real twoPi = Real(2) * Real(M_PI);
-  const Real step = Real(0.05) * s.h / std::sqrt(Real(3));  // U0·dt
   int bad = 0;
   GuardStats worst;
   long totalRebuilt = 0;
   int fell = 0, gateRebuilds = 0;
   for (int k = 1; k <= frames; ++k) {
-    {
-      auto P = pos;
-      Kokkos::parallel_for(
-          "det.advect", Kokkos::RangePolicy<peclet::core::ExecSpace>(0, s.N),
-          KOKKOS_LAMBDA(const int i) {
-            const Real x = P(3 * i), y = P(3 * i + 1), z = P(3 * i + 2);
-            Real q[3] = {x + step * Kokkos::sin(twoPi * y), y + step * Kokkos::sin(twoPi * z),
-                         z + step * Kokkos::sin(twoPi * x)};
-            for (int d = 0; d < 3; ++d) {
-              q[d] = q[d] < Real(0) ? q[d] + Real(1) : (q[d] >= Real(1) ? q[d] - Real(1) : q[d]);
-              P(3 * i + d) = q[d];
-            }
-          });
-    }
+    advect(s, pos);
     const auto st = mt.step(pos);
     fell += st.fellBack ? 1 : 0;
     gateRebuilds += st.route == peclet::voro::RepairStats::kRebuildGate ? 1 : 0;
@@ -488,11 +492,67 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
   return bad;
 }
 
+double median(std::vector<double> v) {
+  std::sort(v.begin(), v.end());
+  return v[v.size() / 2];
+}
+
+/// Wall times (ms) of the cold build (buildTessellation with force geometry), the engine's
+/// rebuild, and per frame of the moving run its repair (`step`) and its publish (reevalPublish →
+/// aux maps → face mesh): medians over `reps` builds and over frames 11..`frames`.
+template <bool W>
+void timing(const Scene& s, const char* tag, int reps, int frames) {
+  Kokkos::Timer t;
+  std::vector<double> cold, reb, rep, pub;
+  for (int r = 0; r < reps + 2; ++r) {
+    Kokkos::fence();
+    t.reset();
+    auto res = coldBuild<W>(s, s.pos);
+    Kokkos::fence();
+    if (r >= 2)
+      cold.push_back(1e3 * t.seconds());
+  }
+  Engine<W> mt;
+  allocEngine<W>(mt, s);
+  for (int r = 0; r < reps + 2; ++r) {
+    Kokkos::fence();
+    t.reset();
+    mt.rebuild(s.pos);
+    Kokkos::fence();
+    if (r >= 2)
+      reb.push_back(1e3 * t.seconds());
+  }
+  DV pos("pos", 3 * s.N);
+  Kokkos::deep_copy(pos, s.pos);
+  mt.rebuild(pos);
+  for (int k = 1; k <= frames; ++k) {
+    advect(s, pos);
+    Kokkos::fence();
+    t.reset();
+    mt.step(pos);
+    Kokkos::fence();
+    const double tr = 1e3 * t.seconds();
+    t.reset();
+    auto view = peclet::voro::reevalPublish<Real, kP, kT>(mt.store, pos, mt.vol, s.N, s.L, mt.wall,
+                                                          mt.xRef);
+    auto aux = peclet::voro::buildAuxMaps(view);
+    auto mesh = fv::buildFaceMesh(view, aux);
+    Kokkos::fence();
+    if (k > 10) {
+      rep.push_back(tr);
+      pub.push_back(1e3 * t.seconds());
+    }
+  }
+  std::printf("TIME %s n=%d threads=%d cold=%.3f rebuild=%.3f repair=%.3f publish=%.3f ms\n", tag,
+              s.n, peclet::core::ExecSpace().concurrency(), median(cold), median(reb), median(rep),
+              median(pub));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   int n = 16, frames = 40, every = 1;
-  bool doGuard = true, detail = false;
+  bool doGuard = true, detail = false, timeIt = false;
   int dumpFrame = -1;
   std::string dumpPath;
   for (int a = 1; a < argc; ++a) {
@@ -506,6 +566,8 @@ int main(int argc, char** argv) {
       doGuard = false;
     else if (!std::strcmp(argv[a], "--detail"))
       detail = true;
+    else if (!std::strcmp(argv[a], "--time"))
+      timeIt = true;
     else if (!std::strcmp(argv[a], "--dump") && a + 2 < argc) {
       dumpFrame = std::atoi(argv[++a]);
       dumpPath = argv[++a];
@@ -517,10 +579,15 @@ int main(int argc, char** argv) {
     std::printf("test_determinism: n=%d frames=%d threads=%d\n", n, frames,
                 peclet::core::ExecSpace().concurrency());
     const Scene s = makeScene(n);
-    coldHashes<false>(s, "voronoi");
-    coldHashes<true>(s, "power");
-    moving<false>(s, "voronoi", frames, every, false, detail);
-    rc |= moving<true>(s, "power", frames, every, doGuard, detail, dumpFrame, dumpPath);
+    if (timeIt) {
+      timing<false>(s, "voronoi", 11, frames);
+      timing<true>(s, "power", 11, frames);
+    } else {
+      coldHashes<false>(s, "voronoi");
+      coldHashes<true>(s, "power");
+      moving<false>(s, "voronoi", frames, every, false, detail);
+      rc |= moving<true>(s, "power", frames, every, doGuard, detail, dumpFrame, dumpPath);
+    }
   }
   Kokkos::finalize();
   return rc;
