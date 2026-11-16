@@ -1578,6 +1578,12 @@ struct StepReport {
   int gaugeRateCells = 0, gaugeStateCells = 0, gaugeCriticalCells = 0;
   double gaugeCapMin = 1, gaugeEllMin = 0, gaugeShiftMax = 0, gaugeDebt = 0;
   double tGauge = 0;
+  /// The offset binding (DESIGN_NOTE_BINDING §18.5 "Ledger"; 0 when off or skipped): U_b after the
+  /// step, its change under this step's gauge ΔU_b,G (booked in Q_b; gaugePotential is then
+  /// ΔŨ_Γ,G), the band (χ > 0) size and max/rms |o|/h, and the π_b solves of the step (D-BD2: only
+  /// when the gauge passes its activity gate) with their seconds.
+  double binding = 0, gaugeBinding = 0, bindingOffMax = 0, bindingOffRms = 0, tBinding = 0;
+  int bindingBand = 0, bindingSolves = 0;
   /// The step's energy ledger by stage (diagnostics only, M7 WO-EB; the accepted attempt). Per kick
   /// k: ΔK_k, its heat, Q_c and body-work increments, and its potential-force work
   /// G_k = (τ/2) ∇Ũᵀ(v_old + v_new)/2 with the ∇Ũ the kick used; the momentum balance gives
@@ -1764,11 +1770,13 @@ class Integrator {
       if (prm_.gaugeEvery > 0 && ++stepCount_ % prm_.gaugeEvery == 0)
         driftGauge(tau, rep);
     } else if (prm_.gaugeEvery > 0 && ++stepCount_ % prm_.gaugeEvery == 0) {
-      double dU = 0, dK = 0;
-      gauge(tau, rep, dU, dK);
+      double dU = 0, dK = 0, dUb = 0;
+      gauge(tau, rep, dU, dK, dUb);
       gaugeU_ += dU;
       gaugeK_ += dK;
-      gaugeDebt_ += dU;  // G⁗'s B (§16.5 step 9): the trial's exact ΔŨ_G
+      gaugeDebt_ += dU;  // G⁗'s B (§16.5 step 9): the trial's exact ΔŨ_G (ΔŨ_Γ,G with U_b, D-BD2)
+      gaugeUb_ += dUb;  // Q_b −= ΔU_b,G (0 without the binding)
+      rep.gaugeBinding = dUb;
     }
     rep.gaugeDebt = gaugeDebt_;
     Kokkos::fence();
@@ -1784,6 +1792,12 @@ class Integrator {
     rep.maxSpeed = maxSpeed();
     shifts(rep.maxShift, rep.maxShiftUnlike);
     rep.minMargin = minMargin();
+    if (pots_.binding.active) {
+      rep.binding = parts_.binding;
+      rep.bindingBand = pots_.binding.nBand;
+      rep.bindingOffMax = pots_.binding.offMax;
+      rep.bindingOffRms = pots_.binding.offRms;
+    }
     return rep;
   }
 
@@ -1809,7 +1823,33 @@ class Integrator {
     }
     if (capillary > 0)
       tau = std::min(tau, capillaryStep(capillary));
+    tau = std::min(tau, bindingStep());  // Δt ← min(Δt, Δt_b) (§18.5 "Time step")
     return tau;
+  }
+
+  /// Δt_b = (ρ_min h_min³ / (8(β + β₀)σ))^{1/2} over the band cells (χ > 0), over every cell when
+  /// β₀ > 0 (DESIGN_NOTE_BINDING §18.5 "Time step" with the orchestrator's floor rule, WO-BD4);
+  /// +inf when the binding is off or skipped.
+  double bindingStep() const {
+    if (!pots_.binding.active)
+      return std::numeric_limits<double>::infinity();
+    const double sigma = peclet::core::toVector(spec_.tension)[1];
+    const bool all = spec_.binding.beta0 > Real(0);
+    const LView<Real> chi = pots_.binding.chi, rho = rho_, h = h_;
+    Real rmin = std::numeric_limits<Real>::infinity(), hmin = rmin;
+    Kokkos::parallel_reduce(
+        "nhvw.bindStep", Kokkos::RangePolicy<Exec>(0, N_),
+        KOKKOS_LAMBDA(const int i, Real& ra, Real& ha) {
+          if (all || chi(i) > Real(0)) {
+            ra = rho(i) < ra ? rho(i) : ra;
+            ha = h(i) < ha ? h(i) : ha;
+          }
+        },
+        Kokkos::Min<Real>(rmin), Kokkos::Min<Real>(hmin));
+    const double bs = double(spec_.binding.beta + spec_.binding.beta0) * sigma;
+    if (!(rmin < std::numeric_limits<Real>::infinity()) || !(bs > 0))
+      return std::numeric_limits<double>::infinity();
+    return std::sqrt(double(rmin) * double(hmin) * double(hmin) * double(hmin) / (8.0 * bs));
   }
 
   /// C_σ √(ρ_σ h_min³ / σ_max) (+inf without tension).
@@ -1879,7 +1919,8 @@ class Integrator {
     for (double v : V0h_)
       vt += v;
     const double h = std::cbrt(vt / N_);
-    PotentialSpec<Real> st = spec_;  // E_σ only
+    PotentialSpec<Real> st = spec_;      // E_σ only
+    st.binding = BindingParams<Real>();  // R0's F has no U_b (§12.3.1)
     st.sigmaWall = LView<Real>();
     st.density = LView<Real>();
     for (int a = 0; a < 3; ++a)
@@ -2148,7 +2189,21 @@ class Integrator {
     gaugeK_ = gaugeK;
   }
   double gaugePotential() const { return gaugeU_; }  ///< Σ ΔŨ of the accepted gauge trials
-  double gaugeKinetic() const { return gaugeK_; }    ///< Σ ΔK of the gauge's projections
+  /// Σ ΔU_b,G: the binding's change under the gauge (D-BD2), booked in Q_b = −gaugeBinding() (with
+  /// the binding on, gaugePotential() is Σ ΔŨ_Γ,G, the part without U_b)
+  double gaugeBinding() const { return gaugeUb_; }
+  void setGaugeBinding(double u) { gaugeUb_ = u; }
+  /// The binding is on and not skipped at the current state (§18.5 skip rule).
+  bool bindingActive() const { return pots_.binding.active; }
+  /// The binding's state at the current (x, w) (§18.5 "Ledger", "Pressure output"): χ, ∂_xU_b and
+  /// ∂_wU_b at fixed w (the scratch of the last evaluation), and π_b (solved here if not yet
+  /// valid). Empty views when the binding is off or skipped.
+  const BindingScratch<Real>& bindingScratch() const { return pots_.binding; }
+  const LView<Real>& bindingPressure() {
+    ensureBindingGradient();
+    return pib_;
+  }
+  double gaugeKinetic() const { return gaugeK_; }           ///< Σ ΔK of the gauge's projections
   int restoreRebuilds() const { return restoreRebuilds_; }  ///< cold rebuilds by restoreEngine
   double kinetic() const { return kinetic_; }
   double heat() const { return heat_; }
@@ -2309,6 +2364,7 @@ class Integrator {
     Kokkos::deep_copy(gx_, Real(0));
     Kokkos::deep_copy(gw_, Real(0));
     parts_ = partitionPotential(*mt_, F_, pos_, weight_, L_, spec_, gx_, gw_, &pots_);
+    gbValid_ = false;  // g_b, g_Γ describe the previous state
     Kokkos::fence();
     evalSplit_[1] = tp.seconds();
     tp.reset();
@@ -2511,8 +2567,15 @@ class Integrator {
     const bool withDelta = deltaPending_;
     deltaPending_ = false;
     deltaUsed_ = false;
-    if (withDelta)  // the monitor's first half Σ_i ∇_iŨⁿ·δⁿ_i (∇Ũ is still at x^n)
-      gaugeGradDelta0_ = double(detail::dotView(grad_, gd_));
+    if (withDelta) {  // the monitor's first half Σ_i ∇_iŨⁿ·δⁿ_i (∇Ũ is still at x^n)
+      if (pots_.binding.active) {  // D-BD2: g_Γⁿ·δⁿ and g_bⁿ·δⁿ
+        ensureBindingGradient(&rep);
+        gaugeGradDelta0_ = double(detail::dotView(gG_, gd_));
+        gaugeBDelta0_ = double(detail::dotView(gb_, gd_));
+      } else {
+        gaugeGradDelta0_ = double(detail::dotView(grad_, gd_));
+      }
+    }
     int driftEvals = 0;  // the evaluations of a drift redone with δⁿ = 0
     CellFacets<Real> Fnext;
     FacetMatch mNext;
@@ -2530,6 +2593,7 @@ class Integrator {
             "nhvw.driftHalve", Kokkos::RangePolicy<Exec>(0, 3 * N_),
             KOKKOS_LAMBDA(const int k) { g(k) *= Real(0.5); });
         gaugeGradDelta0_ *= 0.5;
+        gaugeBDelta0_ *= 0.5;
       } else {
         useDelta = false;
       }
@@ -2909,9 +2973,9 @@ class Integrator {
   ///  6. acceptance  v_i travels with its cell; the M-projection onto C(x̃)v = 0 (one saddle with
   ///                 A = M); ∇Ũ(x̃) recomputed (evalState).
   /// dU, dK: the accepted trial's exact ΔŨ_G and ΔK_G ≤ 0 (0 when skipped).
-  void gauge(double tau, StepReport& rep, double& dU, double& dK) {
+  void gauge(double tau, StepReport& rep, double& dU, double& dK, double& dUb) {
     Kokkos::Timer t;
-    dU = dK = 0;
+    dU = dK = dUb = 0;
     // ---- 1. activation ----
     {
       const double am = gaugeActivation(tau, rep);
@@ -2920,11 +2984,12 @@ class Integrator {
         return;
       }
     }
-    // ---- 2-4. the displacement ----
+    // ---- 2-4. the displacement (g_Γ with the binding, D-BD2) ----
+    ensureBindingGradient(&rep);
     rep.gaugeInterface = gaugeDisplacement(rep);
     Kokkos::deep_copy(pos0_, pos_);
     Kokkos::deep_copy(w0_, weight_);
-    const double U0 = parts_.total() + wrapOffset_;
+    const double U0 = parts_.total() + wrapOffset_, Ub0 = parts_.binding;
     double s = 1;
     for (int k = 0; k <= prm_.gaugeRetries; ++k, s *= 0.5) {
       ++rep.gaugeTries;
@@ -2942,6 +3007,10 @@ class Integrator {
           accumulateWrap();
           evalState();
           dU = parts_.total() + wrapOffset_ - U0;
+          if (pots_.binding.active) {  // D-BD2: ΔU_b,G exact, booked in Q_b; dU = ΔŨ_Γ,G
+            dUb = parts_.binding - Ub0;
+            dU -= dUb;
+          }
           rep.gaugeTrialDU = dU;
           rep.gaugeAccepted = true;
           break;
@@ -2978,11 +3047,62 @@ class Integrator {
   /// (G⁗ §16.5 step 9; the f_G throttle was removed by D16.3).
   void gaugeMonitor(StepReport& rep) {
     if (deltaUsed_) {
+      if (pots_.binding.active) {  // D-BD2: ½(g_Γⁿ + g_Γⁿ⁺¹)·δ into B and Q_G; ½(g_bⁿ + g_bⁿ⁺¹)·δ
+        ensureBindingGradient(&rep);  // into Q_b (π_b at x^{n+1})
+        const double dU = 0.5 * (gaugeGradDelta0_ + double(detail::dotView(gG_, gd_)));
+        const double dUb = 0.5 * (gaugeBDelta0_ + double(detail::dotView(gb_, gd_)));
+        gaugeU_ += dU;
+        gaugeDebt_ += dU;
+        gaugeUb_ += dUb;
+        rep.gaugePotential = dU;
+        rep.gaugeBinding = dUb;
+        return;
+      }
       const double dU = 0.5 * (gaugeGradDelta0_ + double(detail::dotView(grad_, gd_)));
       gaugeU_ += dU;
       gaugeDebt_ += dU;  // G⁗'s B (§16.5 step 9)
       rep.gaugePotential = dU;
     }
+  }
+
+  /// D-BD2 (DESIGN_NOTE_BINDING §18.5 "Gauge"): at the current state (F_ and the last evaluation's
+  /// binding partials), π_b from Hπ_b = −∂_wU_b and g_b = ∂_xU_b + J_xᵀπ_b (reducedGradient: the H
+  /// hierarchy and the adjoint's tolerance, warm-started from the last π_b), then
+  /// g_Γ = ∇Ũ_tot − g_b. Once per state (gbValid_, cleared by evalState); called only past G⁗'s
+  /// activity gate (and by the drift monitor after a δ was used) or for output. False, nothing
+  /// done, when the binding is off or skipped.
+  bool ensureBindingGradient(StepReport* rep = nullptr) {
+    if (!pots_.binding.active)
+      return false;
+    if (gbValid_)
+      return true;
+    Kokkos::Timer t;
+    const std::size_t n = static_cast<std::size_t>(N_);
+    if (pib_.extent(0) != n) {
+      pib_ = LView<Real>("nhvw.piB", n);
+      gb_ = LView<Real>("nhvw.gradB", 3 * n);
+      gG_ = LView<Real>("nhvw.gradGamma", 3 * n);
+      pibValid_ = false;
+    }
+    WeightSolveParams wp;
+    wp.pcgTol = prm_.adjointTol;
+    wp.amg = &hAmg_;
+    wp.scratch = &wss_;
+    wp.warmStart = pibValid_;
+    wp.warmRelTol = prm_.adjointWarmTol;
+    reducedGradient(F_, pots_.binding.gx, pots_.binding.gw, pib_, gb_, wp);
+    pibValid_ = true;
+    const LView<Real> gt = grad_, gbv = gb_, gg = gG_;
+    Kokkos::parallel_for(
+        "nhvw.gradGamma", Kokkos::RangePolicy<Exec>(0, 3 * N_),
+        KOKKOS_LAMBDA(const int k) { gg(k) = gt(k) - gbv(k); });
+    gbValid_ = true;
+    if (rep) {
+      Kokkos::fence();
+      ++rep->bindingSolves;
+      rep->tBinding += t.seconds();
+    }
+    return true;
   }
 
   /// The weight-relaxation displacement of G‴+W (§14.4.4) into dW_, at x^{n+1}, w^{n+1}:
@@ -3055,6 +3175,7 @@ class Integrator {
     Kokkos::Timer t;
     const double am = gaugeActivation(tau, rep);
     if (am >= prm_.gaugeSkip) {
+      ensureBindingGradient(&rep);  // g_Γ for steps 6, 7 (D-BD2); nothing without the binding
       const bool withW = prm_.gaugeWeightEvery > 0 && stepCount_ % prm_.gaugeWeightEvery == 0;
       if (withW)
         weightRelaxation(tau, rep);
@@ -3091,8 +3212,10 @@ class Integrator {
   int gaugeDisplacement(StepReport& rep, bool withW = false) {
     const CellFacets<Real> G = F_;
     const auto T = spec_.types;
-    const LView<Real> a = aI_, g = grad_, d = gd_, h = h_, P = pos_, w = weight_, al = aG_,
-                      mg = mG_, dW = dW_, qh = qhG_, u = uG_;
+    // G⁗'s gradient (steps 6, 7): g_Γ = ∇Ũ_tot − g_b with the binding (D-BD2; the caller ran
+    // ensureBindingGradient), else ∇Ũ
+    const LView<Real> a = aI_, g = pots_.binding.active ? gG_ : grad_, d = gd_, h = h_, P = pos_,
+                      w = weight_, al = aG_, mg = mG_, dW = dW_, qh = qhG_, u = uG_;
     const Kokkos::View<int*, Mem> cls = cls_, list = iList_;
     // classes: 0 the rest, 1 I, 2 CL (an unlike and a wall facet)
     Kokkos::parallel_for(
@@ -3524,6 +3647,13 @@ class Integrator {
   double gaugeGradDelta0_ = 0;
   double gaugeEbar_ = 0;  ///< ε̄ of the last G‴ activation (W's β)
   double gaugeDebt_ = 0;  ///< G⁗'s Ũ debt B (§16.5 steps 7, 9): Σ ΔŨ_G not yet compensated
+  // the offset binding under the gauge (DESIGN_NOTE_BINDING D-BD2, §18.5 "Gauge"): π_b (pib_) from
+  // Hπ_b = −∂_wU_b and g_b = ∂_xU_b + J_xᵀπ_b (gb_) at the current state when gbValid_; g_Γ =
+  // ∇Ũ_tot − g_b (gG_) is G⁗'s gradient in steps 6, 7 and 9. gaugeUb_ = Σ ΔU_b,G (Q_b = −gaugeUb_);
+  // gaugeBDelta0_ = Σ_i g_b,iⁿ·δⁿ_i (the drift monitor's first half of ΔU_b,G).
+  LView<Real> pib_, gb_, gG_;
+  bool gbValid_ = false, pibValid_ = false;
+  double gaugeUb_ = 0, gaugeBDelta0_ = 0;
   // persistent scratch (M7 WO-PERF3 P3.1, DESIGN_NOTE §14.4.6 item 1): the facet exports (a pool:
   // an export takes a buffer no live CellFacets references — F_, fc_, the option-S copy of x^n, the
   // saddle's copy, a gauge trial), the weight solve / H solves / adjoint, the band publish

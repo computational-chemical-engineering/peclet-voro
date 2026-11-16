@@ -46,6 +46,7 @@
 #include "peclet/voro/lagrangian/facets.hpp"
 #include "peclet/voro/lagrangian/nonlocal_energy.hpp"
 #include "peclet/voro/lagrangian/nonlocal_perimeter.hpp"
+#include "peclet/voro/lagrangian/offset_binding.hpp"
 #include "peclet/voro/lagrangian/operators.hpp"
 #include "peclet/voro/lagrangian/weight_solve.hpp"
 #include "peclet/voro/reeval_tessellation.hpp"
@@ -137,11 +138,16 @@ struct PotentialSpec {
   NonlocalParams<Real> nonlocal;             ///< E_M widths (Nonlocal only)
   PerimeterParams<Real> perimeter;           ///< E_Γ width and mode cut-off (NonlocalExact only)
   PerimeterStats* perimeterStats = nullptr;  ///< optional: E_Γ sizes and fenced timings
+  /// the offset binding U_b (DESIGN_NOTE_BINDING §18.5, lagrangian/offset_binding.hpp); off by
+  /// default (β = β₀ = 0: nothing is evaluated)
+  BindingParams<Real> binding;
 };
 
 struct PotentialParts {
   double interface = 0, wall = 0, gravity = 0;
-  double total() const { return interface + wall + gravity; }
+  double binding = 0;  ///< U_b (0 when the binding is off or skipped)
+  /// Ũ_tot = U + U_b (U_b = 0 exactly when off: the sum is the old one bit for bit)
+  double total() const { return interface + wall + gravity + binding; }
 };
 
 /// Persistent scratch of partitionPotential (M7 WO-PERF3 P3.1: no View allocation per steady
@@ -151,6 +157,7 @@ struct PotentialScratch {
   Kokkos::View<int*, peclet::core::MemSpace> unlike, band;
   ReevalScratch<Real> publish;
   energy::detail::RouteScratch<Real> route;
+  BindingScratch<Real> binding;  ///< the offset binding's own partials, χ and diagnostics
 };
 
 namespace detail {
@@ -203,7 +210,8 @@ Kokkos::View<int*, peclet::core::MemSpace> energyBand(
 
 /// U(x, w) on the resident POWER tessellation `mt` (a MovingTessellation with the Power policy,
 /// built at `pos`, `weight`) with its facets `F`: the interface and wetting energies
-/// (energy/interface.hpp, energy/wall.hpp on the power re-publish) and the facet gravity. ADDS ∂_xU
+/// (energy/interface.hpp, energy/wall.hpp on the power re-publish), the facet gravity and the
+/// offset binding U_b (`s.binding`, off by default; PotentialParts::binding). ADDS ∂_xU
 /// into `gradX` (3N) and ∂_wU into `gradW` (N); returns the parts. Reduce with reducedGradient.
 template <class MT, class Real>
 PotentialParts partitionPotential(MT& mt, const CellFacets<Real>& F, const LView<Real>& pos,
@@ -249,6 +257,11 @@ PotentialParts partitionPotential(MT& mt, const CellFacets<Real>& F, const LView
                                     s.refVolume, s.perimeter, gradX, gradW, s.perimeterStats);
   if (s.density.extent(0) > 0)
     e.gravity = facetGravity(F, pos, s.types, s.density, s.gravity, s.rhoRef, L, gradX, gradW);
+  if (s.binding.on())  // U_b (§18.5); its skip rule returns before any arithmetic
+    e.binding = offsetBinding(F, pos, s.types, s.tension, s.nTypes, s.binding, L, gradX, gradW,
+                              mt.wall.active(), scr ? &scr->binding : nullptr);
+  else if (scr)
+    scr->binding.active = false;
   return e;
 }
 

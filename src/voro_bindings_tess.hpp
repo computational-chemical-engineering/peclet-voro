@@ -373,7 +373,8 @@ class Tess : public peclet::core::python::Releasable {
                                      real_t reference_density, real_t tol,
                                      const std::string& interface_energy,
                                      std::optional<nb::ndarray<real_t, nb::c_contig>> volumes,
-                                     double kappa_s, double eps_g, double rc_over_s);
+                                     double kappa_s, double eps_g, double rc_over_s,
+                                     std::optional<std::array<double, 2>> binding);
   nb::dict reduced_potential_impl(nb::ndarray<int, nb::c_contig> types,
                                   std::optional<nb::ndarray<real_t, nb::c_contig>> tension,
                                   std::optional<nb::ndarray<real_t, nb::c_contig>> sigma_wall,
@@ -382,8 +383,8 @@ class Tess : public peclet::core::python::Releasable {
                                   real_t reference_density, real_t tol,
                                   const std::string& interface_energy,
                                   std::optional<nb::ndarray<real_t, nb::c_contig>> volumes,
-                                  bool allow_private, double kappa_s, double eps_g,
-                                  double rc_over_s);
+                                  std::optional<std::array<double, 2>> binding, bool allow_private,
+                                  double kappa_s, double eps_g, double rc_over_s);
   bool has_geometry() const { return scene_.set; }
 
   // Per-cell number of resident SDF wall planes (0 everywhere without geometry).

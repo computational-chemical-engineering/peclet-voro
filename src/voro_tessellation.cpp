@@ -237,10 +237,16 @@ void bindTessellation(nb::module_& m) {
            nb::arg("reference_density") = 0.0, nb::arg("tol") = 1e-12,
            nb::arg("interface_energy") = "facet", nb::arg("volumes") = nb::none(),
            nb::arg("kappa_s") = 1.0, nb::arg("eps_g") = 1e-10, nb::arg("rc_over_s") = 5.0,
+           nb::arg("binding") = nb::none(),
            "PRIVATE (M7 statics): reduced_potential plus interface_energy='nonlocal_exact' (the\n"
            "set-based nonlocal perimeter E_Gamma, spectral direct sum, periodic, two types; its\n"
            "'volumes' are V0) and the widths: s = kappa_s h (E_M and E_Gamma), E_Gamma's mode\n"
-           "cut-off eps_g, E_M's r_c/s. With 'nonlocal_exact' the result adds 'perimeter_stats'.")
+           "cut-off eps_g, E_M's r_c/s. With 'nonlocal_exact' the result adds 'perimeter_stats'.\n"
+           "binding=(beta, beta0): the offset binding U_b (DESIGN_NOTE_BINDING 18.5) added to the\n"
+           "potential; default (None): (0.1, 1e-3) with 'nonlocal_exact', else off. The result\n"
+           "adds 'binding_energy' and, when U_b is evaluated (not skipped), 'binding_gradient_x',\n"
+           "'binding_gradient_w' (fixed w), 'binding_chi', 'binding_pi' (H pi_b = -dU_b/dw),\n"
+           "'binding_gradient' (dU_b/dx + J_x^T pi_b) and 'binding_band'.")
       .def_prop_ro("num_particles", &Tess::num_particles,
                    "Particle count N set by the last `build` (0 before it).")
       .def_prop_ro(

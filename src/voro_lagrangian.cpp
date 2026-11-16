@@ -251,6 +251,13 @@ namespace {
 /// 'nonlocal' (the moment-blob energy E_M, DESIGN_NOTE §12.3.3); with `allowPrivate` also the
 /// private placeholder 'nonlocal_exact' (the set-based E_Γ, DESIGN_NOTE_STATICS §17.4; its public
 /// name waits for Frank, Q-S2).
+/// The offset binding's code default (DESIGN_NOTE_BINDING §18.5; Decision Q-B1, Decision Desk
+/// m7-binding-default A, 2026-11-14): band β 0.1 and global floor β₀ 1e-3, applied only with the
+/// interface energy 'nonlocal_exact' (E_Γ); off with the facet energy and E_M.
+std::array<double, 2> lagrangianBindingDefault() {
+  return {0.1, 1e-3};
+}
+
 lag::InterfaceEnergy interfaceEnergyMode(const std::string& m, const char* where,
                                          bool allowPrivate = false) {
   if (m == "facet")
@@ -273,7 +280,8 @@ nb::dict Tess::reduced_potential(nb::ndarray<int, nb::c_contig> types,
                                  const std::string& interface_energy,
                                  std::optional<nb::ndarray<real_t, nb::c_contig>> volumes) {
   return reduced_potential_impl(types, tension, sigma_wall, density, gravity, reference_density,
-                                tol, interface_energy, volumes, false, 1.0, 1e-10, 5.0);
+                                tol, interface_energy, volumes, std::nullopt, false, 1.0, 1e-10,
+                                5.0);
 }
 
 nb::dict Tess::reduced_potential_private(
@@ -282,9 +290,10 @@ nb::dict Tess::reduced_potential_private(
     std::optional<nb::ndarray<real_t, nb::c_contig>> density,
     std::optional<std::array<real_t, 3>> gravity, real_t reference_density, real_t tol,
     const std::string& interface_energy, std::optional<nb::ndarray<real_t, nb::c_contig>> volumes,
-    double kappa_s, double eps_g, double rc_over_s) {
+    double kappa_s, double eps_g, double rc_over_s, std::optional<std::array<double, 2>> binding) {
   return reduced_potential_impl(types, tension, sigma_wall, density, gravity, reference_density,
-                                tol, interface_energy, volumes, true, kappa_s, eps_g, rc_over_s);
+                                tol, interface_energy, volumes, binding, true, kappa_s, eps_g,
+                                rc_over_s);
 }
 
 nb::dict Tess::reduced_potential_impl(
@@ -293,7 +302,8 @@ nb::dict Tess::reduced_potential_impl(
     std::optional<nb::ndarray<real_t, nb::c_contig>> density,
     std::optional<std::array<real_t, 3>> gravity, real_t reference_density, real_t tol,
     const std::string& interface_energy, std::optional<nb::ndarray<real_t, nb::c_contig>> volumes,
-    bool allow_private, double kappa_s, double eps_g, double rc_over_s) {
+    std::optional<std::array<double, 2>> binding, bool allow_private, double kappa_s, double eps_g,
+    double rc_over_s) {
   if (N_ == 0 || !weighted_)
     throw std::runtime_error(
         "voro: reduced_potential() needs a built POWER tessellation (set_weights, build, "
@@ -342,6 +352,23 @@ nb::dict Tess::reduced_potential_impl(
   spec.rhoRef = reference_density;
   spec.interfaceEnergy = interfaceEnergyMode(interface_energy, "reduced_potential", allow_private);
   lag::PerimeterStats pstats;
+  // the offset binding (DESIGN_NOTE_BINDING §18.5): explicit, else the code default (β 0.1, β₀
+  // 1e-3 with 'nonlocal_exact'; off otherwise)
+  const std::array<double, 2> bnd =
+      binding ? *binding
+              : (spec.interfaceEnergy == lag::InterfaceEnergy::NonlocalExact
+                     ? lagrangianBindingDefault()
+                     : std::array<double, 2>{0.0, 0.0});
+  if (bnd[0] != 0.0 || bnd[1] != 0.0) {
+    std::vector<double> V0b =
+        volumes
+            ? cellsToInternal(
+                  perm_, std::vector<double>(volumes->data(), volumes->data() + volumes->size()), 1)
+            : peclet::core::toVector(F.volume);
+    if (static_cast<int>(V0b.size()) != N)
+      throw std::runtime_error("voro: reduced_potential(volumes) must be (N,)");
+    spec.binding = lag::bindingParams<real_t>(V0b, bnd[0], bnd[1]);
+  }
   if (spec.interfaceEnergy == lag::InterfaceEnergy::Nonlocal ||
       spec.interfaceEnergy == lag::InterfaceEnergy::NonlocalExact) {
     // V⁰ of E_M: the given reference volumes, else the current cell volumes
@@ -359,16 +386,18 @@ nb::dict Tess::reduced_potential_impl(
       spec.perimeter = lag::perimeterParams<real_t>(V0, kappa_s, eps_g);
       spec.perimeterStats = &pstats;
     }
-  } else if (volumes) {
+  } else if (volumes && !spec.binding.on()) {
     throw std::invalid_argument(
         "voro: reduced_potential(volumes) is the V0 of interface_energy='nonlocal' only");
   }
   const real_t Larr[3] = {L_[0], L_[1], L_[2]};
+  lag::PotentialScratch<real_t> pscr;  // only to receive the binding's own partials
   const lag::PotentialParts e = std::visit(
       [&](auto& mt) -> lag::PotentialParts {
         using T = std::decay_t<decltype(mt)>;
         if constexpr (std::is_same_v<typename T::PlanePolicy, peclet::voro::Power>)
-          return lag::partitionPotential(mt, F, pos_, weight_, Larr, spec, gx, gw);
+          return lag::partitionPotential(mt, F, pos_, weight_, Larr, spec, gx, gw,
+                                         spec.binding.on() ? &pscr : nullptr);
         else
           throw std::logic_error("voro: weighted Tessellation without a power engine");
       },
@@ -388,6 +417,19 @@ nb::dict Tess::reduced_potential_impl(
   d["pi"] = toNumpy1(cellsToCaller(perm_, peclet::core::toVector(pi), 1));
   d["pcg_iterations"] = R.pcgIters;
   d["pcg_rel_residual"] = R.pcgRelRes;
+  if (spec.binding.on())
+    d["binding_energy"] = e.binding;
+  if (pscr.binding.active) {
+    const lag::BindingScratch<real_t>& b = pscr.binding;
+    DView pib("rp.piB", N), gb("rp.gradB", 3 * static_cast<std::size_t>(N));
+    lag::reducedGradient(F, b.gx, b.gw, pib, gb, prm);
+    d["binding_gradient_x"] = toNumpy3(cellsToCaller(perm_, peclet::core::toVector(b.gx), 3));
+    d["binding_gradient_w"] = toNumpy1(cellsToCaller(perm_, peclet::core::toVector(b.gw), 1));
+    d["binding_chi"] = toNumpy1(cellsToCaller(perm_, peclet::core::toVector(b.chi), 1));
+    d["binding_pi"] = toNumpy1(cellsToCaller(perm_, peclet::core::toVector(pib), 1));
+    d["binding_gradient"] = toNumpy3(cellsToCaller(perm_, peclet::core::toVector(gb), 3));
+    d["binding_band"] = b.nBand;
+  }
   if (spec.interfaceEnergy == lag::InterfaceEnergy::NonlocalExact) {
     nb::dict st;
     st["num_gamma"] = pstats.nGamma;
@@ -586,6 +628,21 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       throw std::invalid_argument("voro: LagrangianFlow._set_nonlocal_width() must be > 0");
     kappaS_ = kappa;
     dirty_ = true;
+  }
+  // Private (DESIGN_NOTE_BINDING §18.5, WO-BD4): the offset binding's band β and floor β₀. Unset:
+  // the code default, (0.1, 1e-3) with 'nonlocal_exact' (Decision Q-B1), off otherwise.
+  void set_binding(double beta, double beta0) {
+    if (!(beta >= 0) || !(beta0 >= 0))
+      throw std::invalid_argument("voro: LagrangianFlow._set_binding() needs beta, beta0 >= 0");
+    binding_ = std::array<double, 2>{beta, beta0};
+    dirty_ = true;
+  }
+  std::array<double, 2> bindingStrengths() const {
+    if (binding_)
+      return *binding_;
+    return interfaceEnergy_ == lag::InterfaceEnergy::NonlocalExact
+               ? lagrangianBindingDefault()
+               : std::array<double, 2>{0.0, 0.0};
   }
   void set_nonlocal_cutoff(double rcs) {
     if (!(rcs > 0))
@@ -828,6 +885,42 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       d["gauge_potential"] = I.gaugePotential();
       d["gauge_kinetic"] = I.gaugeKinetic();
       d["unlike_area"] = I.unlikeArea();
+      if (bindingOn()) {  // the offset binding's ledger terms (keys only when it is set)
+        d["binding"] = I.potential().binding;
+        d["gauge_binding"] = I.gaugeBinding();
+      }
+    });
+    return d;
+  }
+
+  /// The binding is configured (β or β₀ ≠ 0; it may still be skipped at evaluation).
+  bool bindingOn() const {
+    const std::array<double, 2> b = bindingStrengths();
+    return b[0] != 0.0 || b[1] != 0.0;
+  }
+
+  /// PRIVATE: the offset binding at the current state ({} when off or skipped).
+  nb::dict binding_state() {
+    prepare();
+    nb::dict d;
+    withInteg([&](auto& I) {
+      if (!I.bindingActive())
+        return;
+      const auto& perm = t_->perm_;
+      const auto pib = peclet::core::toVector(I.bindingPressure());
+      const auto& b = I.bindingScratch();
+      std::vector<real_t> cen = peclet::core::toVector(I.facets().cellCentroid);
+      for (auto& c : cen)
+        c = -c;  // o_i = x_i − B_i
+      d["energy"] = I.potential().binding;
+      d["chi"] = toNumpy1(cellsToCaller(perm, peclet::core::toVector(b.chi), 1));
+      d["offset"] = toNumpy3(cellsToCaller(perm, std::move(cen), 3));
+      d["pi"] = toNumpy1(cellsToCaller(perm, std::vector<real_t>(pib), 1));
+      d["gradient_x"] = toNumpy3(cellsToCaller(perm, peclet::core::toVector(b.gx), 3));
+      d["gradient_w"] = toNumpy1(cellsToCaller(perm, peclet::core::toVector(b.gw), 1));
+      d["band"] = b.nBand;
+      d["offset_max"] = b.offMax;
+      d["offset_rms"] = b.offRms;
     });
     return d;
   }
@@ -964,7 +1057,19 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     d["gauge_ell_min"] = col([](const auto& r) { return r.gaugeEllMin; });
     d["gauge_shift_max"] = col([](const auto& r) { return r.gaugeShiftMax; });
     d["gauge_debt"] = col([](const auto& r) { return r.gaugeDebt; });
+    // the offset binding (DESIGN_NOTE_BINDING §18.5 "Ledger"; keys only when it is set)
+    if (bindingOn()) {
+      d["binding"] = col([](const auto& r) { return r.binding; });
+      d["gauge_binding"] = col([](const auto& r) { return r.gaugeBinding; });
+      d["binding_band"] = col([](const auto& r) { return r.bindingBand; });
+      d["binding_offset_max"] = col([](const auto& r) { return r.bindingOffMax; });
+      d["binding_offset_rms"] = col([](const auto& r) { return r.bindingOffRms; });
+      d["binding_solves"] = col([](const auto& r) { return r.bindingSolves; });
+      d["t_binding"] = col([](const auto& r) { return r.tBinding; });
+    }
     withInteg([&](auto& I) {
+      if (bindingOn())
+        d["gauge_binding_total"] = I.gaugeBinding();
       d["gauge_potential_total"] = I.gaugePotential();
       d["gauge_kinetic_total"] = I.gaugeKinetic();
     });
@@ -1026,6 +1131,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       acc_ = {I.heat(),       I.constraintWork(), I.bodyWork(),
               I.wrapOffset(), I.gaugePotential(), I.gaugeKinetic()};
       gaugeDebt_ = I.gaugeDebt();
+      gaugeBinding_ = I.gaugeBinding();
     });
   }
 
@@ -1127,6 +1233,10 @@ class LagrangianFlow : public peclet::core::python::Releasable {
       spec.refVolume = peclet::core::toDevice<real_t>(V0_, "lf.V0");
       spec.perimeter = lag::perimeterParams<real_t>(V0_, kappaS_, epsG_);
     }
+    {
+      const std::array<double, 2> b = bindingStrengths();
+      spec.binding = lag::bindingParams<real_t>(V0_, b[0], b[1]);
+    }
     if (!sigmaWall_.empty())
       spec.sigmaWall = peclet::core::toDevice<real_t>(sigmaWall_, "lf.sigmaWall");
     if (hasGravity_) {
@@ -1196,6 +1306,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
               I->setGaugeMode(gaugeMode_);
             }
             I->setGaugeDebt(gaugeDebt_);
+            I->setGaugeBinding(gaugeBinding_);
             if (gaugeOpts_)
               I->setGaugeOptions((*gaugeOpts_)[0], (*gaugeOpts_)[1], (*gaugeOpts_)[2]);
             if (kickTol_ > 0)
@@ -1233,7 +1344,9 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   real_t warmTol_ = 1e-4, newtonTol_ = 1e-3;
   bool perfSet_ = false;  // false: the integrator's defaults
   peclet::voro::lagrangian::GaugeMode gaugeMode_ = peclet::voro::lagrangian::GaugeMode::kTrial;
-  double gaugeDebt_ = 0;  // G⁗'s Ũ debt B, carried across a re-preparation
+  double gaugeDebt_ = 0;     // G⁗'s Ũ debt B, carried across a re-preparation
+  double gaugeBinding_ = 0;  // Σ ΔU_b,G (Q_b = −it), carried across a re-preparation
+  std::optional<std::array<double, 2>> binding_;  // _set_binding (unset: the code default)
   std::optional<std::array<bool, 3>> gaugeOpts_;  // _set_gauge_options (unset: the defaults)
   // Morton relabelling: -1 off, 0 once at the first preparation, K > 0 also every K steps. K = 100
   // (M7 WO-PERF2): a re-sort costs ~0.7 step (N 32768); a frozen order loses 66 % of its locality
@@ -1322,6 +1435,14 @@ void bindLagrangian(nb::module_& m) {
            "PRIVATE: E_Gamma's mode cut-off, G^(k_max) = eps (default 1e-10).")
       .def("_set_nonlocal_width", &LagrangianFlow::set_nonlocal_width, nb::arg("kappa_s"),
            "PRIVATE: the width s = kappa_s h of E_M and E_Gamma (default 1).")
+      .def("_set_binding", &LagrangianFlow::set_binding, nb::arg("beta"), nb::arg("beta0"),
+           "PRIVATE (placeholder name): the offset binding U_b = sigma sum_i (beta0 + beta chi_i)\n"
+           "|x_i - B_i|^2 (DESIGN_NOTE_BINDING 18.5). Default: beta 0.1, beta0 1e-3 with\n"
+           "'nonlocal_exact', off otherwise; (0, 0) switches it off.")
+      .def("_binding_state", &LagrangianFlow::binding_state,
+           "PRIVATE: the offset binding at the current state, {} when off or skipped: 'energy',\n"
+           "'chi' (N,), 'offset' (N,3) = x_i - B_i, 'pi' (N,) = pi_b (H pi_b = -dU_b/dw),\n"
+           "'gradient_x' (N,3), 'gradient_w' (N,) (fixed w), 'band', 'offset_max', 'offset_rms'.")
       .def("_set_nonlocal_cutoff", &LagrangianFlow::set_nonlocal_cutoff, nb::arg("rc_over_s"),
            "PRIVATE: E_M's pair cutoff r_c / s (default 5).")
       .def("set_wall_tension", &LagrangianFlow::set_wall_tension, nb::arg("wall_tension"),

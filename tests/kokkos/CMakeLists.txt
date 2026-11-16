@@ -113,6 +113,10 @@ if(PECLET_VORO_BUILD_TESTS)
   # translation invariance, the default spec untouched.
   add_voro_kokkos_test(test_nonlocal_perimeter)
 
+  # M7 binding (DESIGN_NOTE_BINDING §18.5, WO-BD4 unit gates): the offset binding U_b — device =
+  # host oracle, FD of the fixed-w / fixed-x partials, translation and Σ∂ = 0, the skip rule.
+  add_voro_kokkos_test(test_offset_binding)
+
   # P5: differentiable SDF wall force (seed-foot J_wall). FD-vs-analytic — flat wall exact, sphere
   # first-order.
   add_voro_kokkos_test(test_sdf_policy)

@@ -181,6 +181,94 @@ NonlocalParams<Real> nonlocalParams(const std::vector<double>& V0, double kappaS
   return p;
 }
 
+namespace detail {
+/// A uniform bin grid over the periodic box for a radius-r pair search (shared by E_M and the
+/// offset binding, lagrangian/offset_binding.hpp): nb[a] = max(1, ⌊L_a/r⌋) bins per axis (bin size
+/// ≥ r), `bin` (N) the bin of each generator (wrapped into the box), `cnt` (nBins + 1) the CSR
+/// offsets, `item` (N) the contents, sorted by index within each bin (a fixed gather order).
+struct PairBins {
+  Kokkos::Array<int, 3> nb = {1, 1, 1};
+  Kokkos::View<int*, peclet::core::MemSpace> bin, cnt, item;
+};
+
+template <class Real>
+PairBins pairBins(const Kokkos::View<Real*, peclet::core::MemSpace>& pos, int N, const Real L[3],
+                  Real r) {
+  using Mem = peclet::core::MemSpace;
+  using Exec = peclet::core::ExecSpace;
+  const std::size_t sN = static_cast<std::size_t>(N);
+  int nb[3];
+  for (int a = 0; a < 3; ++a) {
+    nb[a] = static_cast<int>(std::floor(L[a] / r));
+    nb[a] = nb[a] < 1 ? 1 : nb[a];
+  }
+  const int nBins = nb[0] * nb[1] * nb[2];
+  const Kokkos::Array<int, 3> NB = {nb[0], nb[1], nb[2]};
+  const Kokkos::Array<Real, 3> L3 = {L[0], L[1], L[2]};
+  const Kokkos::View<Real*, Mem> P = pos;
+  Kokkos::View<int*, Mem> bin("nl.bin", sN), cnt("nl.cnt", static_cast<std::size_t>(nBins) + 1);
+  Kokkos::parallel_for(
+      "nl.binOf", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        int b3[3];
+        for (int a = 0; a < 3; ++a) {
+          Real y = P(3 * i + a) - L3[a] * Kokkos::floor(P(3 * i + a) / L3[a]);
+          int q = static_cast<int>(y / L3[a] * NB[a]);
+          b3[a] = q < 0 ? 0 : (q >= NB[a] ? NB[a] - 1 : q);
+        }
+        const int b = b3[0] + NB[0] * (b3[1] + NB[1] * b3[2]);
+        bin(i) = b;
+        Kokkos::atomic_add(&cnt(b + 1), 1);
+      });
+  Kokkos::parallel_scan(
+      "nl.binScan", nBins + 1, KOKKOS_LAMBDA(const int b, int& upd, const bool fin) {
+        const int v = cnt(b);
+        upd += v;
+        if (fin)
+          cnt(b) = upd;
+      });
+  Kokkos::View<int*, Mem> fill("nl.fill", static_cast<std::size_t>(nBins)), item("nl.item", sN);
+  Kokkos::parallel_for(
+      "nl.binFill", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        const int b = bin(i);
+        item(cnt(b) + Kokkos::atomic_fetch_add(&fill(b), 1)) = i;
+      });
+  Kokkos::parallel_for(
+      "nl.binSort", Kokkos::RangePolicy<Exec>(0, nBins), KOKKOS_LAMBDA(const int b) {
+        for (int p = cnt(b) + 1; p < cnt(b + 1); ++p) {  // insertion sort: fixed order
+          const int v = item(p);
+          int q = p - 1;
+          while (q >= cnt(b) && item(q) > v) {
+            item(q + 1) = item(q);
+            --q;
+          }
+          item(q + 1) = v;
+        }
+      });
+  PairBins out;
+  out.nb = NB;
+  out.bin = bin;
+  out.cnt = cnt;
+  out.item = item;
+  return out;
+}
+
+/// The bin range [lo, hi] (per axis, before the periodic wrap) searched around bin `bi`: ±1 bin
+/// when the axis has ≥ 3 bins, else every bin of the axis (no bin visited twice).
+KOKKOS_INLINE_FUNCTION void binNeighbourRange(const Kokkos::Array<int, 3>& NB, int bi, int lo[3],
+                                              int hi[3]) {
+  const int b3[3] = {bi % NB[0], (bi / NB[0]) % NB[1], bi / (NB[0] * NB[1])};
+  for (int a = 0; a < 3; ++a) {
+    if (NB[a] >= 3) {
+      lo[a] = b3[a] - 1;
+      hi[a] = b3[a] + 1;
+    } else {
+      lo[a] = 0;
+      hi[a] = NB[a] - 1;
+    }
+  }
+}
+}  // namespace detail
+
 /// E_M on the facets `F` (exported WITH higher moments) at positions `pos` (3N): `types` (N) index
 /// `tension` (nTypes², σ_ab), `V0` (N) the reference volumes, `prm` the widths, `L` the periodic
 /// box. ADDS ∂E_M/∂x into `gradX` (3N) and ∂E_M/∂w into `gradW` (N; may be empty: Voronoi) and
@@ -236,51 +324,9 @@ Real nonlocalInterfaceEnergy(const CellFacets<Real>& F, const LView<Real>& pos,
       });
 
   // ---- 2. bins (cell size ≥ r_c + 2h), contents sorted by index ----
-  int nb[3];
-  for (int a = 0; a < 3; ++a) {
-    nb[a] = static_cast<int>(std::floor(L[a] / rcand));
-    nb[a] = nb[a] < 1 ? 1 : nb[a];
-  }
-  const int nBins = nb[0] * nb[1] * nb[2];
-  const Kokkos::Array<int, 3> NB = {nb[0], nb[1], nb[2]};
-  Kokkos::View<int*, Mem> bin("nl.bin", sN), cnt("nl.cnt", static_cast<std::size_t>(nBins) + 1);
-  Kokkos::parallel_for(
-      "nl.binOf", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
-        int b3[3];
-        for (int a = 0; a < 3; ++a) {
-          Real y = P(3 * i + a) - L3[a] * Kokkos::floor(P(3 * i + a) / L3[a]);
-          int q = static_cast<int>(y / L3[a] * NB[a]);
-          b3[a] = q < 0 ? 0 : (q >= NB[a] ? NB[a] - 1 : q);
-        }
-        const int b = b3[0] + NB[0] * (b3[1] + NB[1] * b3[2]);
-        bin(i) = b;
-        Kokkos::atomic_add(&cnt(b + 1), 1);
-      });
-  Kokkos::parallel_scan(
-      "nl.binScan", nBins + 1, KOKKOS_LAMBDA(const int b, int& upd, const bool fin) {
-        const int v = cnt(b);
-        upd += v;
-        if (fin)
-          cnt(b) = upd;
-      });
-  Kokkos::View<int*, Mem> fill("nl.fill", static_cast<std::size_t>(nBins)), item("nl.item", sN);
-  Kokkos::parallel_for(
-      "nl.binFill", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
-        const int b = bin(i);
-        item(cnt(b) + Kokkos::atomic_fetch_add(&fill(b), 1)) = i;
-      });
-  Kokkos::parallel_for(
-      "nl.binSort", Kokkos::RangePolicy<Exec>(0, nBins), KOKKOS_LAMBDA(const int b) {
-        for (int p = cnt(b) + 1; p < cnt(b + 1); ++p) {  // insertion sort: fixed order
-          const int v = item(p);
-          int q = p - 1;
-          while (q >= cnt(b) && item(q) > v) {
-            item(q + 1) = item(q);
-            --q;
-          }
-          item(q + 1) = v;
-        }
-      });
+  const detail::PairBins bins = detail::pairBins(pos, N, L, rcand);
+  const Kokkos::Array<int, 3> NB = bins.nb;
+  const Kokkos::View<int*, Mem> bin = bins.bin, cnt = bins.cnt, item = bins.item;
 
   // ---- 3. pair gather: E_i, g_i (into gradX), G_i; then a_i, B_i ----
   LView<Real> av("nl.a", 3 * sN), bv("nl.B", 6 * sN);
@@ -295,18 +341,8 @@ Real nonlocalInterfaceEnergy(const CellFacets<Real>& F, const LView<Real>& pos,
         const Real xi[3] = {P(3 * i), P(3 * i + 1), P(3 * i + 2)};
         const Real ci[3] = {cm(3 * i), cm(3 * i + 1), cm(3 * i + 2)};
         Real g[3] = {0, 0, 0}, Gs[6] = {0, 0, 0, 0, 0, 0}, Ei = 0;
-        const int bi = bin(i);
-        const int b3[3] = {bi % NB[0], (bi / NB[0]) % NB[1], bi / (NB[0] * NB[1])};
         int lo[3], hi[3];
-        for (int a = 0; a < 3; ++a) {
-          if (NB[a] >= 3) {
-            lo[a] = b3[a] - 1;
-            hi[a] = b3[a] + 1;
-          } else {
-            lo[a] = 0;
-            hi[a] = NB[a] - 1;
-          }
-        }
+        detail::binNeighbourRange(NB, bin(i), lo, hi);
         for (int oz = lo[2]; oz <= hi[2]; ++oz)
           for (int oy = lo[1]; oy <= hi[1]; ++oy)
             for (int ox = lo[0]; ox <= hi[0]; ++ox) {
