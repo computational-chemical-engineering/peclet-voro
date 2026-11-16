@@ -924,3 +924,36 @@ pressure +0.28 / +0.12 %. Rejected by their gates (campaign log, 2026-11-14: A2i
 the surface only (no rest state: an l = 1 slide of the points), a weaker full umbrella (χ ≤ 0.5), an anchor of the
 surface centroid. No further work on the mesh energy until 3D runs in time exist; the gates of WO-S2.4 take their
 thresholds from the booked error above, not from the 2D scheme.
+
+### A9 (2026-11-15): what WO-S1.1 can gate of the body force; scope of WO-S1.1 (replaces G1.1-h of A7 for S1.1 and the last two rows of §2.3 for S1.1)
+Gate G1.1-h of A7 asks for runs of 100 steps, and WO-S1.1 has no stepper. Decision:
+- WO-S1.1 gates the static part: (H1) ψ = cos(2πy/L) at ρ = 1000 with p_i = −ρψ(x_i): C′ᵀp + I_Fᵀγ = 0 to 1e-13 of
+  max|I_Fᵀγ| on the three meshes; (H2) uniform g through differences: Σ_i (I_Fᵀγ)_i = ρ(Σ_i V_i)g to 1e-13; (H3) the cell
+  form ρ_iV_iḡ. With one phase γ = −ρΔ_nψ, so H1 holds by construction and checks the implementation; H2 fixes the
+  physical sign.
+- The time parts of A7 ((i) |U| over 100 steps, (ii) free fall from a Taylor–Green start, (iii) the control with
+  cell values) move unchanged to gate G1.2 of WO-S1.2.
+- WO-S1.1 covers D, Δ_n, G, I_F, I_Fᵀ, C′, C′ᵀ, L_ρ (assembly and product), Φᵐ, ζ (μ_f a face input) and the body
+  force. The transport tendency and the predictor operator move to WO-S1.2: the reference
+  (`tests/python/ale_reference.py`) does not have them, and it gets them first.
+- L_ρ is assembled as a struct of views in `ale/operators.hpp` (row i = the faces of cell i in ascending face
+  order, one entry per face, diagonal Σ a_f).
+
+### A10 (2026-11-16): the multigrid does not respect the phases (replaces item 1 of §4.5 "Unlike faces never join an aggregate", A3, and gate G0.4)
+Gate G0.4 was run on a branch of core `amgpar` (`ale-amg`, local: 6f6c6d0, 3994738, 62155c6) with a per-node label
+that cuts the strength graph and the smoothing filter. Operator: L_ρ of mesh M1 at 32³ and 64³ (zero weights),
+sphere R = L/4 with ρ = 1 inside and 1000 outside; PCG to 1e-10, registered parameters. Logs
+`build_s0/gate_logs/G0_4.*`.
+- The option does what it says (no aggregate and no prolongator entry across labels on any level; inert with one
+  label; default path byte-identical; hierarchy identical at 1, 2, 4, 8 threads; setup 0.17 s against 0.22 s per
+  solve at 64³).
+- It does not help. Iterations at 32³ / 64³: ratio 1 without label 12 / 15; ratio 1000 without label 17 / 26;
+  ratio 1000 with label 19 / 29 (plain cut: 19 / 33, with 3298 cells left as singletons); ratio 1 with the label
+  15 / 26. **G0.4 MISS** on growth with size (1.53 and 1.73 against 1.2) and on the device criterion.
+- Reading [estimate]: with 1/ρ_f = (h_B/ρ_A + h_A/ρ_B)/d the interface face is the strongest connection of a heavy
+  cell, so the algebraically smooth error is continuous across the interface and a transfer cut there removes
+  what the coarse space needs.
+Decision: `ale::LaplacianSolver` uses the MIS-2 setup of core `amgpar` without a label. No `fv/aggregation_amg.hpp`
+and no core change for the ALE solver. Open, carried to the performance gates: the unlabeled count grows from
+32³ to 64³ by 1.25 (ratio 1) and 1.53 (ratio 1000); on CUDA the setup of amgpar at b21d4bd asks for 31.5 GiB at
+32³ and its level check against the host order is not bitwise (both passed to session `voronoi`).
