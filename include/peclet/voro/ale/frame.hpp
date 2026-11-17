@@ -14,14 +14,19 @@
  * initial frame, a gate rebuild, the fallback) changes every cell; `numRebuilt` counts the cells
  * changed in the frame, over the repair step and the reciprocity rounds together.
  *
- * Reciprocity (§3.5): a facet i → j whose cell j has no facet back to i is non-reciprocal; the
- * face mesh drops it (`FaceMesh::nDropped`). With `enforceReciprocity` (default on), when such a
- * facet has area > kNonReciprocalAreaFrac · h² (h³ = the mean cell volume), both of its cells are
- * forced through `step(pos, forced, n)` (§5.1) and the frame is published again, at most
- * kMaxReciprocityRounds rounds; `reciprocity` records what remains and the rounds used.
+ * Reciprocity (§3.5): a facet i → j whose cell j has no facet back to i is non-reciprocal
+ * (one-sided); the face mesh drops it (`FaceMesh::nDropped`). With `enforceReciprocity` (default
+ * on), both cells of every one-sided facet of nonzero area are forced through
+ * `step(pos, forced, n)` (§5.1) and the frame is published again, at most kMaxReciprocityRounds
+ * rounds; `reciprocity` records what remains and the rounds used.
  *
- * `numEmptyCells` counts the cells of the published view with zero volume or no facet (an empty
- * power cell); the frame is built regardless and the caller decides (§11 A5).
+ * Two counts make a frame an error the caller must act on; the frame is built regardless:
+ * `numEmptyCells`, the cells of the published view with zero volume or no facet (an empty power
+ * cell, §11 A5), and `numOneSidedFacets`, the one-sided facets of area > kOneSidedFacetAreaFrac ·
+ * h² (h³ = the mean cell volume) left after the rounds.
+ *
+ * Weights: the frame snapshots the engine's own power weights (`engine.weight`), so the published
+ * geometry and the repaired topology belong to one power diagram.
  *
  * Single domain only (nProc == N); the distributed frame is a later work order.
  */
@@ -43,8 +48,12 @@
 
 namespace peclet::voro::ale {
 
-/// Non-reciprocal facets with area above this fraction of h² force a rebuild of both cells (α).
-inline constexpr double kNonReciprocalAreaFrac = 1e-12;
+/// A one-sided facet larger than this fraction of h² that survives the reciprocity rounds makes
+/// the frame an error (MeshFrame::numOneSidedFacets). The face mesh drops a one-sided facet; a
+/// dropped facet of area a leaves the cell a volume-rate defect of up to a · h · CFL per step, i.e.
+/// a/h² of V_i at CFL 1, against the geometric conservation bar of 1e-14 V_i of stage 1. Smaller
+/// facets are still forced (any area > 0) but tolerated if they remain.
+inline constexpr double kOneSidedFacetAreaFrac = 1e-14;
 /// At most this many forced rebuild + publish rounds per frame.
 inline constexpr int kMaxReciprocityRounds = 2;
 
@@ -62,7 +71,7 @@ struct FrameOptions {
   /// Builder options; `pos`, `weight` and `L` are overwritten with the frame's snapshot. All
   /// flags off is the default builder.
   fv::FaceMeshOptions<Real> mesh = frameMeshOptions<Real>();
-  bool enforceReciprocity = true;  ///< force the cells of large non-reciprocal facets (§3.5)
+  bool enforceReciprocity = true;  ///< force the cells of every one-sided facet (§3.5)
   bool timed = false;  ///< fence and time the phases into MeshFrame::timings (diagnostic)
 };
 
@@ -72,8 +81,9 @@ struct ReciprocityReport {
   long nNonRecip = 0;          ///< facets toward a cell with no facet back
   int nDropped = 0;            ///< non-reciprocal facets the face mesh dropped
   double maxNonRecipArea = 0;  ///< largest area of a non-reciprocal facet
-  double areaThreshold = 0;    ///< kNonReciprocalAreaFrac · h²
+  double areaThreshold = 0;    ///< kOneSidedFacetAreaFrac · h² (the bar of numOneSidedFacets)
   int rounds = 0;              ///< forced rebuild + publish rounds used
+  int numRoundRebuilt = 0;     ///< cells the rounds' steps rebuilt, summed over rounds (N if cold)
 };
 
 /// Wall time of the phases of the last frame build, seconds (only with FrameOptions::timed).
@@ -85,7 +95,7 @@ template <class Real>
 struct MeshFrame {
   using Mem = peclet::core::MemSpace;
   Kokkos::View<Real*, Mem> pos;     ///< 3N generator positions the frame was built from
-  Kokkos::View<Real*, Mem> weight;  ///< N power weights (empty for the unweighted engine)
+  Kokkos::View<Real*, Mem> weight;  ///< N engine power weights (empty for the unweighted engine)
   fv::FaceMesh<Real> mesh;
   RepairStats stats;       ///< of the repair step (default for the initial frame)
   bool coldBuild = false;  ///< every cell changed: the initial frame, a gate rebuild, the fallback
@@ -93,6 +103,10 @@ struct MeshFrame {
   /// Owned cells with zero volume or no facet in the published view (empty power cells): a frame
   /// with any is an error the caller must act on (docs/ale_design.md §11 A5).
   int numEmptyCells = 0;
+  /// One-sided facets of area > kOneSidedFacetAreaFrac · h² left after the reciprocity rounds
+  /// (with or without enforcement): a frame with any is an error the caller must act on, as for
+  /// numEmptyCells.
+  int numOneSidedFacets = 0;
   ReciprocityReport reciprocity;
   FrameTimings timings;
 };
@@ -140,7 +154,7 @@ struct Clock {
 
 /// Publish the engine's tessellation at the frame's snapshot, build the face mesh, and measure the
 /// reciprocity. With a non-empty `forcedMask` (N), marks in it both cells of every non-reciprocal
-/// facet above the threshold (the mask is left untouched when there is none).
+/// facet of nonzero area (the mask is left untouched when there is none).
 template <class Real, int MAXP, int MAXT, bool Weighted, class Sdf>
 void publish(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine, MeshFrame<Real>& f,
              const Real L[3], const FrameOptions<Real>& opt,
@@ -175,25 +189,27 @@ void publish(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine, MeshFr
       "ale.frame.sumVol", Kokkos::RangePolicy<Exec>(0, N),
       KOKKOS_LAMBDA(const int i, double& a) { a += (double)view.volume(i); }, sumV);
   const double h2 = std::pow(sumV / (N > 0 ? N : 1), 2.0 / 3.0);
-  const double thr = kNonReciprocalAreaFrac * h2;
+  const double thr = kOneSidedFacetAreaFrac * h2;
   auto recip = aux.recip;
   double maxA = 0;
+  int nOver = 0;
   Kokkos::parallel_reduce(
       "ale.frame.nonRecipArea", Kokkos::RangePolicy<Exec>(0, N),
-      KOKKOS_LAMBDA(const int i, double& m) {
+      KOKKOS_LAMBDA(const int i, double& m, int& c) {
         for (int g = view.facetBegin(i); g < view.facetEnd(i); ++g) {
           const long j = (long)view.facetNbr(g);
           if (j < 0 || j >= N || recip(g) >= 0)
             continue;
           double a2 = 0;
-          for (int c = 0; c < 3; ++c)
-            a2 += (double)view.area(g, c) * (double)view.area(g, c);
+          for (int d = 0; d < 3; ++d)
+            a2 += (double)view.area(g, d) * (double)view.area(g, d);
           const double a = std::sqrt(a2);
           if (a > m)
             m = a;
+          c += a > thr ? 1 : 0;
         }
       },
-      Kokkos::Max<double>(maxA));
+      Kokkos::Max<double>(maxA), nOver);
   int nEmpty = 0;
   Kokkos::parallel_reduce(
       "ale.frame.empty", Kokkos::RangePolicy<Exec>(0, N),
@@ -202,12 +218,13 @@ void publish(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine, MeshFr
       },
       nEmpty);
   f.numEmptyCells = nEmpty;
+  f.numOneSidedFacets = nOver;
   f.reciprocity.maxAreaAsym = inv.maxAreaAsym;
   f.reciprocity.nNonRecip = inv.nNonRecip;
   f.reciprocity.nDropped = f.mesh.nDropped;
   f.reciprocity.maxNonRecipArea = maxA;
   f.reciprocity.areaThreshold = thr;
-  if (forcedMask.extent(0) > 0 && maxA > thr) {
+  if (forcedMask.extent(0) > 0 && maxA > 0) {
     auto M = forcedMask;
     Kokkos::deep_copy(M, 0);
     Kokkos::parallel_for(
@@ -219,7 +236,7 @@ void publish(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine, MeshFr
             double a2 = 0;
             for (int c = 0; c < 3; ++c)
               a2 += (double)view.area(g, c) * (double)view.area(g, c);
-            if (std::sqrt(a2) > thr) {
+            if (a2 > 0) {
               Kokkos::atomic_store(&M(i), 1);
               Kokkos::atomic_store(&M((int)j), 1);
             }
@@ -247,6 +264,11 @@ inline int maskToList(const Kokkos::View<int*, peclet::core::MemSpace>& mask, in
   return total;
 }
 
+/// True if the step ended in a cold build (the rebuild gate or the fallback).
+inline bool isCold(const RepairStats& st) {
+  return st.route == RepairStats::kRebuildGate || st.fellBack;
+}
+
 /// Shared tail of initialFrame / advanceFrame: publish, then the reciprocity rounds. `changed`
 /// enters as the frame's changed set when a round is needed (allocated here on demand).
 template <class Real, int MAXP, int MAXT, bool Weighted, class Sdf>
@@ -267,7 +289,7 @@ void publishWithReciprocity(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>&
     return;
   Kokkos::View<int*, Mem> changed, list;
   for (int round = 0; round < kMaxReciprocityRounds; ++round) {
-    if (!(f.reciprocity.maxNonRecipArea > f.reciprocity.areaThreshold))
+    if (!(f.reciprocity.maxNonRecipArea > 0))
       break;
     if (changed.extent(0) == 0) {
       // the frame's changed set so far: all cells after a cold build, else the step's mask
@@ -284,10 +306,12 @@ void publishWithReciprocity(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>&
     Clock clk(opt.timed);
     const RepairStats st = engine.step(pos, list, nF);
     f.timings.repair += clk.lap();
-    if (st.route == RepairStats::kRebuildGate || st.fellBack) {
+    if (isCold(st)) {
       f.coldBuild = true;
       Kokkos::deep_copy(changed, 1);
+      f.reciprocity.numRoundRebuilt += N;
     } else {
+      f.reciprocity.numRoundRebuilt += countNonzero(engine.changedMask(), N);
       auto C = changed;
       auto R = engine.changedMask();
       Kokkos::parallel_for(
@@ -311,12 +335,11 @@ void checkSingleDomain(const MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>
 
 }  // namespace detail
 
-/// The frame after a cold `engine.rebuild(pos)`: every cell changed. `weight` is the engine's
-/// power weights (ignored, and not kept, for the unweighted engine).
+/// The frame after a cold `engine.rebuild(pos)`: every cell changed. The power weights are the
+/// engine's (`setWeights` before the call).
 template <class Real, int MAXP, int MAXT, bool Weighted, class Sdf>
 MeshFrame<Real> initialFrame(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine,
                              const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
-                             const Kokkos::View<Real*, peclet::core::MemSpace>& weight,
                              const Real L[3], const FrameOptions<Real>& opt = {}) {
   detail::checkSingleDomain(engine);
   MeshFrame<Real> f;
@@ -331,28 +354,28 @@ MeshFrame<Real> initialFrame(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>
   f.timings.repair = clk.lap();
   f.pos = detail::snapshot(pos, "ale.frame.pos");
   if constexpr (Weighted)
-    f.weight = detail::snapshot(weight, "ale.frame.weight");
+    f.weight = detail::snapshot(engine.weight, "ale.frame.weight");
   f.coldBuild = true;
   f.numRebuilt = engine.nProc;
   detail::publishWithReciprocity(engine, pos, f, L, opt);
   return f;
 }
 
-/// The frame after a repair `engine.step(pos)` from the engine's present state.
+/// The frame after a repair `engine.step(pos)` from the engine's present state. The power weights
+/// are the engine's.
 template <class Real, int MAXP, int MAXT, bool Weighted, class Sdf>
 MeshFrame<Real> advanceFrame(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine,
                              const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
-                             const Kokkos::View<Real*, peclet::core::MemSpace>& weight,
                              const Real L[3], const FrameOptions<Real>& opt = {}) {
   detail::checkSingleDomain(engine);
   MeshFrame<Real> f;
   detail::Clock clk(opt.timed);
   f.stats = engine.step(pos);
+  f.coldBuild = detail::isCold(f.stats);
   f.timings.repair = clk.lap();
   f.pos = detail::snapshot(pos, "ale.frame.pos");
   if constexpr (Weighted)
-    f.weight = detail::snapshot(weight, "ale.frame.weight");
-  f.coldBuild = f.stats.route == RepairStats::kRebuildGate || f.stats.fellBack;
+    f.weight = detail::snapshot(engine.weight, "ale.frame.weight");
   f.numRebuilt =
       f.coldBuild ? engine.nProc : detail::countNonzero(engine.changedMask(), engine.nProc);
   detail::publishWithReciprocity(engine, pos, f, L, opt);

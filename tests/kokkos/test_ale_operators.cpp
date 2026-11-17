@@ -104,7 +104,7 @@ Frame coldFrame(const Scene& s, const DV& pos, const DV& weight) {
   Engine mt;
   mt.alloc(s.N, s.L, Real(1e-4) * s.h, Real(0.25) * s.h, 4, s.N);
   mt.setWeights(weight);
-  return ale::initialFrame(mt, pos, weight, s.L, FrameOpts{});
+  return ale::initialFrame(mt, pos, s.L, FrameOpts{});
 }
 
 /// Mesh `M1` (jitter 0.3, zero weights), `M2` (the same seeds, weights) or `M3` (jitter 0.45).

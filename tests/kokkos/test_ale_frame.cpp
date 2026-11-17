@@ -34,6 +34,10 @@
  * Builder options: `--opts default` (all off), `frame` (ale::frameMeshOptions), `det`
  * (deterministicOrder only); `auto` (the default) = default at one thread, else frame for (a)
  * and det for (b). (g) always uses the frame options.
+ * Every frame of every part is checked for MeshFrame::numOneSidedFacets and numEmptyCells (an
+ * error of the frame; in (g) recorded as INFO without enforcement), and (g) prints per frame the
+ * cells whose face list does not close, |Σ A_f n_f| > 1e-13 Σ A_f (WO-S0.5 item 5; a diagnostic:
+ * `closure=MISS` does not fail the test).
  * Usage: test_ale_frame [n=16] [--part a|b|f|g|all] [--full] [--opts auto|default|frame|det]
  *                       [--dump DIR] [--time] [--diag]
  * --diag (WO-S1.1b): in (a), the per-array difference of the first differing frame against frame 0
@@ -293,15 +297,15 @@ int partA(const char* tag, const Scene& s, int frames, const std::string& opts, 
   allocEngine<W>(mt, s.N, s.L, s.h, s.weight);
   FrameOpts fo;
   fo.mesh = optionsOf(opts);
-  const DV w = W ? s.weight : DV();
-  const Frame f0 = ale::initialFrame(mt, s.pos, w, s.L, fo);
+  const Frame f0 = ale::initialFrame(mt, s.pos, s.L, fo);
   const auto ref = meshArrays(f0.mesh);
   int badFrames = 0, changedFrames = 0, rounds = f0.reciprocity.rounds;
+  int errorFrames = f0.numOneSidedFacets > 0 || f0.numEmptyCells > 0 ? 1 : 0;
   std::string first;
   std::vector<Arr> ref1;
   int notFixed = 0;  // --diag: frames k >= 2 that differ from frame 1
   for (int k = 1; k <= frames; ++k) {
-    const Frame f = ale::advanceFrame(mt, s.pos, w, s.L, fo);
+    const Frame f = ale::advanceFrame(mt, s.pos, s.L, fo);
     const auto cur = meshArrays(f.mesh);
     const std::string d = firstDiff(ref, cur);
     if (!d.empty()) {
@@ -326,15 +330,16 @@ int partA(const char* tag, const Scene& s, int frames, const std::string& opts, 
     if (nz != 0 || f.numRebuilt != 0 || f.coldBuild)
       ++changedFrames;
     rounds += f.reciprocity.rounds;
+    errorFrames += f.numOneSidedFacets > 0 || f.numEmptyCells > 0 ? 1 : 0;
   }
-  const bool pass = badFrames == 0 && changedFrames == 0;
+  const bool pass = badFrames == 0 && changedFrames == 0 && errorFrames == 0;
   if (diag)
     std::printf("DIAG %s fixedPoint frames2..%d differing from frame1=%d\n", tag, frames, notFixed);
   std::printf(
       "RESULT a %-7s n=%d opts=%s frames=%d %s arrays=%zu mismatchFrames=%d changedFrames=%d "
-      "rounds=%d nDropped=%d%s%s\n",
+      "errorFrames=%d rounds=%d nDropped=%d%s%s\n",
       tag, s.n, opts.c_str(), frames, pass ? "PASS" : "FAIL", ref.size(), badFrames, changedFrames,
-      rounds, f0.mesh.nDropped, first.empty() ? "" : " first=", first.c_str());
+      errorFrames, rounds, f0.mesh.nDropped, first.empty() ? "" : " first=", first.c_str());
   return pass ? 0 : 1;
 }
 
@@ -361,7 +366,7 @@ int partB(int n, int steps, const std::string& opts, const std::string& dumpDir)
   for (const NsConfig& c : cfgs) {
     Engine<false> mt;
     allocEngine<false>(mt, N, L, h, DV());
-    const Frame f0 = ale::initialFrame(mt, dpos, DV(), L, fo);
+    const Frame f0 = ale::initialFrame(mt, dpos, L, fo);
     auto configure = [&](fv::CollocatedNS<Real>& ns) {
       ns.setup(f0.mesh, c.nu, true);
       ns.implicitDiffusion = c.implicitDiffusion;
@@ -374,10 +379,12 @@ int partB(int n, int steps, const std::string& opts, const std::string& dumpDir)
     for (int s = 0; s < steps; ++s)
       ns1.step(dt);
     int changed = 0, meshDiff = 0;
+    int errorFrames = f0.numOneSidedFacets > 0 || f0.numEmptyCells > 0 ? 1 : 0;
     const auto ref = meshArrays(f0.mesh);
     for (int s = 0; s < steps; ++s) {
-      const Frame f = ale::advanceFrame(mt, dpos, DV(), L, fo);
+      const Frame f = ale::advanceFrame(mt, dpos, L, fo);
       changed += f.numRebuilt;
+      errorFrames += f.numOneSidedFacets > 0 || f.numEmptyCells > 0 ? 1 : 0;
       if (!firstDiff(ref, meshArrays(f.mesh)).empty())
         ++meshDiff;
       ns2.m = f.mesh;
@@ -388,10 +395,12 @@ int partB(int n, int steps, const std::string& opts, const std::string& dumpDir)
     std::vector<Arr> r1 = {arrOf("U", ns1.U), arrOf("p", ns1.p), arrOf("uf", ns1.uf)};
     std::vector<Arr> r2 = {arrOf("U", ns2.U), arrOf("p", ns2.p), arrOf("uf", ns2.uf)};
     const std::string d = firstDiff(r1, r2);
-    const bool pass = d.empty();
-    std::printf("RESULT b %-10s n=%d opts=%s steps=%d %s E=%.15e meshDiffSteps=%d rebuilt=%d%s%s\n",
-                c.name, n, opts.c_str(), steps, pass ? "PASS" : "FAIL", (double)ns2.kineticEnergy(),
-                meshDiff, changed, pass ? "" : " first=", d.c_str());
+    const bool pass = d.empty() && errorFrames == 0;
+    std::printf(
+        "RESULT b %-10s n=%d opts=%s steps=%d %s E=%.15e meshDiffSteps=%d rebuilt=%d "
+        "errorFrames=%d%s%s\n",
+        c.name, n, opts.c_str(), steps, pass ? "PASS" : "FAIL", (double)ns2.kineticEnergy(),
+        meshDiff, changed, errorFrames, d.empty() ? "" : " first=", d.c_str());
     if (!dumpDir.empty()) {
       dumpArrays(dumpDir, std::string("b_") + c.name + "_run1", r1);
       dumpArrays(dumpDir, std::string("b_") + c.name + "_run2", r2);
@@ -538,6 +547,13 @@ int partF(const Scene& s) {
   return pass ? 0 : 1;
 }
 
+/// A cold frame (fresh power engine, initialFrame with the default frame options).
+Frame coldFrame(const Scene& s, const DV& pos, const DV& weight) {
+  Engine<true> mt;
+  allocEngine<true>(mt, s.N, s.L, s.h, weight);
+  return ale::initialFrame(mt, pos, s.L, FrameOpts{});
+}
+
 // ---- (g) G0.2
 // ----------------------------------------------------------------------------------------
 void advect(const DV& pos, int N, Real L, Real step) {
@@ -568,6 +584,59 @@ double sumVolume(const FM& m) {
       "t.sumV", Kokkos::RangePolicy<Exec>(0, m.nCells),
       KOKKOS_LAMBDA(const int i, double& a) { a += (double)V(i); }, s);
   return s;
+}
+
+/// Closure of the face mesh (WO-S0.5 item 5): the cells with |Σ_f s_f A_f n_f| > rel · Σ_f A_f
+/// (a dropped facet shows here) and the largest ratio over all cells.
+void closureDefects(const FM& m, double rel, int& nBad, double& maxRel) {
+  auto off = m.cellFaceOffset;
+  auto cf = m.cellFace;
+  auto sg = m.cellFaceSign;
+  auto A = m.faceArea;
+  auto n = m.faceNormal;
+  nBad = 0;
+  maxRel = 0;
+  Kokkos::parallel_reduce(
+      "t.closure", Kokkos::RangePolicy<Exec>(0, m.nCells),
+      KOKKOS_LAMBDA(const int i, int& c, double& mx) {
+        double v[3] = {0, 0, 0}, a = 0;
+        for (int k = off(i); k < off(i + 1); ++k) {
+          const int f = cf(k);
+          const double sa = (double)sg(k) * (double)A(f);
+          for (int d = 0; d < 3; ++d)
+            v[d] += sa * (double)n(3 * f + d);
+          a += (double)A(f);
+        }
+        const double r = std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) / (a > 0 ? a : 1.0);
+        c += r > rel ? 1 : 0;
+        if (r > mx)
+          mx = r;
+      },
+      nBad, Kokkos::Max<double>(maxRel));
+}
+
+/// The same closure on a published view, each cell from its own facets (diagnostic of H2: the
+/// largest |Σ_g A_g| / Σ_g |A_g| over cells).
+double viewClosure(const peclet::voro::TessellationView<Real>& v, int N) {
+  double mx = 0;
+  Kokkos::parallel_reduce(
+      "t.viewClosure", Kokkos::RangePolicy<Exec>(0, N),
+      KOKKOS_LAMBDA(const int i, double& m) {
+        double w[3] = {0, 0, 0}, a = 0;
+        for (int g = v.facetBegin(i); g < v.facetEnd(i); ++g) {
+          double a2 = 0;
+          for (int d = 0; d < 3; ++d) {
+            w[d] += (double)v.area(g, d);
+            a2 += (double)v.area(g, d) * (double)v.area(g, d);
+          }
+          a += std::sqrt(a2);
+        }
+        const double r = std::sqrt(w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) / (a > 0 ? a : 1.0);
+        if (r > m)
+          m = r;
+      },
+      Kokkos::Max<double>(mx));
+  return mx;
 }
 
 /// Facets (ordered pairs i → j, wall facets skipped) present in exactly one of two published
@@ -624,6 +693,8 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
   const double h2 = (double)s.h * s.h;
   const double boxVol = (double)s.L[0] * s.L[1] * s.L[2];
   const Real step = Real(0.05) * s.h / std::sqrt(Real(3));
+  constexpr double kIiiBar = 1e-12;      // G0.2' (iii): one-sided facet area left, units of h²
+  constexpr double kClosureRel = 1e-13;  // G0.5 H2: |Σ A_f n_f| per cell, units of Σ A_f
   DV weight = s.weight;
   if (!weighted)
     weight = DV("w0", s.N);  // zero-initialized
@@ -634,18 +705,23 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
     FrameOpts fo;
     fo.enforceReciprocity = enforce == 1;
     fo.timed = timeIt;
-    Frame f = ale::initialFrame(mt, pos, weight, s.L, fo);
+    Frame f = ale::initialFrame(mt, pos, s.L, fo);
     double maxSumRel = 0, maxNonRecip = 0, sumT[5] = {0, 0, 0, 0, 0}, wall = 0;
     long totalRebuilt = 0, maxNonRecipCount = 0, negTotal = 0, onlyCount = 0;
     int maxRebuilt = 0, framesNonRecip = 0, framesOver = 0, roundsTotal = 0, roundsMax = 0;
     int routes[3] = {0, 0, 0}, fellBack = 0, negMax = 0, checks = 0, checksBad = 0;
     int evaluated = 0, firstEmpty = 0, emptyFrames = 0;
     double maxVolRel = 0, maxOnlyArea = 0;
+    // WO-S0.5: one-sided facets left (H1), closure (H2), cells rebuilt by forcing (H5)
+    int framesOSF = 0, maxOSF = 0, framesClosure = 0, maxClosureCells = 0, framesRound2 = 0;
+    int maxRoundRebuilt = 0;
+    long totalRoundRebuilt = 0;
+    double maxClosureRel = 0;
     std::vector<Arr> lastArrs;
     for (int k = 1; k <= frames; ++k) {
       advect(pos, s.N, s.L[0], step);
       const auto t0 = std::chrono::steady_clock::now();
-      f = ale::advanceFrame(mt, pos, weight, s.L, fo);
+      f = ale::advanceFrame(mt, pos, s.L, fo);
       if (timeIt) {
         Kokkos::fence();
         wall += std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -672,8 +748,19 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
       const auto& r = f.reciprocity;
       if (r.nNonRecip > 0)
         ++framesNonRecip;
-      if (r.maxNonRecipArea > r.areaThreshold)
+      if (r.maxNonRecipArea > kIiiBar * h2)
         ++framesOver;
+      framesOSF += f.numOneSidedFacets > 0 ? 1 : 0;
+      maxOSF = std::max(maxOSF, f.numOneSidedFacets);
+      int nBad = 0;
+      double clRel = 0;
+      closureDefects(f.mesh, kClosureRel, nBad, clRel);
+      framesClosure += nBad > 0 ? 1 : 0;
+      maxClosureCells = std::max(maxClosureCells, nBad);
+      maxClosureRel = std::max(maxClosureRel, clRel);
+      framesRound2 += r.rounds >= 2 ? 1 : 0;
+      totalRoundRebuilt += r.numRoundRebuilt;
+      maxRoundRebuilt = std::max(maxRoundRebuilt, r.numRoundRebuilt);
       maxNonRecip = std::max(maxNonRecip, r.maxNonRecipArea);
       maxNonRecipCount = std::max(maxNonRecipCount, r.nNonRecip);
       roundsTotal += r.rounds;
@@ -685,10 +772,11 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
       negMax = std::max(negMax, neg);
       std::printf(
           "FRAME variant=%s enforce=%d k=%d rebuilt=%d cold=%d route=%d fellBack=%d nNonRecip=%ld "
-          "nDropped=%d maxNonRecipArea/h2=%.3e rounds=%d negH=%d sumVrel=%.2e\n",
+          "nDropped=%d maxNonRecipArea/h2=%.3e rounds=%d negH=%d sumVrel=%.2e oneSided=%d "
+          "closureCells=%d closureMax=%.2e roundRebuilt=%d maxAreaAsym=%.2e\n",
           vname, enforce, k, f.numRebuilt, (int)f.coldBuild, (int)f.stats.route,
           (int)f.stats.fellBack, r.nNonRecip, r.nDropped, r.maxNonRecipArea / h2, r.rounds, neg,
-          sumRel);
+          sumRel, f.numOneSidedFacets, nBad, clRel, r.numRoundRebuilt, r.maxAreaAsym);
       if (!dumpDir.empty())
         lastArrs = meshArrays(f.mesh);
       if (k % every == 0) {
@@ -706,11 +794,18 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
         maxVolRel = std::max(maxVolRel, d.maxVolRelErr);
         const bool ok = d.maxVolRelErr <= 1e-9 && mx <= 1e-8 * h2;
         checksBad += ok ? 0 : 1;
+        // H2 diagnostics: closure of the repaired view per own cell, of the cold view, and of
+        // the face mesh of a cold frame at the same positions
+        int coldBad = 0;
+        double coldMeshRel = 0;
+        closureDefects(coldFrame(s, pos, weight).mesh, kClosureRel, coldBad, coldMeshRel);
         std::printf(
             "CHECK variant=%s enforce=%d k=%d %s maxVolRel=%.3e onlyFacets=%ld "
-            "maxOnlyArea/h2=%.3e nbrDiffCells=%ld missedNbr=%ld\n",
+            "maxOnlyArea/h2=%.3e nbrDiffCells=%ld missedNbr=%ld ownClosure(repaired/cold)="
+            "%.2e/%.2e coldMeshClosure(cells/max)=%d/%.2e\n",
             vname, enforce, k, ok ? "PASS" : "FAIL", d.maxVolRelErr, cnt, mx / h2,
-            std::lround(d.changedNbrFrac * s.N), d.missedNbr);
+            std::lround(d.changedNbrFrac * s.N), d.missedNbr, viewClosure(repaired, s.N),
+            viewClosure(cold.view, s.N), coldBad, coldMeshRel);
         if (!ok)
           explainDiff<true>(enforce ? "enforce=1" : "enforce=0", k, mt, cold.view, f.mesh, s.N,
                             s.h);
@@ -721,7 +816,11 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
     const bool okIII = enforce == 0 || framesOver == 0;
     const bool okIV = checksBad == 0 && checks > 0;
     const bool okEmpty = weighted || emptyFrames == 0;
-    const bool pass = okI && (okII || !full) && okIII && okIV && okEmpty;
+    // a one-sided facet left is an error of the frame (with enforcement; without, recorded); the
+    // closure is a diagnostic (gate G0.5 H2 reads it: MISS, not FAIL)
+    const bool okOSF = enforce == 0 || framesOSF == 0;
+    const bool okClosure = framesClosure == 0;
+    const bool pass = okI && (okII || !full) && okIII && okIV && okEmpty && okOSF;
     rc |= pass ? 0 : 1;
     char firstEmptyStr[16];
     if (firstEmpty > 0)
@@ -735,14 +834,20 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
         "framesNonRecip=%d framesOverThreshold=%d maxNonRecipCount=%ld roundsTotal=%d "
         "roundsMax=%d iv=%s checks=%d maxVolRel=%.2e onlyFacets=%ld maxOnlyArea/h2=%.3e "
         "routes(two/dil/gate)=%d/%d/%d fellBack=%d negH(total/maxPerFrame)=%ld/%d "
-        "empty=%s emptyFrames=%d firstEmpty=%s\n",
+        "empty=%s emptyFrames=%d firstEmpty=%s oneSided=%s framesOneSided=%d maxOneSided=%d "
+        "closure=%s framesClosure=%d maxClosureCells=%d maxClosureRel=%.2e "
+        "roundRebuilt(mean/max)=%.1f/%d framesRound2=%d\n",
         vname, enforce, s.n, frames, evaluated, pass ? "PASS" : "FAIL", okI ? "PASS" : "FAIL",
         maxSumRel, full ? (okII ? "PASS" : "FAIL") : "INFO", totalRebuilt,
         evaluated > 0 ? (double)totalRebuilt / evaluated : 0.0, maxRebuilt,
         enforce == 0 ? "INFO" : (okIII ? "PASS" : "FAIL"), maxNonRecip / h2, framesNonRecip,
         framesOver, maxNonRecipCount, roundsTotal, roundsMax, okIV ? "PASS" : "FAIL", checks,
         maxVolRel, onlyCount, maxOnlyArea, routes[0], routes[1], routes[2], fellBack, negTotal,
-        negMax, weighted ? "INFO" : (okEmpty ? "PASS" : "MISS"), emptyFrames, firstEmptyStr);
+        negMax, weighted ? "INFO" : (okEmpty ? "PASS" : "MISS"), emptyFrames, firstEmptyStr,
+        enforce == 0 ? "INFO" : (okOSF ? "PASS" : "FAIL"), framesOSF, maxOSF,
+        enforce == 0 ? "INFO" : (okClosure ? "PASS" : "MISS"), framesClosure, maxClosureCells,
+        maxClosureRel, evaluated > 0 ? (double)totalRoundRebuilt / evaluated : 0.0, maxRoundRebuilt,
+        framesRound2);
     if (timeIt && evaluated > 0)
       std::printf(
           "TIME g variant=%s enforce=%d threads=%d per-frame ms: repair %.2f publish %.2f "
@@ -794,13 +899,6 @@ Scene exportScene(int n, Real jitter) {
   return s;
 }
 
-/// A cold frame (fresh power engine, initialFrame with the default frame options).
-Frame coldFrame(const Scene& s, const DV& pos, const DV& weight) {
-  Engine<true> mt;
-  allocEngine<true>(mt, s.N, s.L, s.h, weight);
-  return ale::initialFrame(mt, pos, weight, s.L, FrameOpts{});
-}
-
 /// Per cell, the sorted list of the other cells of its faces.
 std::vector<std::vector<int>> neighbourSets(const FM& m) {
   const auto A = down(m.faceCellA), B = down(m.faceCellB), off = down(m.cellFaceOffset),
@@ -828,13 +926,14 @@ void writeVec(const std::string& path, const std::vector<T>& v) {
 /// ẋ_i = (sin 2πy, sin 2πz, sin 2πx)(x_i) + frac · r_i, r_i uniform in [−1, 1]³ (fixed seed);
 /// τ0 max_i |ẋ_i| = 0.02 h; ẇ_i = (0.02 h²/τ0) s_i, s_i uniform in [−1, 1], on weighted meshes.
 /// Variants: full (frac 0.2, ẇ on the weighted mesh), smooth (frac 0), nowdot (frac 0.2, ẇ = 0;
-/// weighted mesh only). Returns nonzero if a frame has an empty cell.
+/// weighted mesh only). Returns nonzero if a frame has an empty cell or a one-sided facet.
 int exportMesh(const std::string& dir, const std::string& name, const Scene& s, bool weighted) {
   const int N = s.N;
   const DV w = weighted ? s.weight : DV("w0", N);  // zero weights: the power engine (§11 A4)
   const Frame base = coldFrame(s, s.pos, w);
-  if (base.numEmptyCells > 0) {
-    std::printf("EXPORT %s FAIL base numEmptyCells=%d\n", name.c_str(), base.numEmptyCells);
+  if (base.numEmptyCells > 0 || base.numOneSidedFacets > 0) {
+    std::printf("EXPORT %s FAIL base numEmptyCells=%d numOneSidedFacets=%d\n", name.c_str(),
+                base.numEmptyCells, base.numOneSidedFacets);
     return 1;
   }
   dumpArrays(dir, name, meshArrays(base.mesh));
@@ -901,7 +1000,7 @@ int exportMesh(const std::string& dir, const std::string& name, const Scene& s, 
       for (int i = 0; i < N; ++i)
         wt[i] = wv[i] + taus[t] * wdot[i];
       const Frame f = coldFrame(s, up(xt, "pos_t"), up(wt, "w_t"));
-      empty += f.numEmptyCells;
+      empty += f.numEmptyCells + f.numOneSidedFacets;
       const auto vol = down(f.mesh.cellVolume);
       const auto nb = neighbourSets(f.mesh);
       nChanged[t] = 0;
@@ -918,7 +1017,7 @@ int exportMesh(const std::string& dir, const std::string& name, const Scene& s, 
     writeVec(p + "vol_" + v.tag, vols);
     writeVec(p + "changed_" + v.tag, changed);
     std::printf(
-        "EXPORT %s %s variant=%s tau0=%.6e emptyCells=%d changedCells(+tau)=%d,%d,%d,%d "
+        "EXPORT %s %s variant=%s tau0=%.6e emptyOrOneSided=%d changedCells(+tau)=%d,%d,%d,%d "
         "(-tau)=%d,%d,%d,%d\n",
         name.c_str(), empty ? "FAIL" : "ok", v.tag, (double)tau0, empty, nChanged[0], nChanged[1],
         nChanged[2], nChanged[3], nChanged[4], nChanged[5], nChanged[6], nChanged[7]);
@@ -942,8 +1041,9 @@ int exportBase(const std::string& dir, int n, const std::string& mesh) {
   const DV w = weighted ? s.weight : DV("w0", s.N);
   const Frame base = coldFrame(s, s.pos, w);
   const std::string name = mesh + "_" + std::to_string(n);
-  if (base.numEmptyCells > 0) {
-    std::printf("EXPORT %s FAIL base numEmptyCells=%d\n", name.c_str(), base.numEmptyCells);
+  if (base.numEmptyCells > 0 || base.numOneSidedFacets > 0) {
+    std::printf("EXPORT %s FAIL base numEmptyCells=%d numOneSidedFacets=%d\n", name.c_str(),
+                base.numEmptyCells, base.numOneSidedFacets);
     return 1;
   }
   dumpArrays(dir, name, meshArrays(base.mesh));
