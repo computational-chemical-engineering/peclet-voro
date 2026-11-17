@@ -40,10 +40,10 @@
  *        test_ale_frame --export DIR [--mesh M1|M2|M3|all]
  * writes the meshes of WO-S0.3 (gate G0.3, tools/ale_gates/G0_3.sh) for the Python reference
  * tests/python/ale_reference.py and runs nothing else (exportMesh() documents the files).
- *        test_ale_frame --export DIR --cells N
- * writes the base arrays only (no rate variants) of mesh M1 (jitter ±0.3h, zero weights) at N³
- * cells under the name M1_N, for the pressure-operator export of WO-S0.4
- * (tools/ale_gates/export_lrho.py, gate G0.4).
+ *        test_ale_frame --export DIR --cells N [--mesh M1|M2|M3|all]
+ * writes the base arrays only (no rate variants) of the G0.3 mesh family at N³ cells under the
+ * name <mesh>_N; without --mesh, M1 only (jitter ±0.3h, zero weights), for the pressure-operator
+ * export of WO-S0.4 (tools/ale_gates/export_lrho.py, gate G0.4).
  */
 #include <algorithm>
 #include <chrono>
@@ -857,13 +857,16 @@ int exportMesh(const std::string& dir, const std::string& name, const Scene& s, 
   return rc;
 }
 
-/// Mesh M1 (jitter ±0.3h, zero weights) at n³ cells, base arrays only, as `<dir>/M1_<n>.<array>`
-/// (WO-S0.4: the pressure operator of tools/ale_gates/export_lrho.py). Same seeds as exportScene.
-int exportBase(const std::string& dir, int n) {
-  const Scene s = exportScene(n, Real(0.3));
-  const DV w("w0", s.N);
+/// One mesh of the G0.3 family at n³ cells, base arrays only, as `<dir>/<mesh>_<n>.<array>`: M1
+/// (jitter ±0.3h, zero weights), M2 (the same seeds, weights uniform in [0, 0.15h²]), M3 (jitter
+/// ±0.45h, zero weights). Same seeds as exportScene. (WO-S0.4: M1 for the pressure operator of
+/// tools/ale_gates/export_lrho.py; M2 for the consistent-mass probe ALE_D5_PROBE.)
+int exportBase(const std::string& dir, int n, const std::string& mesh) {
+  const bool weighted = mesh == "M2";
+  const Scene s = exportScene(n, Real(mesh == "M3" ? 0.45 : 0.3));
+  const DV w = weighted ? s.weight : DV("w0", s.N);
   const Frame base = coldFrame(s, s.pos, w);
-  const std::string name = "M1_" + std::to_string(n);
+  const std::string name = mesh + "_" + std::to_string(n);
   if (base.numEmptyCells > 0) {
     std::printf("EXPORT %s FAIL base numEmptyCells=%d\n", name.c_str(), base.numEmptyCells);
     return 1;
@@ -901,7 +904,7 @@ int main(int argc, char** argv) {
   {
     int n = 16;
     std::string part = "all", opts = "auto", dumpDir, exportDir, exportWhich = "all";
-    bool full = false, timeIt = false;
+    bool full = false, timeIt = false, meshGiven = false;
     int gframes = 0, exportCells = 0;
     for (int a = 1; a < argc; ++a) {
       const std::string s = argv[a];
@@ -913,9 +916,10 @@ int main(int argc, char** argv) {
         dumpDir = argv[++a];
       else if (s == "--export" && a + 1 < argc)
         exportDir = argv[++a];
-      else if (s == "--mesh" && a + 1 < argc)
+      else if (s == "--mesh" && a + 1 < argc) {
         exportWhich = argv[++a];
-      else if (s == "--cells" && a + 1 < argc)
+        meshGiven = true;
+      } else if (s == "--cells" && a + 1 < argc)
         exportCells = std::atoi(argv[++a]);
       else if (s == "--gframes" && a + 1 < argc)
         gframes = std::atoi(argv[++a]);
@@ -927,8 +931,14 @@ int main(int argc, char** argv) {
         n = std::atoi(s.c_str());
     }
     if (!exportDir.empty()) {
-      rc = exportCells > 0 ? exportBase(exportDir, exportCells)
-                           : exportMeshes(exportDir, exportWhich);
+      if (exportCells > 0) {
+        const std::string which = meshGiven ? exportWhich : "M1";
+        for (const char* mesh : {"M1", "M2", "M3"})
+          if (which == "all" || which == mesh)
+            rc |= exportBase(exportDir, exportCells, mesh);
+      } else {
+        rc = exportMeshes(exportDir, exportWhich);
+      }
       std::printf("=== S0.3 export %s ===\n", rc ? "FAIL" : "PASS");
       Kokkos::finalize();
       return rc;
