@@ -984,3 +984,39 @@ and no core change for the ALE solver. Open, carried to the performance gates: t
   clipping-kernel volume, so on CUDA the next frame at rest may differ from it by a few ulp once. It occurs only
   after motion and is not part of the Eulerian limit; S0.5 decides whether those frames get the same step. With an
   SDF engine or an empty power cell the step at rest is not established to be inert (S1.1b report, "Not done").
+
+### A12 (2026-11-17): a frame is reciprocal or an error (work order S0.5; replaces the trigger of §3.5 and criterion (iii) of G0.2′, closes the open item of A11)
+- **Trigger:** every one-sided facet with area > 0 forces a rebuild of both cells (was: area > 1e-12 h²). At most
+  two rounds, as before.
+- **Error of the frame:** `MeshFrame::numOneSidedFacets` counts the one-sided facets above 1e-14 h² that remain after
+  the rounds; the contract is that of `numEmptyCells`. The bar: a dropped facet of area a leaves a volume-rate
+  defect of up to a/h² of V_i per step at Courant number 1 [derived], and the geometric conservation bar of
+  stage 1 is 1e-14 V_i.
+- **Weights:** the frame snapshots the weights of the engine; `initialFrame` and `advanceFrame` take no weights.
+- **Step at rest after a cold build inside `advanceFrame`** (rebuild gate, fallback, a reciprocity round): the
+  same step as in `initialFrame` (A11), so every published frame holds the volume of the certificate kernel.
+  Known side effect, accepted: the step at rest builds the adjacency that the rebuild gate skips, so the next
+  step uses the local certificate where it used the brute one, and its count `pass1Raw` changes (1407 → 1400 on
+  the host, → 1399 on the GPU; power 1394 → 1393); route, changed set and volumes are bitwise the same. Rejected:
+  switching the local certificate off around the step at rest (untested, and it moves the change of kernel to a
+  later frame on CUDA).
+- **Gate G0.5** (`build_s0/gate_logs/S0_5.*`, head 174461d): H1 PASS (zero weights, 32³, 500 frames, 1 and 8
+  threads: no one-sided facet left, largest area left 0, one round always enough); H3 PASS (`S0.2' PASS`, the
+  runs with enforcement gate (iv′), the runs without are printed as INFO); H4 PASS (V0.1, F, 46/46, G0.3′);
+  H6 PASS (frame after a cold build = the next two frames at rest, bitwise in all 16 arrays, host and GPU;
+  `G1.1 PASS`, K0–K7 unchanged to the digit); H5: 146 ms per frame at 32³, 8 threads (171 ms before at the same
+  load), 8.4 cells rebuilt per frame by forcing (max 26), never a second round.
+- **H2 MISS, open:** the face mesh of a repaired frame does not close: |Σ_f s_if A_f n_f| > 1e-13 Σ_f A_f in up to
+  184 of 32768 cells in 499 of 500 frames, largest 6.3e-5 (weights: 3.7e-5), with and without enforcement. Each
+  cell fails on its own published facets too (2.7e-5); a cold frame at the same positions closes to 9e-15; the
+  cell volumes agree with the cold build to 1e-10. So it is not a one-sided facet. Uniform flow is then not
+  divergence-free on a moving mesh (C′e = e·Σ_f s_if A_f n_f), which gates G1.3 forbid at 1e-12: **S1.3 is blocked
+  on this; S1.2 (static mesh, frames at rest) is not.** Diagnosis: work order S0.6.
+
+### A13 (2026-11-17): the free-fall gate on a static mesh (replaces (ii) of gate G1.1-h in A7 for S1.2; (ii) itself moves to G1.3)
+A7 (ii) asks that a Taylor–Green start under a uniform ḡ equals the run without ḡ plus ḡt to 1e-12. On a static
+mesh that cannot hold: the fall carries the pattern through the mesh, and the discrete derivative of the pattern
+along ḡ is not zero on an irregular mesh, even where the continuous one is [derived]. On a static mesh the exact
+statements are (ii′): from rest the velocity is ḡt to 1e-12 relative, and from the Taylor–Green start the mean
+velocity Σ M U/Σ M is ḡt to 1e-12 relative (transport, friction and pressure conserve momentum). The original
+(ii) is a statement of Galilean invariance and is gated in S1.3 with a mesh that falls with ḡt.
