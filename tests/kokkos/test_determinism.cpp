@@ -20,8 +20,11 @@
  *         with zero volume and no facets, the counts of the status bits kOverflow, kIncomplete,
  *         kNegOffset and kBuried, and the repair against the cold build: `repVolMax` =
  *         max_i |V_pub,i − V_cold,i| / h³ and `repFacetMismatch` = cells whose published
- *         facet-neighbour set (facets with |A| > 0) differs from the cold build's. One `GUARD`
- *         line per frame; G1 = volume, reciprocity, empty, overflow and incomplete; G2 = repair.
+ *         facet-neighbour set (facets with |A| > 0) differs from the cold build's; the same
+ *         split between the outside-seed cells with their facet neighbours and the rest, the
+ *         largest area of a facet present in one view only, and cells empty in one view only
+ *         (G2′). One `GUARD` line per frame; G1 = volume, reciprocity, empty, overflow and
+ *         incomplete; G2 = repair (the G2 flag keeps the note's strict criterion).
  *
  * Usage: test_determinism [--n N] [--frames F] [--every K] [--wmax W] [--no-guard] [--detail]
  *        [--dump K[,K...] FILE] [--time]  (--detail: per-array hashes on every FRAME line too;
@@ -37,6 +40,7 @@
 #include <cstdio>
 #include <cstring>
 #include <Kokkos_Core.hpp>
+#include <map>
 #include <random>
 #include <string>
 #include <vector>
@@ -381,6 +385,15 @@ struct GuardStats {
   long emptyBad = 0;      // empty cells published with a volume or facets
   double repVolMax = 0;   // max_i |V_pub,i − V_cold,i| / h³
   long repFacetMismatch = 0;  // cells whose facet-neighbour sets (|A| > 0) differ
+  // G2′ (outside-seed amendment 6): the same repair-vs-cold metrics split between the
+  // outside-seed set S (cold status kNegOffset or kBuried, plus every cell that shares a facet
+  // with one in the cold or the published view) and the rest; `diffA` = the largest |A| of a
+  // facet present in one view's facet-neighbour set and not in the other's, in h²; `emptyFlip` =
+  // cells empty (V = 0 and no facet with |A| > 0) in one view and not in the other.
+  double repVolOs = 0, repVolRest = 0;
+  long mismOs = 0, mismRest = 0;
+  double diffA = 0, diffAOs = 0, diffARest = 0;
+  long emptyFlip = 0, emptyFlipOs = 0;
   bool g1() const {
     return volRel <= 1e-12 && nonRecip == 0 && emptyBad == 0 && overflow == 0 && incomplete == 0;
   }
@@ -398,8 +411,38 @@ struct GuardStats {
     emptyBad = std::max(emptyBad, g.emptyBad);
     repVolMax = std::max(repVolMax, g.repVolMax);
     repFacetMismatch = std::max(repFacetMismatch, g.repFacetMismatch);
+    repVolOs = std::max(repVolOs, g.repVolOs);
+    repVolRest = std::max(repVolRest, g.repVolRest);
+    mismOs = std::max(mismOs, g.mismOs);
+    mismRest = std::max(mismRest, g.mismRest);
+    diffA = std::max(diffA, g.diffA);
+    diffAOs = std::max(diffAOs, g.diffAOs);
+    diffARest = std::max(diffARest, g.diffARest);
+    emptyFlip = std::max(emptyFlip, g.emptyFlip);
+    emptyFlipOs = std::max(emptyFlipOs, g.emptyFlipOs);
   }
 };
+
+/// Each cell's facet-neighbour → |A| map over facets with |A| > 0 (several facets to one
+/// neighbour id, e.g. periodic images, keep the largest).
+std::vector<std::map<long, double>> facetAreas(int N,
+                                               const peclet::voro::TessellationView<Real>& v) {
+  const auto off = down(v.cellFacetOffset), cnt = down(v.cellFacetCount);
+  const auto nbr = down(v.facetNeighbor);
+  const auto area = down(v.facetArea);
+  std::vector<std::map<long, double>> m(N);
+  for (int i = 0; i < N; ++i)
+    for (int f = off[i]; f < off[i] + cnt[i]; ++f) {
+      const double a =
+          std::sqrt(double(area[3 * f]) * area[3 * f] + double(area[3 * f + 1]) * area[3 * f + 1] +
+                    double(area[3 * f + 2]) * area[3 * f + 2]);
+      if (a > 0) {
+        double& slot = m[i][static_cast<long>(nbr[f])];
+        slot = std::max(slot, a);
+      }
+    }
+  return m;
+}
 
 /// Each cell's sorted facet-neighbour list over facets with |A| > 0.
 std::vector<std::vector<long>> neighbourSets(int N, const peclet::voro::TessellationView<Real>& v) {
@@ -471,6 +514,42 @@ GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& re
     const auto a = neighbourSets(s.N, res.view), b = neighbourSets(s.N, *pub);
     for (int i = 0; i < s.N; ++i)
       g.repFacetMismatch += (a[i] != b[i]) ? 1 : 0;
+    // G2′ split (see GuardStats).
+    const auto ma = facetAreas(s.N, res.view), mb = facetAreas(s.N, *pub);
+    std::vector<char> os(s.N, 0);
+    for (int i = 0; i < s.N; ++i)
+      if (st[i] & (peclet::voro::kNegOffset | peclet::voro::kBuried))
+        os[i] = 1;
+    std::vector<char> inS(os);
+    for (int i = 0; i < s.N; ++i)
+      for (const auto* m : {&ma[i], &mb[i]})
+        for (const auto& e : *m)
+          if (e.first >= 0 && e.first < s.N && (os[i] || os[e.first]))
+            inS[i] = inS[e.first] = 1;
+    for (int i = 0; i < s.N; ++i) {
+      const double dv = std::fabs(double(pv[i]) - double(vol[i])) / h3;
+      double da = 0;
+      for (const auto& e : ma[i])
+        if (!mb[i].count(e.first))
+          da = std::max(da, e.second / h2);
+      for (const auto& e : mb[i])
+        if (!ma[i].count(e.first))
+          da = std::max(da, e.second / h2);
+      const bool mism = a[i] != b[i];
+      const bool flip = (vol[i] == Real(0) && ma[i].empty()) != (pv[i] == Real(0) && mb[i].empty());
+      g.diffA = std::max(g.diffA, da);
+      g.emptyFlip += flip ? 1 : 0;
+      if (inS[i]) {
+        g.repVolOs = std::max(g.repVolOs, dv);
+        g.mismOs += mism ? 1 : 0;
+        g.diffAOs = std::max(g.diffAOs, da);
+        g.emptyFlipOs += flip ? 1 : 0;
+      } else {
+        g.repVolRest = std::max(g.repVolRest, dv);
+        g.mismRest += mism ? 1 : 0;
+        g.diffARest = std::max(g.diffARest, da);
+      }
+    }
   }
   return g;
 }
@@ -578,10 +657,13 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
             "GUARD %s frame=%d G1=%s G2=%s volRel=%.3e nonRecip=%ld maxNonRecipA/h2=%.3e "
             "nonRecipTiny=%ld "
             "empty=%ld buried=%ld negOffset=%ld overflow=%ld incomplete=%ld emptyBad=%ld "
-            "repVolMax/h3=%.3e repFacetMismatch=%ld\n",
+            "repVolMax/h3=%.3e repFacetMismatch=%ld repVolOs/h3=%.3e repVolRest/h3=%.3e "
+            "mismOs=%ld mismRest=%ld diffA/h2=%.3e diffAOs/h2=%.3e diffARest/h2=%.3e "
+            "emptyFlip=%ld emptyFlipOs=%ld\n",
             tag, k, ok1 ? "ok" : "MISS", ok2 ? "ok" : "MISS", g.volRel, g.nonRecip, g.nonRecipA,
             g.nonRecipTiny, g.empty, g.buried, g.negOffset, g.overflow, g.incomplete, g.emptyBad,
-            g.repVolMax, g.repFacetMismatch);
+            g.repVolMax, g.repFacetMismatch, g.repVolOs, g.repVolRest, g.mismOs, g.mismRest,
+            g.diffA, g.diffAOs, g.diffARest, g.emptyFlip, g.emptyFlipOs);
         worst.worst(g);
       }
     }
