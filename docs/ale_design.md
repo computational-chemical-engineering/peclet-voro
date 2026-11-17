@@ -1020,3 +1020,34 @@ along ḡ is not zero on an irregular mesh, even where the continuous one is [de
 statements are (ii′): from rest the velocity is ḡt to 1e-12 relative, and from the Taylor–Green start the mean
 velocity Σ M U/Σ M is ḡt to 1e-12 relative (transport, friction and pressure conserve momentum). The original
 (ii) is a statement of Galilean invariance and is gated in S1.3 with a mesh that falls with ḡt.
+
+### A14 (2026-11-17): a frame closes or it is an error (work order S0.6; closes H2 of gate G0.5 in A12, extends §3.5)
+**Finding (gate G0.6, logs `build_s0/gate_logs/S0_6.*`, all measured).** The repair keeps the topology of a cell
+when its certificate holds within 1e-4 h. A kept cell can then carry a vertex 4.5e-5–8.6e-5 h outside one of its
+planes: an inverted short edge, seen as two reflex corners on two facets. The facet's vertices are ordered by
+angle around the facet centroid (`faceOrderedIdx`); for such a polygon that order is not the order of the
+dual-triangle adjacency, and the published area vector is wrong to first order in the tolerance (up to 6.3e-5 of
+the cell surface at 32³; 2.89e-5 / 7.79e-7 / 1.41e-7 at tolerance 1e-4 / 1e-5 / 1e-6 h at 16³), while the per-vertex
+volume is right to 1e-10. With the adjacency order the kept cell still disagrees with its neighbours' facets to
+second order (2.5e-9 at 16³), so a reorder alone does not reach 1e-13. Refuted, 0 cases each: a facet skipped as
+degenerate, a vertex evaluated twice, stale positions. voro main b93f0e5 does not change it. The GPU shows the
+same numbers.
+
+**Rule.** `publish()` tests every cell i: |Σ_g A⃗_g| + Σ_g |A⃗_g + A⃗_recip(g)| > 1e-13 Σ_g |A⃗_g| (its own closure plus
+the mismatch with the other side of each facet: the bound of its closure in the face mesh). With
+`FrameOptions::enforceClosure` (default on, independent of `enforceReciprocity`) such cells are forced in the
+rounds of A12 and rebuilt from their clip. `ReciprocityReport::numOpenCells` counts the cells above the bar after
+the rounds. **`numOpenCells > 0` after two rounds is an error of the frame**, as `numOneSidedFacets > 0` is: the
+time step must not use that frame. The repair engine, its route and the cold build are unchanged; the bar is not
+a tolerance of the repair and changing the certificate tolerance is not the fix.
+
+**Numbers (32³, 500 frames, 8 threads, zero weights and weights 0.15 h²).** No cell above 1e-13 in any frame,
+with reciprocity enforcement on and off; largest closure 5.03e-14 (zero weights), 1.05e-14 (weights); volumes
+against the cold build 8.6e-16 (1.1e-10 before). 114 cells forced per frame, a second round in 275 of 500
+frames, never a third. `S0.2' PASS`, `G0.3' PASS`, `G1.1 PASS` with K0–K7 unchanged to the character; the frame
+at rest is unchanged bitwise (no round at rest). GPU at 16³: 0 frames above the bar, largest 9.9e-15.
+
+**Open.** A timing on a quiet host (149.6 ms per frame against 146 ms, measured at different times; +10 to +22 %
+in two same-load pairs at load 35–45); it is taken with the cost number of S1.3. The root (a kept cell whose
+facet polygon is not convex) is in the repair and in `convex_cell.hpp`, which are session `voronoi`'s code; it
+has the finding. Across ranks the forcing has the same gap as A12's (review F5), before S1.4.
