@@ -757,13 +757,15 @@ void s06Diag(EngineT& mt, const Frame& f, const Scene& s, const DV& pos, const D
         "s06.cells", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
           Cell c;
           st.load(i, c, Lx, Ly, Lz);
+          // capture P and W outside the constexpr-if (nvcc extended-lambda rule)
           const Real* wPtr = W.data();
+          const Real* pPtr = P.data();
+          const Real sx = pPtr[3 * i], sy = pPtr[3 * i + 1], sz = pPtr[3 * i + 2];
           (void)wPtr;
           if constexpr (Policy::kHasWeightDof)
-            c.template reevalGeometry<Policy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
-                                              wPtr[i], wPtr);
+            c.template reevalGeometry<Policy>(sx, sy, sz, pPtr, Lx, wPtr[i], wPtr);
           else
-            c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
+            c.reevalGeometry(sx, sy, sz, pPtr, Lx);
           Real vol = 0, avx[kP], avy[kP], avz[kP], dgx[kP], dgy[kP], dgz[kP];
           for (int k = 0; k < kP; ++k)
             avx[k] = avy[k] = avz[k] = dgx[k] = dgy[k] = dgz[k] = 0;
