@@ -44,11 +44,12 @@
  * cells whose face list does not close, |Σ A_f n_f| > 1e-13 Σ A_f (WO-S0.5 item 5; a diagnostic:
  * `closure=MISS` does not fail the test).
  * Usage: test_ale_frame [n=16] [--part a|b|c|f|g|all] [--full] [--opts auto|default|frame|det]
- *                       [--dump DIR] [--time] [--diag] [--s06 F] [--tol T]
+ *                       [--dump DIR] [--time] [--diag] [--s06 F] [--tol T] [--no-closure]
  * --s06 F (WO-S0.6): in (g), S06FRAME / S06CELL lines for the first F frames with cells that do
  *        not close (each facet's area vector from the walked polygon and per vertex, the
  *        hypothesis counts, the worst cells against a cold build). --tol T: the repair's
- *        certificate tolerance in units of h (default 1e-4). Neither changes a default run.
+ *        certificate tolerance in units of h (default 1e-4). --no-closure: (g) without the
+ *        frame's closure forcing (FrameOptions::enforceClosure). None changes a default run.
  * --diag (WO-S1.1b): in (a), the per-array difference of the first differing frame against frame 0
  * (elements, max ulp, max relative), the frames 2.. that differ from frame 1, and hashes of
  * frame 0, frame 1 and the last frame (to compare two runs).
@@ -696,7 +697,8 @@ void unmatchedFacets(const peclet::voro::TessellationView<Real>& a,
 
 // ---- --s06 F (WO-S0.6, diagnostic): why the cells of a repaired frame do not close
 // ---------------
-int g_s06Frames = 0;  ///< diagnose the first F frames of each run that have offending cells
+int g_s06Frames = 0;       ///< diagnose the first F frames of each run that have offending cells
+bool g_noClosure = false;  ///< --no-closure: (g) with FrameOptions::enforceClosure off
 
 /// Rotate the canonical (det > 0) plane triple of triangle t so that plane k comes first: (k, p,
 /// q).
@@ -1107,6 +1109,7 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
     DV pos = copyOf(s.pos);
     FrameOpts fo;
     fo.enforceReciprocity = enforce == 1;
+    fo.enforceClosure = !g_noClosure;
     fo.timed = timeIt;
     Frame f = ale::initialFrame(mt, pos, s.L, fo);
     double maxSumRel = 0, maxNonRecip = 0, sumT[5] = {0, 0, 0, 0, 0}, wall = 0;
@@ -1603,6 +1606,8 @@ int main(int argc, char** argv) {
         gframes = std::atoi(argv[++a]);
       else if (s == "--s06" && a + 1 < argc)
         g_s06Frames = std::atoi(argv[++a]);
+      else if (s == "--no-closure")
+        g_noClosure = true;
       else if (s == "--tol" && a + 1 < argc)
         g_tolFactor = std::atof(argv[++a]);
       else if (s == "--full")
