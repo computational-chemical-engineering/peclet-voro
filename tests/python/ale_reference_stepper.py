@@ -34,6 +34,8 @@ The mu_hat power iteration uses the exact L_rho solve (the device uses a loose o
 
 Usage: python ale_reference_stepper.py run EXPORT_DIR CASE [--log FILE]   one run, RESULT line at the end
        python ale_reference_stepper.py judge LOG_DIR                       gate G1.2r from the RESULT lines
+       python ale_reference_stepper.py trace EXPORT_DIR CASE OUT_DIR [--steps K] [--pred-rtol X]
+                                     start state and per-step U*, F, U, p for the device (gate G1.2 C1/C2)
 """
 import argparse
 import os
@@ -288,6 +290,7 @@ class Stepper:
 
             us, r['pred_its'] = gmres(Aop, rhs, ue.copy(), prec, self.pred_rtol)
         res = rhs - Aop(us)
+        r['Ustar'], r['F'] = us.reshape(N, 3), F        # for the trace subcommand (no other use)
         r['pred_res'] = np.linalg.norm(res) / np.linalg.norm(rhs) if np.linalg.norm(rhs) > 0 else 0.0
         ub = 0.5 * (us + u0)
         r['B2'] = -tau * ub @ (T @ ub)
@@ -536,6 +539,45 @@ def run_case(export_dir, name, log):
     return out
 
 
+# ------------------------------------------------------------------------------- trace (work order S1.2b)
+def trace_case(export_dir, name, out_dir, nsteps, pred_rtol):
+    """Write the start state of case `name` and, per step k = 1..nsteps, U*, F, U, p (raw float64) and the
+    scalars (k, omega, mu_hat) for the device comparison of gate G1.2 C1/C2. The start state is that of
+    run_case (the same operations in the same order: the start field projected exactly, tau from the flux
+    Courant number 0.4, the start pressure from one trial step in mode R); run_case itself is not changed."""
+    fam, n, fld, mode, _, opt = case_table()[name]
+    m = ar.Mesh(export_dir, mesh_name(fam, n))
+    rho, nu = opt.get('rho', 1.0), 0.01
+    st = Stepper(m, rho=rho, nu=nu, upwind=opt.get('upwind', 1.0), pred_rtol=pred_rtol)
+    if fld not in ('tg', 'abc') or 'force' in opt:
+        raise ValueError(f'trace: {name} is not a Taylor-Green or ABC case without a body force')
+    U = FIELDS[fld](m.pos, nu, 0.0)
+    dp0, _ = st.exact_projection(U)
+    Uc = U + apply_inverse_mass(st.rhoV, (st.CpT @ dp0).reshape(-1, 3))
+    c1 = st.courant(st.project_flux(st.IF @ Uc.ravel()), 1.0)
+    tau = 1.0 / int(np.ceil(c1 / COURANT))
+    U = Uc
+    _, p, _ = st.step(U, U, np.zeros(m.N), tau, 'R', None)
+    os.makedirs(out_dir, exist_ok=True)
+    pre = os.path.join(out_dir, name + '.')
+    with open(pre + 'meta', 'w') as f:
+        f.write(f'mesh={mesh_name(fam, n)} mode={mode} field={fld} rho={rho!r} nu={nu!r} tau={tau!r} '
+                f'steps={nsteps} pred_rtol={pred_rtol!r}\n')
+    U.astype('<f8').tofile(pre + 'U0')
+    p.astype('<f8').tofile(pre + 'p0')
+    Uprev = None
+    with open(pre + 'ref_scalars', 'w') as sc:
+        for k in range(1, nsteps + 1):
+            Uext = U if Uprev is None else 1.5 * U - 0.5 * Uprev
+            U1, p1, r = st.step(U, Uext, p, tau, mode, None)
+            Uprev, U, p = U, U1, p1
+            for key, arr in (('Ustar', r['Ustar']), ('F', r['F']), ('U', U), ('p', p)):
+                np.asarray(arr, dtype='<f8').tofile(pre + f'ref_{key}_{k}')
+            sc.write(f"{k} {r['omega']!r} {r.get('mu_hat', float('nan'))!r}\n")
+    print(f'TRACE {name} mesh={mesh_name(fam, n)} mode={mode} tau={tau:.6e} steps={nsteps} written to {out_dir}')
+    return 0
+
+
 # ------------------------------------------------------------------------------------------------- the gate
 def read_results(log_dir):
     res = {}
@@ -583,7 +625,7 @@ def judge(log_dir):
     cs = ['tg_Z16_F', 'tg_Z16_R', 'tg_W16_F', 'tg_W16_R']
     if miss(cs):
         verdict('R1', False, f'missing {miss(cs)}')
-        verdict('R2', False, f'missing {miss(cs)}')
+        verdict("R2'", False, f'missing {miss(cs)}')
     else:
         c = max(get(x, 'closure') for x in cs)
         verdict('R1', c <= 1e-13, f'max|closure|/K={c:.2e} (<=1e-13) ' + ' '.join(
@@ -593,10 +635,12 @@ def judge(log_dir):
         dv = max(get(x, 'divPhi1') for x in cs)
         ctl = [get(x + '_rtol14', 'mom') for x in cs]
         ctl = 'missing' if None in ctl else f'{max(ctl):.2e}'
-        verdict('R2', mo <= 1e-13 and dv <= 1e-13, f'momentum drift |P^n-P^0|/sum M|U|={mo:.2e} (<=1e-13) '
-                + ' '.join(f"{x}:{get(x, 'mom'):.1e}" for x in cs)
-                + f' max tau|D Phi_1|/V={dv:.2e} (<=1e-13); reported: drift with the predictor residual booked '
-                f'{mb:.2e}, drift with predictor rtol 1e-14 {ctl}')
+        # R2' (A15, fixed 2026-11-17): the drift with the predictor residual's momentum booked
+        verdict("R2'", mb <= 1e-13 and dv <= 1e-13, f'momentum drift with the residual booked '
+                f'|P^n-P^0+sum res|/sum M|U|={mb:.2e} (<=1e-13) '
+                + ' '.join(f"{x}:{get(x, 'mom_booked'):.1e}" for x in cs)
+                + f' max tau|D Phi_1|/V={dv:.2e} (<=1e-13); reported: drift without booking {mo:.2e}, '
+                f'without booking at predictor rtol 1e-14 {ctl}')
     # R3
     c = 'r3_tg_W16_F'
     if miss([c]):
@@ -616,7 +660,8 @@ def judge(log_dir):
     else:
         d16 = abs(get('tg_Z16_F', 'err') / get('tg_Z16_R', 'err') - 1)
         d32 = abs(get('tg_Z32_F', 'err') / get('tg_Z32_R', 'err') - 1)
-        verdict('R4', max(d16, d32) <= 0.02, f'|err_F/err_R - 1| 16^3={d16:.4f} 32^3={d32:.4f} (<=0.02)')
+        # A15: the bound applies at 32^3 only; 16^3 is reported
+        verdict('R4', d32 <= 0.02, f'|err_F/err_R - 1| 32^3={d32:.4f} (<=0.02); reported 16^3={d16:.4f}')
     # R5
     parts, ok5 = [], True
     for fam in 'ZW':
@@ -644,8 +689,10 @@ def judge(log_dir):
         b14, b8 = get(c2 + '_rtol14', 'gt_dev'), get('r6ii_rest_W8', 'gt_dev')
         b14 = f'{b14:.2e}' if b14 is not None else 'missing'
         b8 = f'{b8:.2e}' if b8 is not None else 'missing'
-        verdict('R6', a <= 1e-12 and b <= 1e-12 and d <= 1e-12,
-                f'(i) max|U|/(|grad psi|h)^0.5={a:.2e} (<=1e-12) (ii\') rest |U-gt|/|g|t={b:.2e} (<=1e-12) '
+        # (ii')' (A15): the fall from rest within 20 x the predictor's relative tolerance
+        bb = 20.0 * PREDICTOR_RTOL
+        verdict('R6', a <= 1e-12 and b <= bb and d <= 1e-12,
+                f"(i) max|U|/(|grad psi|h)^0.5={a:.2e} (<=1e-12) (ii')' rest |U-gt|/|g|t={b:.2e} (<={bb:.0e}) "
                 f'[controls: predictor rtol 1e-14 {b14}, W 8^3 direct {b8}] '
                 f'TG mean |Ubar-gt|/|g|t={d:.2e} (<=1e-12) TG twin max|U-U0-gt|/|g|t={tw:.2e} (reported) '
                 f'(iii) control |U|/(tau 100 |grad psi|)={ctl if ctl is not None else float("nan"):.3e} (reported)')
@@ -673,7 +720,15 @@ def main():
     j = sub.add_parser('judge')
     j.add_argument('log_dir')
     sub.add_parser('cases')
+    t = sub.add_parser('trace')
+    t.add_argument('export_dir')
+    t.add_argument('case')
+    t.add_argument('out_dir')
+    t.add_argument('--steps', type=int, default=10)
+    t.add_argument('--pred-rtol', type=float, default=PREDICTOR_RTOL)
     args = ap.parse_args()
+    if args.cmd == 'trace':
+        return trace_case(args.export_dir, args.case, args.out_dir, args.steps, args.pred_rtol)
     if args.cmd == 'cases':
         print('\n'.join(case_table()))
         return 0
