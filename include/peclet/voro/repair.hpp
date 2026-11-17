@@ -421,8 +421,12 @@ struct MovingTessellation {
           const unsigned char* pk4 = &Pk4((size_t)i * MAXT * 4);  // poke4 is always allocated
           const Real tl = tolL;
           if constexpr (Local) {
-            // Outside-seed cells (a live plane with nn < 0) take the full test (WO-3b).
-            if (c.anyLiveNegOffset())
+            // Outside-seed cells (a live plane with nn < 0) take the full test (WO-3b). Only a
+            // power cell can have one: Voronoi keeps the local test with no scan.
+            bool fullTest = false;
+            if constexpr (Weighted)
+              fullTest = c.anyLiveNegOffset();
+            if (fullTest)
               ok = c.isSelfConsistentPartners(tl, partners, 32, nP);
             else
               ok = c.isLocallyConvexPartners(pk4, tl, partners, 32, nP);
@@ -604,8 +608,12 @@ struct MovingTessellation {
               &Pk4((size_t)i * MAXT * 4);  // force-capture poke4 + tol OUTSIDE the
           const Real tl = tolL;            // constexpr-if (nvcc extended-lambda rule)
           if constexpr (Local) {
-            // Outside-seed cells (a live plane with nn < 0) take the full test (WO-3b).
-            if (c.anyLiveNegOffset())
+            // Outside-seed cells (a live plane with nn < 0) take the full test (WO-3b). Only a
+            // power cell can have one: Voronoi keeps the local test with no scan.
+            bool fullTest = false;
+            if constexpr (Weighted)
+              fullTest = c.anyLiveNegOffset();
+            if (fullTest)
               ok = c.isSelfConsistentPartners(tl, partners, 32, nP);
             else
               ok = c.isLocallyConvexPartners(pk4, tl, partners, 32, nP);
