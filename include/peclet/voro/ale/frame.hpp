@@ -28,6 +28,13 @@
  * Weights: the frame snapshots the engine's own power weights (`engine.weight`), so the published
  * geometry and the repaired topology belong to one power diagram.
  *
+ * Volumes: every frame publishes the cell volume of the repair step's certificate kernel. A cold
+ * build (`rebuild`: the initial frame, a gate rebuild, the fallback, also inside a reciprocity
+ * round) leaves the clipping kernel's volume, which a device compiler may contract differently (up
+ * to 6 ulp under nvcc); it is followed by one `step(pos)` at the same positions, which rebuilds
+ * nothing and re-evaluates every volume, so a frame after a cold build equals the frames at rest
+ * that follow it bitwise (§11 A11). `stats`, `coldBuild` and `numRebuilt` describe the real step.
+ *
  * Single domain only (nProc == N); the distributed frame is a later work order.
  */
 #ifndef PECLET_VORO_ALE_FRAME_HPP
@@ -97,7 +104,7 @@ struct MeshFrame {
   Kokkos::View<Real*, Mem> pos;     ///< 3N generator positions the frame was built from
   Kokkos::View<Real*, Mem> weight;  ///< N engine power weights (empty for the unweighted engine)
   fv::FaceMesh<Real> mesh;
-  RepairStats stats;       ///< of the repair step (default for the initial frame)
+  RepairStats stats;  ///< of the repair step (default for the initial frame; not the step at rest)
   bool coldBuild = false;  ///< every cell changed: the initial frame, a gate rebuild, the fallback
   int numRebuilt = 0;      ///< cells changed in this frame (step and reciprocity rounds)
   /// Owned cells with zero volume or no facet in the published view (empty power cells): a frame
@@ -269,6 +276,16 @@ inline bool isCold(const RepairStats& st) {
   return st.route == RepairStats::kRebuildGate || st.fellBack;
 }
 
+/// After a cold build: one repair step at the same positions (§11 A11). It rebuilds nothing and
+/// leaves in the engine the certificate kernel's cell volume; its statistics are not the frame's.
+/// After a gate rebuild (which skips the adjacency) it also builds the adjacency, so the next step
+/// certifies with the local certificate instead of the brute one (test_ale_frame part c, INFO).
+template <class Real, int MAXP, int MAXT, bool Weighted, class Sdf>
+void stepAtRest(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine,
+                const Kokkos::View<Real*, peclet::core::MemSpace>& pos) {
+  engine.step(pos);
+}
+
 /// Shared tail of initialFrame / advanceFrame: publish, then the reciprocity rounds. `changed`
 /// enters as the frame's changed set when a round is needed (allocated here on demand).
 template <class Real, int MAXP, int MAXT, bool Weighted, class Sdf>
@@ -305,6 +322,8 @@ void publishWithReciprocity(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>&
     const int nF = maskToList(forcedMask, N, list);
     Clock clk(opt.timed);
     const RepairStats st = engine.step(pos, list, nF);
+    if (isCold(st))
+      stepAtRest(engine, pos);
     f.timings.repair += clk.lap();
     if (isCold(st)) {
       f.coldBuild = true;
@@ -350,7 +369,7 @@ MeshFrame<Real> initialFrame(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>
   // clipping kernel; the two agree bitwise on the host, but a device compiler may contract
   // a·b + c differently in each (nvcc: up to 6 ulp), and the Eulerian limit (frames at rest equal
   // the initial frame bitwise, V0.1) needs one code path. Design note §11 A11.
-  engine.step(pos);
+  detail::stepAtRest(engine, pos);
   f.timings.repair = clk.lap();
   f.pos = detail::snapshot(pos, "ale.frame.pos");
   if constexpr (Weighted)
@@ -361,8 +380,8 @@ MeshFrame<Real> initialFrame(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>
   return f;
 }
 
-/// The frame after a repair `engine.step(pos)` from the engine's present state. The power weights
-/// are the engine's.
+/// The frame after a repair `engine.step(pos)` from the engine's present state (and, if that step
+/// was a cold build, the step at rest of §11 A11). The power weights are the engine's.
 template <class Real, int MAXP, int MAXT, bool Weighted, class Sdf>
 MeshFrame<Real> advanceFrame(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine,
                              const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
@@ -372,6 +391,8 @@ MeshFrame<Real> advanceFrame(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>
   detail::Clock clk(opt.timed);
   f.stats = engine.step(pos);
   f.coldBuild = detail::isCold(f.stats);
+  if (f.coldBuild)
+    detail::stepAtRest(engine, pos);
   f.timings.repair = clk.lap();
   f.pos = detail::snapshot(pos, "ale.frame.pos");
   if constexpr (Weighted)

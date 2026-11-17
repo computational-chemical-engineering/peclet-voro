@@ -15,6 +15,11 @@
  *      keeps the mesh of initialFrame; run 2 replaces it before every step by the mesh of
  *      advanceFrame at unchanged positions (ns.m = mesh; poisson.setup; viscDt = -1). U, p, uf
  *      bitwise equal after the last step.
+ *  (c) WO-S0.5 item 6 (§11 A11): Voronoi and power engines; initialFrame, advanceFrame at the
+ *      seeds drawn again (fires the rebuild gate: a cold build inside advanceFrame), then two
+ *      advanceFrame at rest. The three frames after the jump bitwise equal in every FaceMesh
+ *      array, the frames at rest rebuild nothing; printed (INFO): the next moving step with and
+ *      without the step at rest after the gate rebuild.
  *  (f) F: power engine at rest, step(pos, forced, 50 random slots): changedMask ⊇ the 50; the
  *      result equals a cold build (neighbour sets exact, volumes ≤ 1e-13 relative); step(pos)
  *      afterwards changes nothing.
@@ -38,7 +43,7 @@
  * error of the frame; in (g) recorded as INFO without enforcement), and (g) prints per frame the
  * cells whose face list does not close, |Σ A_f n_f| > 1e-13 Σ A_f (WO-S0.5 item 5; a diagnostic:
  * `closure=MISS` does not fail the test).
- * Usage: test_ale_frame [n=16] [--part a|b|f|g|all] [--full] [--opts auto|default|frame|det]
+ * Usage: test_ale_frame [n=16] [--part a|b|c|f|g|all] [--full] [--opts auto|default|frame|det]
  *                       [--dump DIR] [--time] [--diag]
  * --diag (WO-S1.1b): in (a), the per-array difference of the first differing frame against frame 0
  * (elements, max ulp, max relative), the frames 2.. that differ from frame 1, and hashes of
@@ -870,6 +875,101 @@ int partG(const Scene& s, int frames, bool full, bool timeIt, const std::string&
   return rc;
 }
 
+// ---- (c) a cold build inside advanceFrame (WO-S0.5 item 6, docs/ale_design.md §11 A11)
+// ----------------------------------------------------------------------------------------
+/// The scene's seeds drawn again (same lattice, jitter ±0.3h, another seed): a displacement of
+/// up to 0.6h per axis, enough churn to fire the rebuild gate.
+DV jumpedPositions(const Scene& s) {
+  std::mt19937 rng(20261117u);
+  std::uniform_real_distribution<Real> U(-1, 1);
+  std::vector<Real> x(3 * s.N);
+  for (int k = 0; k < s.n; ++k)
+    for (int j = 0; j < s.n; ++j)
+      for (int i = 0; i < s.n; ++i) {
+        const int c = i + s.n * (j + s.n * k);
+        const int ijk[3] = {i, j, k};
+        for (int d = 0; d < 3; ++d) {
+          Real p = (ijk[d] + Real(0.5)) * s.h + Real(0.3) * s.h * U(rng);
+          p = p < 0 ? p + 1 : (p >= 1 ? p - 1 : p);
+          x[3 * c + d] = p;
+        }
+      }
+  return up(x, "pos_jump");
+}
+
+int frameErrors(const Frame& f) {
+  return f.numOneSidedFacets + f.numEmptyCells;
+}
+
+/// initialFrame at the scene's seeds, advanceFrame at the jumped seeds (must be a cold build),
+/// then two advanceFrame at rest. Every FaceMesh array of the three frames after the jump bitwise
+/// equal; the two frames at rest change nothing; no frame is an error. Also printed (INFO): what
+/// the step at rest leaves for the next moving step, against an engine driven by hand without it
+/// (rebuild, step at rest, step(jump), [step(jump) at rest], step(jump + 0.05h)): the next step's
+/// statistics, changed set and volumes.
+template <bool W>
+int partC(const char* tag, const Scene& s, const std::string& opts) {
+  using Stats = peclet::voro::RepairStats;
+  const DV jump = jumpedPositions(s);
+  Engine<W> mt;
+  allocEngine<W>(mt, s.N, s.L, s.h, s.weight);
+  FrameOpts fo;
+  fo.mesh = optionsOf(opts);
+  const Frame f0 = ale::initialFrame(mt, s.pos, s.L, fo);
+  const Frame f1 = ale::advanceFrame(mt, jump, s.L, fo);
+  const int afterCold = nonzero(mt.changedMask(), s.N);  // the step at rest (or the last round)
+  const Frame f2 = ale::advanceFrame(mt, jump, s.L, fo);
+  const Frame f3 = ale::advanceFrame(mt, jump, s.L, fo);
+  const auto a1 = meshArrays(f1.mesh), a2 = meshArrays(f2.mesh), a3 = meshArrays(f3.mesh);
+  const std::string d12 = firstDiff(a1, a2), d13 = firstDiff(a1, a3);
+  const bool restQuiet = !f2.coldBuild && !f3.coldBuild && f2.numRebuilt == 0 &&
+                         f3.numRebuilt == 0 && f2.reciprocity.rounds == 0 &&
+                         f3.reciprocity.rounds == 0;
+  const int errors = frameErrors(f0) + frameErrors(f1) + frameErrors(f2) + frameErrors(f3);
+  const bool pass = f1.coldBuild && f1.numRebuilt == s.N && d12.empty() && d13.empty() &&
+                    restQuiet && errors == 0;
+  std::printf(
+      "RESULT c %-7s n=%d opts=%s %s cold=%d route=%d fellBack=%d pass1Raw=%d rebuilt=%d "
+      "rounds=%d changedAfterCold=%d restQuiet=%d errors=%d%s%s%s%s\n",
+      tag, s.n, opts.c_str(), pass ? "PASS" : "FAIL", (int)f1.coldBuild, (int)f1.stats.route,
+      (int)f1.stats.fellBack, f1.stats.pass1Raw, f1.numRebuilt, f1.reciprocity.rounds, afterCold,
+      (int)restQuiet, errors, d12.empty() ? "" : " first12=", d12.c_str(),
+      d13.empty() ? "" : " first13=", d13.c_str());
+
+  // INFO: the next moving step with and without the step at rest after the gate rebuild
+  const DV next = copyOf(jump);
+  advect(next, s.N, s.L[0], Real(0.05) * s.h / std::sqrt(Real(3)));
+  Stats st[2];
+  std::vector<Arr> out[2];
+  Stats gate[2];
+  for (int withRest = 0; withRest < 2; ++withRest) {
+    Engine<W> e;
+    allocEngine<W>(e, s.N, s.L, s.h, s.weight);
+    e.rebuild(s.pos);
+    e.step(s.pos);
+    gate[withRest] = e.step(jump);
+    if (withRest)
+      e.step(jump);
+    st[withRest] = e.step(next);
+    out[withRest] = {arrOf("changedMask", e.changedMask()), arrOf("vol", e.vol)};
+  }
+  auto line = [](const Stats& x) {
+    char b[160];
+    std::snprintf(b, sizeof b, "%d/%d/%d/%d/%d/%d/%d/%d", (int)x.route, (int)x.fellBack, x.pass1Raw,
+                  x.pass1, x.pass2, x.extra, x.verifyPasses, x.nearFlagged);
+    return std::string(b);
+  };
+  const std::string s0 = line(st[0]), s1 = line(st[1]), dn = firstDiff(out[0], out[1]);
+  std::printf(
+      "INFO c %-7s next step after gate=%d/%d (route/fellBack/pass1Raw/pass1/pass2/extra/"
+      "verifyPasses/nearFlagged) without rest %s, with rest %s: stats %s, changedMask+vol %s%s\n",
+      tag, (int)gate[0].route, (int)gate[1].route, s0.c_str(), s1.c_str(),
+      s0 == s1 ? "same" : "DIFFER", dn.empty() ? "bitwise" : "differ at ", dn.c_str());
+  if (!dn.empty())
+    printDiffStats((std::string(tag) + " next-step without-vs-with-rest").c_str(), out[0], out[1]);
+  return pass ? 0 : 1;
+}
+
 // ---- --export DIR: the meshes of WO-S0.3 for the Python reference (tests/python/ale_reference.py)
 // -------------------------------------------------------------------------------------------------
 /// makeScene with the seed jitter as a parameter: same generator, same draw order.
@@ -1126,11 +1226,15 @@ int main(int argc, char** argv) {
     std::printf("=== S0.2 frame pipeline: n=%d part=%s threads=%d %s ===\n", n, part.c_str(),
                 Exec().concurrency(), full ? "full" : "short");
     const bool all = part == "all";
-    if (all || part == "a" || part == "f" || part == "g") {
+    if (all || part == "a" || part == "c" || part == "f" || part == "g") {
       const Scene s = makeScene(n);
       if (all || part == "a") {
         rc |= partA<false>("voronoi", s, full ? 100 : 20, optsA, diag);
         rc |= partA<true>("power", s, full ? 100 : 20, optsA, diag);
+      }
+      if (all || part == "c") {
+        rc |= partC<false>("voronoi", s, optsA);
+        rc |= partC<true>("power", s, optsA);
       }
       if (all || part == "f")
         rc |= partF(s);
