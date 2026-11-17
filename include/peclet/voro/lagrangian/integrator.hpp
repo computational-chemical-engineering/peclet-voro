@@ -279,16 +279,32 @@ KOKKOS_INLINE_FUNCTION void heapSortInts(int* a, int n) {
   }
 }
 
+/// a·b rounded on its own, never contracted with a following add into an FMA (nvcc's default
+/// --fmad=true fuses a*b+c; voro's host builds do not). Every product of the S₀ assembly that feeds
+/// a sum goes through it, so S₀ is bit-identical on every backend — the suite's "assembled
+/// operators are bit-exact" rule (core's GraphAMG setup does the same with its own mulRn). On the
+/// host it is a*b.
+KOKKOS_INLINE_FUNCTION double mulRn(double a, double b) {
+#ifdef __clang__
+#pragma clang fp contract(off)
+#endif
+#ifdef KOKKOS_ENABLE_CUDA
+  KOKKOS_IF_ON_DEVICE((return __dmul_rn(a, b);))
+#endif
+  return a * b;
+}
+
 /// S₀ = C M⁻¹ Cᵀ assembled on the device, bit-identical to schurHost (WO-PERF3 P3.1, §14.4.6
-/// item 4). Columns of C are formed per velocity cell l in schurHost's order (facets of l, then the
-/// self entry), with the same expressions; row i (one thread) visits its column cells l in
-/// ascending order, the occurrences of i in column l in column order, and the entries k of column
-/// l in column order — exactly the order in which schurHost's stable sort leaves the equal-k terms
-/// of row i, so every coefficient is the same left-to-right sum. Off-diagonal slots start at −0
-/// (−0 + v = v for every v, the host's "first term assigned"); the diagonal starts at +0 as on the
-/// host. F must be reciprocal (matchFacets): the cells whose column holds row i are i and its face
-/// neighbours. The off-diagonal sparsity (2-ring, pinned at DOF 0) is kept while F's facet
-/// structure (facetOffset, nbr) is unchanged. All scratch is persistent.
+/// item 4) on every backend (products through mulRn: no FMA on the device). Columns of C are formed
+/// per velocity cell l in schurHost's order (facets of l, then the self entry), with the same
+/// expressions; row i (one thread) visits its column cells l in ascending order, the occurrences of
+/// i in column l in column order, and the entries k of column l in column order — exactly the order
+/// in which schurHost's stable sort leaves the equal-k terms of row i, so every coefficient is the
+/// same left-to-right sum. Off-diagonal slots start at −0 (−0 + v = v for every v, the host's
+/// "first term assigned"); the diagonal starts at +0 as on the host. F must be reciprocal
+/// (matchFacets): the cells whose column holds row i are i and its face neighbours. The
+/// off-diagonal sparsity (2-ring, pinned at DOF 0) is kept while F's facet structure (facetOffset,
+/// nbr) is unchanged. All scratch is persistent.
 template <class Real>
 class SchurAssembly {
  public:
@@ -345,19 +361,19 @@ class SchurAssembly {
           double dl[3] = {0, 0, 0};
           int e = off(l) + l;
           for (int f = off(l); f < off(l + 1); ++f, ++e) {
-            const double d =
-                Kokkos::sqrt(conn(3 * f) * conn(3 * f) + conn(3 * f + 1) * conn(3 * f + 1) +
-                             conn(3 * f + 2) * conn(3 * f + 2));
+            const double d = Kokkos::sqrt(mulRn(conn(3 * f), conn(3 * f)) +
+                                          mulRn(conn(3 * f + 1), conn(3 * f + 1)) +
+                                          mulRn(conn(3 * f + 2), conn(3 * f + 2)));
             const double sc = area(f) / d;
             for (int a = 0; a < 3; ++a) {
-              dl[a] -= sc * cen(3 * f + a);
+              dl[a] -= mulRn(sc, cen(3 * f + a));
               colVal(3 * e + a) = sc * (cen(3 * f + a) - conn(3 * f + a));
             }
             colRow(e) = nbr(f);
           }
           for (int f = woff(l); f < woff(l + 1); ++f)
             for (int a = 0; a < 3; ++a)
-              dl[a] -= warea(f) * wn(3 * f + a);
+              dl[a] -= mulRn(warea(f), wn(3 * f + a));
           for (int a = 0; a < 3; ++a)
             colVal(3 * e + a) = dl[a];
           colRow(e) = l;
@@ -400,7 +416,8 @@ class SchurAssembly {
               for (int ek = e0; ek < e1; ++ek) {
                 const int k = colRow(ek);
                 const double v =
-                    im * (c0 * colVal(3 * ek) + c1 * colVal(3 * ek + 1) + c2 * colVal(3 * ek + 2));
+                    mulRn(im, mulRn(c0, colVal(3 * ek)) + mulRn(c1, colVal(3 * ek + 1)) +
+                                  mulRn(c2, colVal(3 * ek + 2)));
                 if (k == i) {
                   di += v;
                   continue;

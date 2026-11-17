@@ -17,7 +17,10 @@
  *       against the reference over |q_t|D ∈ [0.2, 0.3] (each branch is exact on both sides);
  *       F₀, F₁ continuous across |a| = 0.5;
  *   (D) device: the same evaluations inside a parallel_for on the default execution space equal
- *       the host calls (≤ 10⁻¹⁴; bit-identical expected on a host backend);
+ *       the host calls — bit-identical on a host backend; on a device backend (CUDA/HIP) within
+ *       10⁻¹³ of the transform's scale (|ΔΦ|/A, the (B) metric). Φ is a pointwise transform, not
+ *       an assembled operator, so the suite's bit-exact-assembly rule does not apply: the device
+ *       compiler contracts a*b+c into FMAs (measured 3.5e-14 on CUDA, M7 WO-ST1c);
  *   (E) report only: slivers (aspect 5–30, near-coincident vertices), where the edge branch's
  *       cancellation scales as D²/A.
  *
@@ -517,9 +520,13 @@ int main(int argc, char** argv) {
             }
           }
         }
-        const bool ok = eDev <= 1e-14;
-        std::printf("  (D) device vs host, %d polygons x 5 q: max %.1e, %ld of %d values differ\n",
-                    nd, eDev, nDiff, 40 * nd);
+        constexpr bool onHost =
+            std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
+        const bool ok = onHost ? nDiff == 0 : eDev <= 1e-13;
+        std::printf(
+            "  (D) device vs host, %d polygons x 5 q: max %.1e, %ld of %d values differ "
+            "(gate: %s)\n",
+            nd, eDev, nDiff, 40 * nd, onHost ? "bit-identical, host backend" : "<= 1e-13");
         rc |= ok ? 0 : 1;
       }
 
