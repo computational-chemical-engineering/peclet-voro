@@ -266,6 +266,11 @@ struct ConvexCell {
   /// True iff some live triangle references a plane with nn < 0 (the seed lies outside that
   /// half-space, hence outside its own cell). Always false for Voronoi cells.
   KOKKOS_INLINE_FUNCTION bool anyLiveNegOffset() const {
+    bool anyNeg = false;  // O(np) pre-check: no negative plane at all is the common case
+    for (int k = 0; k < np; ++k)
+      anyNeg = anyNeg || nn[k] < Real(0);
+    if (!anyNeg)
+      return false;
     for (int t = 0; t < nt; ++t)
       if (alive[t] && (nn[t0[t]] < Real(0) || nn[t1[t]] < Real(0) || nn[t2[t]] < Real(0)))
         return true;
