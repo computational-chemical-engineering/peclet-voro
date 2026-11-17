@@ -5,8 +5,8 @@
  * of mode R) and right-preconditioned restarted GMRES (the predictor, whose operator is not
  * symmetric: the transport T is skew, §11 A15).
  *
- * Both are written against callables on device vectors (`op(in, out)`, `prec(in, out)`), so that a
- * matrix-free operator and a multigrid V-cycle plug in alike. Vectors are `DV<Real>` of at least
+ * Both are written against `Operator`s on device vectors (`op(in, out)`, `prec(in, out)`), so that
+ * a matrix-free operator and a multigrid V-cycle plug in alike. Vectors are `DV<Real>` of at least
  * `n` entries; the iteration runs over the first `n` (the owned entries). The vector updates are
  * elementwise kernels (bitwise reproducible); the inner products are `parallel_reduce` (§2.2 K5),
  * whose summation order is fixed for a fixed launch (backend and thread count) and differs between
@@ -27,6 +27,7 @@
 #define PECLET_VORO_ALE_KRYLOV_HPP
 
 #include <cmath>
+#include <functional>
 #include <Kokkos_Core.hpp>
 #include <limits>
 #include <vector>
@@ -38,6 +39,12 @@ namespace peclet::voro::ale::krylov {
 
 template <class Real>
 using DV = fv::DV<Real>;
+
+/// A linear map on device vectors, `op(in, out)`: the operator or the preconditioner of a solve. A
+/// std::function and not a template parameter: nvcc forbids a host lambda type as the template
+/// argument of a function that contains extended device lambdas.
+template <class Real>
+using Operator = std::function<void(const DV<Real>&, const DV<Real>&)>;
 
 /// The outcome of one solve.
 struct SolveReport {
@@ -160,9 +167,10 @@ struct PcgWork {
 /// `deflate`: A is singular with the constants as null space (all-periodic L_ρ): the mean is
 /// removed from the initial residual, from every preconditioned residual and from x on return.
 /// A must be symmetric positive (semi)definite and `prec` symmetric positive definite.
-template <class Real, class Op, class Prec>
-SolveReport pcg(Op&& A, Prec&& M, const DV<Real>& b, const DV<Real>& x, const PcgTest<Real>& test,
-                bool deflate, int maxIt, PcgWork<Real>& w, int n) {
+template <class Real>
+SolveReport pcg(const Operator<Real>& A, const Operator<Real>& M, const DV<Real>& b,
+                const DV<Real>& x, const PcgTest<Real>& test, bool deflate, int maxIt,
+                PcgWork<Real>& w, int n) {
   SolveReport rep;
   w.reserve(n);
   const DV<Real> r = w.r, z = w.z, d = w.d, q = w.q;
@@ -262,9 +270,9 @@ struct GmresWork {
 /// Solve A x = b by GMRES(restart) with right preconditioning, x = P u, from the initial guess in
 /// `x`. Modified Gram–Schmidt, Givens rotations. Returns when the true residual is ≤ rtol |b|₂ or
 /// after `maxIt` inner iterations (not converged); `w.r` holds b − A x of the returned x.
-template <class Real, class Op, class Prec>
-SolveReport gmres(Op&& A, Prec&& P, const DV<Real>& b, const DV<Real>& x, Real rtol, int restart,
-                  int maxIt, GmresWork<Real>& w, int n) {
+template <class Real>
+SolveReport gmres(const Operator<Real>& A, const Operator<Real>& P, const DV<Real>& b,
+                  const DV<Real>& x, Real rtol, int restart, int maxIt, GmresWork<Real>& w, int n) {
   using Exec = peclet::core::ExecSpace;
   SolveReport rep;
   w.reserve(n, restart);
