@@ -27,7 +27,8 @@
  *         incomplete; G2 = repair (the G2 flag keeps the note's strict criterion).
  *
  * Usage: test_determinism [--n N] [--frames F] [--every K] [--wmax W] [--no-guard] [--detail]
- *        [--dump K[,K...] FILE] [--time]  (--detail: per-array hashes on every FRAME line too;
+ *        [--dump K[,K...] FILE] [--time] [--still]
+ * (--detail: per-array hashes on every FRAME line too; --still: zero displacement every frame;
  * --dump: at each frame K the power run's positions then weights, raw doubles, to FILE (FILE.K when
  * several frames are listed), and the cold build's per-cell `i status volume nFacets sorted
  * neighbours...` to the same name + `.cold`; --time: wall times only) Exit status: nonzero if a
@@ -657,6 +658,10 @@ void dumpFrame(const Scene& s, const DV& pos, const peclet::voro::TessellatorRes
 
 /// One frame of the S0.2 motion: x += U0·dt (sin 2πy, sin 2πz, sin 2πx), U0·dt = 0.05h/√3,
 /// wrapped into [0,1).
+/// --still: no advection (zero displacement every frame); the power run prints per hashed frame a
+/// STILL line with max |published V| over the cells that are empty in the cold build.
+bool gStill = false;
+
 void advect(const Scene& s, const DV& pos) {
   const Real twoPi = Real(2) * Real(M_PI);
   const Real step = Real(0.05) * s.h / std::sqrt(Real(3));
@@ -687,9 +692,12 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
   long totalRebuilt = 0;
   int fell = 0, gateRebuilds = 0;
   long transGain = 0, transLoss = 0;  // the publish's emptiness against its previous frame (§10.4)
-  std::vector<char> prevEmpty;
+  std::vector<char> prevEmpty, coldEmpty;
+  if (gStill && W)
+    coldEmpty = publishedEmpty(s.N, coldBuild<W>(s, pos).view);
   for (int k = 1; k <= frames; ++k) {
-    advect(s, pos);
+    if (!gStill)
+      advect(s, pos);
     const auto st = mt.step(pos);
     fell += st.fellBack ? 1 : 0;
     gateRebuilds += st.route == peclet::voro::RepairStats::kRebuildGate ? 1 : 0;
@@ -713,6 +721,18 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
       d.add("rebuilt", mt.rebuilt);
       addPublishView<W>(d, mt, pub);
       std::printf("FRAME %s %d %s rebuilt=%ld\n", tag, k, d.all.hex().c_str(), nReb);
+      if (!coldEmpty.empty()) {
+        const auto vol = down(pub.cellVolume);
+        Real vmax = 0;
+        long nE = 0;
+        for (int i = 0; i < s.N; ++i)
+          if (coldEmpty[i]) {
+            ++nE;
+            vmax = std::max(vmax, std::abs(vol[i]));
+          }
+        std::printf("STILL %s frame=%d coldEmpty=%ld maxAbsVpub/h3=%.3e\n", tag, k, nE,
+                    vmax / (s.h * s.h * s.h));
+      }
       if (detail)
         for (const auto& p : d.parts)
           std::printf("FRAME %s %d %s %s\n", tag, k, p.first.c_str(), p.second.c_str());
@@ -843,6 +863,8 @@ int main(int argc, char** argv) {
       detail = true;
     else if (!std::strcmp(argv[a], "--wmax") && a + 1 < argc)
       wmax = std::atof(argv[++a]);
+    else if (!std::strcmp(argv[a], "--still"))
+      gStill = true;
     else if (!std::strcmp(argv[a], "--time"))
       timeIt = true;
     else if (!std::strcmp(argv[a], "--dump") && a + 2 < argc) {
