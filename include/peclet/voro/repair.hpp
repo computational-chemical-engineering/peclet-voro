@@ -417,9 +417,13 @@ struct MovingTessellation {
           // constexpr-if).
           const unsigned char* pk4 = &Pk4((size_t)i * MAXT * 4);  // poke4 is always allocated
           const Real tl = tolL;
-          if constexpr (Local)
-            ok = c.isLocallyConvexPartners(pk4, tl, partners, 32, nP);
-          else {
+          if constexpr (Local) {
+            // Outside-seed cells (a live plane with nn < 0) take the full test (WO-3b).
+            if (c.anyLiveNegOffset())
+              ok = c.isSelfConsistentPartners(tl, partners, 32, nP);
+            else
+              ok = c.isLocallyConvexPartners(pk4, tl, partners, 32, nP);
+          } else {
             (void)pk4;
             ok = c.isSelfConsistentPartners(tl, partners, 32, nP);
           }
@@ -563,9 +567,13 @@ struct MovingTessellation {
           const unsigned char* pk4 =
               &Pk4((size_t)i * MAXT * 4);  // force-capture poke4 + tol OUTSIDE the
           const Real tl = tolL;            // constexpr-if (nvcc extended-lambda rule)
-          if constexpr (Local)
-            ok = c.isLocallyConvexPartners(pk4, tl, partners, 32, nP);
-          else {
+          if constexpr (Local) {
+            // Outside-seed cells (a live plane with nn < 0) take the full test (WO-3b).
+            if (c.anyLiveNegOffset())
+              ok = c.isSelfConsistentPartners(tl, partners, 32, nP);
+            else
+              ok = c.isLocallyConvexPartners(pk4, tl, partners, 32, nP);
+          } else {
             (void)pk4;
             ok = c.isSelfConsistentPartners(tl, partners, 32, nP);
           }

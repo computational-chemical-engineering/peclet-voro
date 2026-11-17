@@ -263,6 +263,15 @@ struct ConvexCell {
     return nn[k] >= Real(0) ? Kokkos::sqrt(nn[k]) : -Kokkos::sqrt(-nn[k]);
   }
 
+  /// True iff some live triangle references a plane with nn < 0 (the seed lies outside that
+  /// half-space, hence outside its own cell). Always false for Voronoi cells.
+  KOKKOS_INLINE_FUNCTION bool anyLiveNegOffset() const {
+    for (int t = 0; t < nt; ++t)
+      if (alive[t] && (nn[t0[t]] < Real(0) || nn[t1[t]] < Real(0) || nn[t2[t]] < Real(0)))
+        return true;
+    return false;
+  }
+
   /// Compute and cache the dual vertex of triangle t (where its three planes meet,
   /// Cramer's rule). Called once when a triangle is created; all later reads use the
   /// cache (vx/vy/vz), so the per-cell vertex solves are O(#triangles), not O(#clips ·
