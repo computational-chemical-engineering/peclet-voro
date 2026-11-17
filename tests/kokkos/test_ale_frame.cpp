@@ -48,8 +48,8 @@
  * --s06 F (WO-S0.6): in (g), S06FRAME / S06CELL lines for the first F frames with cells that do
  *        not close (each facet's area vector from the walked polygon and per vertex, the
  *        hypothesis counts, the worst cells against a cold build). --tol T: the repair's
- *        certificate tolerance in units of h (default 1e-4). --no-closure: (g) without the
- *        frame's closure forcing (FrameOptions::enforceClosure). None changes a default run.
+ *        certificate tolerance in units of h (default 1e-4). --no-closure: (b) and (g) without
+ *        the frame's closure forcing (FrameOptions::enforceClosure). None changes a default run.
  * --diag (WO-S1.1b): in (a), the per-array difference of the first differing frame against frame 0
  * (elements, max ulp, max relative), the frames 2.. that differ from frame 1, and hashes of
  * frame 0, frame 1 and the last frame (to compare two runs).
@@ -134,6 +134,8 @@ Scene makeScene(int n) {
 
 /// --tol F (WO-S0.6, diagnostic): the repair's certificate tolerance in units of h (default 1e-4).
 double g_tolFactor = 1e-4;
+/// --no-closure (WO-S0.6, diagnostic): parts (b) and (g) with FrameOptions::enforceClosure off.
+bool g_noClosure = false;
 
 template <bool W>
 void allocEngine(Engine<W>& mt, int N, const Real L[3], Real h, const DV& weight) {
@@ -374,6 +376,7 @@ int partB(int n, int steps, const std::string& opts, const std::string& dumpDir)
   const DV dpos = up(pos, "pos");
   FrameOpts fo;
   fo.mesh = optionsOf(opts);
+  fo.enforceClosure = !g_noClosure;
   const NsConfig cfgs[2] = {{"B_rk3", 0.0, false, 1e-13}, {"D_implicit", 0.01, true, 1e-11}};
   int rc = 0;
   for (const NsConfig& c : cfgs) {
@@ -697,8 +700,7 @@ void unmatchedFacets(const peclet::voro::TessellationView<Real>& a,
 
 // ---- --s06 F (WO-S0.6, diagnostic): why the cells of a repaired frame do not close
 // ---------------
-int g_s06Frames = 0;       ///< diagnose the first F frames of each run that have offending cells
-bool g_noClosure = false;  ///< --no-closure: (g) with FrameOptions::enforceClosure off
+int g_s06Frames = 0;  ///< diagnose the first F frames of each run that have offending cells
 
 /// Rotate the canonical (det > 0) plane triple of triangle t so that plane k comes first: (k, p,
 /// q).
