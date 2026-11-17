@@ -200,6 +200,12 @@ static int run() {
   // G9 as restated by the orchestrator (2026-11-17): the gated FD step scales with the cell,
   // δ_i = 1e-6·min(h, V_i^{1/3}); the δ² law is checked on the 3 cells with the largest dV/dq FD
   // error (error at 10δ_i / error at δ_i = 100 ± 30 %). The fixed step δ = 1e-6h stays a REPORT.
+  // Restated again (2026-11-17, WO-OS4): the FD criteria are judged on cells with dist/size ≤ 20
+  // (amendment 3's range, where seed-frame roundoff stays below the 1e-6 bar); cells beyond are
+  // REPORTED (their largest FD error and dist/size).
+  constexpr double kFdDistSize = 20;
+  long nFdOut = 0;
+  double eFdOut = 0, eFdOutDistSize = 0, maxFdOutDistSize = 0;
   double eGradVh = 0;                         // dV/dq FD error at the fixed δ = 1e-6h
   std::vector<std::array<double, 4>> cellFD;  // {err(δ_i), err(10δ_i), V/h³, dist/size}
   // REPORT: the dV/dq FD error at other steps (truncation ∝ δ², roundoff ∝ ε·dist³/δ), and the
@@ -258,6 +264,8 @@ static int run() {
       eV = std::max(eV, std::fabs(a.V[v] - b.V[v]) / h3);
     const real_t dI = 1e-6 * std::min<real_t>(h, std::cbrt(a.V[0]));  // the cell's FD step
     double cErr = 0, cErr10 = 0;
+    double cGV = 0, cGVA = 0, cFan = 0,
+           cFad = 0;  // this cell's FD errors (judged if dist/size ≤ 20)
     // match facets by neighbour id (planes with area > 0 in either frame)
     std::vector<int> map2(c.np, -1);
     for (int k = 0; k < c.np; ++k)
@@ -342,7 +350,7 @@ static int run() {
         const double fd = (cp.volumePerVertex() - cm.volumePerVertex()) / (2 * dI);
         const double g = d == 0 ? dgx[l] : (d == 1 ? dgy[l] : dgz[l]);
         const double gA = d == 0 ? ggx[l] : (d == 1 ? ggy[l] : ggz[l]);
-        eGradV = std::max(eGradV, std::fabs(fd - g) / gmax);
+        cGV = std::max(cGV, std::fabs(fd - g) / gmax);
         cErr = std::max(cErr, std::fabs(fd - g) / gmax);
         {
           Cell tp = c, tm = c;
@@ -370,7 +378,7 @@ static int run() {
           const double fs = (sp.volumePerVertex() - sm.volumePerVertex()) / (2 * sweep[sIdx]);
           eSweep[sIdx] = std::max(eSweep[sIdx], std::fabs(fs - g) / gmax);
         }
-        eGradVA = std::max(eGradVA, std::fabs(fd - gA) / gmaxA);
+        cGVA = std::max(cGVA, std::fabs(fd - gA) / gmaxA);
         double ap[64] = {}, am[64] = {};
         cp.facetAreasPerVertex(ap);
         cm.facetAreasPerVertex(am);
@@ -378,14 +386,28 @@ static int run() {
           if (!fp[k])
             continue;
           const double fdA = (ap[k] - am[k]) / (2 * dI);
-          eFDan = std::max(eFDan, std::fabs(fdA - Jan[k][l][d]) / jmax);
-          eFDad = std::max(eFDad, std::fabs(fdA - Jad[k][l][d]) / jmax);
+          cFan = std::max(cFan, std::fabs(fdA - Jan[k][l][d]) / jmax);
+          cFad = std::max(cFad, std::fabs(fdA - Jad[k][l][d]) / jmax);
         }
       }
     }
-    cellFD.push_back(
-        {cErr, cErr10, a.V[0] / h3,
-         std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) / std::cbrt(std::max(a.V[0], 1e-300))});
+    const double dsz =
+        std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) / std::cbrt(std::max(a.V[0], 1e-300));
+    if (dsz <= kFdDistSize) {
+      eGradV = std::max(eGradV, cGV);
+      eGradVA = std::max(eGradVA, cGVA);
+      eFDan = std::max(eFDan, cFan);
+      eFDad = std::max(eFDad, cFad);
+      cellFD.push_back({cErr, cErr10, a.V[0] / h3, dsz});
+    } else {
+      ++nFdOut;
+      maxFdOutDistSize = std::max(maxFdOutDistSize, dsz);
+      const double e = std::max({cGV, cGVA, cFan, cFad});
+      if (e > eFdOut) {
+        eFdOut = e;
+        eFdOutDistSize = dsz;
+      }
+    }
   }
   std::sort(
       cellFD.begin(), cellFD.end(),
@@ -401,15 +423,21 @@ static int run() {
       "(<=1e-12) |dm|/h3=%.2e (<=1e-12) |dM2c|/h4=%.2e (<=1e-12)\n",
       eV, eA, eAv, eM, eM2);
   std::printf(
-      "  (13b) dV/dq vs FD (delta=1e-6*min(h,V^1/3), rel to the cell's max): geomVolumeGrad %.2e "
-      "geomVolumeArea %.2e (<=1e-6); dA/dq analytic-vs-AD %.2e (<=1e-12, per triangle); "
-      "vs FD: analytic %.2e AD %.2e (<=1e-6)\n",
-      eGradV, eGradVA, eAD, eFDan, eFDad);
+      "  (13b) dV/dq vs FD (delta=1e-6*min(h,V^1/3), rel to the cell's max; cells with "
+      "dist/size <= 20: %zu): geomVolumeGrad %.2e geomVolumeArea %.2e (<=1e-6); dA/dq "
+      "analytic-vs-AD %.2e (<=1e-12, per triangle); vs FD: analytic %.2e AD %.2e (<=1e-6)\n",
+      cellFD.size(), eGradV, eGradVA, eAD, eFDan, eFDad);
+  std::printf(
+      "  (13b+) REPORT cells with dist/size > 20: %ld (max dist/size %.1f); largest FD error "
+      "%.2e at dist/size %.1f\n",
+      nFdOut, maxFdOutDistSize, eFdOut, eFdOutDistSize);
   std::printf(
       "  (13b') REPORT dV/dq FD error vs step: delta/h=1e-4:%.2e 1e-5:%.2e 1e-6:%.2e "
       "1e-7:%.2e; worst cell at 1e-6h: dist/size=%.2f V/h3=%.2e\n",
       eSweep[0], eSweep[1], eGradVh, eSweep[2], worstDistSize, worstV);
-  std::printf("  (13b'') delta^2 law on the 3 worst cells (err(10d)/err(d) in [70,130]):");
+  std::printf(
+      "  (13b'') delta^2 law on the 3 worst cells with dist/size <= 20 (err(10d)/err(d) in "
+      "[70,130]):");
   for (size_t r = 0; r < 3 && r < cellFD.size(); ++r) {
     const double ratio = cellFD[r][0] > 0 ? cellFD[r][1] / cellFD[r][0] : 0;
     lawOk &= ratio >= 70 && ratio <= 130;
