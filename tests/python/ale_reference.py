@@ -382,3 +382,106 @@ def gamma_face_uniform(m, rho, g):
     psi(x_A) - psi(c_f) = g.(c_f - x_A), psi(c_f) - psi(x_B) = g.(conn_f - (c_f - x_A))."""
     g = np.asarray(g, dtype=np.float64)
     return rho[m.A] * (m.cA @ g) + rho[m.B] * ((m.conn - m.cA) @ g)
+
+
+# ------------------------------------------------------------- transport and predictor (work order S1.2a)
+# Design note §4.1 S4 (scheme v3f of the 2D oracle): flux form with the mean of the two linear reconstructions at
+# c_f; upwind part split as Q = Delta^T W Delta (implicit) plus Delta^T W (R - Delta) U (explicit). Fm is the face
+# mass flux rho_f F_f (one phase: rho F). Here (Delta U)_f = U_A - U_B = -(face_differences); Delta^T scatters a face
+# quantity q_f to the cells as sum_f s_if q_f, i.e. the outflow divergence D applied per component.
+def face_scatter_mf(m, q):
+    """sum_{f in i} s_if q_f for a face quantity q (F, 3): Delta^T q."""
+    out = np.zeros((m.N,) + q.shape[1:])
+    np.add.at(out, m.A, q)
+    np.add.at(out, m.B, -q)
+    return out
+
+
+def transport_mf(m, U, Fm):
+    """(T U)_i = 1/2 sum_{f in i} s_if Fm_f U_o, o the other cell of f. Skew-symmetric: U^T T U = 0. With the
+    diagonal part 1/2 (D Fm)_i U_i (zero when D F = 0) it is the central flux form sum_f s_if Fm_f (U_A + U_B)/2."""
+    out = np.zeros((m.N, 3))
+    np.add.at(out, m.A, 0.5 * Fm[:, None] * U[m.B])
+    np.add.at(out, m.B, -0.5 * Fm[:, None] * U[m.A])
+    return out
+
+
+def upwind_mf(m, U, Fm):
+    """Q U = Delta^T W Delta U, W = diag(1/2 |Fm_f|), (Delta U)_f = U_A - U_B. Symmetric positive semidefinite."""
+    return face_scatter_mf(m, (0.5 * np.abs(Fm))[:, None] * (U[m.A] - U[m.B]))
+
+
+def reconstruction_jump_mf(m, U=None, dU=None):
+    """((R - Delta) U)_f = G_A (c_f - x_A) - G_B (c_f - x_B): the jump of the two linear reconstructions at c_f
+    minus the jump of the cell values (F, 3). Zero for a linear field (G exact)."""
+    if dU is None:
+        dU = face_differences(m, U)
+    G = grad_mf(m, dU=dU)
+    return np.einsum('fab,fb->fa', G[m.A], m.cA) - np.einsum('fab,fb->fa', G[m.B], m.cB)
+
+
+def centroid_correction_mf(m, U=None, dU=None):
+    """delta_f = 1/2 [G_A (c_f - x_A) + G_B (c_f - x_B)] (F, 3): (U_A + U_B)/2 + delta_f is the mean of the two
+    linear reconstructions at c_f."""
+    if dU is None:
+        dU = face_differences(m, U)
+    G = grad_mf(m, dU=dU)
+    return 0.5 * (np.einsum('fab,fb->fa', G[m.A], m.cA) + np.einsum('fab,fb->fa', G[m.B], m.cB))
+
+
+def transport_explicit_mf(m, Uext, Fm):
+    """Explicit part of the transport tendency (the predictor's right side carries tau times this):
+    -sum_f s_if Fm_f delta_f - Delta^T W (R - Delta) U_ext, both from U_ext."""
+    q = Fm[:, None] * centroid_correction_mf(m, Uext) + (0.5 * np.abs(Fm))[:, None] * reconstruction_jump_mf(m, Uext)
+    return -face_scatter_mf(m, q)
+
+
+def predictor_mf(m, U, Fm, tau, mass_apply, mu=None):
+    """Predictor operator (M + tau/2 (T + Q) + tau/2 zeta) U; mass_apply(U) -> M U (N, 3); mu the face viscosity."""
+    return mass_apply(U) + 0.5 * tau * (transport_mf(m, U, Fm) + upwind_mf(m, U, Fm) + zeta_mf(m, U, mu))
+
+
+class TransportMatrices:
+    """The transport operators as sparse matrices on one mesh, built from the gradient of a `Matrices` (vector
+    unknowns flattened 3i + c, face vectors 3f + c). The geometric parts are fixed; the flux enters per call."""
+
+    def __init__(self, mx):
+        m = mx.m
+        F = m.F
+        f = np.arange(F)
+        self.mx, self.m = mx, m
+        self.Delta = (-mx.Delta3).tocsr()                     # (Delta U)_f = U_A - U_B (3F x 3N)
+        self.DeltaT = self.Delta.T.tocsr()                    # face scatter sum_f s_if q_f (3N x 3F)
+        # Rc_A, Rc_B (3F x 9N): row 3f + c picks sum_k G[c, k] (c_f - x)_k of cell A (resp. B)
+        rows, cA, cB, vA, vB = [], [], [], [], []
+        for c in range(3):
+            for k in range(3):
+                rows.append(3 * f + c)
+                cA.append(9 * m.A + 3 * c + k); cB.append(9 * m.B + 3 * c + k)
+                vA.append(m.cA[:, k]); vB.append(m.cB[:, k])
+        RcA = _coo(rows, cA, vA, (3 * F, 9 * m.N))
+        RcB = _coo(rows, cB, vB, (3 * F, 9 * m.N))
+        self.Jump = ((RcA - RcB) @ mx.G).tocsr()              # R - Delta (3F x 3N)
+        self.Delta_c = (0.5 * (RcA + RcB) @ mx.G).tocsr()     # U -> delta_f (3F x 3N)
+
+    def T(self, Fm):
+        m = self.m
+        h = np.repeat(0.5 * Fm, 3)
+        f3 = np.arange(3 * m.F)
+        c = f3 % 3
+        iA, iB = 3 * np.repeat(m.A, 3) + c, 3 * np.repeat(m.B, 3) + c
+        return _coo([iA, iB], [iB, iA], [h, -h], (3 * m.N, 3 * m.N))
+
+    def W(self, Fm):
+        return sp.diags(np.repeat(0.5 * np.abs(Fm), 3))
+
+    def Q(self, Fm):
+        return (self.DeltaT @ self.W(Fm) @ self.Delta).tocsr()
+
+    def explicit(self, Fm):
+        """The explicit transport operator (3N x 3N): U_ext -> -Delta^T [Fm delta + W (R - Delta) U_ext]."""
+        return -(self.DeltaT @ (sp.diags(np.repeat(Fm, 3)) @ self.Delta_c + self.W(Fm) @ self.Jump)).tocsr()
+
+    def predictor(self, Fm, tau, mass_matrix):
+        """M + tau/2 (T + Q) + tau/2 zeta, with zeta of the Matrices (its set_mu) and M given as a sparse matrix."""
+        return (mass_matrix + 0.5 * tau * (self.T(Fm) + self.Q(Fm) + self.mx.zeta)).tocsr()
