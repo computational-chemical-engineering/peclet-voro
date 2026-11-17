@@ -22,8 +22,14 @@
  *   - MovingTessellation (tol 1e-4 h, skin 0.25 h) rebuilt at A, one step to B, against a cold
  *     build at B; variants localCert × useNearMiss.
  * Assertions at B: (1) i empty in the repair ⟺ empty in cold; (2) i and j1…j4 carry cold's
- * facet-neighbour sets, |V_rep − V_cold| ≤ 1e-12·V_cold for a non-empty i and ≤ 1e-15 h³ for the
- * j's; (3) every published V ≥ −1e-24 h³.
+ * facet-neighbour sets, |V_rep − V_cold| ≤ max(1e-12, ε·(dist/size)³)·V_cold (ε = 2.2e-16) for a
+ * non-empty i and ≤ 1e-15 h³ for the j's; (3) every published V ≥ −1e-24 h³.
+ * The volume bar in (2) is the round-off law of the seed frame (DESIGN_NOTE_OUTSIDE_SEED amendment
+ * 3, briefs/WO_OUTSIDE_SEED.md: relative volume error ∝ ε·(dist/size)³, dist = |x_i − v|, size =
+ * V_cold^{1/3}). The repair's gather holds cold's planes and vertex triples in a different order,
+ * so at dist/size ~3e4 the bits differ (measured rel 1.86e-4); a flat 1e-12 relative bar
+ * contradicts that law (orchestrator decision, WO-OS5). Emptiness (1) and the facet sets stay
+ * exact.
  */
 #include <algorithm>
 #include <cmath>
@@ -257,8 +263,11 @@ int runCase(const char* name, Real deltaA) {
           mt.store, p, mt.vol, kNTot, L, mt.wall, mt.xRef, false, false, w);
       const CellPub r = summarize(pub);
       const bool a1 = r.empty(I) == cB.empty(I);
+      // relative volume bar: max(1e-12, ε·(dist/size)³), amendment 3's round-off law (see header)
+      const Real dOverS = cB.vol[I] > 0 ? s.uNorm / std::cbrt(cB.vol[I]) : Real(0);
+      const Real relBar = std::max(Real(1e-12), Real(2.2e-16) * dOverS * dOverS * dOverS);
       bool a2 = r.nbr[I] == cB.nbr[I] &&
-                (cB.empty(I) || std::fabs(r.vol[I] - cB.vol[I]) <= Real(1e-12) * cB.vol[I]);
+                (cB.empty(I) || std::fabs(r.vol[I] - cB.vol[I]) <= relBar * cB.vol[I]);
       Real djMax = 0;
       for (int k = 0; k < 4; ++k) {
         const int j = s.j[k];
@@ -275,15 +284,14 @@ int runCase(const char* name, Real deltaA) {
       // reported: i's relative volume difference and its seed distance over its size (the
       // seed-frame conditioning, amendment 3: relative error ∝ ε·(dist/size)³)
       const Real relI = cB.vol[I] > 0 ? std::fabs(r.vol[I] - cB.vol[I]) / cB.vol[I] : Real(0);
-      const Real dOverS = cB.vol[I] > 0 ? s.uNorm / std::cbrt(cB.vol[I]) : Real(0);
       std::printf(
           "  %s localCert=%d nearMiss=%d: route=%d pass1=%d pass2=%d near=%d | i: rep "
           "empty=%d V %.6e h^3 nf %zu, cold empty=%d V %.6e h^3 nf %zu, rel %.3e, "
-          "dist/size %.3e | max|dV_j| %.3e h^3 | minV %.3e h^3 | (1)%s (2)%s (3)%s %s\n",
+          "dist/size %.3e bar %.3e | max|dV_j| %.3e h^3 | minV %.3e h^3 | (1)%s (2)%s (3)%s %s\n",
           name, lc, nm, static_cast<int>(st.route), st.pass1, st.pass2, st.nearFlagged, r.empty(I),
           r.vol[I] / h3, r.nbr[I].size(), cB.empty(I), cB.vol[I] / h3, cB.nbr[I].size(), relI,
-          dOverS, djMax / h3, vMin / h3, a1 ? "ok" : "MISS", a2 ? "ok" : "MISS", a3 ? "ok" : "MISS",
-          ok ? "PASS" : "FAIL");
+          dOverS, relBar, djMax / h3, vMin / h3, a1 ? "ok" : "MISS", a2 ? "ok" : "MISS",
+          a3 ? "ok" : "MISS", ok ? "PASS" : "FAIL");
     }
   return fails;
 }

@@ -203,11 +203,17 @@ static int run() {
   // Restated again (2026-11-17, WO-OS4): the FD criteria are judged on cells with dist/size ≤ 20
   // (amendment 3's range, where seed-frame roundoff stays below the 1e-6 bar); cells beyond are
   // REPORTED (their largest FD error and dist/size).
+  // Regression form (orchestrator decision, WO-OS5, 2026-11-18): analytic = AD ≤ 1e-13 relative;
+  // the δ² consistency law (err(10δ_i)/err(δ_i) = 100 ± 30 on the 3 worst cells with dist/size
+  // ≤ 20) stays at δ_i = 1e-6·min(h, V^{1/3}), where truncation dominates; the FD accuracy bar
+  // ≤ 1e-6 relative is judged at δ7_i = 1e-7·min(h, V^{1/3}). The gate G9 at the δ = 1e-6 scale is
+  // recorded as a MISS (area FD 1.07e-6 > 1e-6: truncation, not a defect — the δ² law holds).
   constexpr double kFdDistSize = 20;
   long nFdOut = 0;
   double eFdOut = 0, eFdOutDistSize = 0, maxFdOutDistSize = 0;
   double eGradVh = 0;                         // dV/dq FD error at the fixed δ = 1e-6h
-  std::vector<std::array<double, 4>> cellFD;  // {err(δ_i), err(10δ_i), V/h³, dist/size}
+  double eFD6 = 0;                            // REPORT: max FD error at δ_i (the G9 MISS scale)
+  std::vector<std::array<double, 5>> cellFD;  // {err(δ_i), err(10δ_i), V/h³, dist/size, err(δ7_i)}
   // REPORT: the dV/dq FD error at other steps (truncation ∝ δ², roundoff ∝ ε·dist³/δ), and the
   // cell where the gated step's error peaks.
   const real_t sweep[3] = {1e-4 * h, 1e-5 * h, 1e-7 * h};
@@ -262,10 +268,11 @@ static int run() {
     values(c2, b);
     for (int v = 0; v < 5; ++v)
       eV = std::max(eV, std::fabs(a.V[v] - b.V[v]) / h3);
-    const real_t dI = 1e-6 * std::min<real_t>(h, std::cbrt(a.V[0]));  // the cell's FD step
-    double cErr = 0, cErr10 = 0;
+    const real_t dI = 1e-6 * std::min<real_t>(h, std::cbrt(a.V[0]));   // δ² law step
+    const real_t dI7 = 1e-7 * std::min<real_t>(h, std::cbrt(a.V[0]));  // the gated FD step
+    double cErr = 0, cErr10 = 0, cFD6 = 0;
     double cGV = 0, cGVA = 0, cFan = 0,
-           cFad = 0;  // this cell's FD errors (judged if dist/size ≤ 20)
+           cFad = 0;  // this cell's FD errors at δ7_i (judged if dist/size ≤ 20)
     // match facets by neighbour id (planes with area > 0 in either frame)
     std::vector<int> map2(c.np, -1);
     for (int k = 0; k < c.np; ++k)
@@ -344,14 +351,28 @@ static int run() {
       if (!fp[l])
         continue;
       for (int d = 0; d < 3; ++d) {
-        Cell cp = c, cm = c;
-        moveFoot(cp, l, d, dI);
-        moveFoot(cm, l, d, -dI);
-        const double fd = (cp.volumePerVertex() - cm.volumePerVertex()) / (2 * dI);
         const double g = d == 0 ? dgx[l] : (d == 1 ? dgy[l] : dgz[l]);
         const double gA = d == 0 ? ggx[l] : (d == 1 ? ggy[l] : ggz[l]);
+        {  // δ_i: the δ² law, and the REPORT of the G9 scale
+          Cell c6p = c, c6m = c;
+          moveFoot(c6p, l, d, dI);
+          moveFoot(c6m, l, d, -dI);
+          const double f6 = (c6p.volumePerVertex() - c6m.volumePerVertex()) / (2 * dI);
+          cErr = std::max(cErr, std::fabs(f6 - g) / gmax);
+          cFD6 = std::max({cFD6, std::fabs(f6 - g) / gmax, std::fabs(f6 - gA) / gmaxA});
+          double ap6[64] = {}, am6[64] = {};
+          c6p.facetAreasPerVertex(ap6);
+          c6m.facetAreasPerVertex(am6);
+          for (int k = 0; k < c.np; ++k)
+            if (fp[k])
+              cFD6 = std::max({cFD6, std::fabs((ap6[k] - am6[k]) / (2 * dI) - Jan[k][l][d]) / jmax,
+                               std::fabs((ap6[k] - am6[k]) / (2 * dI) - Jad[k][l][d]) / jmax});
+        }
+        Cell cp = c, cm = c;
+        moveFoot(cp, l, d, dI7);
+        moveFoot(cm, l, d, -dI7);
+        const double fd = (cp.volumePerVertex() - cm.volumePerVertex()) / (2 * dI7);
         cGV = std::max(cGV, std::fabs(fd - g) / gmax);
-        cErr = std::max(cErr, std::fabs(fd - g) / gmax);
         {
           Cell tp = c, tm = c;
           moveFoot(tp, l, d, 10 * dI);
@@ -385,7 +406,7 @@ static int run() {
         for (int k = 0; k < c.np; ++k) {
           if (!fp[k])
             continue;
-          const double fdA = (ap[k] - am[k]) / (2 * dI);
+          const double fdA = (ap[k] - am[k]) / (2 * dI7);
           cFan = std::max(cFan, std::fabs(fdA - Jan[k][l][d]) / jmax);
           cFad = std::max(cFad, std::fabs(fdA - Jad[k][l][d]) / jmax);
         }
@@ -398,7 +419,8 @@ static int run() {
       eGradVA = std::max(eGradVA, cGVA);
       eFDan = std::max(eFDan, cFan);
       eFDad = std::max(eFDad, cFad);
-      cellFD.push_back({cErr, cErr10, a.V[0] / h3, dsz});
+      eFD6 = std::max(eFD6, cFD6);
+      cellFD.push_back({cErr, cErr10, a.V[0] / h3, dsz, cGV});
     } else {
       ++nFdOut;
       maxFdOutDistSize = std::max(maxFdOutDistSize, dsz);
@@ -411,7 +433,7 @@ static int run() {
   }
   std::sort(
       cellFD.begin(), cellFD.end(),
-      [](const std::array<double, 4>& p, const std::array<double, 4>& q) { return p[0] > q[0]; });
+      [](const std::array<double, 5>& p, const std::array<double, 5>& q) { return p[0] > q[0]; });
   bool lawOk = cellFD.size() >= 3;
   std::printf(
       "outside-seed power cells (8^3 jittered ±0.3h, W = %.1f h^2): checked=%ld (>= 20) "
@@ -423,10 +445,14 @@ static int run() {
       "(<=1e-12) |dm|/h3=%.2e (<=1e-12) |dM2c|/h4=%.2e (<=1e-12)\n",
       eV, eA, eAv, eM, eM2);
   std::printf(
-      "  (13b) dV/dq vs FD (delta=1e-6*min(h,V^1/3), rel to the cell's max; cells with "
+      "  (13b) dV/dq vs FD (delta=1e-7*min(h,V^1/3), rel to the cell's max; cells with "
       "dist/size <= 20: %zu): geomVolumeGrad %.2e geomVolumeArea %.2e (<=1e-6); dA/dq "
-      "analytic-vs-AD %.2e (<=1e-12, per triangle); vs FD: analytic %.2e AD %.2e (<=1e-6)\n",
+      "analytic-vs-AD %.2e (<=1e-13, per triangle); vs FD: analytic %.2e AD %.2e (<=1e-6)\n",
       cellFD.size(), eGradV, eGradVA, eAD, eFDan, eFDad);
+  std::printf(
+      "  (13b-) REPORT max FD error at delta=1e-6*min(h,V^1/3) (the G9 scale, recorded MISS "
+      "above 1e-6): %.2e\n",
+      eFD6);
   std::printf(
       "  (13b+) REPORT cells with dist/size > 20: %ld (max dist/size %.1f); largest FD error "
       "%.2e at dist/size %.1f\n",
@@ -441,8 +467,11 @@ static int run() {
   for (size_t r = 0; r < 3 && r < cellFD.size(); ++r) {
     const double ratio = cellFD[r][0] > 0 ? cellFD[r][1] / cellFD[r][0] : 0;
     lawOk &= ratio >= 70 && ratio <= 130;
-    std::printf(" [err=%.2e err10=%.2e ratio=%.3g V/h3=%.2e dist/size=%.1f]", cellFD[r][0],
-                cellFD[r][1], ratio, cellFD[r][2], cellFD[r][3]);
+    std::printf(
+        " [err=%.2e err10=%.2e ratio=%.3g (REPORT err(d)/err(d/10)=%.3g) V/h3=%.2e "
+        "dist/size=%.1f]",
+        cellFD[r][0], cellFD[r][1], ratio, cellFD[r][4] > 0 ? cellFD[r][0] / cellFD[r][4] : 0,
+        cellFD[r][2], cellFD[r][3]);
   }
   std::printf(" %s\n", lawOk ? "ok" : "MISS");
   // ---- REPORT (amendment 4): Power::chain dV_i/dx_j vs FD in x_j as d_ij → 0, both signs.
@@ -504,7 +533,7 @@ static int run() {
   }
   const bool pass = nOS >= 20 && nOverflow == 0 && nNotInterior == 0 && nSetDiff == 0 &&
                     eV <= 1e-12 && eA <= 1e-12 && eAv <= 1e-12 && eM <= 1e-12 && eM2 <= 1e-12 &&
-                    eGradV <= 1e-6 && eGradVA <= 1e-6 && eAD <= 1e-12 && eFDan <= 1e-6 &&
+                    eGradV <= 1e-6 && eGradVA <= 1e-6 && eAD <= 1e-13 && eFDan <= 1e-6 &&
                     eFDad <= 1e-6 && lawOk;
   std::printf("  (13) %s\n", pass ? "PASS" : "FAIL");
   return pass ? 0 : 1;
