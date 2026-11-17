@@ -360,6 +360,9 @@ def case_table():
     c['r6iii_W16'] = ('W', 16, 'zero', 'F', 100, {'rho': 1000.0, 'force': 'psi_cell'})
     c['r6ii_rest_W16'] = ('W', 16, 'zero', 'F', 100, {'force': 'gbar'})
     c['r6ii_tg_W16'] = ('W', 16, 'tg', 'F', 100, {'force': 'gbar', 'twin': True})
+    # R6 (ii') controls, reported: the run from rest with the predictor to a relative 1e-14, and at W 8^3 (direct)
+    c['r6ii_rest_W16_rtol14'] = ('W', 16, 'zero', 'F', 100, {'force': 'gbar', 'pred_rtol': 1e-14})
+    c['r6ii_rest_W8'] = ('W', 8, 'zero', 'F', 100, {'force': 'gbar'})
     # R5 control (stop rule): the same runs with the upwind part switched off
     for n in (8, 16, 32):
         c[f'tg_Z{n}_F_noupw'] = ('Z', n, 'tg', 'F', None, {'upwind': 0.0})
@@ -626,7 +629,7 @@ def judge(log_dir):
             o1, o2 = np.log2(e[0] / e[1]), np.log2(e[1] / e[2])
             parts.append(f'{fld}{fam}:{e[0]:.3e},{e[1]:.3e},{e[2]:.3e} order {o1:.2f},{o2:.2f}')
             if fam == 'Z':
-                ok5 = ok5 and o2 >= 1.5
+                ok5 = ok5 and bool(o2 >= 1.5)
     verdict('R5', ok5, '(Z: order 16->32 >=1.5; W reported) ' + ' '.join(parts))
     # R6
     c1, c2, c3, c4 = 'r6i_W16', 'r6ii_rest_W16', 'r6ii_tg_W16', 'r6iii_W16'
@@ -638,8 +641,12 @@ def judge(log_dir):
         d = get(c3, 'mean_dev')
         tw = get(c3, 'twin_dev')
         ctl = get(c4, 'maxU_rel_drive')
+        b14, b8 = get(c2 + '_rtol14', 'gt_dev'), get('r6ii_rest_W8', 'gt_dev')
+        b14 = f'{b14:.2e}' if b14 is not None else 'missing'
+        b8 = f'{b8:.2e}' if b8 is not None else 'missing'
         verdict('R6', a <= 1e-12 and b <= 1e-12 and d <= 1e-12,
                 f'(i) max|U|/(|grad psi|h)^0.5={a:.2e} (<=1e-12) (ii\') rest |U-gt|/|g|t={b:.2e} (<=1e-12) '
+                f'[controls: predictor rtol 1e-14 {b14}, W 8^3 direct {b8}] '
                 f'TG mean |Ubar-gt|/|g|t={d:.2e} (<=1e-12) TG twin max|U-U0-gt|/|g|t={tw:.2e} (reported) '
                 f'(iii) control |U|/(tau 100 |grad psi|)={ctl if ctl is not None else float("nan"):.3e} (reported)')
     # R7

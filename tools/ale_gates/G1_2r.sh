@@ -63,7 +63,8 @@ if [[ $RUNS -eq 1 ]]; then
     # longest first: the 32^3 runs and the 2000-step run, then 16^3, then 8^3
     CASES="tg_Z32_F tg_Z32_R abc_Z32_F tg_W32_F abc_W32_F r3_tg_W16_F tg_Z16_F tg_Z16_R tg_W16_F tg_W16_R
            abc_Z16_F abc_W16_F tg_Z16_F_rtol14 tg_Z16_R_rtol14 tg_W16_F_rtol14 tg_W16_R_rtol14
-           r6i_W16 r6iii_W16 r6ii_rest_W16 r6ii_tg_W16 tg_Z8_F tg_W8_F abc_Z8_F abc_W8_F
+           r6i_W16 r6iii_W16 r6ii_rest_W16 r6ii_tg_W16 r6ii_rest_W16_rtol14 r6ii_rest_W8
+           tg_Z8_F tg_W8_F abc_Z8_F abc_W8_F
            r0_zero_F r0_zero_R r0_unif_F r0_unif_R"
   fi
   run_one() {
