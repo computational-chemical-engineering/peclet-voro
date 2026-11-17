@@ -151,11 +151,11 @@ class Tess : public peclet::core::python::Releasable {
         },
         mt_);
     auto r = std::visit([](auto& mt) { return mt.report(); }, mt_);
-    if (r.buried > 0 || r.reachExceeded > 0 || r.overflow > 0) {
+    // Empty power cells (`buried`) are exact results, not validity failures: counted in the
+    // report only.
+    if (r.reachExceeded > 0 || r.overflow > 0) {
       const std::string msg =
           "peclet.voro: the tessellation is not a guaranteed-exact partition: " +
-          std::to_string(r.buried) +
-          " buried power cell(s) (seed outside its own cell, emptied), " +
           std::to_string(r.reachExceeded) + " cell(s) with a search reach beyond half the box " +
           "(min-image invalid), " + std::to_string(r.overflow) +
           " overflowed cell(s). See diagnostics.build_report().";

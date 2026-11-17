@@ -48,19 +48,17 @@ namespace peclet::voro {
 enum StatusBit {
   kOk = 0,
   kOverflow = 1,
-  kEmpty = 2,
+  kEmpty = 2,  // zero-volume cell: an SDF seed in the solid, or an empty power cell (kBuried)
   kIncomplete = 4,
-  // Power only: a candidate's radical offset d = ½(|r|²+w_i−w_j) went ≤ 0, i.e. the seed lies
-  // outside its own cell w.r.t. that neighbour. The ConvexCell foot-point half-space {n·x ≤ n·n}
-  // always contains the seed, so it cannot represent such a plane; the cut is skipped and the cell
-  // flagged (never silently mis-clipped). Full support needs a generalized (origin-excluding)
-  // half-space representation — a follow-up to this weighted build.
+  // Power only, informational (NOT a defect): the seed lies outside its own NON-empty cell (some
+  // facet plane has radical offset d = ½(|r|²+w_i−w_j) < 0, stored sign-safe with nn < 0). The
+  // geometry is exact.
   kNegOffset = 8,
-  // Rung A2a validity diagnostics. kBuried: a power seed lies outside its own cell (d ≤ 0 to some
-  // neighbour) — the engine EMPTIES it, which is wrong in general (the cell exists elsewhere);
-  // never happens for w = r² of non-overlapping spheres. kReachExceeded: the cell's converged
-  // search reach exceeded half the smallest box edge, so the min-image gather may have missed a
-  // non-nearest periodic image and the partition is not guaranteed exact.
+  // kBuried — Power only, exact (NOT a defect): the power cell is EMPTY (every point is dominated
+  // in power distance); published with zero volume and no facets, always together with kEmpty.
+  // Rung A2a validity diagnostic kReachExceeded: the cell's converged search reach exceeded half
+  // the smallest box edge, so the min-image gather may have missed a non-nearest periodic image
+  // and the partition is not guaranteed exact.
   kBuried = 16,
   kReachExceeded = 32,
   // Informational, NOT a defect: a cut of this cell met (near-)cospherical input — a vertex ON the
@@ -467,6 +465,18 @@ struct CellBuilder {
       st |= kEmpty;
     if (incomplete)
       st |= kIncomplete;
+    if constexpr (Weighted) {
+      // The seed lies outside its own non-empty cell iff some facet plane excludes it (nn < 0):
+      // informational, the geometry is exact (independent of the gather order).
+      if (!empty && !c.overflow) {
+        bool neg = false;
+        for (int t = 0; t < c.nt && !neg; ++t)
+          if (c.alive[t])
+            neg = c.nn[c.t0[t]] < Real(0) || c.nn[c.t1[t]] < Real(0) || c.nn[c.t2[t]] < Real(0);
+        if (neg)
+          st |= kNegOffset;
+      }
+    }
     cellVol(i) = (empty || c.overflow) ? Real(0) : c.volumePerVertex();
 
     // Part-II: persist the final (post-SDF-clip) topology so a later step can re-eval/repair
@@ -552,15 +562,15 @@ struct CellBuilder {
   /// The gather half of buildCell: the worklist walk that clips the cell of grid-sorted slot pi
   /// on the fly (early wall clip, neighbour planes; candidate + near-miss recording when those
   /// outputs are sized), leaving the neighbour-clipped cell in `c` — the SDF clip, status and
-  /// publish are finishCell's. Returns false for a buried power cell. Shared by buildCell and
-  /// the pore-space export (pore_cells.hpp), which keeps the cell instead of publishing it.
+  /// publish are finishCell's. Returns false for an empty power cell (a clip emptied it). Shared by
+  /// buildCell and the pore-space export (pore_cells.hpp), which keeps the cell instead of
+  /// publishing it.
   KOKKOS_INLINE_FUNCTION bool gatherCell(int pi, Cell& c, Real& pix, Real& piy, Real& piz,
                                          Real& wSelf, int& ncRec, int& nnRec) const {
     // Voronoi (Weighted=false) uses the bisector plane + security-radius early-out. Power
     // (Weighted=true) uses the radical plane offset ½(|r|²+w_self−w_nbr) — which can be negative
-    // (the seed can lie OUTSIDE its own cell) so the bisector security certificate is invalid.
-    // P1 keeps the trivially-correct APPLY-ALL path for Power (every worklist candidate, no
-    // early-out); the weight-aware security gate is P2.
+    // (the seed can lie OUTSIDE its own cell; the clip stores such a plane sign-safe) so the
+    // bisector security certificate is invalid; Power walks the weight-aware reach instead.
     const int i = binned(pi);
     pix = posSorted(3 * pi + 0);
     piy = posSorted(3 * pi + 1);
@@ -572,7 +582,7 @@ struct CellBuilder {
     wSelf = Real(0);
     if constexpr (Weighted)
       wSelf = wSorted(pi);
-    bool buried = false;  // Power: some neighbour dominates the seed at its own location (d≤0)
+    bool emptied = false;  // Power: a clip took every vertex — the power cell is empty
     // Early wall clip (rung C4/B follow-up): the tangent plane at the SEED'S OWN FOOT on the wall
     // bounds the cell toward the solid before any neighbour is gathered. Without it a cell next
     // to a curved wall extends through the solid to the far side until the SDF clip runs after
@@ -610,7 +620,7 @@ struct CellBuilder {
     // With near-miss emission the worklist reach grows by the margin: a plane can miss the cell
     // by less than the margin while its seed sits beyond the security radius.
     const Real nm = emitNear ? nearMargin : Real(0);
-    for (int g = 0; g < nOff && !c.overflow && !buried; ++g) {
+    for (int g = 0; g < nOff && !c.overflow && !emptied; ++g) {
       if constexpr (Weighted) {
         const Real rr = Kokkos::sqrt(reachSq) + Real(2) * nm;
         if (wlRmin(base + g) > rr * rr)
@@ -623,7 +633,7 @@ struct CellBuilder {
           break;
       }
       const int gc = worklistCell(base, g, cx, cy, cz);
-      for (int q = cellStart(gc); q < cellStart(gc + 1) && !c.overflow && !buried; ++q) {
+      for (int q = cellStart(gc); q < cellStart(gc + 1) && !c.overflow && !emptied; ++q) {
         if (q == pi)
           continue;
         if (haveGid && gidSorted(q) == gidSorted(pi))
@@ -652,19 +662,18 @@ struct CellBuilder {
           wNbr = wSorted(q);
         const Real off = PlanePolicy::template offsetFromRel<Real>(pv, wSelf, wNbr);
         if constexpr (Weighted) {
-          // Power: d = ½(|r|²+w_i−w_j) ≤ 0 means neighbour j has lower power than i at the seed's
-          // own location — the seed is not in its own power cell, so cell i is BURIED (empty). The
-          // foot-point half-space cannot represent this plane anyway; empty the cell and stop.
-          if (off <= Real(0)) {
-            buried = true;
-            break;
-          }
-          // Conservative cull: r·v ≤ |r|·√rSqMax, so |r|²·rSqMax ≤ d² ⇒ the plane cannot cut.
+          // Power: d = ½(|r|²+w_i−w_j) may be ≤ 0 (the seed lies outside this half-space); the
+          // clip stores the plane sign-safe, and a plane that takes every vertex empties the cell.
+          // Conservative cull, d > 0 only: r·v ≤ |r|·√rSqMax, so |r|²·rSqMax ≤ d² ⇒ no cut.
           const Real rho = pv[0] * pv[0] + pv[1] * pv[1] + pv[2] * pv[2];
-          if (!emitNear && rho * c.maxVertexRsq() <= off * off)
+          if (!emitNear && off > Real(0) && rho * c.maxVertexRsq() <= off * off)
             continue;  // provably beyond reach
           Real gap;
           if (c.clip(pv, off, binned(q), emitNear ? &gap : nullptr)) {
+            if (c.nt == 0) {  // the power cell is empty: stop the gather
+              emptied = true;
+              break;
+            }
             reachSq = PlanePolicy::template blockReachSq<Real>(c.maxVertexRsq(), wSelf, wMaxAll);
           } else if (emitNear && gap > -nm) {
             if (nnRec < nearCap)
@@ -685,7 +694,7 @@ struct CellBuilder {
         }
       }
     }
-    return !buried;
+    return !emptied;
   }
 
   /// Build the cell owning grid-sorted slot pi, writing the published outputs at the original
@@ -696,22 +705,29 @@ struct CellBuilder {
     Cell c;
     Real pix, piy, piz, wSelf;
     int ncRec, nnRec;
-    const bool notBuried = gatherCell(pi, c, pix, piy, piz, wSelf, ncRec, nnRec);
-    (void)notBuried;  // only a power cell can be buried
+    const bool nonEmpty = gatherCell(pi, c, pix, piy, piz, wSelf, ncRec, nnRec);
+    (void)nonEmpty;  // only a power cell can be emptied by its neighbours
+    const bool emitNear = oNear.extent(0) > 0 && nearCap > 0;
     if constexpr (Weighted) {
-      if (!notBuried) {  // buried power cell: emit as empty (kEmpty), like an in-solid SDF seed
+      // Empty power cell: exact, published with zero volume and no facets (kEmpty | kBuried). No
+      // SDF clip and no completeness test: a subset of the constraints that is already empty
+      // certifies emptiness.
+      if (!nonEmpty) {
         status(i) = kEmpty | kBuried;
         facetCount(i) = 0;
         cellFacetBase(i) = 0;
         cellVol(i) = Real(0);
         if (emitTopo)
           emitEmptyTopo(i);
+        if (emitCand)
+          oCandCnt(i) = ncRec;
+        if (emitNear)
+          oNearCnt(i) = 0;
         return;
       }
     }
     if (emitCand)
       oCandCnt(i) = ncRec;
-    const bool emitNear = oNear.extent(0) > 0 && nearCap > 0;
     if (emitNear)
       oNearCnt(i) = nnRec > nearCap ? nearCap + 1 : nnRec;  // nearCap+1 = overflow marker
     // Completeness uses the conservative inscribed-sphere coverage (sw·minCsz)², the same

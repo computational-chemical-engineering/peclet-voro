@@ -34,8 +34,9 @@ void bindTessellation(nb::module_& m) {
       .def(
           "build_report", [](TessDiagnostics& d) { return d.t->build_report(); },
           "Validity counts of the last build: {'buried', 'reach_exceeded', 'empty', 'overflow',\n"
-          "'incomplete'} — all zero for a guaranteed-exact partition (build() already warns, or\n"
-          "raises with strict=True, when they are not) — and 'over_buffer_rebuilds', the number "
+          "'incomplete'}. 'buried' counts empty power cells and 'empty' zero-volume cells (exact\n"
+          "results); the others are zero for a guaranteed-exact partition (build() already warns,\n"
+          "or raises with strict=True, when they are not) — and 'over_buffer_rebuilds', the number "
           "of\n"
           "times the build's facet/edge over-buffer estimate was exceeded and the build pass "
           "re-run\n"
@@ -131,11 +132,9 @@ void bindTessellation(nb::module_& m) {
            "Cold-build the (power-)Voronoi tessellation of `positions` (N,3) from scratch and make "
            "it resident, clipped by the geometry from `set_geometry` if any.\n"
            "Sets the particle count N for subsequent `step` calls. Warns (raises if strict=True)\n"
-           "when the result is not a guaranteed-exact partition: buried power cells (a seed "
-           "outside\n"
-           "its own cell — never for w = r² of non-overlapping spheres), a search reach beyond "
-           "half\n"
-           "the box, or overflowed cells; see `diagnostics.build_report()`.")
+           "when the result is not a guaranteed-exact partition: a search reach beyond half\n"
+           "the box, or overflowed cells; see `diagnostics.build_report()`. Empty power cells\n"
+           "(counted as 'buried') are exact and do not warn.")
       .def(
           "step", &Tess::step, nb::arg("positions"),
           "Incrementally repair the resident tessellation to new `positions` (N,3, same N as "

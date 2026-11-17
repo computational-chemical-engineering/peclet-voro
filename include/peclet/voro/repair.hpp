@@ -75,9 +75,9 @@ struct RepairStats {
 
 /// A2a validity diagnostics of a cold (re)build (counts over the maintained cells).
 struct BuildReport {
-  long buried = 0;         ///< power seeds outside their own cell (emptied — see kBuried)
+  long buried = 0;         ///< power cells that are empty (exact — see kBuried)
   long reachExceeded = 0;  ///< cells whose search reach passed half the box (min-image invalid)
-  long empty = 0;          ///< cells with no volume (in-solid seeds + buried)
+  long empty = 0;          ///< cells with no volume (in-solid seeds + empty power cells)
   long overflow = 0;       ///< cells that hit a capacity (planes / triangles / facets)
   long incomplete = 0;     ///< cells whose coverage did not close
   long degenerate = 0;     ///< cells cut through a (near-)cospherical vertex (kDegenerate; valid)

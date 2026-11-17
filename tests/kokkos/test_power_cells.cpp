@@ -26,6 +26,14 @@
  *       points out of the cell, dV matches central differences, and the partition closes.
  *
  *   (H) Voronoi: the published connector 2·foot equals p_j − p_i bit for bit.
+ *
+ *   (I) Seeds outside their own power cell and empty power cells (DESIGN_NOTE_OUTSIDE_SEED WO-2):
+ *       8³ lattices jittered ±0.3h with weights in [0, W h²], every cell against the sign-safe
+ *       brute oracle (volume, empty ⟺ empty, facet set, kNegOffset ⟺ a face with nn < 0), and the
+ *       oracle itself against the TRANSLATION oracle, which never executes a σ = −1 code path:
+ *       the cell rebuilt in the frame of an interior point y, where every offset is positive.
+ *       An empty cell is certified by the snapshot before its emptying candidate (validated the
+ *       same way): every snapshot vertex violates the emptying plane.
  */
 #include <algorithm>
 #include <cmath>
@@ -47,11 +55,17 @@ namespace {
 
 using OracleCell = peclet::voro::ConvexCell<real_t, 200, 400>;
 
-// Host brute-force power cell for seed i: clip the box by every other seed's radical plane
-// {x : r·x ≤ ½(|r|²+w_i−w_j)}, closest-first (keeps the live-plane count bounded). Returns
-// 0 = ok, 1 = buried (seed outside its own cell), -1 = overflow. Generous caps for the O(N) oracle.
-int buildPowerCell(int i, const std::vector<real_t>& x, const std::vector<real_t>& w, int N,
-                   real_t L, OracleCell& c) {
+// One radical-plane candidate of seed i: min-image connector r = p_j − p_i and offset
+// d = ½(|r|²+w_i−w_j) of the half-space {x : r·x ≤ d} (seed frame), either sign.
+struct Cand {
+  real_t r[3];
+  real_t off;
+  int j;
+};
+
+// Every other seed's radical plane for seed i, closest-first (min-image, cubic box L).
+std::vector<Cand> candidates(int i, const std::vector<real_t>& x, const std::vector<real_t>& w,
+                             int N, real_t L) {
   const real_t Lh = real_t(0.5) * L;
   std::vector<std::pair<real_t, int>> ord;
   ord.reserve(N - 1);
@@ -67,27 +81,157 @@ int buildPowerCell(int i, const std::vector<real_t>& x, const std::vector<real_t
     ord.emplace_back(rho, j);
   }
   std::sort(ord.begin(), ord.end());
-
-  c.initBox(L, L, L);
+  std::vector<Cand> out;
+  out.reserve(ord.size());
   for (auto& pr : ord) {
-    const int j = pr.second;
-    real_t r[3];
+    Cand c;
+    c.j = pr.second;
     for (int d = 0; d < 3; ++d) {
-      real_t rr = x[3 * j + d] - x[3 * i + d];
-      rr = rr > Lh ? rr - L : (rr < -Lh ? rr + L : rr);
-      r[d] = rr;
+      real_t rr = x[3 * c.j + d] - x[3 * i + d];
+      c.r[d] = rr > Lh ? rr - L : (rr < -Lh ? rr + L : rr);
     }
-    const real_t off = real_t(0.5) * (r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + w[i] - w[j]);
-    if (off <= real_t(0))
-      return 1;  // buried
-    c.clip(r, off, j);
+    c.off = real_t(0.5) * (c.r[0] * c.r[0] + c.r[1] * c.r[1] + c.r[2] * c.r[2] + w[i] - w[c.j]);
+    out.push_back(c);
+  }
+  return out;
+}
+
+// Clip `c` (initBox(box) centred on the frame origin) by the first `nUse` candidates in order, each
+// shifted into the frame of the point y (offset d − r·y; y = 0: the seed frame). `seedBox` > 0:
+// first clip the seed-centred box of that extent as six explicit planes (±x_ax ≤ seedBox/2 ∓ y_ax),
+// so a cell touching the seed frame's box is the same set in y's frame. Returns 0 = ok, 1 = empty
+// (a clip took every vertex; `emptyAt` = that candidate's index), -1 = overflow.
+int clipCands(const std::vector<Cand>& cand, int nUse, const real_t y[3], real_t box, OracleCell& c,
+              int* emptyAt = nullptr, real_t seedBox = 0) {
+  c.initBox(box, box, box);
+  if (seedBox > 0)
+    for (int ax = 0; ax < 3; ++ax)
+      for (int sg = -1; sg <= 1; sg += 2) {
+        real_t pd[3] = {0, 0, 0};
+        pd[ax] = real_t(sg);
+        c.clip(pd, real_t(0.5) * seedBox - sg * y[ax], -1);
+      }
+  for (int k = 0; k < nUse; ++k) {
+    const Cand& q = cand[k];
+    const real_t off = q.off - (q.r[0] * y[0] + q.r[1] * y[1] + q.r[2] * y[2]);
+    c.clip(q.r, off, q.j);
     if (c.overflow)
       return -1;
+    if (c.nt == 0) {
+      if (emptyAt)
+        *emptyAt = k;
+      return 1;
+    }
   }
   return 0;
 }
 
-// Volume of the brute-force power cell (0 buried, -1 overflow).
+// Host brute-force power cell for seed i: clip the box by EVERY other seed's radical plane
+// {x : r·x ≤ ½(|r|²+w_i−w_j)}, closest-first (keeps the live-plane count bounded), either sign of
+// the offset (sign-safe planes). Returns 0 = ok, 1 = empty power cell, -1 = overflow. Generous
+// caps for the O(N) oracle.
+int buildPowerCell(int i, const std::vector<real_t>& x, const std::vector<real_t>& w, int N,
+                   real_t L, OracleCell& c) {
+  const auto cand = candidates(i, x, w, N, L);
+  const real_t y0[3] = {0, 0, 0};
+  return clipCands(cand, static_cast<int>(cand.size()), y0, L, c);
+}
+
+// The cell's faces: sorted pnbr of the planes an alive triangle references; `box` = a box face.
+std::vector<long> facesOf(const OracleCell& c, bool* box = nullptr) {
+  std::vector<long> f;
+  if (box)
+    *box = false;
+  for (int k = 0; k < c.np; ++k) {
+    bool used = false;
+    for (int t = 0; t < c.nt && !used; ++t)
+      used = c.alive[t] && (c.t0[t] == k || c.t1[t] == k || c.t2[t] == k);
+    if (!used)
+      continue;
+    if (c.pnbr[k] < 0) {
+      if (box)
+        *box = true;
+    } else {
+      f.push_back(c.pnbr[k]);
+    }
+  }
+  std::sort(f.begin(), f.end());
+  return f;
+}
+
+// Some face of the cell excludes the seed (nn < 0): the seed lies outside its cell.
+bool hasNegFace(const OracleCell& c) {
+  for (int t = 0; t < c.nt; ++t)
+    if (c.alive[t] && (c.nn[c.t0[t]] < 0 || c.nn[c.t1[t]] < 0 || c.nn[c.t2[t]] < 0))
+      return true;
+  return false;
+}
+
+// Per-face area by neighbour id (facetAreasPerVertex over the planes).
+std::vector<std::pair<long, double>> areasOf(const OracleCell& c) {
+  std::vector<real_t> a(c.np, real_t(0));
+  c.facetAreasPerVertex(a.data());
+  std::vector<std::pair<long, double>> out;
+  for (long j : facesOf(c))
+    for (int k = 0; k < c.np; ++k)
+      if (c.pnbr[k] == j) {
+        out.emplace_back(j, a[k]);
+        break;
+      }
+  return out;
+}
+
+// The translation oracle for a seed-frame oracle cell `c` built from the first nUse candidates:
+// y = mean of its live vertices; every candidate must have d − r·y > 0 (else "not interior"); the
+// cell is rebuilt in y's frame (initBox(2L) centred at y, same order — only σ = +1 planes) into
+// `ct`. Agreement: |ΔV| ≤ 1e-12 h³, facet sets equal, |ΔA| ≤ 1e-12 h², no box face. A snapshot
+// (`snapshot`: the cell before its emptying candidate, which may still touch the seed frame's box)
+// carries that box into y's frame as explicit planes, and its box faces must then agree instead.
+struct TransResult {
+  bool interior = false, agree = false;
+  double dV = 0, dA = 0, distOverSize = 0;
+};
+TransResult translationOracle(const std::vector<Cand>& cand, int nUse, const OracleCell& c,
+                              real_t L, double h, OracleCell& ct, real_t y[3],
+                              bool snapshot = false) {
+  TransResult r;
+  y[0] = y[1] = y[2] = 0;
+  int m = 0;
+  for (int t = 0; t < c.nt; ++t)
+    if (c.alive[t]) {
+      y[0] += c.vx[t];
+      y[1] += c.vy[t];
+      y[2] += c.vz[t];
+      ++m;
+    }
+  if (m == 0)
+    return r;
+  for (int d = 0; d < 3; ++d)
+    y[d] /= m;
+  for (int k = 0; k < nUse; ++k)
+    if (!(cand[k].off - (cand[k].r[0] * y[0] + cand[k].r[1] * y[1] + cand[k].r[2] * y[2]) > 0))
+      return r;  // not interior
+  r.interior = true;
+  if (clipCands(cand, nUse, y, 2 * L, ct, nullptr, snapshot ? L : real_t(0)) != 0)
+    return r;
+  const double V = c.volumePerVertex(), Vt = ct.volumePerVertex();
+  r.dV = std::abs(V - Vt);
+  r.distOverSize = std::sqrt(double(y[0]) * y[0] + double(y[1]) * y[1] + double(y[2]) * y[2]) /
+                   std::cbrt(std::max(V, 1e-300));
+  bool box = false, boxT = false;
+  const auto f = facesOf(c, &box), ft = facesOf(ct, &boxT);
+  const auto a = areasOf(c), at = areasOf(ct);
+  bool sameA = a.size() == at.size();
+  for (std::size_t k = 0; sameA && k < a.size(); ++k) {
+    sameA = a[k].first == at[k].first;
+    r.dA = std::max(r.dA, std::abs(a[k].second - at[k].second));
+  }
+  const bool boxOk = snapshot ? box == boxT : (!box && !boxT);
+  r.agree = boxOk && f == ft && sameA && r.dV <= 1e-12 * h * h * h && r.dA <= 1e-12 * h * h;
+  return r;
+}
+
+// Volume of the brute-force power cell (0 empty, -1 overflow).
 double bruteVol(int i, const std::vector<real_t>& x, const std::vector<real_t>& w, int N, real_t L,
                 std::vector<int>* nbrOut = nullptr) {
   OracleCell c;
@@ -188,7 +332,7 @@ int caseVarWeights(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   // (C) brute-force full-N radical-plane oracle on host. Check ALL cells when N is small enough.
   auto Vh = toHost(res.view.cellVolume);
   const int nCheck = std::min(N, 2000);
-  double maxRelVol = 0.0, sumOracle = 0.0, sumDevChecked = 0.0;
+  double maxRelVol = 0.0, maxAbsVol = 0.0, sumOracle = 0.0, sumDevChecked = 0.0;
   long nVolMismatch = 0, nOracleChecked = 0, nBuriedMismatch = 0;
   for (int i = 0; i < nCheck; ++i) {
     const double vb = bruteVol(i, xh, wh, N, L, nullptr);
@@ -204,17 +348,21 @@ int caseVarWeights(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
       continue;  // buried on either side: no volume comparison
     const double rel = std::abs(vb - Vh[i]) / std::max(vb, 1e-30);
     maxRelVol = std::max(maxRelVol, rel);
-    if (rel > 1e-9)
+    // Absolute criterion |ΔV| ≤ 1e-12 h³ (DESIGN_NOTE_OUTSIDE_SEED §2 and its amendment 3: a tiny
+    // cell far from its seed carries a relative error ∝ ε·(dist/size)³ in the seed frame).
+    const double h3 = double(spacing) * spacing * spacing;
+    maxAbsVol = std::max(maxAbsVol, std::abs(vb - Vh[i]) / h3);
+    if (std::abs(vb - Vh[i]) > 1e-12 * h3)
       ++nVolMismatch;
   }
   const double oracleFill = (nCheck == N) ? sumOracle / boxVol : -1.0;  // oracle space-filling
   const double devVsOracleSum = std::abs(sumDevChecked - sumOracle) / std::max(sumOracle, 1e-30);
 
   // P2 CORRECTNESS GATE: the device radical-plane build (weight-aware security cull + reach break +
-  // buried-cell detection) must reproduce an INDEPENDENT full-N brute-force power diagram —
-  // per-cell volume (maxRelVol machine-tiny, no mismatch), buried/empty membership
-  // (nBuriedMismatch==0), and reciprocal recorded facets (sumAreaMag≈0) — with no overflow. This
-  // proves the cull is conservative (drops no real face) and buried cells are handled.
+  // sign-safe planes + empty-cell clip) must reproduce an INDEPENDENT full-N brute-force power
+  // diagram — per-cell volume (|ΔV| ≤ 1e-12 h³), empty membership (nBuriedMismatch==0), and
+  // reciprocal recorded facets (sumAreaMag≈0) — with no overflow. This proves the cull is
+  // conservative (drops no real face) and outside-seed / empty cells are handled.
   //
   // NOT gated (diagnostics only): `volRelErr` (space-filling). The device matches the brute-force
   // oracle EXACTLY (devVsOracleSum≈0), yet the oracle ITSELF is not a perfect partition (oracleFill
@@ -222,13 +370,13 @@ int caseVarWeights(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   // cells — a face can require a non-nearest periodic image. Closing that needs a multi-image
   // gather (future; the near-incompressible solver runs at small weights where the error is
   // negligible).
-  const bool pass = maxRelVol < 1e-9 && nVolMismatch == 0 && nBuriedMismatch == 0 &&
-                    inv.sumAreaMag < 1e-9 && nOverflow == 0;
+  const bool pass =
+      nVolMismatch == 0 && nBuriedMismatch == 0 && inv.sumAreaMag < 1e-9 && nOverflow == 0;
   std::printf(
-      "  (B/C) var-w N=%-6d seed=%u wSpread=%.2f | oracle: n=%ld maxRelVol=%.2e nVolMism=%ld "
-      "buriedMism=%ld devVsOracle=%.2e areaClosure=%.2e | diag: nOk=%ld nEmpty=%ld volRelErr=%.2e "
-      "oracleFill=%.6f  %s\n",
-      N, seed, wSpreadFrac, nOracleChecked, maxRelVol, nVolMismatch, nBuriedMismatch,
+      "  (B/C) var-w N=%-6d seed=%u wSpread=%.2f | oracle: n=%ld maxRelVol=%.2e maxDV/h3=%.2e "
+      "nVolMism=%ld emptyMism=%ld devVsOracle=%.2e areaClosure=%.2e | diag: nOk=%ld nEmpty=%ld "
+      "volRelErr=%.2e oracleFill=%.6f  %s\n",
+      N, seed, wSpreadFrac, nOracleChecked, maxRelVol, maxAbsVol, nVolMismatch, nBuriedMismatch,
       devVsOracleSum, inv.sumAreaMag, nOk, nEmpty, inv.volRelErr, oracleFill, pass ? "OK" : "FAIL");
   return pass ? 0 : 1;
 }
@@ -262,7 +410,9 @@ int caseGradients(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   for (int i = 0; i < nCheck; ++i) {
     OracleCell c;
     if (buildPowerCell(i, xh, wh, N, L, c) != 0)
-      continue;  // buried/overflow
+      continue;  // empty/overflow
+    if (hasNegFace(c))
+      continue;  // seed outside its cell: the foot-point gradient kernels come with WO-4
     // interior filter: skip cells with any nonzero-area box-wall face (pnbr<0).
     double area[200];
     for (int k = 0; k < c.np; ++k)
@@ -703,6 +853,112 @@ int caseVoronoiConnExact(int N, unsigned seed) {
 
 }  // namespace
 
+// (I) Seeds outside their own power cell and empty power cells against the sign-safe oracle and
+// the translation oracle (header). Totals over all configurations feed the non-vacuity check.
+long gOutside = 0, gEmpty = 0;
+double gDistOverSize = 0;
+int caseOutsideSeedOracle(int n, unsigned seed, real_t W) {
+  using Mem = peclet::core::MemSpace;
+  const real_t L = 1.0, Larr[3] = {L, L, L}, h = L / n;
+  const int N = n * n * n;
+  std::mt19937 rng(seed);
+  std::vector<real_t> x = jitteredLattice(n, 0.3, rng);
+  for (auto& v : x)
+    v = v < 0 ? v + L : (v >= L ? v - L : v);
+  std::uniform_real_distribution<real_t> U(0.0, 1.0);
+  std::vector<real_t> w(N);
+  for (auto& v : w)
+    v = W * h * h * U(rng);
+  Kokkos::View<real_t*, Mem> pos("pos", 3 * N), wd("w", N);
+  Kokkos::deep_copy(pos, Kokkos::View<const real_t*, Kokkos::HostSpace>(x.data(), 3 * N));
+  Kokkos::deep_copy(wd, Kokkos::View<const real_t*, Kokkos::HostSpace>(w.data(), N));
+  Kokkos::View<long*, Mem> gd;
+  auto res = peclet::voro::buildTessellation<real_t, true>(pos, wd, N, Larr, 4, N, gd,
+                                                           peclet::voro::NoSdf{}, true);
+  const HostFacets hf = toHostFacets(res.view);
+  auto stH = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), res.status);
+  const double h3 = double(h) * h * h;
+  long nOutside = 0, nEmpty = 0, bad = 0, badTrans = 0, badCert = 0, oracleOvf = 0;
+  double maxDV = 0, maxTransDV = 0, maxTransDA = 0;
+  for (int i = 0; i < N; ++i) {
+    const auto cand = candidates(i, x, w, N, L);
+    const real_t y0[3] = {0, 0, 0};
+    OracleCell c, ct;
+    int emptyAt = -1;
+    const int rc = clipCands(cand, static_cast<int>(cand.size()), y0, L, c, &emptyAt);
+    if (rc < 0) {
+      ++oracleOvf;
+      continue;
+    }
+    const int st = stH(i);
+    const bool devEmpty = (st & peclet::voro::kEmpty) != 0;
+    real_t y[3];
+    if (rc == 1) {  // empty: certify by the validated snapshot
+      ++nEmpty;
+      OracleCell s;
+      clipCands(cand, emptyAt, y0, L, s);
+      const TransResult tr = translationOracle(cand, emptyAt, s, L, h, ct, y, true);
+      bool allOut = tr.agree;
+      const Cand& e = cand[emptyAt];
+      const real_t de = e.off - (e.r[0] * y[0] + e.r[1] * y[1] + e.r[2] * y[2]);
+      for (int t = 0; t < ct.nt && allOut; ++t)
+        if (ct.alive[t])
+          allOut = e.r[0] * ct.vx[t] + e.r[1] * ct.vy[t] + e.r[2] * ct.vz[t] > de;
+      if (!allOut)
+        ++badCert;
+      const bool ok =
+          devEmpty && (st & peclet::voro::kBuried) && hf.vol[i] == 0.0 && hf.cnt[i] == 0;
+      if (!ok) {
+        ++bad;
+        if (bad <= 5)
+          std::printf("    (I) cell %d: oracle EMPTY, device status=%d vol=%.3e facets=%d\n", i, st,
+                      hf.vol[i], hf.cnt[i]);
+      }
+      continue;
+    }
+    const TransResult tr = translationOracle(cand, static_cast<int>(cand.size()), c, L, h, ct, y);
+    if (!tr.agree) {
+      ++badTrans;
+      if (badTrans <= 5)
+        std::printf("    (I) cell %d: translation oracle interior=%d dV=%.3e dA=%.3e\n", i,
+                    (int)tr.interior, tr.dV, tr.dA);
+    }
+    maxTransDV = std::max(maxTransDV, tr.dV / h3);
+    maxTransDA = std::max(maxTransDA, tr.dA / (double(h) * h));
+    const bool neg = hasNegFace(c);
+    if (neg) {
+      ++nOutside;
+      gDistOverSize = std::max(gDistOverSize, tr.distOverSize);
+    }
+    std::vector<long> fd;
+    for (int f = hf.off[i]; f < hf.off[i] + hf.cnt[i]; ++f)
+      fd.push_back(hf.nbr[f]);
+    std::sort(fd.begin(), fd.end());
+    const double dV = std::abs(hf.vol[i] - c.volumePerVertex());
+    maxDV = std::max(maxDV, dV / h3);
+    const bool devNeg = (st & peclet::voro::kNegOffset) != 0;
+    const bool ok = !devEmpty && dV <= 1e-12 * h3 && fd == facesOf(c) && devNeg == neg;
+    if (!ok) {
+      ++bad;
+      if (bad <= 5)
+        std::printf(
+            "    (I) cell %d: status=%d dV/h3=%.3e facets dev=%zu oracle=%zu neg dev=%d "
+            "oracle=%d\n",
+            i, st, dV / h3, fd.size(), facesOf(c).size(), (int)devNeg, (int)neg);
+    }
+  }
+  gOutside += nOutside;
+  gEmpty += nEmpty;
+  const bool pass = bad == 0 && badTrans == 0 && badCert == 0 && oracleOvf == 0;
+  std::printf(
+      "  (I) outside n=%d seed=%u W=%.2f | outsideSeed=%ld empty=%ld | device vs oracle: bad=%ld "
+      "maxDV/h3=%.2e | translation: bad=%ld maxDV/h3=%.2e maxDA/h2=%.2e | emptyCertBad=%ld "
+      "oracleOvf=%ld  %s\n",
+      n, seed, W, nOutside, nEmpty, bad, maxDV, badTrans, maxTransDV, maxTransDA, badCert,
+      oracleOvf, pass ? "OK" : "FAIL");
+  return pass ? 0 : 1;
+}
+
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   int rc = 0;
@@ -727,6 +983,16 @@ int main(int argc, char** argv) {
       rc |= caseSeedOutside(8, seed);
     for (unsigned seed : {1u, 7u})
       rc |= caseVoronoiConnExact(3000, seed);
+    // W = 2.0 added because W ≤ 1.0 gave 7 empty cells (< 10; note WO-2 non-vacuity rule)
+    for (real_t W : {real_t(0.15), real_t(0.5), real_t(1.0), real_t(2.0)})
+      for (unsigned seed : {1u, 2u, 3u})
+        rc |= caseOutsideSeedOracle(8, seed, W);
+    {
+      const bool nonVacuous = gOutside >= 50 && gEmpty >= 10;
+      std::printf("  (I) totals: outsideSeed=%ld (>= 50) empty=%ld (>= 10) maxDist/size=%.2f  %s\n",
+                  gOutside, gEmpty, gDistOverSize, nonVacuous ? "OK" : "FAIL (vacuous)");
+      rc |= nonVacuous ? 0 : 1;
+    }
     std::printf("%s\n", rc == 0 ? "ALL POWER-CELL CHECKS PASS" : "POWER-CELL CHECKS FAILED");
   }
   Kokkos::finalize();

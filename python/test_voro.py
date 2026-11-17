@@ -252,25 +252,32 @@ def test_weights():
         st = t1.step(pos)
         assert not st["fell_back"]
     assert abs(t1.get_volumes().sum() / L**3 - 1.0) < 1e-2
-    # A2a diagnostics: large-spread weights on overlapping (random) balls bury cells — reported,
-    # warned, and raised under strict=True; the small weights above bury none.
+    # An empty power cell is an exact result: counted as 'buried' in the report, never warned or
+    # raised. Deterministic scene: a 6^3 lattice jittered ±0.1h, every weight 2h² except seed 0
+    # (w = 0): each of seed 0's six axis neighbours (|r| < √2 h) has d = ½(|r|² − 2h²) < 0, and the
+    # opposite pairs exclude each other, so cell 0 is empty.
     rep = t1.diagnostics.build_report()
     import warnings
-    wbig = (rng.random(N) * 2.0 * spacing) ** 2
-    t1.set_weights(wbig)
+    ne = 6
+    he = L / ne
+    g = (np.indices((ne, ne, ne)).reshape(3, -1).T[:, ::-1] + 0.5) * he
+    pe = (g + 0.1 * he * (2 * np.random.default_rng(7).random(g.shape) - 1)) % L
+    we = np.full(ne**3, 2.0 * he * he)
+    we[0] = 0.0
+    te = voro.Tessellation()
+    te.set_domain(extent=(L, L, L))
+    te.set_weights(we)
     with warnings.catch_warnings(record=True) as w:
         warnings.simplefilter("always")
-        t1.build(pos)
-        assert any("buried" in str(x.message) for x in w)
-    big = t1.diagnostics.build_report()
-    assert big["buried"] > 0
-    try:
-        t1.build(pos, strict=True)
-        raise AssertionError("strict build must raise on buried cells")
-    except RuntimeError:
-        pass
+        te.build(pe)
+        assert not any("guaranteed-exact" in str(x.message) for x in w), [str(x.message) for x in w]
+    big = te.diagnostics.build_report()
+    assert big["buried"] >= 1 and big["overflow"] == 0, big
+    te.build(pe, strict=True)  # must not raise
+    ve = te.get_volumes()
+    assert ve[0] == 0.0 and abs(ve.sum() / L**3 - 1.0) < 1e-12, (ve[0], ve.sum())
     print(f"  Weights:      N={N}  power volumes sum err={err:.1e} (periodic min-image floor); "
-          f"small-w report {rep}; large-w buried={big['buried']}")
+          f"small-w report {rep}; empty-cell scene buried={big['buried']}")
 
 
 def test_energy_forces():
