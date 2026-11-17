@@ -899,6 +899,117 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     return b[0] != 0.0 || b[1] != 0.0;
   }
 
+  // ---- PRIVATE: the bitwise restart (M7 WO-S2b) ----
+  // A fresh flow does not reproduce a running one: the tessellation is repaired, not cold-built,
+  // and the integrator holds lagged state (AMG hierarchies, warm starts, the kick's history). The
+  // re-sort is where a running flow itself cold-builds and re-prepares, carrying only v, t, the
+  // accumulators, the gauge's debts and Carried. With `restartable` every re-sort does so (also
+  // when the Morton order is unchanged), and a flow saved at a re-sort boundary is restored by
+  // replaying that re-sort: restart_state() + set_restart_state() == the continuing run, bit for
+  // bit.
+  void set_restartable(bool on) { restartable_ = on; }
+  /// Accepted steps until the next re-sort (0: the next step() re-sorts first); -1 when off.
+  int steps_to_resort() const {
+    return relabelEvery_ > 0 ? std::max(relabelEvery_ - sinceRelabel_, 0) : -1;
+  }
+  /// Δt of the step rule (CFL, capillary, binding bounds) without the set_dt() cap.
+  double step_bound() {
+    prepare();
+    double tau = 0;
+    withInteg([&](auto& I) { tau = I.stableStep(cfl_, cap_, 0.0); });
+    return tau;
+  }
+  nb::dict restart_state() {
+    if (!restartable_ || steps_to_resort() != 0)
+      throw std::runtime_error(
+          "voro: LagrangianFlow._restart_state(): only on a restartable flow at a re-sort "
+          "boundary (_set_restartable(True); step until _steps_to_resort() == 0)");
+    prepare();
+    pull();
+    Carried c = carried();
+    const Tess& t = *t_;
+    const int N = t.N_;
+    std::vector<int> perm(t.perm_);
+    if (perm.empty())
+      for (int k = 0; k < N; ++k)
+        perm.push_back(k);
+    namespace py = peclet::core::python;
+    nb::dict d;  // per-cell arrays in this flow's cell order; `perm` maps it to the caller's
+    d["perm"] = py::vector_to_ndarray(std::move(perm), {static_cast<std::size_t>(N)}, {1});
+    d["positions"] = toNumpy3(peclet::core::toVector(t.pos_));
+    d["weights"] = toNumpy1(std::vector<real_t>(t.wHost_));
+    d["velocity"] = toNumpy3(std::vector<real_t>(vel_));
+    d["lambda"] = toNumpy1(std::move(c.lam));
+    d["delta"] = toNumpy1(std::move(c.delta));
+    d["lambda_prev"] = toNumpy1(std::move(c.lamPrev));
+    d["v_half"] = toNumpy1(std::move(c.vHalf));
+    d["step_count"] = c.count;
+    d["tau_prev"] = c.tauPrev;
+    d["time"] = static_cast<double>(time_);
+    d["accumulators"] = toNumpy1(std::vector<real_t>(acc_.begin(), acc_.end()));
+    d["gauge_debt"] = gaugeDebt_;
+    d["gauge_binding"] = gaugeBinding_;
+    return d;
+  }
+  /// On a fresh restartable flow over a Tessellation built from the saved (x, w) in the caller's
+  /// order: the saved cell order (a cold build), the host state, then the re-sort of the saved run.
+  void set_restart_state(nb::dict d) {
+    Tess& t = *t_;
+    checkOrder();
+    if (!restartable_)
+      throw std::runtime_error(
+          "voro: LagrangianFlow._set_restart_state(): _set_restartable(True) first");
+    const int N = t.N_;
+    auto arr = [&](const char* k) {
+      return flatten1(nb::cast<nb::ndarray<real_t, nb::c_contig>>(d[k]));
+    };
+    auto arr3 = [&](const char* k) {
+      return flatten3(nb::cast<nb::ndarray<real_t, nb::c_contig>>(d[k]));
+    };
+    const auto pa = nb::cast<nb::ndarray<int, nb::c_contig>>(d["perm"]);
+    if (static_cast<int>(pa.size()) != N)
+      throw std::runtime_error("voro: LagrangianFlow._set_restart_state(): perm is not (N,)");
+    std::vector<int> inv(N, -1), order(N);
+    for (int k = 0; k < N; ++k)
+      inv[t.perm_.empty() ? k : t.perm_[k]] = k;
+    for (int k = 0; k < N; ++k) {
+      const int c = pa.data()[k];
+      if (c < 0 || c >= N || inv[c] < 0)
+        throw std::runtime_error(
+            "voro: LagrangianFlow._set_restart_state(): perm is not a permutation");
+      order[k] = inv[c];
+      inv[c] = -1;
+    }
+    pull();
+    i0_.reset();
+    i1_.reset();
+    types_ = cellsToInternal(order, std::move(types_), 1);
+    V0_ = cellsToInternal(order, std::move(V0_), 1);
+    t.relabel(order);
+    relabels_ = t.relabels_;
+    ordered_ = true;
+    if (peclet::core::toVector(t.pos_) != arr3("positions") || t.wHost_ != arr("weights"))
+      throw std::runtime_error(
+          "voro: LagrangianFlow._set_restart_state(): the Tessellation's (x, w) are not the saved "
+          "ones (build it from the saved positions and weights)");
+    vel_ = arr3("velocity");
+    time_ = nb::cast<double>(d["time"]);
+    const auto acc = arr("accumulators");
+    for (std::size_t e = 0; e < acc_.size(); ++e)
+      acc_[e] = acc.at(e);
+    gaugeDebt_ = nb::cast<double>(d["gauge_debt"]);
+    gaugeBinding_ = nb::cast<double>(d["gauge_binding"]);
+    dirty_ = true;
+    Carried c;
+    c.lam = arr("lambda");
+    c.delta = arr("delta");
+    c.lamPrev = arr("lambda_prev");
+    c.vHalf = arr("v_half");
+    c.count = nb::cast<long>(d["step_count"]);
+    c.tauPrev = nb::cast<double>(d["tau_prev"]);
+    resortWith(std::move(c), true);
+  }
+
   /// PRIVATE: the offset binding at the current state ({} when off or skipped).
   nb::dict binding_state() {
     prepare();
@@ -1147,7 +1258,9 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   /// operators, AMG and the repair; the caller's order is kept by Tess::perm_). Permutes this
   /// flow's per-cell host state and the Tessellation (cold rebuild), marking the integrator for a
   /// re-preparation. Returns the gather order, empty when the cells already are in that order.
-  std::vector<int> relabelCells() {
+  /// `force` (the restartable re-sort): relabel, cold-rebuild and re-prepare also when the cells
+  /// already are in that order (the identity is then returned).
+  std::vector<int> relabelCells(bool force = false) {
     Tess& t = *t_;
     ordered_ = true;
     sinceRelabel_ = 0;
@@ -1155,7 +1268,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
     bool identity = true;
     for (std::size_t k = 0; k < order.size() && identity; ++k)
       identity = order[k] == static_cast<int>(k);
-    if (identity)
+    if (identity && !force)
       return {};
     pull();  // the integrator's state is now on the host; it is rebuilt in the new order
     i0_.reset();
@@ -1172,34 +1285,43 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   /// The periodic re-sort of a running flow: relabel, re-prepare, and carry λ₂ (kick 1's warm
   /// start), the gauge's step count, the drift gauge's pending δⁿ and the 'pressure' kick's
   /// history (λⁿ⁻¹, v^{n−½}, τ_prev) into the new integrator.
-  void resort() {
+  void resort() { resortWith(carried(), restartable_); }
+
+  /// What the re-sort carries into the new integrator, in the old integrator's cell order.
+  struct Carried {
     std::vector<real_t> lam, delta, lamPrev, vHalf;
     long count = 0;
     double tauPrev = 0;
+  };
+  Carried carried() {
+    Carried c;
     withInteg([&](auto& I) {
-      lam = peclet::core::toVector(I.lambda());
-      count = I.stepCount();
-      delta = I.pendingDelta();
+      c.lam = peclet::core::toVector(I.lambda());
+      c.count = I.stepCount();
+      c.delta = I.pendingDelta();
       auto h = I.kickHistory();
-      lamPrev = std::move(h.lamPrev);
-      vHalf = std::move(h.vHalf);
-      tauPrev = h.tauPrev;
+      c.lamPrev = std::move(h.lamPrev);
+      c.vHalf = std::move(h.vHalf);
+      c.tauPrev = h.tauPrev;
     });
-    const std::vector<int> order = relabelCells();
+    return c;
+  }
+  void resortWith(Carried c, bool force) {
+    const std::vector<int> order = relabelCells(force);
     if (order.empty())
       return;
     prepare();
-    lam = cellsToInternal(order, std::move(lam), 1);
-    if (!delta.empty())
-      delta = cellsToInternal(order, std::move(delta), 3);
-    if (!lamPrev.empty()) {
-      lamPrev = cellsToInternal(order, std::move(lamPrev), 1);
-      vHalf = cellsToInternal(order, std::move(vHalf), 3);
+    c.lam = cellsToInternal(order, std::move(c.lam), 1);
+    if (!c.delta.empty())
+      c.delta = cellsToInternal(order, std::move(c.delta), 3);
+    if (!c.lamPrev.empty()) {
+      c.lamPrev = cellsToInternal(order, std::move(c.lamPrev), 1);
+      c.vHalf = cellsToInternal(order, std::move(c.vHalf), 3);
     }
     withInteg([&](auto& I) {
-      I.setWarmStart(lam, count);
-      I.setPendingDelta(delta);
-      I.setKickHistory({std::move(lamPrev), std::move(vHalf), tauPrev});
+      I.setWarmStart(c.lam, c.count);
+      I.setPendingDelta(c.delta);
+      I.setKickHistory({std::move(c.lamPrev), std::move(c.vHalf), c.tauPrev});
     });
   }
 
@@ -1354,7 +1476,8 @@ class LagrangianFlow : public peclet::core::python::Releasable {
   // over 180 Taylor-Green steps (gamma 6), the step time within noise of K = 20 over that run
   int relabelEvery_ = 100, sinceRelabel_ = 0;
   bool ordered_ = false;
-  unsigned relabels_ = 0;  ///< Tess::relabels_ the per-cell state was gathered at
+  bool restartable_ = false;  ///< every re-sort re-prepares (the private bitwise restart)
+  unsigned relabels_ = 0;     ///< Tess::relabels_ the per-cell state was gathered at
   std::optional<real_t> rhoRef_;
   real_t dtUser_ = 0, cfl_ = 0.2, cap_ = 0.5, time_ = 0, lastDt_ = 0, theta_ = 0.5;
   std::array<double, 6> acc_{0, 0, 0, 0, 0, 0};
@@ -1440,6 +1563,19 @@ void bindLagrangian(nb::module_& m) {
            "PRIVATE (placeholder name): the offset binding U_b = sigma sum_i (beta0 + beta chi_i)\n"
            "|x_i - B_i|^2 (DESIGN_NOTE_BINDING 18.5). Default: beta 0.1, beta0 1e-3 with\n"
            "'nonlocal_exact', off otherwise; (0, 0) switches it off.")
+      .def("_set_restartable", &LagrangianFlow::set_restartable, nb::arg("on"),
+           "PRIVATE (M7 WO-S2b): every re-sort cold-builds and re-prepares, also when the Morton\n"
+           "order is unchanged, so a run saved at a re-sort boundary restarts bit for bit.")
+      .def("_steps_to_resort", &LagrangianFlow::steps_to_resort,
+           "PRIVATE: accepted steps until the next re-sort (0: at a boundary); -1 when off.")
+      .def("_step_bound", &LagrangianFlow::step_bound,
+           "PRIVATE: the step rule's dt (CFL, capillary, binding) without the set_dt() cap.")
+      .def("_restart_state", &LagrangianFlow::restart_state,
+           "PRIVATE: the state a restartable flow carries over its next re-sort (call at\n"
+           "_steps_to_resort() == 0); per-cell arrays in the flow's cell order, 'perm' -> caller.")
+      .def("_set_restart_state", &LagrangianFlow::set_restart_state, nb::arg("state"),
+           "PRIVATE: restore _restart_state() on a fresh restartable flow whose Tessellation was\n"
+           "built from the saved caller-order positions and weights (same options as the run).")
       .def("_binding_state", &LagrangianFlow::binding_state,
            "PRIVATE: the offset binding at the current state, {} when off or skipped: 'energy',\n"
            "'chi' (N,), 'offset' (N,3) = x_i - B_i, 'pi' (N,) = pi_b (H pi_b = -dU_b/dw),\n"
