@@ -44,7 +44,11 @@
  * cells whose face list does not close, |Σ A_f n_f| > 1e-13 Σ A_f (WO-S0.5 item 5; a diagnostic:
  * `closure=MISS` does not fail the test).
  * Usage: test_ale_frame [n=16] [--part a|b|c|f|g|all] [--full] [--opts auto|default|frame|det]
- *                       [--dump DIR] [--time] [--diag]
+ *                       [--dump DIR] [--time] [--diag] [--s06 F] [--tol T]
+ * --s06 F (WO-S0.6): in (g), S06FRAME / S06CELL lines for the first F frames with cells that do
+ *        not close (each facet's area vector from the walked polygon and per vertex, the
+ *        hypothesis counts, the worst cells against a cold build). --tol T: the repair's
+ *        certificate tolerance in units of h (default 1e-4). Neither changes a default run.
  * --diag (WO-S1.1b): in (a), the per-array difference of the first differing frame against frame 0
  * (elements, max ulp, max relative), the frames 2.. that differ from frame 1, and hashes of
  * frame 0, frame 1 and the last frame (to compare two runs).
@@ -127,9 +131,12 @@ Scene makeScene(int n) {
   return s;
 }
 
+/// --tol F (WO-S0.6, diagnostic): the repair's certificate tolerance in units of h (default 1e-4).
+double g_tolFactor = 1e-4;
+
 template <bool W>
 void allocEngine(Engine<W>& mt, int N, const Real L[3], Real h, const DV& weight) {
-  mt.alloc(N, L, Real(1e-4) * h, Real(0.25) * h, 4, N);
+  mt.alloc(N, L, Real(g_tolFactor) * h, Real(0.25) * h, 4, N);
   if constexpr (W)
     mt.setWeights(weight);
 }
@@ -687,6 +694,397 @@ void unmatchedFacets(const peclet::voro::TessellationView<Real>& a,
   }
 }
 
+// ---- --s06 F (WO-S0.6, diagnostic): why the cells of a repaired frame do not close
+// ---------------
+int g_s06Frames = 0;  ///< diagnose the first F frames of each run that have offending cells
+
+/// Rotate the canonical (det > 0) plane triple of triangle t so that plane k comes first: (k, p,
+/// q).
+template <class Cell>
+KOKKOS_INLINE_FUNCTION void s06Rot(const Cell& c, int t, int k, int& p, int& q) {
+  int a = c.t0[t], b = c.t1[t], d = c.t2[t];
+  const Real* na = c.n[a];
+  const Real* nb = c.n[b];
+  const Real* nd = c.n[d];
+  const Real det = na[0] * (nb[1] * nd[2] - nb[2] * nd[1]) +
+                   na[1] * (nb[2] * nd[0] - nb[0] * nd[2]) +
+                   na[2] * (nb[0] * nd[1] - nb[1] * nd[0]);
+  if (det < Real(0)) {
+    const int s = b;
+    b = d;
+    d = s;
+  }
+  if (a == k) {
+    p = b;
+    q = d;
+  } else if (b == k) {
+    p = d;
+    q = a;
+  } else {
+    p = a;
+    q = b;
+  }
+}
+
+/// Per cell of a repaired frame, over the stored topology re-evaluated at the frame's positions
+/// (as reevalPublish does): each facet's area vector three ways besides the published one —
+/// (W) the polygon in the order of the dual-triangle adjacency (walk across edge (k,q) of the
+/// canonical triple, outward by construction), (R) the same polygon oriented like facetGeometry
+/// (A·n_k ≥ 0), (V) the per-vertex sum geomVolumeArea — and per cell the counts that test the
+/// hypotheses of WO-S0.6. Prints S06FRAME (summary) and S06CELL (worst offending cells) lines.
+template <class EngineT>
+void s06Diag(EngineT& mt, const Frame& f, const Scene& s, const DV& pos, const DV& weight,
+             const char* vname, int enforce, int frame, double rel) {
+  using Policy = typename EngineT::PlanePolicy;
+  using Cell = peclet::voro::ConvexCell<Real, kP, kT, false>;
+  using HostV = Kokkos::HostSpace;
+  constexpr int MAXFV = Cell::MAXFV;
+  const int N = s.N;
+  const auto view = peclet::voro::reevalPublish<Real, kP, kT, Policy>(
+      mt.store, f.pos, mt.vol, N, s.L, mt.wall, mt.xRef, false, false, f.weight);
+  const int nFac = (int)view.facetNeighbor.extent(0);
+  DV aW("s06.aW", 3 * (size_t)nFac), aR("s06.aR", 3 * (size_t)nFac), aV("s06.aV", 3 * (size_t)nFac);
+  Kokkos::View<int**, Mem> ci("s06.ci", N, 8);
+  DV poke("s06.poke", N);
+  {
+    auto st = mt.store;
+    DV P = f.pos, W = f.weight;
+    auto off = view.cellFacetOffset;
+    const Real Lx = s.L[0], Ly = s.L[1], Lz = s.L[2], h = s.h;
+    Kokkos::parallel_for(
+        "s06.cells", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+          Cell c;
+          st.load(i, c, Lx, Ly, Lz);
+          const Real* wPtr = W.data();
+          (void)wPtr;
+          if constexpr (Policy::kHasWeightDof)
+            c.template reevalGeometry<Policy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
+                                              wPtr[i], wPtr);
+          else
+            c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
+          Real vol = 0, avx[kP], avy[kP], avz[kP], dgx[kP], dgy[kP], dgz[kP];
+          for (int k = 0; k < kP; ++k)
+            avx[k] = avy[k] = avz[k] = dgx[k] = dgy[k] = dgz[k] = 0;
+          c.geomVolumeArea(vol, avx, avy, avz, dgx, dgy, dgz);
+          int nRe = 0, nWF = 0, nFG = 0, nRx = 0, nInc = 0, nNeg = 0, nDup = 0, nFaces = 0;
+          int idx = 0;
+          const int b = off(i);
+          for (int k = 0; k < c.np; ++k) {
+            int T[MAXFV], m = 0;
+            for (int t = 0; t < c.nt; ++t)
+              if (c.alive[t] && (c.t0[t] == k || c.t1[t] == k || c.t2[t] == k)) {
+                if (m < MAXFV)
+                  T[m] = t;
+                ++m;
+              }
+            if (m < 3)
+              continue;  // the publish criterion (>= 3 incident live triangles)
+            const size_t g = (size_t)(b + idx);
+            ++idx;
+            ++nFaces;
+            Real ar[3] = {0, 0, 0}, dv[3], cn[3] = {2 * c.n[k][0], 2 * c.n[k][1], 2 * c.n[k][2]};
+            if (!c.facetGeometry(k, ar, dv, cn))
+              ++nFG;  // (b): a face of the topology published as zero
+            int ang[MAXFV];
+            const int ma = c.faceOrderedIdx(k, ang);
+            // walk the face along the triangle adjacency
+            int seq[MAXFV], ms = 0, p0, q0;
+            bool ok = m <= MAXFV, closed = false;
+            s06Rot(c, T[0], k, p0, q0);
+            seq[ms++] = T[0];
+            int cur = T[0], edge = q0;
+            for (int step = 0; ok && step < m; ++step) {
+              int nxt = -1, cnt = 0;
+              for (int u = 0; u < m; ++u) {
+                const int t = T[u];
+                if (t == cur)
+                  continue;
+                if (c.t0[t] == edge || c.t1[t] == edge || c.t2[t] == edge) {
+                  nxt = t;
+                  ++cnt;
+                }
+              }
+              if (cnt != 1) {
+                ok = false;
+                break;
+              }
+              int p, q;
+              s06Rot(c, nxt, k, p, q);
+              if (p != edge)
+                ++nInc;  // the corner's canonical orientation disagrees with the walk
+              const int nextEdge = p == edge ? q : p;
+              if (nxt == T[0]) {
+                closed = true;
+                break;
+              }
+              if (ms < MAXFV)
+                seq[ms++] = nxt;
+              cur = nxt;
+              edge = nextEdge;
+            }
+            ok = ok && closed && ms == m;
+            Real A[3] = {0, 0, 0};
+            if (ok) {
+              for (int u = 0; u < m; ++u) {
+                const int a = seq[u], bb = seq[(u + 1) % m];
+                A[0] += c.vy[a] * c.vz[bb] - c.vz[a] * c.vy[bb];
+                A[1] += c.vz[a] * c.vx[bb] - c.vx[a] * c.vz[bb];
+                A[2] += c.vx[a] * c.vy[bb] - c.vy[a] * c.vx[bb];
+                const int z = seq[(u + m - 1) % m];
+                const Real e1[3] = {c.vx[a] - c.vx[z], c.vy[a] - c.vy[z], c.vz[a] - c.vz[z]};
+                const Real e2[3] = {c.vx[bb] - c.vx[a], c.vy[bb] - c.vy[a], c.vz[bb] - c.vz[a]};
+                const Real x = (e1[1] * e2[2] - e1[2] * e2[1]) * c.n[k][0] +
+                               (e1[2] * e2[0] - e1[0] * e2[2]) * c.n[k][1] +
+                               (e1[0] * e2[1] - e1[1] * e2[0]) * c.n[k][2];
+                nRx += x < Real(0) ? 1 : 0;  // a reflex (inverted) corner of the walked polygon
+              }
+              for (int d = 0; d < 3; ++d)
+                A[d] *= Real(0.5);
+              // (e): does the angular order of faceOrderedIdx differ from the walk (cyclically,
+              // either direction)?
+              int s0 = -1;
+              for (int u = 0; u < ma; ++u)
+                if (ang[u] == seq[0])
+                  s0 = u;
+              bool fw = ma == m && s0 >= 0, bw = fw;
+              for (int u = 0; fw && u < m; ++u)
+                fw = ang[(s0 + u) % m] == seq[u];
+              for (int u = 0; bw && u < m; ++u)
+                bw = ang[(s0 - u + m) % m] == seq[u];
+              nRe += (fw || bw) ? 0 : 1;
+            } else {
+              ++nWF;
+              for (int d = 0; d < 3; ++d)
+                A[d] = ar[d];
+            }
+            const Real an = A[0] * c.n[k][0] + A[1] * c.n[k][1] + A[2] * c.n[k][2];
+            nNeg += an < Real(0) ? 1 : 0;
+            for (int d = 0; d < 3; ++d) {
+              aW(3 * g + d) = A[d];
+              aR(3 * g + d) = an < Real(0) ? -A[d] : A[d];
+            }
+            aV(3 * g) = avx[k];
+            aV(3 * g + 1) = avy[k];
+            aV(3 * g + 2) = avz[k];
+          }
+          // (c): two live triangles on the same plane triple
+          for (int t = 0; t < c.nt; ++t)
+            for (int u = t + 1; u < c.nt; ++u)
+              if (c.alive[t] && c.alive[u]) {
+                const int a0 = c.t0[t], a1 = c.t1[t], a2 = c.t2[t];
+                const int b0 = c.t0[u], b1 = c.t1[u], b2 = c.t2[u];
+                const bool has0 = b0 == a0 || b1 == a0 || b2 == a0;
+                const bool has1 = b0 == a1 || b1 == a1 || b2 == a1;
+                const bool has2 = b0 == a2 || b1 == a2 || b2 == a2;
+                nDup += (has0 && has1 && has2) ? 1 : 0;
+              }
+          // how far the kept topology is from exact: largest distance of a vertex outside a plane
+          Real pk = 0;
+          for (int t = 0; t < c.nt; ++t) {
+            if (!c.alive[t])
+              continue;
+            for (int k = 0; k < c.np; ++k) {
+              if (k == c.t0[t] || k == c.t1[t] || k == c.t2[t] || c.nn[k] <= Real(0))
+                continue;
+              const Real d =
+                  (c.n[k][0] * c.vx[t] + c.n[k][1] * c.vy[t] + c.n[k][2] * c.vz[t] - c.nn[k]) /
+                  Kokkos::sqrt(c.nn[k]);
+              pk = d > pk ? d : pk;
+            }
+          }
+          poke(i) = pk / h;
+          ci(i, 0) = nRe;
+          ci(i, 1) = nWF;
+          ci(i, 2) = nFG;
+          ci(i, 3) = nRx;
+          ci(i, 4) = nInc;
+          ci(i, 5) = nNeg;
+          ci(i, 6) = nDup;
+          ci(i, 7) = nFaces;
+        });
+  }
+  // ---- host: closures of the cells on their own facets and through the face mesh
+  auto hc = Kokkos::create_mirror_view_and_copy(HostV(), ci);
+  auto hpk = Kokkos::create_mirror_view_and_copy(HostV(), poke);
+  auto hW = Kokkos::create_mirror_view_and_copy(HostV(), aW);
+  auto hR = Kokkos::create_mirror_view_and_copy(HostV(), aR);
+  auto hV = Kokkos::create_mirror_view_and_copy(HostV(), aV);
+  auto hP = Kokkos::create_mirror_view_and_copy(HostV(), view.facetArea);
+  auto hOff = Kokkos::create_mirror_view_and_copy(HostV(), view.cellFacetOffset);
+  auto hCnt = Kokkos::create_mirror_view_and_copy(HostV(), view.cellFacetCount);
+  auto hNbr = Kokkos::create_mirror_view_and_copy(HostV(), view.facetNeighbor);
+  const FM& m = f.mesh;
+  auto mOff = Kokkos::create_mirror_view_and_copy(HostV(), m.cellFaceOffset);
+  auto mCf = Kokkos::create_mirror_view_and_copy(HostV(), m.cellFace);
+  auto mSg = Kokkos::create_mirror_view_and_copy(HostV(), m.cellFaceSign);
+  auto mA = Kokkos::create_mirror_view_and_copy(HostV(), m.faceArea);
+  auto mN = Kokkos::create_mirror_view_and_copy(HostV(), m.faceNormal);
+  auto mF = Kokkos::create_mirror_view_and_copy(HostV(), m.faceFacet);
+  auto pf = Kokkos::create_mirror_view_and_copy(HostV(), f.pos);
+  auto pt = Kokkos::create_mirror_view_and_copy(HostV(), pos);
+  double posDiff = 0;  // (d): the frame's snapshot against the positions the test moved to
+  for (size_t q = 0; q < pf.extent(0); ++q)
+    posDiff = std::max(posDiff, std::abs((double)pf(q) - (double)pt(q)));
+  auto nrm = [](const double v[3]) { return std::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); };
+  // own closure of cell i with per-facet vectors X (published P, walk W, walk oriented R, vertex V)
+  auto own = [&](auto& X, int i, double& asum) {
+    double v[3] = {0, 0, 0};
+    asum = 0;
+    for (int g = hOff(i); g < hOff(i) + hCnt(i); ++g) {
+      for (int d = 0; d < 3; ++d)
+        v[d] += (double)X(3 * g + d);
+      const double pa[3] = {(double)hP(3 * g), (double)hP(3 * g + 1), (double)hP(3 * g + 2)};
+      asum += nrm(pa);
+    }
+    return nrm(v) / (asum > 0 ? asum : 1.0);
+  };
+  // face-mesh closure of cell i with the owner facet's vector X in place of the published one
+  auto meshCl = [&](auto& X, int i) {
+    double v[3] = {0, 0, 0}, asum = 0;
+    for (int q = mOff(i); q < mOff(i + 1); ++q) {
+      const int fc = mCf(q), g = mF(fc);
+      const double sg = (double)mSg(q);
+      const double nf[3] = {(double)mN(3 * fc), (double)mN(3 * fc + 1), (double)mN(3 * fc + 2)};
+      const double pa[3] = {(double)hP(3 * g), (double)hP(3 * g + 1), (double)hP(3 * g + 2)};
+      const double sgn = pa[0] * nf[0] + pa[1] * nf[1] + pa[2] * nf[2] < 0 ? -1.0 : 1.0;
+      for (int d = 0; d < 3; ++d)
+        v[d] += sg * sgn * (double)X(3 * g + d);
+      asum += (double)mA(fc);
+    }
+    return nrm(v) / (asum > 0 ? asum : 1.0);
+  };
+  // facet i -> j lookup (for the two sides of a pair)
+  auto facetTo = [&](int i, long j) {
+    for (int g = hOff(i); g < hOff(i) + hCnt(i); ++g)
+      if ((long)hNbr(g) == j)
+        return g;
+    return -1;
+  };
+  struct Row {
+    int i;
+    double mesh, ownP, ownW, ownR, ownV, meshW, meshR, meshV, asymP, asymW, asumI;
+  };
+  std::vector<Row> rows;
+  double mx[11] = {
+      0};  // over ALL cells: mesh ownP ownW ownR ownV meshW meshR meshV asymP asymW poke
+  long tot[8] = {0}, totBad[8] = {0};
+  double pokeBad = 0;
+  for (int i = 0; i < N; ++i) {
+    Row r{};
+    r.i = i;
+    double asum = 0;
+    r.ownP = own(hP, i, asum);
+    r.asumI = asum;
+    r.ownW = own(hW, i, asum);
+    r.ownR = own(hR, i, asum);
+    r.ownV = own(hV, i, asum);
+    r.mesh = meshCl(hP, i);
+    r.meshW = meshCl(hW, i);
+    r.meshR = meshCl(hR, i);
+    r.meshV = meshCl(hV, i);
+    // the two sides of each reciprocal pair: |A_ij + A_ji| summed over the cell's facets / Σ|A|
+    for (int g = hOff(i); g < hOff(i) + hCnt(i); ++g) {
+      const long j = (long)hNbr(g);
+      const int gb = j >= 0 && j < N ? facetTo((int)j, i) : -1;
+      if (gb < 0)
+        continue;
+      double dp[3], dw[3];
+      for (int d = 0; d < 3; ++d) {
+        dp[d] = (double)hP(3 * g + d) + (double)hP(3 * gb + d);
+        dw[d] = (double)hW(3 * g + d) + (double)hW(3 * gb + d);
+      }
+      r.asymP += nrm(dp) / r.asumI;
+      r.asymW += nrm(dw) / r.asumI;
+    }
+    const double vals[11] = {r.mesh,  r.ownP,  r.ownW,  r.ownR,  r.ownV,        r.meshW,
+                             r.meshR, r.meshV, r.asymP, r.asymW, (double)hpk(i)};
+    for (int q = 0; q < 11; ++q)
+      mx[q] = std::max(mx[q], vals[q]);
+    for (int q = 0; q < 8; ++q)
+      tot[q] += hc(i, q);
+    if (r.mesh > rel) {
+      for (int q = 0; q < 8; ++q)
+        totBad[q] += hc(i, q);
+      pokeBad = std::max(pokeBad, (double)hpk(i));
+      rows.push_back(r);
+    }
+  }
+  std::printf(
+      "S06FRAME variant=%s enforce=%d k=%d bad=%zu posDiff=%.1e max(all cells): mesh=%.2e "
+      "ownPub=%.2e ownWalk=%.2e ownWalkR=%.2e ownVertex=%.2e meshWalk=%.2e meshWalkR=%.2e "
+      "meshVertex=%.2e asymPub=%.2e asymWalk=%.2e poke/h=%.2e | counts all(bad): faces=%ld(%ld) "
+      "reordered=%ld(%ld) walkFail=%ld(%ld) fgFalse=%ld(%ld) reflex=%ld(%ld) inconsistent=%ld(%ld) "
+      "negWalk=%ld(%ld) dupTri=%ld(%ld) poke/h(bad)=%.2e\n",
+      vname, enforce, frame, rows.size(), posDiff, mx[0], mx[1], mx[2], mx[3], mx[4], mx[5], mx[6],
+      mx[7], mx[8], mx[9], mx[10], tot[7], totBad[7], tot[0], totBad[0], tot[1], totBad[1], tot[2],
+      totBad[2], tot[3], totBad[3], tot[4], totBad[4], tot[5], totBad[5], tot[6], totBad[6],
+      pokeBad);
+  // the worst offending cells, each against a cold build at the same positions
+  std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) { return a.mesh > b.mesh; });
+  if (rows.empty())
+    return;
+  // the cold reference: a fresh engine's initial frame at the same positions (cold build + the
+  // step at rest, A11), published like the repaired one (the cold buildTessellation of coldBuild
+  // carries no force geometry)
+  Engine<true> ce;
+  allocEngine<true>(ce, N, s.L, s.h, weight);
+  const Frame cf = ale::initialFrame(ce, pos, s.L, FrameOpts{});
+  const auto cview = peclet::voro::reevalPublish<Real, kP, kT, Policy>(
+      ce.store, cf.pos, ce.vol, N, s.L, ce.wall, ce.xRef, false, false, cf.weight);
+  auto cOff = Kokkos::create_mirror_view_and_copy(HostV(), cview.cellFacetOffset);
+  auto cCnt = Kokkos::create_mirror_view_and_copy(HostV(), cview.cellFacetCount);
+  auto cNbr = Kokkos::create_mirror_view_and_copy(HostV(), cview.facetNeighbor);
+  auto cA = Kokkos::create_mirror_view_and_copy(HostV(), cview.facetArea);
+  for (size_t q = 0; q < rows.size() && q < 6; ++q) {
+    const Row& r = rows[q];
+    const int i = r.i;
+    int missing = 0, extra = 0;
+    double dPub = 0, dWalk = 0, extraA = 0, missA = 0, worstA = 0, worstJ = -1;
+    for (int g = hOff(i); g < hOff(i) + hCnt(i); ++g) {
+      int gc = -1;
+      for (int u = cOff(i); u < cOff(i) + cCnt(i); ++u)
+        if (cNbr(u) == hNbr(g))
+          gc = u;
+      const double pa[3] = {(double)hP(3 * g), (double)hP(3 * g + 1), (double)hP(3 * g + 2)};
+      if (gc < 0) {
+        ++extra;
+        extraA = std::max(extraA, nrm(pa) / r.asumI);
+        continue;
+      }
+      double dp[3], dw[3];
+      for (int d = 0; d < 3; ++d) {
+        dp[d] = pa[d] - (double)cA(3 * gc + d);
+        dw[d] = (double)hW(3 * g + d) - (double)cA(3 * gc + d);
+      }
+      if (nrm(dp) / r.asumI > dPub) {
+        dPub = nrm(dp) / r.asumI;
+        worstA = nrm(pa) / r.asumI;
+        worstJ = (double)hNbr(g);
+      }
+      dWalk = std::max(dWalk, nrm(dw) / r.asumI);
+    }
+    for (int u = cOff(i); u < cOff(i) + cCnt(i); ++u) {
+      bool found = false;
+      for (int g = hOff(i); g < hOff(i) + hCnt(i); ++g)
+        found = found || cNbr(u) == hNbr(g);
+      if (!found) {
+        ++missing;
+        const double ca[3] = {(double)cA(3 * u), (double)cA(3 * u + 1), (double)cA(3 * u + 2)};
+        missA = std::max(missA, nrm(ca) / r.asumI);
+      }
+    }
+    std::printf(
+        "S06CELL variant=%s enforce=%d k=%d cell=%d mesh=%.2e ownPub=%.2e ownWalk=%.2e "
+        "ownWalkR=%.2e ownVertex=%.2e meshWalk=%.2e meshVertex=%.2e asymPub=%.2e asymWalk=%.2e "
+        "faces=%d reordered=%d walkFail=%d fgFalse=%d reflex=%d inconsistent=%d negWalk=%d "
+        "dupTri=%d poke/h=%.2e | vsCold: missing=%d(maxA=%.1e) extra=%d(maxA=%.1e) "
+        "maxdA(pub)=%.2e at nbr %.0f (|A|=%.1e) maxdA(walk)=%.2e\n",
+        vname, enforce, frame, i, r.mesh, r.ownP, r.ownW, r.ownR, r.ownV, r.meshW, r.meshV, r.asymP,
+        r.asymW, hc(i, 7), hc(i, 0), hc(i, 1), hc(i, 2), hc(i, 3), hc(i, 4), hc(i, 5), hc(i, 6),
+        (double)hpk(i), missing, missA, extra, extraA, dPub, worstJ, worstA, dWalk);
+  }
+}
+
 /// One variant of (g): Z = power engine with all weights zero, W = the scene's weights. Returns
 /// nonzero on a failed criterion (a miss of variant W is reported, not an error of the test).
 int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool timeIt,
@@ -723,6 +1121,7 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
     long totalRoundRebuilt = 0;
     double maxClosureRel = 0;
     std::vector<Arr> lastArrs;
+    int s06Done = 0;
     for (int k = 1; k <= frames; ++k) {
       advect(pos, s.N, s.L[0], step);
       const auto t0 = std::chrono::steady_clock::now();
@@ -760,6 +1159,10 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
       int nBad = 0;
       double clRel = 0;
       closureDefects(f.mesh, kClosureRel, nBad, clRel);
+      if (g_s06Frames > 0 && nBad > 0 && s06Done < g_s06Frames) {
+        ++s06Done;
+        s06Diag(mt, f, s, pos, weight, vname, enforce, k, kClosureRel);
+      }
       framesClosure += nBad > 0 ? 1 : 0;
       maxClosureCells = std::max(maxClosureCells, nBad);
       maxClosureRel = std::max(maxClosureRel, clRel);
@@ -1198,6 +1601,10 @@ int main(int argc, char** argv) {
         exportCells = std::atoi(argv[++a]);
       else if (s == "--gframes" && a + 1 < argc)
         gframes = std::atoi(argv[++a]);
+      else if (s == "--s06" && a + 1 < argc)
+        g_s06Frames = std::atoi(argv[++a]);
+      else if (s == "--tol" && a + 1 < argc)
+        g_tolFactor = std::atof(argv[++a]);
       else if (s == "--full")
         full = true;
       else if (s == "--time")
