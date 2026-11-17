@@ -15,7 +15,7 @@
  *   Pass 1 (structure factor; parallel over k, Γ in fixed index order):
  *     S(k) = Σ_{f∈Γ} n̂_f e^{−ik·x_i} Φ_f(−k),  χ̂(k) = i k·S(k)/|k|²,  χ̂(0) = |Ω_a| = Σ_{i∈a} V⁰_i,
  *     E_Γ = σC_Γ [|Ω_a| − (|Ω_a|² + 2 Σ_{K⁺} Ĝ|χ̂|²)/|L|],   Ĝ(k) = exp(−s²|k|²/2).
- *   Pass 2 (κ moments; parallel over cells, k in fixed order). With u = G_s*χ_a,
+ *   Pass 2 (κ moments; one team per directed facet, k strided over the team). With u = G_s*χ_a,
  *     u(y) = (1/|L|)[|Ω_a| + 2 Re Σ_{K⁺} Ĝχ̂(k) e^{ik·y}],  κ = σC_Γ[1 − 2u] (the density of δE_Γ =
  *     ∮_Γ κ δn for a growing into b), per directed unlike facet f of cell c toward c′ in c's frame
  *     (s_c = +1 on a, −1 on b, d_f = |x_{c′}′ − x_c|):
@@ -26,8 +26,10 @@
  *   is gathered from its own cell's facet (atomic-free; the two sides agree to round-off).
  *
  * Φ and Φ1 are the exact polygon transforms of lagrangian/polygon_transform.hpp. Every sum is in a
- * fixed order (Γ by index in pass 1, k in K⁺ order in pass 2, the mode sum of E sequential), so
- * the result does not depend on the thread count.
+ * fixed order (Γ by index in pass 1, the mode sum of E sequential; in pass 2 team thread t of T
+ * sums k = t, t + T, … in K⁺ order and the T partials are added in thread order, then each cell
+ * adds its facets in index order), so the result does not depend on the thread count. T is a
+ * constant per backend: 1 on a host backend (the plain K⁺-order sum), kPerimeterTeam on a device.
  *
  * Γ buffer (exportGamma): every directed unlike facet of every cell, from the cell's own geometry
  * (the resident power tessellation re-evaluated as lagrangian/facets.hpp does): the ordered
@@ -252,18 +254,18 @@ KOKKOS_INLINE_FUNCTION Kokkos::complex<Real> perimeterChi(const GammaFacets<Real
 }
 
 /// Pass 2 for directed facet f: J0 = Re Σ_k A(k) e^{ik·x_c} Φ_f(k), J1 = Re Σ_k A(k) e^{ik·x_c}
-/// Φ1_f(k) (k in K⁺ order), A = Ĝχ̂.
+/// Φ1_f(k), A = Ĝχ̂, over the modes m = m0, m0 + dm, … in K⁺ order (default: all of K⁺).
 template <class Real>
 KOKKOS_INLINE_FUNCTION void perimeterMoments(const GammaFacets<Real>& G, const LView<Real>& K,
                                              const LView<Real>& Are, const LView<Real>& Aim, int nK,
-                                             int f, Real& J0, Real J1[3]) {
+                                             int f, Real& J0, Real J1[3], int m0 = 0, int dm = 1) {
   const PolygonFrame<Real> Pf = gammaFrame(G, f);
   const Real* xi = G.xi.data() + 3 * GammaFacets<Real>::kMaxV * static_cast<std::size_t>(f);
   const int nv = G.nv(f);
   const Real x[3] = {G.xg(3 * f), G.xg(3 * f + 1), G.xg(3 * f + 2)};
   J0 = 0;
   J1[0] = J1[1] = J1[2] = 0;
-  for (int m = 0; m < nK; ++m) {
+  for (int m = m0; m < nK; m += dm) {
     const Real q[3] = {K(3 * m), K(3 * m + 1), K(3 * m + 2)};
     Kokkos::complex<Real> phi, phi1[3];
     polygonPhiPhi1(xi, nv, Pf, q, phi, phi1);
@@ -274,6 +276,9 @@ KOKKOS_INLINE_FUNCTION void perimeterMoments(const GammaFacets<Real>& G, const L
       J1[d] += (a * phi1[d]).real();
   }
 }
+
+/// Pass 2's team size on a device backend (threads per directed facet; a host backend uses 1).
+inline constexpr int kPerimeterTeam = 128;
 
 /// Per-facet I0, I1 (without the sign s_c) from J0, J1: σC_Γ[A − 2∫u], σC_Γ[Aξ_c − 2∫uξ].
 template <class Real>
@@ -488,21 +493,47 @@ Real nonlocalPerimeterEnergy(const GammaFacets<Real>& G,
     E = peclet::core::toVector(e)[0];
   }
   auto t1 = Clock::now();
-  // ---- pass 2: the κ moments per directed unlike facet, gathered per cell ----
+  // ---- pass 2: the κ moments per directed unlike facet (one team each), gathered per cell ----
   {
+    using Team = Kokkos::TeamPolicy<Exec>;
+    using Scratch =
+        Kokkos::View<Real*, typename Exec::scratch_memory_space, Kokkos::MemoryUnmanaged>;
+    constexpr bool onHost =
+        Kokkos::SpaceAccessibility<Kokkos::HostSpace, typename Exec::memory_space>::accessible;
+    const int nT = onHost ? 1 : detail::kPerimeterTeam, nF = G.nFacets;
     const GammaFacets<Real> Gc = G;
     const LView<Real> K = M.k;
+    const LView<Real> J("nlp.J", 4 * static_cast<std::size_t>(nF));
+    Kokkos::parallel_for(
+        "nlp.pass2", Team(nF, nT).set_scratch_size(0, Kokkos::PerTeam(Scratch::shmem_size(4 * nT))),
+        KOKKOS_LAMBDA(const typename Team::member_type& tm) {
+          const int f = tm.league_rank(), t = tm.team_rank(), n = tm.team_size();
+          Real J0, J1[3];
+          detail::perimeterMoments(Gc, K, Are, Aim, nK, f, J0, J1, t, n);
+          const Scratch s(tm.team_scratch(0), 4 * n);
+          s(4 * t) = J0;
+          for (int d = 0; d < 3; ++d)
+            s(4 * t + 1 + d) = J1[d];
+          tm.team_barrier();
+          if (t == 0)  // the team's partials in thread order (one partial on a host backend)
+            for (int c = 0; c < 4; ++c) {
+              Real v = s(c);
+              for (int u = 1; u < n; ++u)
+                v += s(4 * u + c);
+              J(4 * f + c) = v;
+            }
+        });
     const Real oa = Oa, il = iL, sc = sC;
     Kokkos::parallel_for(
-        "nlp.pass2", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        "nlp.pass2gather", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
           const int f0 = Gc.offset(i), f1 = Gc.offset(i + 1);
           if (f1 == f0)
             return;
           const Real sgn = T(i) == 0 ? Real(1) : Real(-1);
           Real fx[3] = {0, 0, 0}, fw = 0;
           for (int f = f0; f < f1; ++f) {
-            Real J0, J1[3], I0, I1[3];
-            detail::perimeterMoments(Gc, K, Are, Aim, nK, f, J0, J1);
+            Real I0, I1[3];
+            const Real J0 = J(4 * f), J1[3] = {J(4 * f + 1), J(4 * f + 2), J(4 * f + 3)};
             const Real c[3] = {Gc.cen(3 * f), Gc.cen(3 * f + 1), Gc.cen(3 * f + 2)};
             detail::perimeterFacetTerms(sc, oa, il, Gc.area(f), c, J0, J1, I0, I1);
             const Real d = Kokkos::sqrt(Gc.conn(3 * f) * Gc.conn(3 * f) +
