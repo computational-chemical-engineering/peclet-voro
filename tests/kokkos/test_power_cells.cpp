@@ -405,14 +405,13 @@ int caseGradients(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   const double relTol = 3e-3;                   // FD-limited
   const double sig = 5e-3 * spacing * spacing;  // significant-gradient floor (dV/dx ~ face area)
   double maxRel = 0.0;
-  long nTot = 0, nPass = 0, nCellsChecked = 0;
+  long nTot = 0, nPass = 0, nCellsChecked = 0, nNegChecked = 0;
   const int nCheck = std::min(N, 300);
   for (int i = 0; i < nCheck; ++i) {
     OracleCell c;
     if (buildPowerCell(i, xh, wh, N, L, c) != 0)
-      continue;  // empty/overflow
-    if (hasNegFace(c))
-      continue;  // seed outside its cell: the foot-point gradient kernels come with WO-4
+      continue;                          // empty/overflow
+    const bool negFace = hasNegFace(c);  // seed outside its cell: foot-point gradients (WO-4)
     // interior filter: skip cells with any nonzero-area box-wall face (pnbr<0).
     double area[200];
     for (int k = 0; k < c.np; ++k)
@@ -428,6 +427,7 @@ int caseGradients(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
     if (wall)
       continue;
     ++nCellsChecked;
+    nNegChecked += negFace ? 1 : 0;
 
     // analytic: dV/dn_k then chain to DOFs.
     double vg = 0, dgx[200], dgy[200], dgz[200];
@@ -478,9 +478,10 @@ int caseGradients(int N, real_t L, unsigned seed, real_t wSpreadFrac) {
   }
   const bool pass = nTot > 0 && (double)nPass / nTot > 0.98 && maxRel < 5e-2;
   std::printf(
-      "  (D) grad  N=%-6d seed=%u wSpread=%.2f | cells=%ld comps=%ld pass=%ld/%ld "
-      "maxRel=%.2e  %s\n",
-      N, seed, wSpreadFrac, nCellsChecked, nTot, nPass, nTot, maxRel, pass ? "OK" : "FAIL");
+      "  (D) grad  N=%-6d seed=%u wSpread=%.2f | cells=%ld (outside-seed %ld) comps=%ld "
+      "pass=%ld/%ld maxRel=%.2e  %s\n",
+      N, seed, wSpreadFrac, nCellsChecked, nNegChecked, nTot, nPass, nTot, maxRel,
+      pass ? "OK" : "FAIL");
   return pass ? 0 : 1;
 }
 

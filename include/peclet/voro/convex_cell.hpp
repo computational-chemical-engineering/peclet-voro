@@ -252,6 +252,8 @@ struct ConvexCell {
       out[2] = n[k][2];
     }
   }
+  /// σ_k = sign(nn_k) as ±1 (+1 for nn_k = 0).
+  KOKKOS_INLINE_FUNCTION Real sigmaOf(int k) const { return nn[k] < Real(0) ? Real(-1) : Real(1); }
   /// Seed->plane distance |n_k|.
   KOKKOS_INLINE_FUNCTION Real planeDistance(int k) const {
     return Kokkos::sqrt(Kokkos::fabs(nn[k]));
@@ -1662,24 +1664,26 @@ struct ConvexCell {
   }
 
   /// Scatter one facet's area + first moment (∫x dA) at a vertex into the per-facet accumulators.
-  /// Facet i's local boundary at v is the path f_first → v → f_last with apex n_i: two signed
-  /// triangles (n_i,f_first,v) and (n_i,v,f_last). |n_i| is the one sqrt (per facet).
-  KOKKOS_INLINE_FUNCTION static void scatterFacetMoment(int ki, const Real ni[3], const Real ff[3],
-                                                        const Real fl[3], const Real v[3],
-                                                        Real* area, Real* mx, Real* my, Real* mz) {
+  /// Facet i's local boundary at v is the path f_first → v → f_last with apex q_i (the foot point,
+  /// in the facet plane): two signed triangles (q_i,f_first,v) and (q_i,v,f_last), oriented by the
+  /// outward normal n_i. |n_i| is the one sqrt (per facet).
+  KOKKOS_INLINE_FUNCTION static void scatterFacetMoment(int ki, const Real ni[3], const Real qi[3],
+                                                        const Real ff[3], const Real fl[3],
+                                                        const Real v[3], Real* area, Real* mx,
+                                                        Real* my, Real* mz) {
     const Real inv2n = Real(0.5) / Kokkos::sqrt(dot3(ni, ni));
     const Real sa = det3(ni, ff, v) * inv2n;   // triangle (ni, ff, v)
     const Real sb = -det3(ni, fl, v) * inv2n;  // triangle (ni, v, fl)
     area[ki] += sa + sb;
-    mx[ki] += sa * (ni[0] + ff[0] + v[0]) / Real(3) + sb * (ni[0] + v[0] + fl[0]) / Real(3);
-    my[ki] += sa * (ni[1] + ff[1] + v[1]) / Real(3) + sb * (ni[1] + v[1] + fl[1]) / Real(3);
-    mz[ki] += sa * (ni[2] + ff[2] + v[2]) / Real(3) + sb * (ni[2] + v[2] + fl[2]) / Real(3);
+    mx[ki] += sa * (qi[0] + ff[0] + v[0]) / Real(3) + sb * (qi[0] + v[0] + fl[0]) / Real(3);
+    my[ki] += sa * (qi[1] + ff[1] + v[1]) / Real(3) + sb * (qi[1] + v[1] + fl[1]) / Real(3);
+    mz[ki] += sa * (qi[2] + ff[2] + v[2]) / Real(3) + sb * (qi[2] + v[2] + fl[2]) / Real(3);
   }
 
   /// Per-facet area + first moment ∫x dA by the same vertex-local scatter (caller zeroes the
-  /// np-sized arrays). The area-weighted facet centroid is c_k = (mx,my,mz)[k]/area[k]; the volume
-  /// gradient (force) is then dV_k = ∂V/∂r_k = (area_k/|r_k|)(r_k − c_k) with connector r_k =
-  /// 2·n[k] — sort/adjacency-free.
+  /// np-sized arrays). The area-weighted facet centroid is c_k = (mx,my,mz)[k]/area[k]; for a
+  /// Voronoi cell the volume gradient (force) is then dV_k = ∂V/∂r_k = (area_k/|r_k|)(r_k − c_k)
+  /// with connector r_k = 2·n[k] — sort/adjacency-free.
   KOKKOS_INLINE_FUNCTION void facetMomentsPerVertex(Real* area, Real* mx, Real* my,
                                                     Real* mz) const {
     for (int t = 0; t < nt; ++t) {
@@ -1690,6 +1694,10 @@ struct ConvexCell {
       planeN(k1, n1);
       planeN(k2, n2);
       planeN(k3, n3);
+      Real q1[3], q2[3], q3[3];  // foot points (cone apexes, centroids)
+      footPoint(k1, q1);
+      footPoint(k2, q2);
+      footPoint(k3, q3);
       Real c1[3], c2[3], c3[3];
       xprod(n2, n3, c1);
       xprod(n3, n1, c2);
@@ -1702,6 +1710,9 @@ struct ConvexCell {
           tm = c2[a];
           c2[a] = c3[a];
           c3[a] = tm;
+          tm = q2[a];
+          q2[a] = q3[a];
+          q3[a] = tm;
         }
         int tk = k2;
         k2 = k3;
@@ -1712,39 +1723,41 @@ struct ConvexCell {
       edgeFoot(v, c3, f12);
       edgeFoot(v, c1, f23);
       edgeFoot(v, c2, f31);
-      scatterFacetMoment(k1, n1, f12, f31, v, area, mx, my, mz);
-      scatterFacetMoment(k2, n2, f23, f12, v, area, mx, my, mz);
-      scatterFacetMoment(k3, n3, f31, f23, v, area, mx, my, mz);
+      scatterFacetMoment(k1, n1, q1, f12, f31, v, area, mx, my, mz);
+      scatterFacetMoment(k2, n2, q2, f23, f12, v, area, mx, my, mz);
+      scatterFacetMoment(k3, n3, q3, f31, f23, v, area, mx, my, mz);
     }
   }
 
-  /// Scatter one facet's contribution to the volume-gradient NUMERATOR 2·S_a·n_k − S_m AT a vertex,
-  /// with NO sqrt and into just the 3 output arrays. The trick: n_k is the SAME normal (= ni) at
-  /// every vertex of facet k, so the per-vertex term 2·da·ni − mom already carries the facet
-  /// normal; summed over the facet's vertices it is exactly 2·(Σda)·n_k − Σmom = 2·S_a·n_k − S_m.
-  /// `da`, `mom` are RAW (no 1/(2|n|) factor); geomVolumeGrad's fold supplies the shared
-  /// 1/(2·nn[k]) once per facet (also sqrt-free).
-  KOKKOS_INLINE_FUNCTION static void scatterGradRaw(int ki, const Real ni[3], const Real ff[3],
-                                                    const Real fl[3], const Real v[3], Real* dgx,
-                                                    Real* dgy, Real* dgz) {
+  /// Scatter one facet's contribution to the volume-gradient NUMERATOR 2·S_a·q_k − S_m AT a vertex,
+  /// with NO sqrt and into just the 3 output arrays. The trick: q_k is the SAME foot point (= qi)
+  /// at every vertex of facet k, so the per-vertex term 2·da·qi − mom already carries it; summed
+  /// over the facet's vertices it is exactly 2·(Σda)·q_k − Σmom = 2·S_a·q_k − S_m. `da`, `mom` are
+  /// RAW (no 1/(2|n|) factor); geomVolumeGrad's fold supplies the shared 1/(2·nn[k]) once per facet
+  /// (also sqrt-free).
+  KOKKOS_INLINE_FUNCTION static void scatterGradRaw(int ki, const Real ni[3], const Real qi[3],
+                                                    const Real ff[3], const Real fl[3],
+                                                    const Real v[3], Real* dgx, Real* dgy,
+                                                    Real* dgz) {
     const Real sa = det3(ni, ff, v);   // raw signed area of triangle (ni, ff, v)
     const Real sb = -det3(ni, fl, v);  // raw signed area of triangle (ni, v, fl)
     const Real da = sa + sb;
-    const Real momx = sa * (ni[0] + ff[0] + v[0]) / Real(3) + sb * (ni[0] + v[0] + fl[0]) / Real(3);
-    const Real momy = sa * (ni[1] + ff[1] + v[1]) / Real(3) + sb * (ni[1] + v[1] + fl[1]) / Real(3);
-    const Real momz = sa * (ni[2] + ff[2] + v[2]) / Real(3) + sb * (ni[2] + v[2] + fl[2]) / Real(3);
-    dgx[ki] += Real(2) * da * ni[0] - momx;  // 2·da·n_k − mom  (numerator piece)
-    dgy[ki] += Real(2) * da * ni[1] - momy;
-    dgz[ki] += Real(2) * da * ni[2] - momz;
+    const Real momx = sa * (qi[0] + ff[0] + v[0]) / Real(3) + sb * (qi[0] + v[0] + fl[0]) / Real(3);
+    const Real momy = sa * (qi[1] + ff[1] + v[1]) / Real(3) + sb * (qi[1] + v[1] + fl[1]) / Real(3);
+    const Real momz = sa * (qi[2] + ff[2] + v[2]) / Real(3) + sb * (qi[2] + v[2] + fl[2]) / Real(3);
+    dgx[ki] += Real(2) * da * qi[0] - momx;  // 2·da·n_k − mom  (numerator piece)
+    dgy[ki] += Real(2) * da * qi[1] - momy;
+    dgz[ki] += Real(2) * da * qi[2] - momz;
   }
 
   /// geomVolumeGrad tier (Phase 2): cell volume + the volume gradient dV/dn_k per plane, with NO
   /// area/ centroid arrays exposed, NO sqrt anywhere, and only the 3 output arrays touched (so it
-  /// keeps the compact cell's GPU occupancy). dV/dn_k = (2·A_k·n_k − m_k)/|n_k|; scattering the raw
-  /// numerator 2·S_a·n_k − S_m per vertex (S_a = 2|n_k|·A_k, S_m = 2|n_k|·m_k), the per-facet fold
-  /// is dV/dn_k = (numerator)/(2·nn[k]) — the |n_k| cancels into the stored nn=|n|². Caller zeroes
-  /// the np-sized dgx/dgy/dgz (accumulate the numerator, then overwritten in place by the fold).
-  /// Matches geometryPerVertex's closed form to round-off. Voronoi position force dV/dr_k =
+  /// keeps the compact cell's GPU occupancy). The gradient is w.r.t. the FOOT POINT q_k = σ_k n_k
+  /// (= n_k for σ = +1; what Policy::chain consumes): dV/dq_k = σ_k(A_k/|q_k|)(2q_k − x̄_k);
+  /// scattering the raw numerator 2·S_a·q_k − S_m per vertex (S_a = 2|n_k|·A_k, S_m = 2|n_k|·m_k),
+  /// the per-facet fold is dV/dq_k = (numerator)/(2·nn[k]) with the SIGNED nn = σ|n|². Caller
+  /// zeroes the np-sized dgx/dgy/dgz (accumulate the numerator, then overwritten in place by the
+  /// fold). Matches geometryPerVertex's closed form to round-off. Voronoi position force dV/dr_k =
   /// ½·(dgx,dgy,dgz)[k]; the policy layer (Phase 3) owns that chain.
   KOKKOS_INLINE_FUNCTION void geomVolumeGrad(Real& vol, Real* dgx, Real* dgy, Real* dgz) const {
     Real V = 0;
@@ -1756,6 +1769,10 @@ struct ConvexCell {
       planeN(k1, n1);
       planeN(k2, n2);
       planeN(k3, n3);
+      Real q1[3], q2[3], q3[3];  // foot points (cone apexes, centroids)
+      footPoint(k1, q1);
+      footPoint(k2, q2);
+      footPoint(k3, q3);
       Real c1[3], c2[3], c3[3];
       xprod(n2, n3, c1);
       xprod(n3, n1, c2);
@@ -1768,6 +1785,9 @@ struct ConvexCell {
           tm = c2[a];
           c2[a] = c3[a];
           c3[a] = tm;
+          tm = q2[a];
+          q2[a] = q3[a];
+          q3[a] = tm;
         }
         int tk = k2;
         k2 = k3;
@@ -1779,24 +1799,24 @@ struct ConvexCell {
       edgeFoot(v, c1, f23);
       edgeFoot(v, c2, f31);
       Real e[3];
-      e[0] = n1[0] - n2[0];
-      e[1] = n1[1] - n2[1];
-      e[2] = n1[2] - n2[2];
+      e[0] = q1[0] - q2[0];
+      e[1] = q1[1] - q2[1];
+      e[2] = q1[2] - q2[2];
       V += det3(e, f12, v);
-      e[0] = n2[0] - n3[0];
-      e[1] = n2[1] - n3[1];
-      e[2] = n2[2] - n3[2];
+      e[0] = q2[0] - q3[0];
+      e[1] = q2[1] - q3[1];
+      e[2] = q2[2] - q3[2];
       V += det3(e, f23, v);
-      e[0] = n3[0] - n1[0];
-      e[1] = n3[1] - n1[1];
-      e[2] = n3[2] - n1[2];
+      e[0] = q3[0] - q1[0];
+      e[1] = q3[1] - q1[1];
+      e[2] = q3[2] - q1[2];
       V += det3(e, f31, v);
-      scatterGradRaw(k1, n1, f12, f31, v, dgx, dgy, dgz);
-      scatterGradRaw(k2, n2, f23, f12, v, dgx, dgy, dgz);
-      scatterGradRaw(k3, n3, f31, f23, v, dgx, dgy, dgz);
+      scatterGradRaw(k1, n1, q1, f12, f31, v, dgx, dgy, dgz);
+      scatterGradRaw(k2, n2, q2, f23, f12, v, dgx, dgy, dgz);
+      scatterGradRaw(k3, n3, q3, f31, f23, v, dgx, dgy, dgz);
     }
     for (int k = 0; k < np; ++k) {  // per-facet fold, sqrt-free: numerator/(2·nn)
-      const Real inv = (nn[k] > Real(0)) ? Real(1) / (Real(2) * nn[k]) : Real(0);
+      const Real inv = (nn[k] != Real(0)) ? Real(1) / (Real(2) * nn[k]) : Real(0);  // signed
       dgx[k] *= inv;
       dgy[k] *= inv;
       dgz[k] *= inv;
@@ -1809,21 +1829,22 @@ struct ConvexCell {
   /// the shared 1/(2|n|) to its per-facet fold, where it cancels against |n| for the area-vector
   /// and the gradient.
   KOKKOS_INLINE_FUNCTION static void scatterAreaMomentRaw(int ki, const Real ni[3],
-                                                          const Real ff[3], const Real fl[3],
-                                                          const Real v[3], Real* sa_acc, Real* smx,
-                                                          Real* smy, Real* smz) {
+                                                          const Real qi[3], const Real ff[3],
+                                                          const Real fl[3], const Real v[3],
+                                                          Real* sa_acc, Real* smx, Real* smy,
+                                                          Real* smz) {
     const Real sa = det3(ni, ff, v);   // raw signed area of triangle (ni, ff, v)
     const Real sb = -det3(ni, fl, v);  // raw signed area of triangle (ni, v, fl)
     sa_acc[ki] += sa + sb;
-    smx[ki] += sa * (ni[0] + ff[0] + v[0]) / Real(3) + sb * (ni[0] + v[0] + fl[0]) / Real(3);
-    smy[ki] += sa * (ni[1] + ff[1] + v[1]) / Real(3) + sb * (ni[1] + v[1] + fl[1]) / Real(3);
-    smz[ki] += sa * (ni[2] + ff[2] + v[2]) / Real(3) + sb * (ni[2] + v[2] + fl[2]) / Real(3);
+    smx[ki] += sa * (qi[0] + ff[0] + v[0]) / Real(3) + sb * (qi[0] + v[0] + fl[0]) / Real(3);
+    smy[ki] += sa * (qi[1] + ff[1] + v[1]) / Real(3) + sb * (qi[1] + v[1] + fl[1]) / Real(3);
+    smz[ki] += sa * (qi[2] + ff[2] + v[2]) / Real(3) + sb * (qi[2] + v[2] + fl[2]) / Real(3);
   }
 
   /// geomVolumeArea tier (Phase 2): cell volume + the outward area-VECTOR A_k·n_k/|n_k| AND the
-  /// volume gradient dV/dn_k per plane — the full G2 physics set (areas for fluxes/momentum,
-  /// gradient for force). Like geomVolumeGrad it is fully SQRT-FREE: both outputs are
-  /// |n|²-normalized — areaVec_k = S_a·n_k/(2·nn[k]) and dV/dn_k = (2·S_a·n_k − S_m)/(2·nn[k]) —
+  /// volume gradient dV/dq_k per plane (q_k the foot point, see geomVolumeGrad) — the full G2
+  /// physics set. Like geomVolumeGrad it is fully SQRT-FREE: areaVec_k = S_a·n_k/(2·|nn[k]|) and
+  /// dV/dq_k = (2·S_a·q_k − S_m)/(2·nn[k]) (signed nn) —
   /// with the raw S_a (=2|n_k|·A_k) and S_m (=2|n_k|·m_k) scattered per vertex. No extra scratch:
   /// during the scatter `avx` holds S_a and (dgx,dgy,dgz) hold S_m; the per-facet fold overwrites
   /// them in place (so the compact-cell stack stays at the 6 caller arrays). Caller zeroes all six.
@@ -1840,6 +1861,10 @@ struct ConvexCell {
       planeN(k1, n1);
       planeN(k2, n2);
       planeN(k3, n3);
+      Real q1[3], q2[3], q3[3];  // foot points (cone apexes, centroids)
+      footPoint(k1, q1);
+      footPoint(k2, q2);
+      footPoint(k3, q3);
       Real c1[3], c2[3], c3[3];
       xprod(n2, n3, c1);
       xprod(n3, n1, c2);
@@ -1852,6 +1877,9 @@ struct ConvexCell {
           tm = c2[a];
           c2[a] = c3[a];
           c3[a] = tm;
+          tm = q2[a];
+          q2[a] = q3[a];
+          q3[a] = tm;
         }
         int tk = k2;
         k2 = k3;
@@ -1863,33 +1891,36 @@ struct ConvexCell {
       edgeFoot(v, c1, f23);
       edgeFoot(v, c2, f31);
       Real e[3];
-      e[0] = n1[0] - n2[0];
-      e[1] = n1[1] - n2[1];
-      e[2] = n1[2] - n2[2];
+      e[0] = q1[0] - q2[0];
+      e[1] = q1[1] - q2[1];
+      e[2] = q1[2] - q2[2];
       V += det3(e, f12, v);
-      e[0] = n2[0] - n3[0];
-      e[1] = n2[1] - n3[1];
-      e[2] = n2[2] - n3[2];
+      e[0] = q2[0] - q3[0];
+      e[1] = q2[1] - q3[1];
+      e[2] = q2[2] - q3[2];
       V += det3(e, f23, v);
-      e[0] = n3[0] - n1[0];
-      e[1] = n3[1] - n1[1];
-      e[2] = n3[2] - n1[2];
+      e[0] = q3[0] - q1[0];
+      e[1] = q3[1] - q1[1];
+      e[2] = q3[2] - q1[2];
       V += det3(e, f31, v);
-      scatterAreaMomentRaw(k1, n1, f12, f31, v, avx, dgx, dgy,
+      scatterAreaMomentRaw(k1, n1, q1, f12, f31, v, avx, dgx, dgy,
                            dgz);  // avx <- S_a, (dgx,dgy,dgz) <- S_m
-      scatterAreaMomentRaw(k2, n2, f23, f12, v, avx, dgx, dgy, dgz);
-      scatterAreaMomentRaw(k3, n3, f31, f23, v, avx, dgx, dgy, dgz);
+      scatterAreaMomentRaw(k2, n2, q2, f23, f12, v, avx, dgx, dgy, dgz);
+      scatterAreaMomentRaw(k3, n3, q3, f31, f23, v, avx, dgx, dgy, dgz);
     }
     for (int k = 0; k < np; ++k) {  // per-facet fold, sqrt-free
-      const Real inv = (nn[k] > Real(0)) ? Real(1) / (Real(2) * nn[k]) : Real(0);
+      const Real inv = (nn[k] != Real(0)) ? Real(1) / (Real(2) * nn[k]) : Real(0);  // signed
+      const Real inva = (nn[k] != Real(0)) ? Real(1) / (Real(2) * Kokkos::fabs(nn[k])) : Real(0);
+      Real qk[3];
+      footPoint(k, qk);
       const Real sa = avx[k];  // raw area S_a (accumulated here during the scatter)
       const Real smx = dgx[k], smy = dgy[k], smz = dgz[k];
-      dgx[k] = (Real(2) * sa * n[k][0] - smx) * inv;  // dV/dn_k
-      dgy[k] = (Real(2) * sa * n[k][1] - smy) * inv;
-      dgz[k] = (Real(2) * sa * n[k][2] - smz) * inv;
-      avx[k] = sa * n[k][0] * inv;  // outward area-vector A_k·n_k/|n_k|
-      avy[k] = sa * n[k][1] * inv;
-      avz[k] = sa * n[k][2] * inv;
+      dgx[k] = (Real(2) * sa * qk[0] - smx) * inv;  // dV/dn_k
+      dgy[k] = (Real(2) * sa * qk[1] - smy) * inv;
+      dgz[k] = (Real(2) * sa * qk[2] - smz) * inv;
+      avx[k] = sa * n[k][0] * inva;  // outward area-vector A_k·n_k/|n_k|
+      avy[k] = sa * n[k][1] * inva;
+      avz[k] = sa * n[k][2] * inva;
     }
     vol = V * (Real(1) / Real(6));
   }
@@ -1952,10 +1983,12 @@ struct ConvexCell {
     pl[1] = kk[1];
     pl[2] = kk[2];
     const Real v[3] = {vx[t], vy[t], vz[t]};
-    Real nn3[3], u[3][3];  // u[a] = 2 n_a − v
+    Real nn3[3], u[3][3];  // u[a] = 2 q_a − v (q the foot point; = n_a for σ = +1)
     VOR_UNROLL for (int a = 0; a < 3; ++a) {
-      nn3[a] = dot3(Nn[a], Nn[a]);
-      VOR_UNROLL for (int d = 0; d < 3; ++d) u[a][d] = Real(2) * Nn[a][d] - v[d];
+      nn3[a] = dot3(Nn[a], Nn[a]);  // |n_a|² (= |nn|)
+      Real qa[3];
+      footPoint(kk[a], qa);
+      VOR_UNROLL for (int d = 0; d < 3; ++d) u[a][d] = Real(2) * qa[d] - v[d];
     }
     // edge directions e[m] = N[eP]×N[eQ] for edges (0,1),(1,2),(2,0); cofactor of plane j is c_j =
     // e[(j+1)%3]
@@ -2022,6 +2055,12 @@ struct ConvexCell {
         }
       }
     }
+    // ∂/∂n_j → ∂/∂q_j (n_j = σ_j q_j): the outputs are derivatives w.r.t. the foot point.
+    VOR_UNROLL for (int j = 0; j < 3; ++j) {
+      const Real sg = sigmaOf(pl[j]);
+      VOR_UNROLL for (int i = 0; i < 3; ++i) VOR_UNROLL for (int d = 0; d < 3; ++d) grad[i][j][d] *=
+          sg;
+    }
   }
 
   /// Reference (forward-AD) implementation of the per-triangle area-Jacobian, kept only as the
@@ -2066,9 +2105,12 @@ struct ConvexCell {
     detail::dcross<Real, 9>(n3, n1, c2);
     detail::dcross<Real, 9>(n1, n2, c3);
     const D Dd = detail::ddot<Real, 9>(n1, c1);  // det
+    // signed offsets σ|n|² in the vertex solve ONLY; the area denominators keep |n| = sqrt(n·n)
+    const D s1 = detail::dnum<Real, 9>(sigmaOf(k1)), s2 = detail::dnum<Real, 9>(sigmaOf(k2)),
+            s3 = detail::dnum<Real, 9>(sigmaOf(k3));
     D v[3];
     for (int a = 0; a < 3; ++a)
-      v[a] = (nn1 * c1[a] + nn2 * c2[a] + nn3 * c3[a]) / Dd;  // Cramer vertex
+      v[a] = (s1 * nn1 * c1[a] + s2 * nn2 * c2[a] + s3 * nn3 * c3[a]) / Dd;  // Cramer: n·v = σ|n|²
     D f12[3], f23[3], f31[3];
     detail::dedgeFoot<Real, 9>(v, c3, f12);
     detail::dedgeFoot<Real, 9>(v, c1, f23);
@@ -2088,14 +2130,15 @@ struct ConvexCell {
       contrib[i] = aa[i].v;
       for (int j = 0; j < 3; ++j)
         for (int c = 0; c < 3; ++c)
-          grad[i][j][c] = aa[i].d[3 * j + c];
+          grad[i][j][c] = aa[i].d[3 * j + c] * sigmaOf(pl[j]);  // ∂/∂q_j
     }
   }
 
   /// MERGED vertex-local geometry: cell volume + per-facet area + per-facet first moment ∫x dA, all
   /// in ONE pass (shares n,c,D,v,feet per vertex). The production G1+G2 kernel — sort-free,
-  /// adjacency-free. Caller zeroes the np-sized arrays. With connector r_k = 2·n[k] (so |r_k| =
-  /// 2·sqrt(nn[k])), derive per facet k:
+  /// adjacency-free. Caller zeroes the np-sized arrays. The area vector area[k]·n[k]/|n[k]| is
+  /// outward (along the generator connector r) for every cell. For a Voronoi cell, with connector
+  /// r_k = 2·n[k] (so |r_k| = 2·sqrt(nn[k])), derive per facet k:
   ///   areaVec_k = area[k] · r_k/|r_k| = area[k] · n[k]/|n[k]|   (outward, toward the neighbour)
   ///   centroid_k = (mx,my,mz)[k]/area[k]
   ///   force dV_k = (area[k]/|r_k|)·(r_k − centroid_k)
@@ -2110,6 +2153,10 @@ struct ConvexCell {
       planeN(k1, n1);
       planeN(k2, n2);
       planeN(k3, n3);
+      Real q1[3], q2[3], q3[3];  // foot points (cone apexes, centroids)
+      footPoint(k1, q1);
+      footPoint(k2, q2);
+      footPoint(k3, q3);
       Real c1[3], c2[3], c3[3];
       xprod(n2, n3, c1);
       xprod(n3, n1, c2);
@@ -2122,6 +2169,9 @@ struct ConvexCell {
           tm = c2[a];
           c2[a] = c3[a];
           c3[a] = tm;
+          tm = q2[a];
+          q2[a] = q3[a];
+          q3[a] = tm;
         }
         int tk = k2;
         k2 = k3;
@@ -2133,21 +2183,21 @@ struct ConvexCell {
       edgeFoot(v, c1, f23);
       edgeFoot(v, c2, f31);
       Real e[3];
-      e[0] = n1[0] - n2[0];
-      e[1] = n1[1] - n2[1];
-      e[2] = n1[2] - n2[2];
+      e[0] = q1[0] - q2[0];
+      e[1] = q1[1] - q2[1];
+      e[2] = q1[2] - q2[2];
       V += det3(e, f12, v);
-      e[0] = n2[0] - n3[0];
-      e[1] = n2[1] - n3[1];
-      e[2] = n2[2] - n3[2];
+      e[0] = q2[0] - q3[0];
+      e[1] = q2[1] - q3[1];
+      e[2] = q2[2] - q3[2];
       V += det3(e, f23, v);
-      e[0] = n3[0] - n1[0];
-      e[1] = n3[1] - n1[1];
-      e[2] = n3[2] - n1[2];
+      e[0] = q3[0] - q1[0];
+      e[1] = q3[1] - q1[1];
+      e[2] = q3[2] - q1[2];
       V += det3(e, f31, v);
-      scatterFacetMoment(k1, n1, f12, f31, v, area, mx, my, mz);
-      scatterFacetMoment(k2, n2, f23, f12, v, area, mx, my, mz);
-      scatterFacetMoment(k3, n3, f31, f23, v, area, mx, my, mz);
+      scatterFacetMoment(k1, n1, q1, f12, f31, v, area, mx, my, mz);
+      scatterFacetMoment(k2, n2, q2, f23, f12, v, area, mx, my, mz);
+      scatterFacetMoment(k3, n3, q3, f31, f23, v, area, mx, my, mz);
     }
     vol = V * (Real(1) / Real(6));
   }
@@ -2156,9 +2206,9 @@ struct ConvexCell {
   /// VECTOR, the volume gradient dV = ∂V/∂r_k, and the connecting vector r_k = 2·n[k] (the
   /// bisector's foot point is exactly half the neighbour's relative position). Matches the
   /// half-edge facetArea / facetConnect / facetConnVec. Returns false if k is not a face.
-  /// A POWER cell's connector is not 2·n[k] (its plane is shifted by the weight difference, and
-  /// n[k] points away from the neighbour when the seed lies outside its own cell): call
-  /// facetGeometryFrom with the generator connector instead.
+  /// VORONOI ONLY. A POWER cell's connector is not 2·n[k] (its plane is shifted by the weight
+  /// difference, and the seed may lie outside its own cell): call facetGeometryFrom with the
+  /// generator connector instead.
   KOKKOS_INLINE_FUNCTION bool facetGeometry(int k, Real areaVec[3], Real dv[3],
                                             Real conn[3]) const {
     const Real r[3] = {Real(2) * n[k][0], Real(2) * n[k][1],

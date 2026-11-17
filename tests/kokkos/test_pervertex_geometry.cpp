@@ -6,7 +6,8 @@
  * vertex ordering, no adjacency) against the ordered reference (volume()/faceOrdered area), the
  * internal divergence identity, label invariance, obtuse/skinny robustness, and a finite-difference
  * gradient check. FP64. Cells are built by clipping random nearest neighbours (incl. an anisotropic
- * batch that produces feet-outside-face cells). Host-side, single thread.
+ * batch that produces feet-outside-face cells), and (13) power cells whose seed lies outside the
+ * cell (translation oracle, FD and AD of the foot-point gradients). Host-side, single thread.
  */
 #include <algorithm>
 #include <array>
@@ -44,6 +45,407 @@ static bool buildCell(Cell& c, int i, const std::vector<real_t>& pos, real_t L,
   }
   return !c.overflow;
 }
+
+// ---------------------------------------------------------------------------------------------
+// (13) Outside-seed power cells (DESIGN_NOTE_OUTSIDE_SEED §5.5, work order WO-4, gate G9): every
+// per-vertex value kernel against the TRANSLATION ORACLE (the same cell rebuilt in the frame of an
+// interior point y, where every plane has d > 0, so no σ = −1 code path runs), and the gradients —
+// derivatives w.r.t. the foot point q_k = σ_k n_k — against central differences of the value
+// kernels on the fixed topology (q_k → q_k ± δ e_a, plane rewritten as n = σq, nn = σ|q|², live
+// vertices recomputed) and against the dual-number AD oracle. Plus a REPORT (not gated, amendment
+// 4) of Power::chain's neighbour-position force against FD as d → 0.
+namespace outside_seed {
+
+struct Plane {
+  real_t p[3];
+  real_t d;
+  int j;
+};
+
+// All N−1 radical planes {x : p·x ≤ d} of site i (p = min-image connector, d = ½(|p|² + w_i −
+// w_j)), sorted by |p|² then id.
+static std::vector<Plane> powerPlanes(int i, const std::vector<real_t>& x,
+                                      const std::vector<real_t>& w, int N, real_t L) {
+  std::vector<Plane> P;
+  P.reserve(N - 1);
+  for (int j = 0; j < N; ++j) {
+    if (j == i)
+      continue;
+    Plane q;
+    for (int a = 0; a < 3; ++a) {
+      real_t r = x[3 * j + a] - x[3 * i + a];
+      q.p[a] = r - L * std::round(r / L);
+    }
+    q.d = 0.5 * (q.p[0] * q.p[0] + q.p[1] * q.p[1] + q.p[2] * q.p[2] + w[i] - w[j]);
+    q.j = j;
+    P.push_back(q);
+  }
+  std::sort(P.begin(), P.end(), [](const Plane& a, const Plane& b) {
+    const real_t ra = a.p[0] * a.p[0] + a.p[1] * a.p[1] + a.p[2] * a.p[2];
+    const real_t rb = b.p[0] * b.p[0] + b.p[1] * b.p[1] + b.p[2] * b.p[2];
+    return ra < rb || (ra == rb && a.j < b.j);
+  });
+  return P;
+}
+
+// Clip every plane, in order, in the frame of y (offsets d − p·y), into a box of edge B about y.
+static bool buildIn(Cell& c, const std::vector<Plane>& P, const real_t y[3], real_t B) {
+  c.initBox(B, B, B);
+  for (const Plane& q : P) {
+    c.clip(q.p, q.d - (q.p[0] * y[0] + q.p[1] * y[1] + q.p[2] * y[2]), q.j);
+    if (c.overflow)
+      return false;
+  }
+  return true;
+}
+
+static bool hasNegFacet(const Cell& c) {
+  for (int t = 0; t < c.nt; ++t)
+    if (c.alive[t] && (c.nn[c.t0[t]] < 0 || c.nn[c.t1[t]] < 0 || c.nn[c.t2[t]] < 0))
+      return true;
+  return false;
+}
+
+static std::vector<char> facetPlanes(const Cell& c) {
+  std::vector<char> f(c.np, 0);
+  for (int t = 0; t < c.nt; ++t)
+    if (c.alive[t])
+      f[c.t0[t]] = f[c.t1[t]] = f[c.t2[t]] = 1;
+  return f;
+}
+
+// Move plane k's foot point by s along axis a (keeping σ_k), then recompute the live vertices.
+static void moveFoot(Cell& c, int k, int a, real_t s) {
+  real_t q[3];
+  c.footPoint(k, q);
+  const real_t sg = c.nn[k] < 0 ? -1.0 : 1.0;
+  q[a] += s;
+  for (int d = 0; d < 3; ++d)
+    c.n[k][d] = sg * q[d];
+  c.nn[k] = sg * (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]);
+  for (int t = 0; t < c.nt; ++t)
+    if (c.alive[t])
+      c.computeVertex(t);
+}
+
+struct Vals {   // per-cell values keyed by plane index
+  double V[5];  // volumePerVertex, volume, geomVolumeGrad, geomVolumeArea, geometryPerVertex
+  double A[64], Am[64], Ag[64], av[64][3], m[64][3], mg[64][3], M2c[64];
+};
+
+static void values(const Cell& c, Vals& o) {
+  double a1[64] = {}, a2[64] = {}, mx[64] = {}, my[64] = {}, mz[64] = {};
+  double gx[64] = {}, gy[64] = {}, gz[64] = {};
+  double avx[64] = {}, avy[64] = {}, avz[64] = {}, dx[64] = {}, dy[64] = {}, dz[64] = {};
+  double a4[64] = {}, nx[64] = {}, ny[64] = {}, nz[64] = {};
+  o.V[0] = c.volumePerVertex();
+  o.V[1] = c.volume();
+  c.geomVolumeGrad(o.V[2], dx, dy, dz);
+  c.geomVolumeArea(o.V[3], avx, avy, avz, gx, gy, gz);
+  c.geometryPerVertex(o.V[4], a4, nx, ny, nz);
+  c.facetAreasPerVertex(a1);
+  c.facetMomentsPerVertex(a2, mx, my, mz);
+  for (int k = 0; k < c.np; ++k) {
+    o.A[k] = a1[k];
+    o.Am[k] = a2[k];
+    o.Ag[k] = a4[k];
+    o.av[k][0] = avx[k];
+    o.av[k][1] = avy[k];
+    o.av[k][2] = avz[k];
+    o.m[k][0] = mx[k];
+    o.m[k][1] = my[k];
+    o.m[k][2] = mz[k];
+    o.mg[k][0] = nx[k];
+    o.mg[k][1] = ny[k];
+    o.mg[k][2] = nz[k];
+    // central second moment ∫|x − x̄|² dA = faceMoment2 (about q) − A|x̄ − q|² (frame-invariant)
+    o.M2c[k] = 0;
+    if (a2[k] > 0) {
+      real_t q[3];
+      c.footPoint(k, q);
+      double e2 = 0;
+      for (int d = 0; d < 3; ++d) {
+        const double e = o.m[k][d] / a2[k] - q[d];
+        e2 += e * e;
+      }
+      o.M2c[k] = c.faceMoment2(k) - a2[k] * e2;
+    }
+  }
+}
+
+static int run() {
+  const int n = 8, N = n * n * n;
+  const real_t L = 1.0, h = L / n, W = 1.0, h2 = h * h, h3 = h2 * h, h4 = h3 * h;
+  std::mt19937 rng(20261117);
+  std::uniform_real_distribution<real_t> U(0, 1);
+  std::vector<real_t> x(3 * N), w(N);
+  for (int k = 0; k < n; ++k)
+    for (int j = 0; j < n; ++j)
+      for (int i = 0; i < n; ++i) {
+        const int s = i + n * (j + n * k);
+        const int ijk[3] = {i, j, k};
+        for (int a = 0; a < 3; ++a) {
+          real_t v = (ijk[a] + 0.5 + 0.6 * (U(rng) - 0.5)) * h;  // jitter ±0.3h
+          x[3 * s + a] = v - L * std::floor(v / L);
+        }
+      }
+  for (auto& v : w)
+    v = W * h2 * U(rng);
+
+  const real_t zero[3] = {0, 0, 0};
+  const real_t delta = 1e-6 * h;
+  long nOS = 0, nEmpty = 0, nOverflow = 0, nNotInterior = 0, nSetDiff = 0, nBoxFace = 0;
+  double eV = 0, eA = 0, eM = 0, eM2 = 0, eAv = 0;  // translation oracle (abs, in h units)
+  double eGradV = 0, eGradVA = 0, eAD = 0, eFDan = 0, eFDad = 0, maxDistSize = 0;
+  // REPORT: the dV/dq FD error at other steps (truncation ∝ δ², roundoff ∝ ε·dist³/δ), and the
+  // cell where the gated step's error peaks.
+  const real_t sweep[3] = {1e-4 * h, 1e-5 * h, 1e-7 * h};
+  double eSweep[3] = {0, 0, 0}, worstDistSize = 0, worstV = 0;
+  for (int i = 0; i < N; ++i) {
+    const std::vector<Plane> P = powerPlanes(i, x, w, N, L);
+    Cell c;
+    if (!buildIn(c, P, zero, L)) {
+      ++nOverflow;
+      continue;
+    }
+    if (c.empty()) {
+      ++nEmpty;
+      continue;
+    }
+    if (!hasNegFacet(c))
+      continue;
+    const std::vector<char> fp = facetPlanes(c);
+    Vals a;
+    values(c, a);
+    bool box = false;
+    for (int k = 0; k < c.np; ++k)
+      box |= fp[k] && c.pnbr[k] < 0 && a.A[k] > 0;
+    if (box) {
+      ++nBoxFace;
+      continue;
+    }
+    ++nOS;
+    // ---- translation oracle
+    real_t y[3] = {0, 0, 0};
+    long nv = 0;
+    for (int t = 0; t < c.nt; ++t)
+      if (c.alive[t]) {
+        y[0] += c.vx[t];
+        y[1] += c.vy[t];
+        y[2] += c.vz[t];
+        ++nv;
+      }
+    for (auto& v : y)
+      v /= real_t(nv);
+    const double dist = std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]);
+    maxDistSize = std::max(maxDistSize, dist / std::cbrt(std::max(a.V[0], 1e-300)));
+    bool interior = true;
+    for (const Plane& q : P)
+      interior &= q.d - (q.p[0] * y[0] + q.p[1] * y[1] + q.p[2] * y[2]) > 0;
+    Cell c2;
+    if (!interior || !buildIn(c2, P, y, 2 * L)) {
+      ++nNotInterior;
+      continue;
+    }
+    Vals b;
+    values(c2, b);
+    for (int v = 0; v < 5; ++v)
+      eV = std::max(eV, std::fabs(a.V[v] - b.V[v]) / h3);
+    // match facets by neighbour id (planes with area > 0 in either frame)
+    std::vector<int> map2(c.np, -1);
+    for (int k = 0; k < c.np; ++k)
+      for (int l = 0; l < c2.np; ++l)
+        if (c2.pnbr[l] == c.pnbr[k])
+          map2[k] = l;
+    for (int l = 0; l < c2.np; ++l) {  // a facet of the y-frame cell missing from the seed frame
+      bool found = false;
+      for (int k = 0; k < c.np; ++k)
+        found |= c.pnbr[k] == c2.pnbr[l] && fp[k] && a.A[k] > 0;
+      if (b.A[l] > 0 && c2.pnbr[l] >= 0 && !found)
+        ++nSetDiff;
+    }
+    for (int k = 0; k < c.np; ++k) {
+      if (!fp[k] || c.pnbr[k] < 0 || a.A[k] <= 0)
+        continue;
+      const int l = map2[k];
+      if (l < 0 || b.A[l] <= 0) {
+        ++nSetDiff;
+        continue;
+      }
+      eA = std::max({eA, std::fabs(a.A[k] - b.A[l]) / h2, std::fabs(a.Am[k] - b.Am[l]) / h2,
+                     std::fabs(a.Ag[k] - b.Ag[l]) / h2});
+      for (int d = 0; d < 3; ++d) {
+        eAv = std::max(eAv, std::fabs(a.av[k][d] - b.av[l][d]) / h2);
+        eM = std::max({eM, std::fabs(a.m[k][d] - (b.m[l][d] + b.Am[l] * y[d])) / h3,
+                       std::fabs(a.mg[k][d] - (b.mg[l][d] + b.Ag[l] * y[d])) / h3});
+      }
+      eM2 = std::max(eM2, std::fabs(a.M2c[k] - b.M2c[l]) / h4);
+    }
+    // ---- dV/dq (geomVolumeGrad, geomVolumeArea) vs FD of volumePerVertex
+    double vg, va, dgx[64] = {}, dgy[64] = {}, dgz[64] = {}, avx[64] = {}, avy[64] = {},
+                   avz[64] = {}, ggx[64] = {}, ggy[64] = {}, ggz[64] = {};
+    c.geomVolumeGrad(vg, dgx, dgy, dgz);
+    c.geomVolumeArea(va, avx, avy, avz, ggx, ggy, ggz);
+    double gmax = 0, gmaxA = 0;
+    for (int k = 0; k < c.np; ++k)
+      if (fp[k]) {
+        gmax = std::max({gmax, std::fabs(dgx[k]), std::fabs(dgy[k]), std::fabs(dgz[k])});
+        gmaxA = std::max({gmaxA, std::fabs(ggx[k]), std::fabs(ggy[k]), std::fabs(ggz[k])});
+      }
+    // ---- area Jacobian: analytic and AD per triangle, gathered to J[k][l][a]
+    static double Jan[64][64][3], Jad[64][64][3];
+    for (int k = 0; k < c.np; ++k)
+      for (int l = 0; l < c.np; ++l)
+        for (int d = 0; d < 3; ++d)
+          Jan[k][l][d] = Jad[k][l][d] = 0;
+    for (int t = 0; t < c.nt; ++t) {
+      if (!c.alive[t])
+        continue;
+      int pa[3], pb[3];
+      double ca[3], cb[3], ga[3][3][3], gb[3][3][3];
+      c.geomVolumeAreaGrad(t, pa, ca, ga);
+      c.geomVolumeAreaGradAD(t, pb, cb, gb);
+      double num = 0, den = 0;
+      for (int i2 = 0; i2 < 3; ++i2)
+        for (int j2 = 0; j2 < 3; ++j2)
+          for (int d = 0; d < 3; ++d) {
+            Jan[pa[i2]][pa[j2]][d] += ga[i2][j2][d];
+            Jad[pb[i2]][pb[j2]][d] += gb[i2][j2][d];
+            den = std::max(den, std::fabs(gb[i2][j2][d]));
+          }
+      bool same = pa[0] == pb[0] && pa[1] == pb[1] && pa[2] == pb[2];
+      for (int i2 = 0; i2 < 3 && same; ++i2)
+        for (int j2 = 0; j2 < 3; ++j2)
+          for (int d = 0; d < 3; ++d)
+            num = std::max(num, std::fabs(ga[i2][j2][d] - gb[i2][j2][d]));
+      eAD = std::max(eAD, same ? (den > 0 ? num / den : num) : 1.0);
+    }
+    double jmax = 0;
+    for (int k = 0; k < c.np; ++k)
+      for (int l = 0; l < c.np; ++l)
+        for (int d = 0; d < 3; ++d)
+          jmax = std::max(jmax, std::fabs(Jad[k][l][d]));
+    for (int l = 0; l < c.np; ++l) {
+      if (!fp[l])
+        continue;
+      for (int d = 0; d < 3; ++d) {
+        Cell cp = c, cm = c;
+        moveFoot(cp, l, d, delta);
+        moveFoot(cm, l, d, -delta);
+        const double fd = (cp.volumePerVertex() - cm.volumePerVertex()) / (2 * delta);
+        const double g = d == 0 ? dgx[l] : (d == 1 ? dgy[l] : dgz[l]);
+        const double gA = d == 0 ? ggx[l] : (d == 1 ? ggy[l] : ggz[l]);
+        if (std::fabs(fd - g) / gmax > eGradV) {
+          worstDistSize = std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) /
+                          std::cbrt(std::max(a.V[0], 1e-300));
+          worstV = a.V[0] / h3;
+        }
+        eGradV = std::max(eGradV, std::fabs(fd - g) / gmax);
+        for (int sIdx = 0; sIdx < 3; ++sIdx) {
+          Cell sp = c, sm = c;
+          moveFoot(sp, l, d, sweep[sIdx]);
+          moveFoot(sm, l, d, -sweep[sIdx]);
+          const double fs = (sp.volumePerVertex() - sm.volumePerVertex()) / (2 * sweep[sIdx]);
+          eSweep[sIdx] = std::max(eSweep[sIdx], std::fabs(fs - g) / gmax);
+        }
+        eGradVA = std::max(eGradVA, std::fabs(fd - gA) / gmaxA);
+        double ap[64] = {}, am[64] = {};
+        cp.facetAreasPerVertex(ap);
+        cm.facetAreasPerVertex(am);
+        for (int k = 0; k < c.np; ++k) {
+          if (!fp[k])
+            continue;
+          const double fdA = (ap[k] - am[k]) / (2 * delta);
+          eFDan = std::max(eFDan, std::fabs(fdA - Jan[k][l][d]) / jmax);
+          eFDad = std::max(eFDad, std::fabs(fdA - Jad[k][l][d]) / jmax);
+        }
+      }
+    }
+  }
+  std::printf(
+      "outside-seed power cells (8^3 jittered ±0.3h, W = %.1f h^2): checked=%ld (>= 20) "
+      "empty=%ld overflow=%ld boxFace=%ld notInterior=%ld facetSetDiff=%ld "
+      "maxDist/size=%.2f\n",
+      W, nOS, nEmpty, nOverflow, nBoxFace, nNotInterior, nSetDiff, maxDistSize);
+  std::printf(
+      "  (13a) translation oracle: |dV|/h3=%.2e (<=1e-12) |dA|/h2=%.2e |dAreaVec|/h2=%.2e "
+      "(<=1e-12) |dm|/h3=%.2e (<=1e-12) |dM2c|/h4=%.2e (<=1e-12)\n",
+      eV, eA, eAv, eM, eM2);
+  std::printf(
+      "  (13b) dV/dq vs FD (delta=1e-6h, rel to the cell's max): geomVolumeGrad %.2e "
+      "geomVolumeArea %.2e (<=1e-6); dA/dq analytic-vs-AD %.2e (<=1e-12, per triangle); "
+      "vs FD: analytic %.2e AD %.2e (<=1e-6)\n",
+      eGradV, eGradVA, eAD, eFDan, eFDad);
+  std::printf(
+      "  (13b') REPORT dV/dq FD error vs step: delta/h=1e-4:%.2e 1e-5:%.2e 1e-6:%.2e "
+      "1e-7:%.2e; worst cell at 1e-6h: dist/size=%.2f V/h3=%.2e\n",
+      eSweep[0], eSweep[1], eGradV, eSweep[2], worstDistSize, worstV);
+  // ---- REPORT (amendment 4): Power::chain dV_i/dx_j vs FD in x_j as d_ij → 0, both signs.
+  {
+    const int i = 0;
+    std::vector<Plane> P = powerPlanes(i, x, w, N, L);
+    Cell c;
+    buildIn(c, P, zero, L);
+    double A[64] = {};
+    c.facetAreasPerVertex(A);
+    int kBig = -1;
+    for (int k = 0; k < c.np; ++k)
+      if (c.pnbr[k] >= 0 && (kBig < 0 || A[k] > A[kBig]))
+        kBig = k;
+    const int j = c.pnbr[kBig];
+    real_t r2 = 0;
+    for (const Plane& q : P)
+      if (q.j == j)
+        r2 = q.p[0] * q.p[0] + q.p[1] * q.p[1] + q.p[2] * q.p[2];
+    std::printf("  (13c) REPORT chain dV_i/dx_j vs FD (cell %d, neighbour %d, delta=1e-6h):", i, j);
+    for (double sgn : {1.0, -1.0})
+      for (double t : {1e-2, 1e-6, 1e-12}) {
+        std::vector<real_t> w2 = w, x2 = x;
+        w2[j] = r2 + w2[i] - 2 * sgn * t * r2;  // d_ij = sgn·t·|r|²
+        Cell cc;
+        buildIn(cc, powerPlanes(i, x2, w2, N, L), zero, L);
+        int kj = -1;
+        for (int k = 0; k < cc.np; ++k)
+          if (cc.pnbr[k] == j)
+            kj = k;
+        if (kj < 0) {
+          std::printf(" %+.0e:nofacet", sgn * t);
+          continue;
+        }
+        double vg, gx[64] = {}, gy[64] = {}, gz[64] = {}, fS[3], fwS, fx[64], fy[64], fz[64],
+                   fw[64];
+        cc.geomVolumeGrad(vg, gx, gy, gz);
+        const real_t seed[3] = {x2[3 * i], x2[3 * i + 1], x2[3 * i + 2]};
+        peclet::voro::chainToDofs<peclet::voro::Power>(cc, seed, x2.data(), w2[i], w2.data(), L, gx,
+                                                       gy, gz, fS, fwS, fx, fy, fz, fw);
+        const double F[3] = {fx[kj], fy[kj], fz[kj]};
+        double num = 0, den = 0;
+        for (int d = 0; d < 3; ++d) {
+          double vpm[2];
+          for (int s = 0; s < 2; ++s) {
+            std::vector<real_t> x3 = x2;
+            x3[3 * j + d] += (s == 0 ? 1 : -1) * delta;
+            Cell c3;
+            buildIn(c3, powerPlanes(i, x3, w2, N, L), zero, L);
+            vpm[s] = c3.volumePerVertex();
+          }
+          const double fd = (vpm[0] - vpm[1]) / (2 * delta);
+          num = std::max(num, std::fabs(fd - F[d]));
+          den = std::max(den, std::fabs(fd));
+        }
+        std::printf(" d/r2=%+.0e:%.1e", sgn * t, num / den);
+      }
+    std::printf("\n");
+  }
+  const bool pass = nOS >= 20 && nOverflow == 0 && nNotInterior == 0 && nSetDiff == 0 &&
+                    eV <= 1e-12 && eA <= 1e-12 && eAv <= 1e-12 && eM <= 1e-12 && eM2 <= 1e-12 &&
+                    eGradV <= 1e-6 && eGradVA <= 1e-6 && eAD <= 1e-12 && eFDan <= 1e-6 &&
+                    eFDad <= 1e-6;
+  std::printf("  (13) %s\n", pass ? "PASS" : "FAIL");
+  return pass ? 0 : 1;
+}
+
+}  // namespace outside_seed
 
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
@@ -448,6 +850,7 @@ int main(int argc, char** argv) {
         std::printf("  PASS\n");
       }
     }
+    rc |= outside_seed::run();
   }
   Kokkos::finalize();
   return rc;
