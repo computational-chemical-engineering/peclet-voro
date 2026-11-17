@@ -193,10 +193,15 @@ static int run() {
     v = W * h2 * U(rng);
 
   const real_t zero[3] = {0, 0, 0};
-  const real_t delta = 1e-6 * h;
+  const real_t delta = 1e-6 * h;  // fixed step: (13c) and the (13b') REPORT
   long nOS = 0, nEmpty = 0, nOverflow = 0, nNotInterior = 0, nSetDiff = 0, nBoxFace = 0;
   double eV = 0, eA = 0, eM = 0, eM2 = 0, eAv = 0;  // translation oracle (abs, in h units)
   double eGradV = 0, eGradVA = 0, eAD = 0, eFDan = 0, eFDad = 0, maxDistSize = 0;
+  // G9 as restated by the orchestrator (2026-11-17): the gated FD step scales with the cell,
+  // δ_i = 1e-6·min(h, V_i^{1/3}); the δ² law is checked on the 3 cells with the largest dV/dq FD
+  // error (error at 10δ_i / error at δ_i = 100 ± 30 %). The fixed step δ = 1e-6h stays a REPORT.
+  double eGradVh = 0;                         // dV/dq FD error at the fixed δ = 1e-6h
+  std::vector<std::array<double, 4>> cellFD;  // {err(δ_i), err(10δ_i), V/h³, dist/size}
   // REPORT: the dV/dq FD error at other steps (truncation ∝ δ², roundoff ∝ ε·dist³/δ), and the
   // cell where the gated step's error peaks.
   const real_t sweep[3] = {1e-4 * h, 1e-5 * h, 1e-7 * h};
@@ -251,6 +256,8 @@ static int run() {
     values(c2, b);
     for (int v = 0; v < 5; ++v)
       eV = std::max(eV, std::fabs(a.V[v] - b.V[v]) / h3);
+    const real_t dI = 1e-6 * std::min<real_t>(h, std::cbrt(a.V[0]));  // the cell's FD step
+    double cErr = 0, cErr10 = 0;
     // match facets by neighbour id (planes with area > 0 in either frame)
     std::vector<int> map2(c.np, -1);
     for (int k = 0; k < c.np; ++k)
@@ -330,17 +337,32 @@ static int run() {
         continue;
       for (int d = 0; d < 3; ++d) {
         Cell cp = c, cm = c;
-        moveFoot(cp, l, d, delta);
-        moveFoot(cm, l, d, -delta);
-        const double fd = (cp.volumePerVertex() - cm.volumePerVertex()) / (2 * delta);
+        moveFoot(cp, l, d, dI);
+        moveFoot(cm, l, d, -dI);
+        const double fd = (cp.volumePerVertex() - cm.volumePerVertex()) / (2 * dI);
         const double g = d == 0 ? dgx[l] : (d == 1 ? dgy[l] : dgz[l]);
         const double gA = d == 0 ? ggx[l] : (d == 1 ? ggy[l] : ggz[l]);
-        if (std::fabs(fd - g) / gmax > eGradV) {
-          worstDistSize = std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) /
-                          std::cbrt(std::max(a.V[0], 1e-300));
-          worstV = a.V[0] / h3;
-        }
         eGradV = std::max(eGradV, std::fabs(fd - g) / gmax);
+        cErr = std::max(cErr, std::fabs(fd - g) / gmax);
+        {
+          Cell tp = c, tm = c;
+          moveFoot(tp, l, d, 10 * dI);
+          moveFoot(tm, l, d, -10 * dI);
+          const double ft = (tp.volumePerVertex() - tm.volumePerVertex()) / (20 * dI);
+          cErr10 = std::max(cErr10, std::fabs(ft - g) / gmax);
+        }
+        {
+          Cell hp = c, hm = c;
+          moveFoot(hp, l, d, delta);
+          moveFoot(hm, l, d, -delta);
+          const double fh = (hp.volumePerVertex() - hm.volumePerVertex()) / (2 * delta);
+          if (std::fabs(fh - g) / gmax > eGradVh) {
+            worstDistSize = std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) /
+                            std::cbrt(std::max(a.V[0], 1e-300));
+            worstV = a.V[0] / h3;
+          }
+          eGradVh = std::max(eGradVh, std::fabs(fh - g) / gmax);
+        }
         for (int sIdx = 0; sIdx < 3; ++sIdx) {
           Cell sp = c, sm = c;
           moveFoot(sp, l, d, sweep[sIdx]);
@@ -355,13 +377,20 @@ static int run() {
         for (int k = 0; k < c.np; ++k) {
           if (!fp[k])
             continue;
-          const double fdA = (ap[k] - am[k]) / (2 * delta);
+          const double fdA = (ap[k] - am[k]) / (2 * dI);
           eFDan = std::max(eFDan, std::fabs(fdA - Jan[k][l][d]) / jmax);
           eFDad = std::max(eFDad, std::fabs(fdA - Jad[k][l][d]) / jmax);
         }
       }
     }
+    cellFD.push_back(
+        {cErr, cErr10, a.V[0] / h3,
+         std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) / std::cbrt(std::max(a.V[0], 1e-300))});
   }
+  std::sort(
+      cellFD.begin(), cellFD.end(),
+      [](const std::array<double, 4>& p, const std::array<double, 4>& q) { return p[0] > q[0]; });
+  bool lawOk = cellFD.size() >= 3;
   std::printf(
       "outside-seed power cells (8^3 jittered ±0.3h, W = %.1f h^2): checked=%ld (>= 20) "
       "empty=%ld overflow=%ld boxFace=%ld notInterior=%ld facetSetDiff=%ld "
@@ -372,14 +401,22 @@ static int run() {
       "(<=1e-12) |dm|/h3=%.2e (<=1e-12) |dM2c|/h4=%.2e (<=1e-12)\n",
       eV, eA, eAv, eM, eM2);
   std::printf(
-      "  (13b) dV/dq vs FD (delta=1e-6h, rel to the cell's max): geomVolumeGrad %.2e "
+      "  (13b) dV/dq vs FD (delta=1e-6*min(h,V^1/3), rel to the cell's max): geomVolumeGrad %.2e "
       "geomVolumeArea %.2e (<=1e-6); dA/dq analytic-vs-AD %.2e (<=1e-12, per triangle); "
       "vs FD: analytic %.2e AD %.2e (<=1e-6)\n",
       eGradV, eGradVA, eAD, eFDan, eFDad);
   std::printf(
       "  (13b') REPORT dV/dq FD error vs step: delta/h=1e-4:%.2e 1e-5:%.2e 1e-6:%.2e "
       "1e-7:%.2e; worst cell at 1e-6h: dist/size=%.2f V/h3=%.2e\n",
-      eSweep[0], eSweep[1], eGradV, eSweep[2], worstDistSize, worstV);
+      eSweep[0], eSweep[1], eGradVh, eSweep[2], worstDistSize, worstV);
+  std::printf("  (13b'') delta^2 law on the 3 worst cells (err(10d)/err(d) in [70,130]):");
+  for (size_t r = 0; r < 3 && r < cellFD.size(); ++r) {
+    const double ratio = cellFD[r][0] > 0 ? cellFD[r][1] / cellFD[r][0] : 0;
+    lawOk &= ratio >= 70 && ratio <= 130;
+    std::printf(" [err=%.2e err10=%.2e ratio=%.3g V/h3=%.2e dist/size=%.1f]", cellFD[r][0],
+                cellFD[r][1], ratio, cellFD[r][2], cellFD[r][3]);
+  }
+  std::printf(" %s\n", lawOk ? "ok" : "MISS");
   // ---- REPORT (amendment 4): Power::chain dV_i/dx_j vs FD in x_j as d_ij → 0, both signs.
   {
     const int i = 0;
@@ -440,7 +477,7 @@ static int run() {
   const bool pass = nOS >= 20 && nOverflow == 0 && nNotInterior == 0 && nSetDiff == 0 &&
                     eV <= 1e-12 && eA <= 1e-12 && eAv <= 1e-12 && eM <= 1e-12 && eM2 <= 1e-12 &&
                     eGradV <= 1e-6 && eGradVA <= 1e-6 && eAD <= 1e-12 && eFDan <= 1e-6 &&
-                    eFDad <= 1e-6;
+                    eFDad <= 1e-6 && lawOk;
   std::printf("  (13) %s\n", pass ? "PASS" : "FAIL");
   return pass ? 0 : 1;
 }
