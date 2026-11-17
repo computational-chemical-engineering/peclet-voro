@@ -35,7 +35,10 @@
  * (deterministicOrder only); `auto` (the default) = default at one thread, else frame for (a)
  * and det for (b). (g) always uses the frame options.
  * Usage: test_ale_frame [n=16] [--part a|b|f|g|all] [--full] [--opts auto|default|frame|det]
- *                       [--dump DIR] [--time]
+ *                       [--dump DIR] [--time] [--diag]
+ * --diag (WO-S1.1b): in (a), the per-array difference of the first differing frame against frame 0
+ * (elements, max ulp, max relative), the frames 2.. that differ from frame 1, and hashes of
+ * frame 0, frame 1 and the last frame (to compare two runs).
  * Without --full (the ctest): (a) 20 frames, (b) 20 steps, (g) variant Z, 60 frames.
  *        test_ale_frame --export DIR [--mesh M1|M2|M3|all]
  * writes the meshes of WO-S0.3 (gate G0.3, tools/ale_gates/G0_3.sh) for the Python reference
@@ -53,9 +56,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <Kokkos_Core.hpp>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -131,6 +136,7 @@ DV copyOf(const DV& v) {
 struct Arr {
   std::string name;
   std::size_t elem = 1;
+  bool real = false;  ///< elements are Real (the --diag statistics in ulp)
   std::vector<char> bytes;
 };
 
@@ -140,6 +146,7 @@ Arr arrOf(const char* name, const V& v) {
   Arr a;
   a.name = name;
   a.elem = sizeof(T);
+  a.real = std::is_same_v<std::remove_cv_t<T>, Real>;
   auto hv = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), v);
   const char* p = reinterpret_cast<const char*>(hv.data());
   a.bytes.assign(p, p + v.extent(0) * sizeof(T));
@@ -195,6 +202,56 @@ std::string firstDiff(const std::vector<Arr>& a, const std::vector<Arr>& b) {
   return "";
 }
 
+/// Ordered integer image of a double: adjacent doubles differ by 1 (the ulp distance).
+std::int64_t ordered(double x) {
+  std::int64_t b;
+  std::memcpy(&b, &x, sizeof b);
+  return b < 0 ? std::numeric_limits<std::int64_t>::min() - b : b;
+}
+
+/// --diag (WO-S1.1b): one line per array that differs between `a` and `b`: elements that differ,
+/// and for Real arrays the largest distance in ulp and relative to max(|x|, |y|).
+void printDiffStats(const char* what, const std::vector<Arr>& a, const std::vector<Arr>& b) {
+  for (std::size_t k = 0; k < a.size(); ++k) {
+    const Arr &x = a[k], &y = b[k];
+    if (x.bytes == y.bytes)
+      continue;
+    const std::size_t n = std::min(x.bytes.size(), y.bytes.size()) / x.elem;
+    std::size_t nd = 0;
+    std::int64_t maxUlp = 0;
+    double maxRel = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+      if (std::memcmp(&x.bytes[i * x.elem], &y.bytes[i * y.elem], x.elem) == 0)
+        continue;
+      ++nd;
+      if (!x.real)
+        continue;
+      double u, v;
+      std::memcpy(&u, &x.bytes[i * x.elem], sizeof u);
+      std::memcpy(&v, &y.bytes[i * y.elem], sizeof v);
+      const std::int64_t du = ordered(u) - ordered(v);
+      maxUlp = std::max(maxUlp, du < 0 ? -du : du);
+      const double s = std::max(std::fabs(u), std::fabs(v));
+      if (s > 0)
+        maxRel = std::max(maxRel, std::fabs(u - v) / s);
+    }
+    std::printf("DIAG %s %-14s differ=%zu/%zu sizes=%zu/%zu maxUlp=%lld maxRel=%.3e\n", what,
+                x.name.c_str(), nd, n, x.bytes.size() / x.elem, y.bytes.size() / y.elem,
+                (long long)maxUlp, maxRel);
+  }
+}
+
+/// FNV-1a 64 over every array of a frame (--diag: compare runs).
+std::uint64_t hashArrays(const std::vector<Arr>& a) {
+  std::uint64_t h = 1469598103934665603ull;
+  for (const Arr& x : a)
+    for (const char c : x.bytes) {
+      h ^= (unsigned char)c;
+      h *= 1099511628211ull;
+    }
+  return h;
+}
+
 void writeFile(const std::string& path, const std::vector<char>& bytes) {
   FILE* fp = std::fopen(path.c_str(), "wb");
   if (!fp) {
@@ -231,7 +288,7 @@ FMO optionsOf(const std::string& o) {
 // ---- (a) V0.1 (a)
 // --------------------------------------------------------------------------------
 template <bool W>
-int partA(const char* tag, const Scene& s, int frames, const std::string& opts) {
+int partA(const char* tag, const Scene& s, int frames, const std::string& opts, bool diag = false) {
   Engine<W> mt;
   allocEngine<W>(mt, s.N, s.L, s.h, s.weight);
   FrameOpts fo;
@@ -241,13 +298,29 @@ int partA(const char* tag, const Scene& s, int frames, const std::string& opts) 
   const auto ref = meshArrays(f0.mesh);
   int badFrames = 0, changedFrames = 0, rounds = f0.reciprocity.rounds;
   std::string first;
+  std::vector<Arr> ref1;
+  int notFixed = 0;  // --diag: frames k >= 2 that differ from frame 1
   for (int k = 1; k <= frames; ++k) {
     const Frame f = ale::advanceFrame(mt, s.pos, w, s.L, fo);
-    const std::string d = firstDiff(ref, meshArrays(f.mesh));
+    const auto cur = meshArrays(f.mesh);
+    const std::string d = firstDiff(ref, cur);
     if (!d.empty()) {
-      if (badFrames == 0)
+      if (badFrames == 0) {
         first = "frame " + std::to_string(k) + " " + d;
+        if (diag)
+          printDiffStats((std::string(tag) + " frame" + std::to_string(k) + "-vs-0").c_str(), cur,
+                         ref);
+      }
       ++badFrames;
+    }
+    if (diag) {
+      if (k == 1)
+        ref1 = cur;
+      else if (!firstDiff(ref1, cur).empty())
+        ++notFixed;
+      if (k == 1 || k == frames)
+        std::printf("DIAG %s hash frame0=%016llx frame%d=%016llx\n", tag,
+                    (unsigned long long)hashArrays(ref), k, (unsigned long long)hashArrays(cur));
     }
     const int nz = nonzero(mt.changedMask(), s.N);
     if (nz != 0 || f.numRebuilt != 0 || f.coldBuild)
@@ -255,6 +328,8 @@ int partA(const char* tag, const Scene& s, int frames, const std::string& opts) 
     rounds += f.reciprocity.rounds;
   }
   const bool pass = badFrames == 0 && changedFrames == 0;
+  if (diag)
+    std::printf("DIAG %s fixedPoint frames2..%d differing from frame1=%d\n", tag, frames, notFixed);
   std::printf(
       "RESULT a %-7s n=%d opts=%s frames=%d %s arrays=%zu mismatchFrames=%d changedFrames=%d "
       "rounds=%d nDropped=%d%s%s\n",
@@ -904,7 +979,7 @@ int main(int argc, char** argv) {
   {
     int n = 16;
     std::string part = "all", opts = "auto", dumpDir, exportDir, exportWhich = "all";
-    bool full = false, timeIt = false, meshGiven = false;
+    bool full = false, timeIt = false, meshGiven = false, diag = false;
     int gframes = 0, exportCells = 0;
     for (int a = 1; a < argc; ++a) {
       const std::string s = argv[a];
@@ -927,6 +1002,8 @@ int main(int argc, char** argv) {
         full = true;
       else if (s == "--time")
         timeIt = true;
+      else if (s == "--diag")
+        diag = true;
       else if (s.rfind("--", 0) != 0)
         n = std::atoi(s.c_str());
     }
@@ -952,8 +1029,8 @@ int main(int argc, char** argv) {
     if (all || part == "a" || part == "f" || part == "g") {
       const Scene s = makeScene(n);
       if (all || part == "a") {
-        rc |= partA<false>("voronoi", s, full ? 100 : 20, optsA);
-        rc |= partA<true>("power", s, full ? 100 : 20, optsA);
+        rc |= partA<false>("voronoi", s, full ? 100 : 20, optsA, diag);
+        rc |= partA<true>("power", s, full ? 100 : 20, optsA, diag);
       }
       if (all || part == "f")
         rc |= partF(s);
