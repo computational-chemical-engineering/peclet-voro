@@ -76,6 +76,12 @@ if(PECLET_VORO_BUILD_TESTS)
   # bitwise), F, G0.2 short (16³; tools/ale_gates/G0_2.sh runs the gate at 16³/32³, 500 frames).
   add_voro_kokkos_test(test_ale_frame)
 
+  # Moving-grid stage 1 (docs/ale_design.md WO-S1.1): the bulk operators of ale/operators.hpp —
+  # adjointness, linear/rigid exactness, the Eulerian limit V0.3, the static body-force balance,
+  # the L_rho matrix (gate G1.1 K2-K6); `--apply DIR` is the device side of K1
+  # (tools/ale_gates/G1_1.sh compares it with tests/python/ale_reference.py).
+  add_voro_kokkos_test(test_ale_operators)
+
   # Track B, rung B1: centroidal (Lloyd) relaxation of a random grid — skewness / volume spread /
   # Poisson residual consistency all drop (grid quality is solver quality).
   add_voro_kokkos_test(test_grid_relax)

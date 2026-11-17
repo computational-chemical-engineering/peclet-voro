@@ -368,3 +368,17 @@ class Matrices:
 
     def zeta_apply(self, dU):
         return (self.Delta3.T @ (self.zeta_d @ dU.ravel())).reshape(-1, 3)
+
+
+# ------------------------------------------------------------------------------- body force (amendment A7)
+def gamma_face(m, rho, psi_cell, psi_face):
+    """Face body force gamma_f = rho_A [psi(x_A) - psi(c_f)] + rho_B [psi(c_f) - psi(x_B)] from the potential at the
+    cells (psi_cell, N) and at the face centroids (psi_face, F); the force on the cells is I_F^T gamma."""
+    return rho[m.A] * (psi_cell[m.A] - psi_face) + rho[m.B] * (psi_face - psi_cell[m.B])
+
+
+def gamma_face_uniform(m, rho, g):
+    """gamma_face for the uniform field psi = -g.x through differences (no positions differenced across the box):
+    psi(x_A) - psi(c_f) = g.(c_f - x_A), psi(c_f) - psi(x_B) = g.(conn_f - (c_f - x_A))."""
+    g = np.asarray(g, dtype=np.float64)
+    return rho[m.A] * (m.cA @ g) + rho[m.B] * ((m.conn - m.cA) @ g)
