@@ -3,7 +3,7 @@
 # 2026-11-14 in the brief ALE_S0_2): the frame pipeline (ale/frame.hpp), the forced worklist and
 # the changed set (repair.hpp).
 #
-#   tools/ale_gates/G0_2.sh <build dir>
+#   tools/ale_gates/G0_2.sh <build dir> [log prefix, default S0_2p]
 #
 # Needs, from the baseline tree (be2d67d) in the same build dir:
 #   <build dir>/gate_logs/ctest.S0_2base.log  (OMP_NUM_THREADS=4 ctest -LE bench)
@@ -26,10 +26,14 @@
 #         the smallest evaluated frame count); the first frame at which the rebuilt counts differ
 #         (1 v 8, 8 v 8) is read from the logs. PASS needs V0.1a, V0.1b, F, base and G0.2'Z;
 #         G0.2'W is printed with its own PASS/MISS and does not decide the line.
-# Logs in <build dir>/gate_logs/S0_2p.*. Prints ONE line `S0.2' PASS|FAIL V0.1a=… V0.1b=… G0.2'Z=…
+#         (iv') gates the runs with enforcement on (4 per variant); the runs with it off are
+#         printed as INFO (`iv0=`): the accepted reading of 2026-11-14 "PASS with enforcement,
+#         MISS without" (criteria change of WO-S0.5, finding F4, made after the run).
+# Logs in <build dir>/gate_logs/<prefix>.*. Prints ONE line `S0.2' PASS|FAIL V0.1a=… V0.1b=… G0.2'Z=…
 # G0.2'W=… F=… base=…`; exit 1 on FAIL.
 set -u
-B="$(cd "${1:?usage: G0_2.sh <build dir>}" && pwd)"
+B="$(cd "${1:?usage: G0_2.sh <build dir> [log prefix]}" && pwd)"
+P="${2:-S0_2p}"
 SRC="$(cd "$(dirname "$0")/../.." && pwd)"
 L="$B/gate_logs"
 mkdir -p "$L"
@@ -43,22 +47,22 @@ for f in "$L/ctest.S0_2base.log" "$L/state_hash.base"; do
   [[ -f "$f" ]] || { echo "S0.2' FAIL missing baseline $f"; exit 1; }
 done
 
-if ! cmake --build "$B" -j8 > "$L/S0_2p.build.log" 2>&1; then
-  echo "S0.2' FAIL build (log $L/S0_2p.build.log)"
+if ! cmake --build "$B" -j8 > "$L/$P.build.log" 2>&1; then
+  echo "S0.2' FAIL build (log $L/$P.build.log)"
   exit 1
 fi
 T="$B/tests/kokkos/test_ale_frame"
 
 # ---- base ----
-OMP_NUM_THREADS=4 ctest --test-dir "$B" -LE bench > "$L/S0_2p.ctest.log" 2>&1
+OMP_NUM_THREADS=4 ctest --test-dir "$B" -LE bench > "$L/$P.ctest.log" 2>&1
 passed_base=$(grep -E 'Test +#[0-9]+: .* Passed' "$L/ctest.S0_2base.log" | sed -E 's/.*: ([^ ]+) .*/\1/' | sort)
-passed_now=$(grep -E 'Test +#[0-9]+: .* Passed' "$L/S0_2p.ctest.log" | sed -E 's/.*: ([^ ]+) .*/\1/' | sort)
+passed_now=$(grep -E 'Test +#[0-9]+: .* Passed' "$L/$P.ctest.log" | sed -E 's/.*: ([^ ]+) .*/\1/' | sort)
 lost=$(comm -23 <(echo "$passed_base") <(echo "$passed_now") | tr '\n' ' ')
 n_base=$(echo "$passed_base" | grep -c .)
 n_now=$(echo "$passed_now" | grep -c .)
-n_all=$(grep -cE 'Test +#[0-9]+: ' "$L/S0_2p.ctest.log")
-OMP_NUM_THREADS=1 PYTHONPATH="$B" python python/state_hash.py > "$L/S0_2p.state_hash" 2> "$L/S0_2p.state_hash.err"
-if cmp -s "$L/state_hash.base" "$L/S0_2p.state_hash" && [[ -s "$L/S0_2p.state_hash" ]]; then
+n_all=$(grep -cE 'Test +#[0-9]+: ' "$L/$P.ctest.log")
+OMP_NUM_THREADS=1 PYTHONPATH="$B" python python/state_hash.py > "$L/$P.state_hash" 2> "$L/$P.state_hash.err"
+if cmp -s "$L/state_hash.base" "$L/$P.state_hash" && [[ -s "$L/$P.state_hash" ]]; then
   hash_ok=1
 else
   hash_ok=0
@@ -72,26 +76,26 @@ fi
 # ---- V0.1 (a) ----
 na=0
 for n in 16 32; do
-  OMP_NUM_THREADS=1 "$T" $n --part a --full > "$L/S0_2p.a$n.t1.log" 2>&1
-  OMP_NUM_THREADS=8 "$T" $n --part a --full > "$L/S0_2p.a$n.t8.log" 2>&1
-  na=$((na + $(grep -c '^RESULT a .* PASS' "$L/S0_2p.a$n.t1.log" "$L/S0_2p.a$n.t8.log" | awk -F: '{s+=$2} END {print s}')))
+  OMP_NUM_THREADS=1 "$T" $n --part a --full > "$L/$P.a$n.t1.log" 2>&1
+  OMP_NUM_THREADS=8 "$T" $n --part a --full > "$L/$P.a$n.t8.log" 2>&1
+  na=$((na + $(grep -c '^RESULT a .* PASS' "$L/$P.a$n.t1.log" "$L/$P.a$n.t8.log" | awk -F: '{s+=$2} END {print s}')))
 done
 if [[ $na == 8 ]]; then a="PASS(8/8)"; else a="FAIL($na/8)"; fi
 
 # ---- V0.1 (b) ----
-D="$L/S0_2p.dump"
+D="$L/$P.dump"
 rm -rf "$D" && mkdir -p "$D/b1" "$D/b8"
-OMP_NUM_THREADS=1 "$T" 16 --part b --full --dump "$D/b1" > "$L/S0_2p.b.t1.log" 2>&1
-OMP_NUM_THREADS=8 "$T" 16 --part b --full --dump "$D/b8" > "$L/S0_2p.b.t8.log" 2>&1
-nb=$(cat "$L/S0_2p.b.t1.log" "$L/S0_2p.b.t8.log" | grep -c '^RESULT b .* PASS')
+OMP_NUM_THREADS=1 "$T" 16 --part b --full --dump "$D/b1" > "$L/$P.b.t1.log" 2>&1
+OMP_NUM_THREADS=8 "$T" 16 --part b --full --dump "$D/b8" > "$L/$P.b.t8.log" 2>&1
+nb=$(cat "$L/$P.b.t1.log" "$L/$P.b.t8.log" | grep -c '^RESULT b .* PASS')
 shadiff=0
-: > "$L/S0_2p.b.sha"
+: > "$L/$P.b.sha"
 for r in b1 b8; do
   for c in B_rk3 D_implicit; do
     for x in U p uf; do
       h1=$(sha256sum < "$D/$r/b_${c}_run1.$x" | cut -c1-64)
       h2=$(sha256sum < "$D/$r/b_${c}_run2.$x" | cut -c1-64)
-      echo "$r $c $x $h1 $h2" >> "$L/S0_2p.b.sha"
+      echo "$r $c $x $h1 $h2" >> "$L/$P.b.sha"
       [[ "$h1" == "$h2" ]] || shadiff=$((shadiff + 1))
     done
   done
@@ -99,8 +103,8 @@ done
 if [[ $nb == 4 && $shadiff == 0 ]]; then b="PASS(4/4,sha=12/12)"; else b="FAIL($nb/4,shadiff=$shadiff)"; fi
 
 # ---- F ----
-OMP_NUM_THREADS=8 "$T" 16 --part f > "$L/S0_2p.f.log" 2>&1
-if grep -q '^RESULT f .* PASS' "$L/S0_2p.f.log"; then f="PASS"; else f="FAIL"; fi
+OMP_NUM_THREADS=8 "$T" 16 --part f > "$L/$P.f.log" 2>&1
+if grep -q '^RESULT f .* PASS' "$L/$P.f.log"; then f="PASS"; else f="FAIL"; fi
 
 # ---- G0.2' ----
 runG() {  # runG <dir> <threads> <log> [extra args]
@@ -109,29 +113,40 @@ runG() {  # runG <dir> <threads> <log> [extra args]
   mkdir -p "$d"
   OMP_NUM_THREADS=$t "$T" 32 --part g --full --dump "$d" "$@" > "$lg" 2>&1
 }
-runG "$D/g1a" 1 "$L/S0_2p.g.t1a.log"
-runG "$D/g1b" 1 "$L/S0_2p.g.t1b.log"
-runG "$D/g8a" 8 "$L/S0_2p.g.t8a.log" --time
-runG "$D/g8b" 8 "$L/S0_2p.g.t8b.log"
-glogs="$L/S0_2p.g.t1a.log $L/S0_2p.g.t1b.log $L/S0_2p.g.t8a.log $L/S0_2p.g.t8b.log"
+runG "$D/g1a" 1 "$L/$P.g.t1a.log"
+runG "$D/g1b" 1 "$L/$P.g.t1b.log"
+runG "$D/g8a" 8 "$L/$P.g.t8a.log" --time
+runG "$D/g8b" 8 "$L/$P.g.t8b.log"
+glogs="$L/$P.g.t1a.log $L/$P.g.t1b.log $L/$P.g.t8a.log $L/$P.g.t8b.log"
 # variant W: the compared runs must have evaluated the same frames; else repeat them capped at the
 # smallest evaluated count (frames before the first empty cell)
 cap=$(cat $glogs | grep '^RESULT g variant=W ' | sed -E 's/.* evaluated=([0-9]+) .*/\1/' | sort -n | head -1)
-same=$(cat "$L/S0_2p.g.t1a.log" "$L/S0_2p.g.t8a.log" "$L/S0_2p.g.t8b.log" | grep '^RESULT g variant=W ' | sed -E 's/.* (enforce=[0-9]) .* evaluated=([0-9]+) .*/\1 \2/' | sort -u | wc -l)
+same=$(cat "$L/$P.g.t1a.log" "$L/$P.g.t8a.log" "$L/$P.g.t8b.log" | grep '^RESULT g variant=W ' | sed -E 's/.* (enforce=[0-9]) .* evaluated=([0-9]+) .*/\1 \2/' | sort -u | wc -l)
 wdir1="$D/g1a"; wdir8a="$D/g8a"; wdir8b="$D/g8b"
-wlog1="$L/S0_2p.g.t1a.log"; wlog8a="$L/S0_2p.g.t8a.log"; wlog8b="$L/S0_2p.g.t8b.log"
+wlog1="$L/$P.g.t1a.log"; wlog8a="$L/$P.g.t8a.log"; wlog8b="$L/$P.g.t8b.log"
 if [[ "$same" != 2 ]]; then  # one distinct evaluated count per enforce setting
-  runG "$D/c1a" 1 "$L/S0_2p.gc.t1a.log" --gframes "$cap"
-  runG "$D/c8a" 8 "$L/S0_2p.gc.t8a.log" --gframes "$cap"
-  runG "$D/c8b" 8 "$L/S0_2p.gc.t8b.log" --gframes "$cap"
+  runG "$D/c1a" 1 "$L/$P.gc.t1a.log" --gframes "$cap"
+  runG "$D/c8a" 8 "$L/$P.gc.t8a.log" --gframes "$cap"
+  runG "$D/c8b" 8 "$L/$P.gc.t8b.log" --gframes "$cap"
   wdir1="$D/c1a"; wdir8a="$D/c8a"; wdir8b="$D/c8b"
-  wlog1="$L/S0_2p.gc.t1a.log"; wlog8a="$L/S0_2p.gc.t8a.log"; wlog8b="$L/S0_2p.gc.t8b.log"
+  wlog1="$L/$P.gc.t1a.log"; wlog8a="$L/$P.gc.t8a.log"; wlog8b="$L/$P.gc.t8b.log"
 fi
-crit() {  # crit <variant> <name>: PASS if the field is PASS|INFO in every RESULT line (4 runs x 2)
-  local tot ok
-  tot=$(cat $glogs | grep -c "^RESULT g variant=$1 ")
-  ok=$(cat $glogs | grep "^RESULT g variant=$1 " | grep -cE " $2=(PASS|INFO)")
-  if [[ $tot == 8 && $ok == 8 ]]; then echo PASS; else echo "FAIL($ok/$tot)"; fi
+crit() {  # crit <variant> <name> [enforce]: PASS if the field is PASS|INFO in every RESULT line
+  # (4 runs x 2 enforce settings; with the third argument, the 4 runs of that setting)
+  local tot ok sel="^RESULT g variant=$1 " want=8
+  if [[ $# -ge 3 ]]; then
+    sel="^RESULT g variant=$1 enforce=$3 "
+    want=4
+  fi
+  tot=$(cat $glogs | grep -c "$sel")
+  ok=$(cat $glogs | grep "$sel" | grep -cE " $2=(PASS|INFO)")
+  if [[ $tot == "$want" && $ok == "$want" ]]; then echo PASS; else echo "FAIL($ok/$tot)"; fi
+}
+info() {  # info <variant> <name> <enforce>: how many of the 4 runs pass the field, as INFO
+  local tot ok sel="^RESULT g variant=$1 enforce=$3 "
+  tot=$(cat $glogs | grep -c "$sel")
+  ok=$(cat $glogs | grep "$sel" | grep -cE " $2=(PASS|INFO)")
+  echo "INFO($ok/${tot}pass)"
 }
 vprime() {  # vprime <variant> <dir1a> <dir1b> <dir1 for volumes> <dir8a> <dir8b> <log1> <log8a> <log8b>
   python3 -I - "$@" << 'PYEOF'
@@ -180,18 +195,18 @@ print('%s(sha1v1=%s,maxRelDvol=%.2e,firstDiffRebuilt:1v8=%s,8v8=%s)' %
       ('PASS' if ok else 'FAIL', 'same' if shaok else 'DIFF', worst, fd18, fd88))
 PYEOF
 }
-gz="i=$(crit Z i),ii=$(crit Z ii),iii=$(crit Z iii),iv=$(crit Z iv),empty=$(crit Z empty)"
-gw="i=$(crit W i),ii=$(crit W ii),iii=$(crit W iii),iv=$(crit W iv)"
-vz=$(vprime Z "$D/g1a" "$D/g1b" "$D/g1a" "$D/g8a" "$D/g8b" "$L/S0_2p.g.t1a.log" "$L/S0_2p.g.t8a.log" "$L/S0_2p.g.t8b.log")
+gz="i=$(crit Z i),ii=$(crit Z ii),iii=$(crit Z iii),iv=$(crit Z iv 1),iv0=$(info Z iv 0),empty=$(crit Z empty)"
+gw="i=$(crit W i),ii=$(crit W ii),iii=$(crit W iii),iv=$(crit W iv 1),iv0=$(info W iv 0)"
+vz=$(vprime Z "$D/g1a" "$D/g1b" "$D/g1a" "$D/g8a" "$D/g8b" "$L/$P.g.t1a.log" "$L/$P.g.t8a.log" "$L/$P.g.t8b.log")
 vw=$(vprime W "$D/g1a" "$D/g1b" "$wdir1" "$wdir8a" "$wdir8b" "$wlog1" "$wlog8a" "$wlog8b")
 fe=$(cat $glogs | grep '^RESULT g variant=W ' | sed -E 's/.* firstEmpty=([0-9a-z]+).*/\1/' | sort -u | tr '\n' ',' | sed 's/,$//')
 gzverdict=PASS
-for x in $(echo "$gz" | tr ',' ' ' | sed 's/[a-z]*=//g') "$vz"; do
-  [[ $x == PASS* ]] || gzverdict=FAIL
+for x in $(echo "$gz" | tr ',' ' ' | sed 's/[a-z0-9]*=//g') "$vz"; do
+  [[ $x == PASS* || $x == INFO* ]] || gzverdict=FAIL
 done
 gwverdict=PASS
-for x in $(echo "$gw" | tr ',' ' ' | sed 's/[a-z]*=//g') "$vw"; do
-  [[ $x == PASS* ]] || gwverdict=MISS
+for x in $(echo "$gw" | tr ',' ' ' | sed 's/[a-z0-9]*=//g') "$vw"; do
+  [[ $x == PASS* || $x == INFO* ]] || gwverdict=MISS
 done
 GZ="$gzverdict($gz,v'=$vz)"
 GW="$gwverdict($gw,v'=$vw,firstEmpty=$fe,evaluated<=$cap)"
@@ -200,5 +215,5 @@ verdict=PASS
 for x in "$a" "$b" "$f" "$gzverdict" "$base"; do
   [[ $x == PASS* ]] || verdict=FAIL
 done
-echo "S0.2' $verdict V0.1a=$a V0.1b=$b G0.2'Z=$GZ G0.2'W=$GW F=$f base=$base (logs $L/S0_2p.*)"
+echo "S0.2' $verdict V0.1a=$a V0.1b=$b G0.2'Z=$GZ G0.2'W=$GW F=$f base=$base (logs $L/$P.*)"
 [[ $verdict == PASS ]]
