@@ -339,10 +339,19 @@ struct ConvexCell {
       ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
       rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
       if constexpr (Policy::kHasWeightDof) {
-        // radical plane {x : r·x <= d}, d = ½(|r|² + w_self − w_nbr), sign-safe (setHalfSpace)
+        // radical plane {x : r·x <= d}, d = ½(|r|² + w_self − w_nbr). d > 0 (the seed inside):
+        // the legacy foot-point expressions verbatim, so nvcc contracts them as before (G6 on
+        // CUDA); setHalfSpace's d > 0 branch is the same arithmetic. d <= 0: sign-safe overwrite.
         const Real r[3] = {rx, ry, rz};
+        const Real rho = rx * rx + ry * ry + rz * rz;
         const Real off = Policy::template offsetFromRel<Real>(r, wSelf, weight[g]);
-        setHalfSpace(k, r, off);
+        const Real a = rho > Real(0) ? off / rho : Real(0);
+        n[k][0] = a * rx;
+        n[k][1] = a * ry;
+        n[k][2] = a * rz;
+        nn[k] = n[k][0] * n[k][0] + n[k][1] * n[k][1] + n[k][2] * n[k][2];
+        if (!(off > Real(0)))
+          setHalfSpace(k, r, off);
       } else {
         // foot point of the Voronoi bisector: n = ½r, offset nn = |n|² = ¼|r|²
         const Real hx = Real(0.5) * rx, hy = Real(0.5) * ry, hz = Real(0.5) * rz;
