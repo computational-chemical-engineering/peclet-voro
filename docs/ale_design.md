@@ -1051,3 +1051,46 @@ at rest is unchanged bitwise (no round at rest). GPU at 16³: 0 frames above the
 in two same-load pairs at load 35–45); it is taken with the cost number of S1.3. The root (a kept cell whose
 facet polygon is not convex) is in the repair and in `convex_cell.hpp`, which are session `voronoi`'s code; it
 has the finding. Across ranks the forcing has the same gap as A12's (review F5), before S1.4.
+
+### A15 (2026-11-17): the reference time step on a static mesh (work order S1.2a, gate G1.2r; fixes what S1.2b is checked against)
+**What exists.** `tests/python/ale_reference.py` (appended: transport matrix T, upwind part Q = ΔᵀWΔ, R − Δ, centroid
+correction δ, predictor operator, each as a matrix and as a face loop), `tests/python/ale_reference_stepper.py`
+(the step of §4.1 for one phase on a static mesh, modes F and R, the energy budget), `tools/ale_gates/G1_2r.sh`.
+Meshes Z = M1 (jitter ±0.3 h, zero weights), W = M2 (weights uniform in [0, 0.15 h²]), 8³–32³ (`--cells n --mesh`).
+
+**Bindings found while writing it (they hold for the device stepper):**
+- The predictor operator is not symmetric (T is skew): a Krylov method for nonsymmetric systems. The reference
+  uses GMRES with a 3×3 block-Jacobi preconditioner from U_ext: 9.4 iterations (mean) at 32³.
+- T is the skew form ½ Σ_f s_if ρF_f U_o; its energy term B2 is zero to rounding because DF = 0 after the compact
+  projection. The diagonal ½(DF)U of the 2D oracle is not carried.
+- **An inexact predictor solve changes momentum by the momentum of its residual.** That is booked, as §4.9 books
+  the residual work: the conservation gate is on the momentum with the residual's part booked. Measured: drift
+  2.2e-13 of Σ M|U| at relative tolerance 1e-13, 2.2e-14 at 1e-14, 6e-17 with the residual booked.
+- Momentum is judged as the drift from its start value: a field sampled at the generators of an irregular mesh
+  has Σ M U ≠ 0 (9e-5 for Taylor–Green at 16³).
+- τ = 1/ceil(c₁/0.4), c₁ the flux Courant number of the start field at τ = 1.
+
+**Gate G1.2r as fixed before the run: FAIL (R2, R4, R6 (ii′) miss).** Logs `build_s0/gate_logs/S1_2a.*`, all measured.
+| id | result |
+|---|---|
+| R0 PASS | rest exactly 0; uniform flow 2.9e-14 |
+| R1 PASS | budget closure 2.4e-17 K (Z and W 16³, modes F and R) |
+| R2 MISS | momentum drift 2.2e-13 against 1e-13 (see above: the solve tolerance tested at its own size); τ\|DΦ₁\|/V 1.4e-16 |
+| R3 PASS | 2000 steps, K never rises beyond the unsigned terms (−9.6e-8 K); μ̂ ≥ 0.972 μ_exact; ω μ_exact ≤ 0.9999; μ_exact Z 0.898 / 0.986 / 1.009, W 0.920 / 1.000 / 1.022 at 8³ / 16³ / 32³ |
+| R4 MISS at 16³ | error of mode F against mode R: 3.4 % at 16³ (bound 2 %), 1.1 % at 32³ |
+| R5 PASS | Taylor–Green, Re 100, Z: 1.71e-1 / 3.33e-2 / 1.03e-2, order 2.36, 1.69; ABC, Z: 1.92e-1 / 3.19e-2 / 5.59e-3, order 2.59, 2.51. W: TG 1.72e-1 / 3.53e-2 / 1.07e-2 (1.72), ABC 1.92e-1 / 3.57e-2 / 6.70e-3 (2.41) |
+| R6 | (i) hydrostatic, face form: 2.5e-15 PASS. (ii′) fall from rest 1.12e-12 against 1e-12 MISS (1.4e-13 at tolerance 1e-14, 7e-15 with a direct solve); mean velocity from the Taylor–Green start 5.0e-14 PASS. Reported: Taylor–Green plus ḡ against the run without ḡ plus ḡt differs by 7.4e-2 on a static mesh (A13); the same potential force given as cell values leaves 2.6e-2 of the free acceleration (D4). |
+| R7 | 32³, one thread: 1.30 s per step in mode F, 12.2 s in mode R (99 CG iterations at every resolution) |
+
+**Corrected criteria (orchestrator, fixed 2026-11-17 before S1.2b; R2 and R6 (ii′) were wrong criteria, shown by
+the controls; R4 stays a recorded miss).** R2′: momentum drift with the residual's momentum booked ≤ 1e-13 Σ M|U|
+(measured 6e-17). R6 (ii′)′, fall from rest: |U − ḡt|/(|ḡ|t) ≤ 20 × the predictor's relative tolerance after 100
+steps (measured 11 × at 1e-13, 14 × at 1e-14). R4: reported at 16³ and 32³, bound 2 % at 32³ only.
+
+**What the numbers say.** At Re 100 (cell Reynolds 6 → 3) the 3D step is between order 1.7 (Taylor–Green) and 2.5
+(ABC), with and without weights; weights cost 4 % (Taylor–Green) and 20 % (ABC) of accuracy at 32³. The first
+order with weights of decision 8 is a statement at cell Reynolds 80 and is not tested here. Mode F is 9 times
+cheaper per step than mode R at 32³ and differs from it by 1 % of the error there.
+
+**Open for S1.2b.** The reference estimates μ̂ with the exact L_ρ solve; §4.3's estimate with a 1e-2 solve is
+tested on the device. The form without the explicit upwind part was not run (the stop rule did not fire).
