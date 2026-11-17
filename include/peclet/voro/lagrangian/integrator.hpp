@@ -1835,9 +1835,28 @@ class Integrator {
   double bindingStep() const {
     if (!pots_.binding.active)
       return std::numeric_limits<double>::infinity();
+    return bindingStepOver(spec_.binding.beta0 > Real(0), pots_.binding.chi);
+  }
+
+  /// Δt_b before the binding has been evaluated (the θ rule's step bound in voro's `prepare`):
+  /// over every cell. With β₀ > 0 this is bindingStep()'s value; with β₀ = 0 the band is not known
+  /// yet and every cell bounds Δt_b from below. +inf when offsetBinding's skip rule applies
+  /// (β = β₀ = 0, no tension, σ = 0, all labels equal; walls or nTypes ≠ 2 throw there).
+  double bindingStepBound() const {
+    if (!spec_.binding.on() || spec_.tension.extent(0) == 0 || spec_.nTypes != 2)
+      return std::numeric_limits<double>::infinity();
+    if (peclet::core::toVector(spec_.tension)[1] == Real(0))
+      return std::numeric_limits<double>::infinity();
+    const auto th = peclet::core::toVector(spec_.types);
+    if (std::all_of(th.begin(), th.end(), [&](int t) { return t == th[0]; }))
+      return std::numeric_limits<double>::infinity();
+    return bindingStepOver(true, LView<Real>());
+  }
+
+  /// (ρ_min h_min³ / (8(β + β₀)σ))^{1/2}, the minima over every cell (`all`) or over χ > 0.
+  double bindingStepOver(bool all, const LView<Real>& chiIn) const {
     const double sigma = peclet::core::toVector(spec_.tension)[1];
-    const bool all = spec_.binding.beta0 > Real(0);
-    const LView<Real> chi = pots_.binding.chi, rho = rho_, h = h_;
+    const LView<Real> chi = chiIn, rho = rho_, h = h_;
     Real rmin = std::numeric_limits<Real>::infinity(), hmin = rmin;
     Kokkos::parallel_reduce(
         "nhvw.bindStep", Kokkos::RangePolicy<Exec>(0, N_),

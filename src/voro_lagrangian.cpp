@@ -1293,6 +1293,7 @@ class LagrangianFlow : public peclet::core::python::Releasable {
             double tauMax = dtUser_ > 0 ? dtUser_ : std::numeric_limits<double>::infinity();
             if (cap_ > 0)
               tauMax = std::min(tauMax, I->capillaryStep(cap_));
+            tauMax = std::min(tauMax, I->bindingStepBound());  // Δt ← min(Δt, Δt_b) (§18.5)
             theta_ = (std::isfinite(tauMax) && I->maxNuOverH2() * tauMax > 1.0) ? 1.0 : 0.5;
             I->setTheta(theta_);
             I->setKickConstraint(kick1_);
