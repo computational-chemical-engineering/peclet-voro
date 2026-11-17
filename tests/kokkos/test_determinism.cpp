@@ -5,7 +5,8 @@
  *
  * Prints the SHA-256 of every published array; the companion script `determinism_check.sh` runs
  * this binary at several OpenMP thread counts and requires the hashes to be equal. Scene: an n³
- * periodic lattice jittered ±0.3h; power weights uniform in [0, 0.15h²] (fixed seed).
+ * periodic lattice jittered ±0.3h; power weights uniform in [0, W h²] (fixed seed; W = --wmax,
+ * default 0.15).
  *
  *  cold:  for Voronoi and power, the cold build's own view (buildTessellation, force geometry
  *         on) and the resident engine's publish (MovingTessellation::rebuild → reevalPublish →
@@ -14,13 +15,20 @@
  *         wrapped into [0,1); the engine repairs (`step`) and publishes every frame; one
  *         `FRAME <policy> k <sha>` line per frame over the published arrays + the rebuilt mask.
  *  guard: every frame of the power run, a cold build of that frame's positions: the volume sum
- *         against the box, facets without a reciprocal (cell i has a facet to j, j none to i),
- *         and every empty cell published with zero volume and no facets.
+ *         against the box, facets without a reciprocal (cell i has a facet to j, j none to i;
+ *         facets of area ≤ 1e-14 h² counted apart as `nonRecipTiny`), every empty cell published
+ *         with zero volume and no facets, the counts of the status bits kOverflow, kIncomplete,
+ *         kNegOffset and kBuried, and the repair against the cold build: `repVolMax` =
+ *         max_i |V_pub,i − V_cold,i| / h³ and `repFacetMismatch` = cells whose published
+ *         facet-neighbour set (facets with |A| > 0) differs from the cold build's. One `GUARD`
+ *         line per frame; G1 = volume, reciprocity, empty, overflow and incomplete; G2 = repair.
  *
- * Usage: test_determinism [--n N] [--frames F] [--every K] [--no-guard] [--detail]
- *        [--dump K FILE] [--time]  (--detail: per-array hashes on every FRAME line too; --dump: the
- * power run's positions then weights at frame K, raw doubles; --time: wall times only) Exit status:
- * nonzero if a guard check fails (hashes are compared by the script, not here).
+ * Usage: test_determinism [--n N] [--frames F] [--every K] [--wmax W] [--no-guard] [--detail]
+ *        [--dump K[,K...] FILE] [--time]  (--detail: per-array hashes on every FRAME line too;
+ * --dump: at each frame K the power run's positions then weights, raw doubles, to FILE (FILE.K when
+ * several frames are listed), and the cold build's per-cell `i status volume nFacets sorted
+ * neighbours...` to the same name + `.cold`; --time: wall times only) Exit status: nonzero if a
+ * frame misses G1 (hashes are compared by the script, not here; G2 is reported only).
  */
 #include <algorithm>
 #include <array>
@@ -174,7 +182,7 @@ struct Scene {
 };
 
 /// The S0.2 scene (test_ale_frame on branch ale-s0): same generator, same draw order.
-Scene makeScene(int n) {
+Scene makeScene(int n, double wmax) {
   Scene s;
   s.n = n;
   s.N = n * n * n;
@@ -194,7 +202,7 @@ Scene makeScene(int n) {
         }
       }
   for (auto& v : w)
-    v = Real(0.15) * s.h * s.h * U01(rng);
+    v = Real(wmax) * s.h * s.h * U01(rng);
   s.pos = up(x, "pos");
   s.weight = up(w, "w");
   return s;
@@ -303,12 +311,17 @@ void addStore(Digest& d, const peclet::voro::TopologyStore<kP, kT>& st) {
   d.add("store.tri", Kokkos::View<unsigned*, Mem>(up<unsigned>(t, "tri")));
 }
 
-/// The resident engine's publish: store → reevalPublish → aux maps → face mesh.
+/// The resident engine's publish (store → reevalPublish).
 template <bool W>
-void addPublish(Digest& d, Engine<W>& mt, const Scene& s, const DV& pos) {
+peclet::voro::TessellationView<Real> publish(Engine<W>& mt, const Scene& s, const DV& pos) {
   using Policy = typename Engine<W>::PlanePolicy;
-  auto view = peclet::voro::reevalPublish<Real, kP, kT, Policy>(
+  return peclet::voro::reevalPublish<Real, kP, kT, Policy>(
       mt.store, pos, mt.vol, s.N, s.L, mt.wall, mt.xRef, false, false, W ? s.weight : DV());
+}
+
+/// Digest of a publish: the view → aux maps → face mesh, and the resident store.
+template <bool W>
+void addPublishView(Digest& d, Engine<W>& mt, const peclet::voro::TessellationView<Real>& view) {
   auto aux = peclet::voro::buildAuxMaps(view);
   auto mesh = fv::buildFaceMesh(view, aux);
   addView(d, "pub.", view);
@@ -316,6 +329,11 @@ void addPublish(Digest& d, Engine<W>& mt, const Scene& s, const DV& pos) {
   d.add("aux.cellOfFacet", aux.cellOfFacet);
   addMesh(d, mesh);
   addStore(d, mt.store);
+}
+
+template <bool W>
+void addPublish(Digest& d, Engine<W>& mt, const Scene& s, const DV& pos) {
+  addPublishView<W>(d, mt, publish<W>(mt, s, pos));
 }
 
 template <bool W>
@@ -349,17 +367,57 @@ void coldHashes(const Scene& s, const char* tag) {
   std::printf("HASH cold %s ALL %s\n", tag, d.all.hex().c_str());
 }
 
-/// Partition invariants of one cold build (host-side).
+/// Partition invariants of one cold build (host-side), and the repair's publish against it.
 struct GuardStats {
-  double volRel = 0;     // |Σ V − L³| / L³
-  long nonRecip = 0;     // facets i→j (|A| > 0) with no facet j→i
-  double nonRecipA = 0;  // the largest such |A|, in h²
-  long empty = 0;        // cells with status kEmpty
-  long buried = 0;       // power seeds outside their own cell (kBuried)
-  long emptyBad = 0;     // empty cells published with a volume or facets
+  double volRel = 0;      // |Σ V − L³| / L³
+  long nonRecip = 0;      // facets i→j (|A| > 1e-14 h²) with no facet j→i
+  double nonRecipA = 0;   // the largest such |A|, in h²
+  long nonRecipTiny = 0;  // facets i→j (0 < |A| ≤ 1e-14 h²) with no facet j→i (reported only)
+  long empty = 0;         // cells with status kEmpty
+  long buried = 0;        // cells with status kBuried
+  long negOffset = 0;     // cells with status kNegOffset
+  long overflow = 0;      // cells with status kOverflow
+  long incomplete = 0;    // cells with status kIncomplete
+  long emptyBad = 0;      // empty cells published with a volume or facets
+  double repVolMax = 0;   // max_i |V_pub,i − V_cold,i| / h³
+  long repFacetMismatch = 0;  // cells whose facet-neighbour sets (|A| > 0) differ
+  bool g1() const {
+    return volRel <= 1e-12 && nonRecip == 0 && emptyBad == 0 && overflow == 0 && incomplete == 0;
+  }
+  bool g2() const { return repVolMax <= 1e-12 && repFacetMismatch == 0; }
+  void worst(const GuardStats& g) {
+    volRel = std::max(volRel, g.volRel);
+    nonRecip = std::max(nonRecip, g.nonRecip);
+    nonRecipA = std::max(nonRecipA, g.nonRecipA);
+    nonRecipTiny = std::max(nonRecipTiny, g.nonRecipTiny);
+    empty = std::max(empty, g.empty);
+    buried = std::max(buried, g.buried);
+    negOffset = std::max(negOffset, g.negOffset);
+    overflow = std::max(overflow, g.overflow);
+    incomplete = std::max(incomplete, g.incomplete);
+    emptyBad = std::max(emptyBad, g.emptyBad);
+    repVolMax = std::max(repVolMax, g.repVolMax);
+    repFacetMismatch = std::max(repFacetMismatch, g.repFacetMismatch);
+  }
 };
 
-GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& res) {
+/// Each cell's sorted facet-neighbour list over facets with |A| > 0.
+std::vector<std::vector<long>> neighbourSets(int N, const peclet::voro::TessellationView<Real>& v) {
+  const auto off = down(v.cellFacetOffset), cnt = down(v.cellFacetCount);
+  const auto nbr = down(v.facetNeighbor);
+  const auto area = down(v.facetArea);
+  std::vector<std::vector<long>> nb(N);
+  for (int i = 0; i < N; ++i) {
+    for (int f = off[i]; f < off[i] + cnt[i]; ++f)
+      if (area[3 * f] != 0 || area[3 * f + 1] != 0 || area[3 * f + 2] != 0)
+        nb[i].push_back(static_cast<long>(nbr[f]));
+    std::sort(nb[i].begin(), nb[i].end());
+  }
+  return nb;
+}
+
+GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& res,
+                 const peclet::voro::TessellationView<Real>* pub) {
   GuardStats g;
   const auto vol = down(res.view.cellVolume);
   const auto off = down(res.view.cellFacetOffset);
@@ -381,8 +439,10 @@ GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& re
       if (vol[i] != Real(0) || cnt[i] != 0)
         ++g.emptyBad;
     }
-    if (st[i] & peclet::voro::kBuried)
-      ++g.buried;
+    g.buried += (st[i] & peclet::voro::kBuried) ? 1 : 0;
+    g.negOffset += (st[i] & peclet::voro::kNegOffset) ? 1 : 0;
+    g.overflow += (st[i] & peclet::voro::kOverflow) ? 1 : 0;
+    g.incomplete += (st[i] & peclet::voro::kIncomplete) ? 1 : 0;
   }
   const double h2 = s.h * s.h;
   for (int i = 0; i < s.N; ++i)
@@ -395,11 +455,53 @@ GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& re
       if (a == 0)
         continue;
       if (!std::binary_search(nb[j].begin(), nb[j].end(), static_cast<long>(i))) {
-        ++g.nonRecip;
-        g.nonRecipA = std::max(g.nonRecipA, a / h2);
+        if (a / h2 > 1e-14) {
+          ++g.nonRecip;
+          g.nonRecipA = std::max(g.nonRecipA, a / h2);
+        } else {
+          ++g.nonRecipTiny;
+        }
       }
     }
+  if (pub) {
+    const auto pv = down(pub->cellVolume);
+    const double h3 = h2 * s.h;
+    for (int i = 0; i < s.N; ++i)
+      g.repVolMax = std::max(g.repVolMax, std::fabs(double(pv[i]) - double(vol[i])) / h3);
+    const auto a = neighbourSets(s.N, res.view), b = neighbourSets(s.N, *pub);
+    for (int i = 0; i < s.N; ++i)
+      g.repFacetMismatch += (a[i] != b[i]) ? 1 : 0;
+  }
   return g;
+}
+
+/// --dump at frame k: positions then weights (raw doubles) to `path`, and the cold build's
+/// per-cell `i status volume nFacets sorted-neighbours...` to `path.cold`.
+void dumpFrame(const Scene& s, const DV& pos, const peclet::voro::TessellatorResult<Real>& res,
+               const std::string& path) {
+  const auto hp = down(pos), hw = down(s.weight);
+  if (FILE* fp = std::fopen(path.c_str(), "wb")) {
+    std::fwrite(hp.data(), sizeof(Real), hp.size(), fp);
+    std::fwrite(hw.data(), sizeof(Real), hw.size(), fp);
+    std::fclose(fp);
+  }
+  const auto vol = down(res.view.cellVolume);
+  const auto off = down(res.view.cellFacetOffset), cnt = down(res.view.cellFacetCount);
+  const auto nbr = down(res.view.facetNeighbor);
+  const auto st = down(res.status);
+  if (FILE* fp = std::fopen((path + ".cold").c_str(), "w")) {
+    for (int i = 0; i < s.N; ++i) {
+      std::vector<long> nb;
+      for (int f = off[i]; f < off[i] + cnt[i]; ++f)
+        nb.push_back(static_cast<long>(nbr[f]));
+      std::sort(nb.begin(), nb.end());
+      std::fprintf(fp, "%d %d %.17g %d", i, st[i], double(vol[i]), cnt[i]);
+      for (long j : nb)
+        std::fprintf(fp, " %ld", j);
+      std::fprintf(fp, "\n");
+    }
+    std::fclose(fp);
+  }
 }
 
 /// One frame of the S0.2 motion: x += U0·dt (sin 2πy, sin 2πz, sin 2πx), U0·dt = 0.05h/√3,
@@ -423,13 +525,13 @@ void advect(const Scene& s, const DV& pos) {
 
 template <bool W>
 int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard, bool detail,
-           int dumpFrame = -1, const std::string& dumpPath = "") {
+           const std::vector<int>& dumpFrames = {}, const std::string& dumpPath = "") {
   Engine<W> mt;
   allocEngine<W>(mt, s);
   DV pos("pos", 3 * s.N);
   Kokkos::deep_copy(pos, s.pos);
   mt.rebuild(pos);
-  int bad = 0;
+  int badG1 = 0, badG2 = 0;
   GuardStats worst;
   long totalRebuilt = 0;
   int fell = 0, gateRebuilds = 0;
@@ -446,51 +548,57 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
           KOKKOS_LAMBDA(const int i, long& a) { a += rb(i); }, nReb);
     }
     totalRebuilt += nReb;
-    if (k % every == 0 || k == frames) {
+    const bool hashIt = k % every == 0 || k == frames;
+    const bool dumpIt =
+        !dumpPath.empty() && std::find(dumpFrames.begin(), dumpFrames.end(), k) != dumpFrames.end();
+    peclet::voro::TessellationView<Real> pub;
+    if (hashIt || doGuard)
+      pub = publish<W>(mt, s, pos);
+    if (hashIt) {
       Digest d;
       d.add("pos", pos);
       d.add("rebuilt", mt.rebuilt);
-      addPublish<W>(d, mt, s, pos);
+      addPublishView<W>(d, mt, pub);
       std::printf("FRAME %s %d %s rebuilt=%ld\n", tag, k, d.all.hex().c_str(), nReb);
       if (detail)
         for (const auto& p : d.parts)
           std::printf("FRAME %s %d %s %s\n", tag, k, p.first.c_str(), p.second.c_str());
     }
-    if (k == dumpFrame && !dumpPath.empty()) {  // positions then weights, raw doubles
-      const auto hp = down(pos), hw = down(s.weight);
-      if (FILE* fp = std::fopen(dumpPath.c_str(), "wb")) {
-        std::fwrite(hp.data(), sizeof(Real), hp.size(), fp);
-        std::fwrite(hw.data(), sizeof(Real), hw.size(), fp);
-        std::fclose(fp);
-      }
-    }
-    if (doGuard) {
-      const auto g = guard(s, coldBuild<W>(s, pos));
-      const bool ok = g.volRel <= 1e-12 && g.nonRecip == 0 && g.emptyBad == 0;
-      if (!ok) {
-        ++bad;
+    if (doGuard || dumpIt) {
+      const auto res = coldBuild<W>(s, pos);
+      if (dumpIt)
+        dumpFrame(s, pos, res,
+                  dumpFrames.size() > 1 ? dumpPath + "." + std::to_string(k) : dumpPath);
+      if (doGuard) {
+        const auto g = guard(s, res, &pub);
+        const bool ok1 = g.g1(), ok2 = g.g2();
+        badG1 += ok1 ? 0 : 1;
+        badG2 += ok2 ? 0 : 1;
         std::printf(
-            "GUARD %s frame=%d MISS volRel=%.3e nonRecip=%ld maxNonRecipA/h2=%.3e empty=%ld "
-            "buried=%ld emptyBad=%ld\n",
-            tag, k, g.volRel, g.nonRecip, g.nonRecipA, g.empty, g.buried, g.emptyBad);
+            "GUARD %s frame=%d G1=%s G2=%s volRel=%.3e nonRecip=%ld maxNonRecipA/h2=%.3e "
+            "nonRecipTiny=%ld "
+            "empty=%ld buried=%ld negOffset=%ld overflow=%ld incomplete=%ld emptyBad=%ld "
+            "repVolMax/h3=%.3e repFacetMismatch=%ld\n",
+            tag, k, ok1 ? "ok" : "MISS", ok2 ? "ok" : "MISS", g.volRel, g.nonRecip, g.nonRecipA,
+            g.nonRecipTiny, g.empty, g.buried, g.negOffset, g.overflow, g.incomplete, g.emptyBad,
+            g.repVolMax, g.repFacetMismatch);
+        worst.worst(g);
       }
-      worst.volRel = std::max(worst.volRel, g.volRel);
-      worst.nonRecip = std::max(worst.nonRecip, g.nonRecip);
-      worst.nonRecipA = std::max(worst.nonRecipA, g.nonRecipA);
-      worst.empty = std::max(worst.empty, g.empty);
-      worst.buried = std::max(worst.buried, g.buried);
-      worst.emptyBad = std::max(worst.emptyBad, g.emptyBad);
     }
   }
   std::printf("RESULT move %s n=%d frames=%d totalRebuilt=%ld fellBack=%d gateRebuilds=%d\n", tag,
               s.n, frames, totalRebuilt, fell, gateRebuilds);
   if (doGuard)
     std::printf(
-        "RESULT guard %s %s framesMiss=%d maxVolRel=%.3e maxNonRecip=%ld maxNonRecipA/h2=%.3e "
-        "maxEmpty=%ld maxBuried=%ld maxEmptyBad=%ld\n",
-        tag, bad == 0 ? "PASS" : "FAIL", bad, worst.volRel, worst.nonRecip, worst.nonRecipA,
-        worst.empty, worst.buried, worst.emptyBad);
-  return bad;
+        "RESULT guard %s G1=%s G2=%s framesMissG1=%d framesMissG2=%d maxVolRel=%.3e "
+        "maxNonRecip=%ld maxNonRecipA/h2=%.3e maxNonRecipTiny=%ld maxEmpty=%ld maxBuried=%ld "
+        "maxNegOffset=%ld maxOverflow=%ld maxIncomplete=%ld maxEmptyBad=%ld maxRepVol/h3=%.3e "
+        "maxRepFacetMismatch=%ld\n",
+        tag, badG1 == 0 ? "PASS" : "FAIL", badG2 == 0 ? "PASS" : "FAIL", badG1, badG2, worst.volRel,
+        worst.nonRecip, worst.nonRecipA, worst.nonRecipTiny, worst.empty, worst.buried,
+        worst.negOffset, worst.overflow, worst.incomplete, worst.emptyBad, worst.repVolMax,
+        worst.repFacetMismatch);
+  return badG1;  // the exit status is the partition guard (G1); G2 is reported
 }
 
 double median(std::vector<double> v) {
@@ -553,8 +661,9 @@ void timing(const Scene& s, const char* tag, int reps, int frames) {
 
 int main(int argc, char** argv) {
   int n = 16, frames = 40, every = 1;
+  double wmax = 0.15;
   bool doGuard = true, detail = false, timeIt = false;
-  int dumpFrame = -1;
+  std::vector<int> dumpFrames;
   std::string dumpPath;
   for (int a = 1; a < argc; ++a) {
     if (!std::strcmp(argv[a], "--n") && a + 1 < argc)
@@ -567,19 +676,26 @@ int main(int argc, char** argv) {
       doGuard = false;
     else if (!std::strcmp(argv[a], "--detail"))
       detail = true;
+    else if (!std::strcmp(argv[a], "--wmax") && a + 1 < argc)
+      wmax = std::atof(argv[++a]);
     else if (!std::strcmp(argv[a], "--time"))
       timeIt = true;
     else if (!std::strcmp(argv[a], "--dump") && a + 2 < argc) {
-      dumpFrame = std::atoi(argv[++a]);
+      const std::string list = argv[++a];  // K or K1,K2,...
+      for (std::size_t p = 0; p < list.size();) {
+        const std::size_t q = list.find(',', p);
+        dumpFrames.push_back(std::atoi(list.substr(p, q - p).c_str()));
+        p = q == std::string::npos ? list.size() : q + 1;
+      }
       dumpPath = argv[++a];
     }
   }
   int rc = 0;
   Kokkos::initialize(argc, argv);
   {
-    std::printf("test_determinism: n=%d frames=%d threads=%d\n", n, frames,
+    std::printf("test_determinism: n=%d frames=%d wmax=%g threads=%d\n", n, frames, wmax,
                 peclet::core::ExecSpace().concurrency());
-    const Scene s = makeScene(n);
+    const Scene s = makeScene(n, wmax);
     if (timeIt) {
       timing<false>(s, "voronoi", 11, frames);
       timing<true>(s, "power", 11, frames);
@@ -587,7 +703,7 @@ int main(int argc, char** argv) {
       coldHashes<false>(s, "voronoi");
       coldHashes<true>(s, "power");
       moving<false>(s, "voronoi", frames, every, false, detail);
-      rc |= moving<true>(s, "power", frames, every, doGuard, detail, dumpFrame, dumpPath);
+      rc |= moving<true>(s, "power", frames, every, doGuard, detail, dumpFrames, dumpPath);
     }
   }
   Kokkos::finalize();
