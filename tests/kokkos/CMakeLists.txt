@@ -81,6 +81,7 @@ if(PECLET_VORO_BUILD_TESTS)
   # the L_rho matrix (gate G1.1 K2-K6); `--apply DIR` is the device side of K1
   # (tools/ale_gates/G1_1.sh compares it with tests/python/ale_reference.py).
   add_voro_kokkos_test(test_ale_operators)
+  add_voro_kokkos_test(test_ale_stepper)  # WO-S1.2b: ale/stepper.hpp; tools/ale_gates/G1_2.sh
 
   # Track B, rung B1: centroidal (Lloyd) relaxation of a random grid — skewness / volume spread /
   # Poisson residual consistency all drop (grid quality is solver quality).
