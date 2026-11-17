@@ -114,6 +114,10 @@ if(PECLET_VORO_BUILD_TESTS)
   # flip (DESIGN_NOTE_OUTSIDE_SEED WO-1), host and device.
   add_voro_kokkos_test(test_outside_seed)
 
+  # Vanishing / appearing power cells in the repair: an exact 1↔4 flip far below the certificate
+  # tolerance must publish what the cold build publishes (DESIGN_NOTE_OUTSIDE_SEED §10, WO-3c).
+  add_voro_kokkos_test(test_repair_vanishing)
+
   # Vertex-local sort-free geometry (design note): acceptance criteria in FP64.
   add_voro_kokkos_test(test_pervertex_geometry)
 

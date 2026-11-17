@@ -342,6 +342,9 @@ struct MovingTessellation {
   ///                   only these need their new neighbours expanded in Pass 2, §1c).
   /// `useSkin` gates the mover trigger (off during verify passes — movers are a once-per-step
   /// trigger already folded into Pass 1, and the verify only needs to re-close residual flips).
+  /// Power cells, Pass 1 only (outside-seed §10): an empty power cell has nothing to certify and is
+  /// re-gathered each step (R-a); a power cell with V ≤ 0 is folded and is rebuilt with its live
+  /// neighbours (R-b).
   template <bool Local>
   void certify(const Kokkos::View<Real*, Mem>& pos, const Kokkos::View<int*, Mem>& outMask,
                const Kokkos::View<int*, Mem>& outMover, bool useSkin) {
@@ -432,6 +435,39 @@ struct MovingTessellation {
             mover = (dx * dx + dy * dy + dz * dz) > half2;
             if (mover)
               Mv(i) = 1;
+          }
+          // ---- vanishing power cells (outside-seed §10, R-a/R-b): Pass-1 certify only ----
+          // force-capture what the constexpr branch reads OUTSIDE it (nvcc rule)
+          int* const mskPtr = M.data();
+          const int nOwned = nP_;
+          if constexpr (Weighted) {
+            if (skinOn) {
+              bool vanish = false;
+              if (c.nt == 0) {  // R-a: empty power cell (an overflowed cell is stored the same way)
+                vanish = true;
+                if constexpr (kHasSdf)  // a seed in the solid is empty by the wall, not by power
+                  vanish = SdC.eval(P(3 * i), P(3 * i + 1), P(3 * i + 2)) > Real(0);
+              } else if (!(Vv(i) > Real(0))) {  // R-b: folded stale topology (NaN included)
+                vanish = true;
+                for (int t = 0; t < c.nt; ++t) {  // flag every owned live-plane partner
+                  if (!c.alive[t])
+                    continue;
+                  const int ks[3] = {c.t0[t], c.t1[t], c.t2[t]};
+                  for (int k : ks) {
+                    const int j = c.pnbr[k];
+                    if (k >= 6 && j >= 0 && j < nOwned)
+                      Kokkos::atomic_exchange(&mskPtr[j], 1);
+                  }
+                }
+              }
+              if (vanish) {  // full gather + Pass 2; the flag line below sets M(i)
+                mover = true;
+                Mv(i) = 1;
+              }
+            }
+          } else {
+            (void)mskPtr;
+            (void)nOwned;
           }
           // ---- SDF boundary watch (rung A0): what the seed-seed certificate cannot see ----
           bool wflag = false;

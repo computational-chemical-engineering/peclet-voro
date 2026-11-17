@@ -395,6 +395,8 @@ struct CellBuilder {
   KOKKOS_INLINE_FUNCTION void emitEmptyTopo(int i) const {
     oNp(i) = 6;
     oNt(i) = 0;
+    for (int k = 0; k < 6; ++k)  // the box slots too, so an empty cell's store is fully defined
+      oTopoPnbr[(size_t)i * kMaxP + k] = -1;
     if (oWall.active())
       oWall.cnt(i) = 0;
   }

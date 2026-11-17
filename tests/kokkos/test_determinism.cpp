@@ -394,6 +394,14 @@ struct GuardStats {
   long mismOs = 0, mismRest = 0;
   double diffA = 0, diffAOs = 0, diffARest = 0;
   long emptyFlip = 0, emptyFlipOs = 0;
+  // §10.4 (vanishing cells): the outside-seed set S also takes the cells the PUBLISHED view has
+  // empty or with a facet (|A| > 0) whose plane excludes the seed (|r|² + w_i − w_j < 0);
+  // `flipRound`/`flipMiss` split emptyFlip at max(|V_cold|, |V_pub|) ≤ 1e-24 h³; `minVpub` (h³)
+  // and `negV` = the smallest published volume and the count of V_pub < 0; `oneSidedToEmpty` =
+  // facets (|A| > 0) a non-empty published cell publishes toward a cell published empty, and the
+  // largest such |A| (h²).
+  long flipRound = 0, flipMiss = 0, negV = 0, oneSidedToEmpty = 0;
+  double minVpub = 0, oneSidedToEmptyA = 0;
   bool g1() const {
     return volRel <= 1e-12 && nonRecip == 0 && emptyBad == 0 && overflow == 0 && incomplete == 0;
   }
@@ -420,6 +428,12 @@ struct GuardStats {
     diffARest = std::max(diffARest, g.diffARest);
     emptyFlip = std::max(emptyFlip, g.emptyFlip);
     emptyFlipOs = std::max(emptyFlipOs, g.emptyFlipOs);
+    flipRound = std::max(flipRound, g.flipRound);
+    flipMiss = std::max(flipMiss, g.flipMiss);
+    negV = std::max(negV, g.negV);
+    oneSidedToEmpty = std::max(oneSidedToEmpty, g.oneSidedToEmpty);
+    minVpub = std::min(minVpub, g.minVpub);
+    oneSidedToEmptyA = std::max(oneSidedToEmptyA, g.oneSidedToEmptyA);
   }
 };
 
@@ -459,8 +473,18 @@ std::vector<std::vector<long>> neighbourSets(int N, const peclet::voro::Tessella
   return nb;
 }
 
+/// A published cell is empty when it has V = 0 and no facet with |A| > 0.
+std::vector<char> publishedEmpty(int N, const peclet::voro::TessellationView<Real>& v) {
+  const auto vol = down(v.cellVolume);
+  const auto m = facetAreas(N, v);
+  std::vector<char> e(N);
+  for (int i = 0; i < N; ++i)
+    e[i] = vol[i] == Real(0) && m[i].empty();
+  return e;
+}
+
 GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& res,
-                 const peclet::voro::TessellationView<Real>* pub) {
+                 const peclet::voro::TessellationView<Real>* pub, const DV& pos, bool weighted) {
   GuardStats g;
   const auto vol = down(res.view.cellVolume);
   const auto off = down(res.view.cellFacetOffset);
@@ -520,6 +544,48 @@ GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& re
     for (int i = 0; i < s.N; ++i)
       if (st[i] & (peclet::voro::kNegOffset | peclet::voro::kBuried))
         os[i] = 1;
+    // the published view's own outside-seed cells (§10.4: "in cold or repair")
+    const auto pe = publishedEmpty(s.N, *pub);
+    {
+      const auto x = down(pos);
+      std::vector<Real> wv(s.N, Real(0));
+      if (weighted)
+        wv = down(s.weight);
+      const auto poff = down(pub->cellFacetOffset), pcnt = down(pub->cellFacetCount);
+      const auto pnb = down(pub->facetNeighbor);
+      const auto par = down(pub->facetArea);
+      for (int i = 0; i < s.N; ++i) {
+        if (pe[i]) {
+          os[i] = 1;
+          continue;
+        }
+        for (int f = poff[i]; f < poff[i] + pcnt[i] && !os[i]; ++f) {
+          const long j = static_cast<long>(pnb[f]);
+          if (j < 0 || j >= s.N || (par[3 * f] == 0 && par[3 * f + 1] == 0 && par[3 * f + 2] == 0))
+            continue;
+          double r2 = 0;
+          for (int d = 0; d < 3; ++d) {
+            double r = double(x[3 * j + d]) - double(x[3 * i + d]);
+            r = r > 0.5 * s.L[d] ? r - s.L[d] : (r < -0.5 * s.L[d] ? r + s.L[d] : r);
+            r2 += r * r;
+          }
+          if (r2 + double(wv[i]) - double(wv[j]) < 0)
+            os[i] = 1;
+        }
+      }
+    }
+    g.minVpub = 0;
+    for (int i = 0; i < s.N; ++i) {
+      g.minVpub = std::min(g.minVpub, double(pv[i]) / h3);
+      g.negV += pv[i] < Real(0) ? 1 : 0;
+      if (pe[i])
+        continue;
+      for (const auto& e : mb[i])
+        if (e.first >= 0 && e.first < s.N && pe[e.first]) {
+          ++g.oneSidedToEmpty;
+          g.oneSidedToEmptyA = std::max(g.oneSidedToEmptyA, e.second / h2);
+        }
+    }
     std::vector<char> inS(os);
     for (int i = 0; i < s.N; ++i)
       for (const auto* m : {&ma[i], &mb[i]})
@@ -539,6 +605,12 @@ GuardStats guard(const Scene& s, const peclet::voro::TessellatorResult<Real>& re
       const bool flip = (vol[i] == Real(0) && ma[i].empty()) != (pv[i] == Real(0) && mb[i].empty());
       g.diffA = std::max(g.diffA, da);
       g.emptyFlip += flip ? 1 : 0;
+      if (flip) {
+        if (std::max(std::fabs(double(vol[i])), std::fabs(double(pv[i]))) <= 1e-24 * h3)
+          ++g.flipRound;
+        else
+          ++g.flipMiss;
+      }
       if (inS[i]) {
         g.repVolOs = std::max(g.repVolOs, dv);
         g.mismOs += mism ? 1 : 0;
@@ -614,6 +686,8 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
   GuardStats worst;
   long totalRebuilt = 0;
   int fell = 0, gateRebuilds = 0;
+  long transGain = 0, transLoss = 0;  // the publish's emptiness against its previous frame (§10.4)
+  std::vector<char> prevEmpty;
   for (int k = 1; k <= frames; ++k) {
     advect(s, pos);
     const auto st = mt.step(pos);
@@ -649,7 +723,14 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
         dumpFrame(s, pos, res,
                   dumpFrames.size() > 1 ? dumpPath + "." + std::to_string(k) : dumpPath);
       if (doGuard) {
-        const auto g = guard(s, res, &pub);
+        const auto g = guard(s, res, &pub, pos, W);
+        const auto pe = publishedEmpty(s.N, pub);
+        if (!prevEmpty.empty())
+          for (int i = 0; i < s.N; ++i) {
+            transGain += (prevEmpty[i] && !pe[i]) ? 1 : 0;
+            transLoss += (!prevEmpty[i] && pe[i]) ? 1 : 0;
+          }
+        prevEmpty = pe;
         const bool ok1 = g.g1(), ok2 = g.g2();
         badG1 += ok1 ? 0 : 1;
         badG2 += ok2 ? 0 : 1;
@@ -659,11 +740,13 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
             "empty=%ld buried=%ld negOffset=%ld overflow=%ld incomplete=%ld emptyBad=%ld "
             "repVolMax/h3=%.3e repFacetMismatch=%ld repVolOs/h3=%.3e repVolRest/h3=%.3e "
             "mismOs=%ld mismRest=%ld diffA/h2=%.3e diffAOs/h2=%.3e diffARest/h2=%.3e "
-            "emptyFlip=%ld emptyFlipOs=%ld\n",
+            "emptyFlip=%ld emptyFlipOs=%ld flipRound=%ld flipMiss=%ld minVpub/h3=%.3e negV=%ld "
+            "oneSidedToEmpty=%ld maxOneSidedToEmptyA/h2=%.3e\n",
             tag, k, ok1 ? "ok" : "MISS", ok2 ? "ok" : "MISS", g.volRel, g.nonRecip, g.nonRecipA,
             g.nonRecipTiny, g.empty, g.buried, g.negOffset, g.overflow, g.incomplete, g.emptyBad,
             g.repVolMax, g.repFacetMismatch, g.repVolOs, g.repVolRest, g.mismOs, g.mismRest,
-            g.diffA, g.diffAOs, g.diffARest, g.emptyFlip, g.emptyFlipOs);
+            g.diffA, g.diffAOs, g.diffARest, g.emptyFlip, g.emptyFlipOs, g.flipRound, g.flipMiss,
+            g.minVpub, g.negV, g.oneSidedToEmpty, g.oneSidedToEmptyA);
         worst.worst(g);
       }
     }
@@ -675,11 +758,11 @@ int moving(const Scene& s, const char* tag, int frames, int every, bool doGuard,
         "RESULT guard %s G1=%s G2=%s framesMissG1=%d framesMissG2=%d maxVolRel=%.3e "
         "maxNonRecip=%ld maxNonRecipA/h2=%.3e maxNonRecipTiny=%ld maxEmpty=%ld maxBuried=%ld "
         "maxNegOffset=%ld maxOverflow=%ld maxIncomplete=%ld maxEmptyBad=%ld maxRepVol/h3=%.3e "
-        "maxRepFacetMismatch=%ld\n",
+        "maxRepFacetMismatch=%ld transGain=%ld transLoss=%ld\n",
         tag, badG1 == 0 ? "PASS" : "FAIL", badG2 == 0 ? "PASS" : "FAIL", badG1, badG2, worst.volRel,
         worst.nonRecip, worst.nonRecipA, worst.nonRecipTiny, worst.empty, worst.buried,
         worst.negOffset, worst.overflow, worst.incomplete, worst.emptyBad, worst.repVolMax,
-        worst.repFacetMismatch);
+        worst.repFacetMismatch, transGain, transLoss);
   return badG1;  // the exit status is the partition guard (G1); G2 is reported
 }
 
