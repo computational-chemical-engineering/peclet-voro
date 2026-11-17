@@ -110,6 +110,10 @@ if(PECLET_VORO_BUILD_TESTS)
   # TrackAdj axis: incremental edge-adjacency + Lawson local-convexity certificate foundation gates.
   add_voro_kokkos_test(test_convexcell_adj)
 
+  # Seed outside its own (power) cell: sign-safe planes, the empty-cell clip, reeval across a sign
+  # flip (DESIGN_NOTE_OUTSIDE_SEED WO-1), host and device.
+  add_voro_kokkos_test(test_outside_seed)
+
   # Vertex-local sort-free geometry (design note): acceptance criteria in FP64.
   add_voro_kokkos_test(test_pervertex_geometry)
 

@@ -143,13 +143,16 @@ struct ConvexCell {
   static constexpr int kMaxT = MAXT;  ///< dual-triangle (vertex) capacity
   static constexpr bool kTrackAdj =
       TrackAdj;  ///< lets templated consumers (store save/load) branch at compile time
-  Real n[MAXP]
-        [3];      ///< foot-point normal of each plane: half-space {x : n·x <= n·n}, so x=n is the
-                  ///< foot of the perpendicular from the seed (origin) and |n| the seed->plane dist
-                  ///< (= ½·(neighbour rel-pos) for Voronoi; the connector r = 2n).
-  Real nn[MAXP];  ///< cached n·n, i.e. the half-space offset (so the cull test is n·x <= nn)
-  int pnbr[MAXP];                              ///< neighbour seed id per plane (<0 => bounding box)
-  int np;                                      ///< number of planes
+  /// Plane k is the half-space {x : n_k·x <= nn_k}. `n_k` is its OUTWARD normal with |n_k| = the
+  /// seed->plane distance, and |nn_k| = n_k·n_k. sign(nn_k) = σ_k is +1 iff the seed (origin) is
+  /// strictly inside the half-space: a power seed may lie outside its own cell (radical offset
+  /// d < 0), where nn_k = −|n_k|². The foot of the perpendicular from the seed is q_k = σ_k n_k
+  /// (footPoint). Box, SDF-wall and Voronoi planes always have σ = +1 (q = n; Voronoi r = 2n).
+  /// Written only by setHalfSpace (neighbour planes) and initBox/initBoxPlanes/WallStore (σ = +1).
+  Real n[MAXP][3];
+  Real nn[MAXP];   ///< signed offset σ·|n|²: the half-space test is n·x <= nn
+  int pnbr[MAXP];  ///< neighbour seed id per plane (<0 => bounding box)
+  int np;          ///< number of planes
   unsigned char t0[MAXT], t1[MAXT], t2[MAXT];  ///< triangle = triple of plane indices
   Real vx[MAXT], vy[MAXT], vz[MAXT];           ///< cached dual-vertex position per triangle
   bool alive[MAXT];                            ///< triangle live flag
@@ -206,6 +209,58 @@ struct ConvexCell {
       rebuildAdjacency();  // one-time bootstrap (~12 box triangles)
   }
 
+  /// Store plane k as the half-space {x : p·x <= d} for either sign of d (design note
+  /// DESIGN_NOTE_OUTSIDE_SEED §5.1): n = (|d|/|p|²)·p (outward), nn = sign(d)·|n|². d > 0 is the
+  /// legacy foot-point arithmetic bit for bit; d < 0 is its exact negation. A computed d of exactly
+  /// 0 (seed on its own facet plane, Power only) is evaluated as d = ε|p|², one unit of the
+  /// round-off d carries. Coincident seeds (p = 0) keep the legacy zero plane.
+  KOKKOS_INLINE_FUNCTION void setHalfSpace(int k, const Real p[3], Real d) {
+    const Real l2 = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+    if (!(l2 > Real(0))) {
+      const Real a = Real(0);
+      n[k][0] = a * p[0];
+      n[k][1] = a * p[1];
+      n[k][2] = a * p[2];
+      nn[k] = n[k][0] * n[k][0] + n[k][1] * n[k][1] + n[k][2] * n[k][2];
+      return;
+    }
+    if (d == Real(0))
+      d = Kokkos::Experimental::epsilon_v<Real> * l2;
+    if (d > Real(0)) {
+      const Real a = d / l2;
+      n[k][0] = a * p[0];
+      n[k][1] = a * p[1];
+      n[k][2] = a * p[2];
+      nn[k] = n[k][0] * n[k][0] + n[k][1] * n[k][1] + n[k][2] * n[k][2];
+    } else {  // the seed is outside this half-space
+      const Real a = (-d) / l2;
+      n[k][0] = a * p[0];
+      n[k][1] = a * p[1];
+      n[k][2] = a * p[2];
+      nn[k] = -(n[k][0] * n[k][0] + n[k][1] * n[k][1] + n[k][2] * n[k][2]);
+    }
+  }
+  /// Foot of the perpendicular from the seed onto plane k: q_k = σ_k n_k (exact negation).
+  KOKKOS_INLINE_FUNCTION void footPoint(int k, Real out[3]) const {
+    if (nn[k] < Real(0)) {
+      out[0] = -n[k][0];
+      out[1] = -n[k][1];
+      out[2] = -n[k][2];
+    } else {
+      out[0] = n[k][0];
+      out[1] = n[k][1];
+      out[2] = n[k][2];
+    }
+  }
+  /// Seed->plane distance |n_k|.
+  KOKKOS_INLINE_FUNCTION Real planeDistance(int k) const {
+    return Kokkos::sqrt(Kokkos::fabs(nn[k]));
+  }
+  /// Signed support h_k: the seed's signed distance to plane k, positive inside.
+  KOKKOS_INLINE_FUNCTION Real signedSupport(int k) const {
+    return nn[k] >= Real(0) ? Kokkos::sqrt(nn[k]) : -Kokkos::sqrt(-nn[k]);
+  }
+
   /// Compute and cache the dual vertex of triangle t (where its three planes meet,
   /// Cramer's rule). Called once when a triangle is created; all later reads use the
   /// cache (vx/vy/vz), so the per-cell vertex solves are O(#triangles), not O(#clips ·
@@ -256,9 +311,10 @@ struct ConvexCell {
   /// fastest, 3*N); `L` the periodic box length for min-imaging.
   ///
   /// Policy = Voronoi (default) rebuilds the bisector foot point n = ½r (byte-identical to the
-  /// historical path). Policy = Power rebuilds the radical foot point n = α r with offset
-  /// d = ½(|r|²+w_self−w_nbr); pass the cell's own weight `wSelf` and the global `weight` array
-  /// (indexed by pnbr[k]). `weight` may be null for Voronoi.
+  /// historical path). Policy = Power rebuilds the radical plane {x : r·x <= d},
+  /// d = ½(|r|²+w_self−w_nbr), through setHalfSpace (either sign of d: a plane whose d changes
+  /// sign between steps changes representation continuously); pass the cell's own weight `wSelf`
+  /// and the global `weight` array (indexed by pnbr[k]). `weight` may be null for Voronoi.
   template <class Policy = Voronoi>
   KOKKOS_INLINE_FUNCTION void reevalGeometry(Real sx, Real sy, Real sz, const Real* pos, Real L,
                                              Real wSelf = Real(0), const Real* weight = nullptr) {
@@ -272,15 +328,10 @@ struct ConvexCell {
       ry = ry > Lh ? ry - L : (ry < -Lh ? ry + L : ry);
       rz = rz > Lh ? rz - L : (rz < -Lh ? rz + L : rz);
       if constexpr (Policy::kHasWeightDof) {
-        // radical foot point: n = (d/|r|²) r,  d = ½(|r|² + w_self − w_nbr)
+        // radical plane {x : r·x <= d}, d = ½(|r|² + w_self − w_nbr), sign-safe (setHalfSpace)
         const Real r[3] = {rx, ry, rz};
-        const Real rho = rx * rx + ry * ry + rz * rz;
         const Real off = Policy::template offsetFromRel<Real>(r, wSelf, weight[g]);
-        const Real a = rho > Real(0) ? off / rho : Real(0);
-        n[k][0] = a * rx;
-        n[k][1] = a * ry;
-        n[k][2] = a * rz;
-        nn[k] = n[k][0] * n[k][0] + n[k][1] * n[k][1] + n[k][2] * n[k][2];
+        setHalfSpace(k, r, off);
       } else {
         // foot point of the Voronoi bisector: n = ½r, offset nn = |n|² = ¼|r|²
         const Real hx = Real(0.5) * rx, hy = Real(0.5) * ry, hz = Real(0.5) * rz;
@@ -322,7 +373,8 @@ struct ConvexCell {
         const Real s = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
         if (s >
             Real(0)) {  // v outside plane k; convert to a perpendicular distance for the tol test
-          const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
+          const Real invlen =
+              (nn[k] != Real(0)) ? Real(1) / Kokkos::sqrt(Kokkos::fabs(nn[k])) : Real(0);
           maxd = Kokkos::max(maxd, s * invlen);
         }
       }
@@ -342,11 +394,8 @@ struct ConvexCell {
   /// trigger (Risk 1d) is the deferred complement that catches *gained* wall faces. Returns true
   /// iff the cell is self-consistent (no violation past `tol`).
   ///
-  /// WEIGHTED/POWER (deferred; see docs/power_large_weights_plan.md): for a Laguerre cell the
-  /// in-sphere test `n_k·v ≤ nn_k` must become the empty-**orthosphere** (power-distance) predicate
-  /// so completeness carries to the regular triangulation. The ConvexCell device path is
-  /// Voronoi-only today (no radical-plane geometry), so only the unweighted form is implemented;
-  /// the orthosphere form plugs in here when the Power policy lands.
+  /// WEIGHTED/POWER: for a power cell the slack test `n_k·v ≤ nn_k` on the radical planes is the
+  /// empty-orthosphere test (π_i(v) ≤ π_k(v)) wherever the seed is (inside or outside its cell).
   KOKKOS_INLINE_FUNCTION bool isSelfConsistentPartners(Real tol, int* outPartners, int maxPartners,
                                                        int& nPartners) const {
     nPartners = 0;
@@ -360,7 +409,8 @@ struct ConvexCell {
           continue;  // a plane that defines this vertex
         const Real s = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
         if (s > Real(0)) {  // v outside plane k; perpendicular distance vs tol
-          const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
+          const Real invlen =
+              (nn[k] != Real(0)) ? Real(1) / Kokkos::sqrt(Kokkos::fabs(nn[k])) : Real(0);
           if (s * invlen > tol) {
             consistent = false;
             const int part = pnbr[k];
@@ -446,7 +496,8 @@ struct ConvexCell {
           continue;
         const Real sl = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
         if (sl > Real(0)) {
-          const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
+          const Real invlen =
+              (nn[k] != Real(0)) ? Real(1) / Kokkos::sqrt(Kokkos::fabs(nn[k])) : Real(0);
           maxd = Kokkos::max(maxd, sl * invlen);
         }
       }
@@ -473,7 +524,8 @@ struct ConvexCell {
           continue;
         const Real sl = n[k][0] * v[0] + n[k][1] * v[1] + n[k][2] * v[2] - nn[k];
         if (sl > Real(0)) {
-          const Real invlen = (nn[k] > Real(0)) ? Real(1) / Kokkos::sqrt(nn[k]) : Real(0);
+          const Real invlen =
+              (nn[k] != Real(0)) ? Real(1) / Kokkos::sqrt(Kokkos::fabs(nn[k])) : Real(0);
           if (sl * invlen > tol) {
             consistent = false;
             const int part = pnbr[k];
@@ -494,19 +546,22 @@ struct ConvexCell {
     return consistent;
   }
 
-  /// ∫_face |s|² dA of face k about the seed's foot point on its plane (s in-plane): the second
+  /// ∫_face |s|² dA of face k about the seed's foot point q_k on its plane (s in-plane): the second
   /// moment the Lloyd energy needs (a pyramid's ∫|y|² dy = h (h² A + M2)/5). Fan from the foot
-  /// over the CCW-ordered polygon with SIGNED triangle areas (the foot may lie outside the face).
+  /// over the CCW-ordered polygon with SIGNED triangle areas (the foot may lie outside the face);
+  /// the orientation is the outward normal n_k.
   KOKKOS_INLINE_FUNCTION Real faceMoment2(int k) const {
     Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
     const int m = faceOrdered(k, fx, fy, fz);
     if (m < 3)
       return Real(0);
-    const Real nx = n[k][0], ny = n[k][1], nz = n[k][2];
-    const Real nl = Kokkos::sqrt(nn[k]);
+    const Real nl = planeDistance(k);
     if (!(nl > Real(0)))
       return Real(0);
-    const Real ux = nx / nl, uy = ny / nl, uz = nz / nl;
+    const Real ux = n[k][0] / nl, uy = n[k][1] / nl, uz = n[k][2] / nl;
+    Real q[3];
+    footPoint(k, q);  // reference point in the facet plane
+    const Real nx = q[0], ny = q[1], nz = q[2];
     Real M2 = Real(0);
     for (int q = 0; q < m; ++q) {
       const int r = (q + 1) % m;
@@ -701,7 +756,8 @@ struct ConvexCell {
                        a[0] * b[1] - a[1] * b[0]};  // direction of the edge x∩y
     const Real dp = n[p][0] * d[0] + n[p][1] * d[1] + n[p][2] * d[2];  // det(x, y, p)
     const Real dz = n[z][0] * d[0] + n[z][1] * d[1] + n[z][2] * d[2];  // det(x, y, z)
-    return !(dp * dz > Real(0)) || dp * dp <= kFanSine2 * nn[x] * nn[y] * nn[p];
+    return !(dp * dz > Real(0)) ||
+           dp * dp <= kFanSine2 * Kokkos::fabs(nn[x]) * Kokkos::fabs(nn[y]) * Kokkos::fabs(nn[p]);
   }
 
   KOKKOS_INLINE_FUNCTION bool anyKilled(const bool* kill) const {
@@ -709,6 +765,15 @@ struct ConvexCell {
       if (kill[t])
         return true;
     return false;
+  }
+
+  /// Every alive triangle is killed (the clip's empty-cell outcome; O(nt), run only when a clip
+  /// killed something and left no horizon).
+  KOKKOS_INLINE_FUNCTION bool allLiveKilled(const bool* kill) const {
+    for (int t = 0; t < nt; ++t)
+      if (alive[t] && !kill[t])
+        return false;
+    return true;
   }
 
   /// Lean-path validity with the cheap cases first: a conflict region of one or two triangles is a
@@ -793,10 +858,12 @@ struct ConvexCell {
   }
 
   /// Add a plane for neighbour `nbr` and clip the cell by it. The plane is passed in
-  /// (direction, offset) form `{x : pdir·x <= d}`; it is stored internally as its
-  /// foot-point normal `nf = (d/|pdir|²)·pdir` (so `{x : nf·x <= nf·nf}` is the same
-  /// half-space). Returns true if the cell was modified. The plane is only committed if
-  /// it actually cuts (so redundant candidates don't grow `np`).
+  /// (direction, offset) form `{x : pdir·x <= d}`, either sign of d; it is stored sign-safe by
+  /// setHalfSpace (outward n = (|d|/|pdir|²)·pdir, nn = sign(d)|n|²), so the seed need not lie
+  /// inside its cell (a power seed with d < 0). Returns true if the cell was modified. The plane
+  /// is only committed if it actually cuts (so redundant candidates don't grow `np`). A plane
+  /// that strictly takes every live vertex EMPTIES the cell (nt = 0, plane not committed,
+  /// returns true): the power cell is empty, decided by the same sign tests as every cut.
   /// `gapOut` (optional): the signed distance of the farthest live vertex beyond the plane —
   /// the commit test's own maximum, in distance units (== planeGap(pdir, d)); negative when the
   /// plane misses the cell. The near-miss recording reads it instead of re-scanning the vertices.
@@ -816,15 +883,10 @@ struct ConvexCell {
       return false;
     }
     const int pi = np;  // tentative index
-    const Real l2 = pdir[0] * pdir[0] + pdir[1] * pdir[1] + pdir[2] * pdir[2];
-    const Real a = (l2 > Real(0)) ? d / l2 : Real(0);  // foot scale: nf = a·pdir
-    n[pi][0] = a * pdir[0];
-    n[pi][1] = a * pdir[1];
-    n[pi][2] = a * pdir[2];
-    nn[pi] = n[pi][0] * n[pi][0] + n[pi][1] * n[pi][1] + n[pi][2] * n[pi][2];
+    setHalfSpace(pi, pdir, d);
     pnbr[pi] = nbr;
 
-    // Mark triangles whose dual vertex is outside the new half-space (nf·v > nf·nf).
+    // Mark triangles whose dual vertex is outside the new half-space (n·v > nn).
     bool kill[MAXT];
     int nk = 0;  // killed triangles
     Real smax = Real(-1e30);
@@ -840,8 +902,8 @@ struct ConvexCell {
         ++nk;
       }
     }
-    if (gapOut) {  // s = n·v − n·n is |n| times the distance beyond the plane
-      const Real nl = Kokkos::sqrt(nn[pi]);
+    if (gapOut) {  // s = n·v − nn is |n| times the distance beyond the plane
+      const Real nl = planeDistance(pi);
       *gapOut = nl > Real(0) ? smax / nl : Real(-1e30);
     }
     if (nk == 0)
@@ -857,8 +919,7 @@ struct ConvexCell {
       // triangle edge whose sharing triangle survives, the new plane gets a triangle (x, y, pi).
       // Collect first, then mutate.
       unsigned char nA[MAXT], nB[MAXT];
-      // (no horizon <=> nothing killed: the seed is inside every half-space, so a cut never
-      // takes the whole cell)
+      // (no horizon with something killed <=> every live vertex killed: the cell is empty)
       int nnew = collectHorizon(kill, pi, nA, nB, nk);
       if (!overflow && nnew > 0 && !diskHorizon(nk, nnew, nA, nB)) {
         degenerate = true;
@@ -869,9 +930,13 @@ struct ConvexCell {
       }
       if (nnew == 0 && !anyKilled(kill))
         return false;  // every outside vertex lay on the plane: it only touches the cell
-      np = pi + 1;     // commit the plane
+      if (nnew == 0 && allLiveKilled(kill)) {
+        nt = 0;  // every live vertex strictly outside: the (power) cell is empty
+        return true;
+      }
+      np = pi + 1;  // commit the plane
       if (nnew == 0)
-        overflow = true;  // killed but no surviving boundary (cannot happen for a real cut)
+        overflow = true;  // killed, no horizon, yet a survivor: broken triangulation, never publish
       if (overflow)
         return true;
       // Remove killed triangles.
@@ -904,9 +969,13 @@ struct ConvexCell {
       }
       if (H == 0 && !anyKilled(kill))
         return false;  // every outside vertex lay on the plane: it only touches the cell
-      np = pi + 1;     // commit the plane
+      if (H == 0 && allLiveKilled(kill)) {
+        nt = 0;  // every live vertex strictly outside: the (power) cell is empty
+        return true;
+      }
+      np = pi + 1;  // commit the plane
       if (H == 0)
-        overflow = true;  // no surviving boundary (cannot happen for a real cut)
+        overflow = true;  // killed, no horizon, yet a survivor: broken triangulation, never publish
       if (overflow)
         return true;
 
@@ -1429,8 +1498,8 @@ struct ConvexCell {
     return m;
   }
 
-  /// Cell volume (G1): V = (1/3) Σ_faces support_k · area_k. Seed (origin) is interior so
-  /// every support distance is positive.
+  /// Cell volume (G1): V = (1/3) Σ_faces h_k · area_k with the SIGNED support h_k (the seed's
+  /// signed distance to plane k, negative where the seed lies outside its cell).
   KOKKOS_INLINE_FUNCTION Real volume() const {
     Real vol = 0;
     Real fx[MAXFV], fy[MAXFV], fz[MAXFV];
@@ -1441,23 +1510,25 @@ struct ConvexCell {
       Real A[3];
       polyAreaVec(fx, fy, fz, m, A);
       const Real area = Kokkos::sqrt(A[0] * A[0] + A[1] * A[1] + A[2] * A[2]);
-      const Real support = Kokkos::sqrt(nn[k]);  // |n_k| = seed->plane distance
+      const Real support = signedSupport(k);  // signed seed->plane distance
       vol += support * area;
     }
     return vol * (Real(1) / Real(3));
   }
 
   // ---- Vertex-local, SORT-FREE geometry (Ray/Sokolov/Lefebvre/Lévy TOG 2018; geogram ConvexCell)
-  // ---- Plane stored as the (non-unit) foot-point normal n with interior {x : n·x ≤ n·n}; then x=n
-  // is the foot of the perpendicular from the origin onto the plane (the facet point), and |n| is
-  // the origin→ plane distance. The cell now stores n directly (member `n`, with `nn = n·n`), so
-  // this is just a read. Volume by the divergence theorem, coning every boundary flag (facet n_i,
-  // edge foot f, vertex v) to the origin: each tetra (0,n_i,f,v) is LOCAL to one vertex + its 3
-  // planes, and the signed sum is exact even when feet fall outside their faces. No vertex
+  // ---- Plane stored as the outward (non-unit) normal n with half-space {x : n·x ≤ nn},
+  // nn = σ|n|²; the foot of the perpendicular from the origin onto the plane (the facet point) is
+  // q = σn, and |n| is the origin→plane distance (σ = −1 only for a power seed outside its cell).
+  // Role rule: half-space tests, Cramer and orientations read n; any use of a plane as a POINT
+  // (cone apex, centroid, moment arm) reads q; |n|² normalisations read |nn|. Volume by the
+  // divergence theorem, coning every boundary flag (facet q_i, edge foot f, vertex v) to the
+  // origin: each tetra (0,q_i,f,v) is LOCAL to one vertex + its 3 planes, and the signed sum is
+  // exact even when feet fall outside their faces or the origin outside the cell. No vertex
   // ordering, no adjacency — a pure per-vertex scatter.
 
-  /// Foot-point normal of plane k — now stored directly, so just a copy (the reconstruction divide
-  /// is gone).
+  /// Outward normal n_k of plane k (stored directly, so just a copy). It is the foot point only
+  /// when σ_k = +1; a formula that needs the plane as a point reads footPoint.
   KOKKOS_INLINE_FUNCTION void planeN(int k, Real out[3]) const {
     out[0] = n[k][0];
     out[1] = n[k][1];
@@ -1495,12 +1566,16 @@ struct ConvexCell {
       planeN(t0[t], n1);
       planeN(t1[t], n2);
       planeN(t2[t], n3);
+      Real q1[3], q2[3], q3[3];  // foot points (cone apexes)
+      footPoint(t0[t], q1);
+      footPoint(t1[t], q2);
+      footPoint(t2[t], q3);
       Real c1[3], c2[3], c3[3];
       xprod(n2, n3, c1);
       xprod(n3, n1, c2);
       xprod(n1, n2, c3);
       Real D = dot3(n1, c1);
-      if (D < Real(0))  // canonical order D>0: swap (n2,n3) and (c2,c3); v is unchanged
+      if (D < Real(0))  // canonical order D>0: swap (n2,n3), (c2,c3), (q2,q3); v unchanged
         for (int a = 0; a < 3; ++a) {
           Real tmp = n2[a];
           n2[a] = n3[a];
@@ -1508,6 +1583,9 @@ struct ConvexCell {
           tmp = c2[a];
           c2[a] = c3[a];
           c3[a] = tmp;
+          tmp = q2[a];
+          q2[a] = q3[a];
+          q3[a] = tmp;
         }
       const Real v[3] = {vx[t], vy[t], vz[t]};
       Real f12[3], f23[3], f31[3];
@@ -1515,17 +1593,17 @@ struct ConvexCell {
       edgeFoot(v, c1, f23);
       edgeFoot(v, c2, f31);
       Real e[3], d = 0;
-      e[0] = n1[0] - n2[0];
-      e[1] = n1[1] - n2[1];
-      e[2] = n1[2] - n2[2];
+      e[0] = q1[0] - q2[0];
+      e[1] = q1[1] - q2[1];
+      e[2] = q1[2] - q2[2];
       d += det3(e, f12, v);
-      e[0] = n2[0] - n3[0];
-      e[1] = n2[1] - n3[1];
-      e[2] = n2[2] - n3[2];
+      e[0] = q2[0] - q3[0];
+      e[1] = q2[1] - q3[1];
+      e[2] = q2[2] - q3[2];
       d += det3(e, f23, v);
-      e[0] = n3[0] - n1[0];
-      e[1] = n3[1] - n1[1];
-      e[2] = n3[2] - n1[2];
+      e[0] = q3[0] - q1[0];
+      e[1] = q3[1] - q1[1];
+      e[2] = q3[2] - q1[2];
       d += det3(e, f31, v);
       vol += d;
     }
