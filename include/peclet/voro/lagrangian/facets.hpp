@@ -507,6 +507,12 @@ CellFacets<Real> exportFacets(const TopologyStore<MAXP, MAXT>& store,
         Light ? "lagrangian.facets.fillLight" : "lagrangian.facets.fill",
         Kokkos::RangePolicy<Exec>(0, N),
         KOKKOS_LAMBDA(const int i, int& mx) {
+          // Force-capture the Views used only in the constexpr-if branches OUTSIDE them (nvcc: an
+          // extended __host__ __device__ lambda cannot FIRST-capture a variable inside a
+          // constexpr-if).
+          (void)sCen;
+          (void)sSec;
+          (void)sThd;
           Cell c;
           detail::loadCell<Policy>(st, Wl, P, W, XR, L3, i, c);
           const CellFaceLists<Cell> fl(c);
@@ -637,6 +643,7 @@ CellFacets<Real> exportFacets(const TopologyStore<MAXP, MAXT>& store,
   Kokkos::parallel_for(
       Light ? "lagrangian.facets.compactLight" : "lagrangian.facets.compact",
       Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        (void)hm;  // force-capture outside the constexpr-if (nvcc extended-lambda rule)
         const std::size_t base = static_cast<std::size_t>(i) * K;
         const int f0 = G.facetOffset(i), ni = G.facetOffset(i + 1) - f0;
         for (int q = 0; q < ni; ++q) {

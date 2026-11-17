@@ -325,7 +325,7 @@ class SchurAssembly {
     return K;
   }
 
- private:
+ public:  // KOKKOS_LAMBDA launchers: nvcc forbids an extended lambda in a private member
   void compute(const CellFacets<Real>& F, const LView<Real>& mass) {
     const int N = F.nCells, nF = F.nFacets;
     const std::size_t nE = static_cast<std::size_t>(nF) + static_cast<std::size_t>(N);
@@ -547,6 +547,7 @@ class SchurAssembly {
     sF_ = nF;
   }
 
+ private:
   using XV = Kokkos::View<peclet::core::Index*, Mem>;
   IV colRow_, ring_, ringN_, ub_, cnt_, cand_, cols_, start_, sOff_, sNbr_;
   XV iStart_, iCols_;
@@ -948,7 +949,7 @@ class SaddleSolver {
     applyDissipation(plan_, v, out, scr_);
   }
 
- private:
+ public:  // KOKKOS_LAMBDA launchers: nvcc forbids an extended lambda in a private member
   /// The inner A-solve preconditioner of a solve at a = θτ/2: AMG on the scalar two-point viscous
   /// operator when max ν τ/h² exceeds prm.amgSwitch, else Jacobi; st.tSetup also takes the last
   /// setup()'s time (charged once). The viscous hierarchy is rebuilt (its time charged to
@@ -1391,6 +1392,7 @@ class SaddleSolver {
                              std::to_string(prm.maxInner) + " iterations");
   }
 
+ private:
   CellFacets<Real> F_;
   LView<Real> mu_, mass_;
   std::vector<double> mh_;
@@ -2248,7 +2250,7 @@ class Integrator {
   const CellFacets<Real>& facets() const { return F_; }
   int numCells() const { return N_; }
 
- private:
+ public:  // KOKKOS_LAMBDA launchers: nvcc forbids an extended lambda in a private member
   /// From (pos0_, w0_) at the state x^n held in F_: x ← x^n + s·u (wrapped), weights warm-started
   /// by H δw = −s J_x u and solved by the repaired Newton. False if the weight solve failed.
   bool moveAndSolve(double s, const LView<Real>& u, StepReport& rep) {
@@ -3609,6 +3611,7 @@ class Integrator {
     unlike = u;
   }
 
+ private:
   MT* mt_;
   LView<Real> pos_, weight_;
   std::vector<double> V0h_;
