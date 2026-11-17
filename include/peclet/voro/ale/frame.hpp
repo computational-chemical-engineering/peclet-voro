@@ -322,6 +322,12 @@ MeshFrame<Real> initialFrame(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>
   MeshFrame<Real> f;
   detail::Clock clk(opt.timed);
   engine.rebuild(pos);
+  // One repair step at the same positions: it rebuilds nothing, but it leaves in the engine the
+  // cell volume of the kernel every later step evaluates. The cold build's volume comes from the
+  // clipping kernel; the two agree bitwise on the host, but a device compiler may contract
+  // a·b + c differently in each (nvcc: up to 6 ulp), and the Eulerian limit (frames at rest equal
+  // the initial frame bitwise, V0.1) needs one code path. Design note §11 A11.
+  engine.step(pos);
   f.timings.repair = clk.lap();
   f.pos = detail::snapshot(pos, "ale.frame.pos");
   if constexpr (Weighted)

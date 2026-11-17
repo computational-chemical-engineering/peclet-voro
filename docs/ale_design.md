@@ -957,3 +957,30 @@ Decision: `ale::LaplacianSolver` uses the MIS-2 setup of core `amgpar` without a
 and no core change for the ALE solver. Open, carried to the performance gates: the unlabeled count grows from
 32³ to 64³ by 1.25 (ratio 1) and 1.53 (ratio 1000); on CUDA the setup of amgpar at b21d4bd asks for 31.5 GiB at
 32³ and its level check against the host order is not bitwise (both passed to session `voronoi`).
+
+### A11 (2026-11-17): the initial frame is a cold build followed by one repair step at rest (gate G1.1 K8, work order S1.1b)
+- Finding [measured, 16³, `build_s0/gate_logs/S1_1b.gpu_diag_r{1,2}.log`]: on CUDA the frame at zero motion was not
+  bitwise. After a cold `rebuild()` the engine's `vol` comes from the clipping kernel of the tessellator; after any
+  `step()` it comes from the re-evaluation in the certificate kernel. nvcc contracts a·b + c into fused
+  multiply-adds differently in the two kernels: `cellVolume` differs in 1106 of 4096 cells (Voronoi) and 1118 of
+  4096 (power), by at most 6 ulp (7.1e-16 relative); `cellCentroid` follows because it is divided by the volume;
+  the other 14 FaceMesh arrays are bitwise. Frames 2–100 equal frame 1 (a fixed point after one step), and two GPU
+  runs are identical. With `--fmad=false` the defect is gone (`S1_1b.gpu_nofma_*.log`); GCC with
+  `-ffp-contract=fast -march=native` contracts both kernels alike (`S1_1b.hostfma_*.log`).
+- Rule: `ale::initialFrame` calls `engine.step(pos)` once after `engine.rebuild(pos)`. The step rebuilds nothing;
+  it leaves in the engine the volume of the kernel every later step evaluates, so the frames at rest equal the
+  initial frame bitwise on every backend (V0.1). No compiler flag, no change to the repair engine. Cost: one
+  certificate pass, once per run.
+- Rejected: (1) the same re-evaluation at the end of `MovingTessellation::rebuild()` (patch tested in a scratch
+  copy, `S1_1b.repair_patch.diff`, passes the same gates): it charges every cold build of every user of the engine
+  and needs guards for SDF engines and empty cells, for a property (repair = cold, bitwise) that the engine's own
+  contract does not require. (2) Products that cannot be contracted in `convex_cell.hpp`: touches the clipping hot
+  loop. (3) `--fmad=false` in the build: a flag that changes results for every user.
+- Gates after the change (`build_s0/gate_logs/S1_1c.*`): G1.1 PASS with K8 = PASS (GPU: `test_ale_frame` and
+  `test_ale_operators` pass, export bitwise, G0.3′ PASS, K1 6.13e-16); K0–K7, G0.3′ and the state hash unchanged
+  to the digit on the host; base 46/46; the S0.2′ line unchanged (V0.1a 8/8, V0.1b 4/4, F PASS; the recorded miss
+  without enforcement stays). On the GPU V0.1 (a) and (b) pass at 100 frames / steps for both engines.
+- Open: a frame that follows a cold build inside `advanceFrame` (rebuild gate, fallback) still holds the
+  clipping-kernel volume, so on CUDA the next frame at rest may differ from it by a few ulp once. It occurs only
+  after motion and is not part of the Eulerian limit; S0.5 decides whether those frames get the same step. With an
+  SDF engine or an empty power cell the step at rest is not established to be inert (S1.1b report, "Not done").
