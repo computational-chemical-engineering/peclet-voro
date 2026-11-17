@@ -154,9 +154,11 @@ struct StepReport {
   double residualMomentum[3] = {0, 0, 0};  ///< Σ_i (rhs − A U*)_i per component
   double momentum[3] = {0, 0, 0};          ///< Σ_i (M U^{n+1})_i
   double absMomentum = 0;                  ///< Σ_i |M U^{n+1}|
-  // stage times (StepOptions::timed): S3, S4, μ̂, S5 solve, S6, budget
+  // stage times (StepOptions::timed): S3 (flux map + solve), S4 (explicit transport + GMRES), μ̂,
+  // S5 (constraint + solve), S6 (flux map + solve), budget
   double timeTransportFlux = 0, timePredictor = 0, timeMu = 0, timeProjection = 0,
          timeCompactFlux = 0, timeBudget = 0;
+  double timeSolveTransportFlux = 0, timeSolveCompactFlux = 0;  ///< the L_ρ solves within S3, S6
 };
 
 // ================================================================================ kernels
@@ -508,7 +510,12 @@ class Stepper {
     test.maxTol = Real(opt.compactTol) / tau;
     test.weight = fr.invVolume;
     fr.solver.maxIterations = opt.laplacianMaxIterations;
+    Kokkos::Timer timer;
+    if (opt.timed)
+      Kokkos::fence(), timer.reset();
     const auto rep = fr.solver.solve(ws.b, phiWarm, test);
+    if (opt.timed)
+      Kokkos::fence(), lastSolveSeconds_ = timer.seconds();
     detail::compactCorrect(m, fr.aFace, phiWarm, Phi);
     return rep;
   }
@@ -739,6 +746,7 @@ class Stepper {
     extrapolate(fr, s);
     transportFlux(fr, s, tau, rep);
     lap(rep.timeTransportFlux);
+    rep.timeSolveTransportFlux = lastSolveSeconds_;
     // S4
     predictor(fr, s, tau, body, Ustar_, rep);
     lap(rep.timePredictor);
@@ -777,6 +785,7 @@ class Stepper {
     rep.compactFlux = compactFluxOf(fr, U1_, tau, s.phiCompact, Phi1_);
     rep.divPhi1 = maxDivergence(fr, Phi1_, tau);
     lap(rep.timeCompactFlux);
+    rep.timeSolveCompactFlux = lastSolveSeconds_;
     // rotate (S8): Uⁿ⁻¹ ← Uⁿ, Uⁿ ← U^{n+1}
     Kokkos::deep_copy(s.Uprev, s.U);
     Kokkos::deep_copy(s.U, U1_);
@@ -790,6 +799,7 @@ class Stepper {
 
  private:
   DV<Real> Ustar_, U1_, dp_, Phi1_, C1_;
+  double lastSolveSeconds_ = 0;  ///< the L_ρ solve of the last compactFluxOf (timed)
 };
 
 }  // namespace peclet::voro::ale
