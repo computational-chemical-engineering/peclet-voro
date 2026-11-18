@@ -427,8 +427,15 @@ int checkGeometry(const char* tag, const Scene& s, const Built<Weighted>& b, con
       for (int d = 0; d < 3; ++d)
         noDet = std::max(noDet, std::abs(CC(3 * i + d) - CC2(3 * i + d)) / h);
   }
-  const bool okDiag =
-      m.generatorDiag.maxNormalConnSine == sine && m.generatorDiag.numNegativeHeight == nNeg;
+  // The builder's diagnostic against this recomputation. The sine (~1e-9) is a cross product of two
+  // nearly parallel unit vectors, so its rounding error is absolute, of order eps: nvcc contracts
+  // the products into FMAs on the device and this host loop is not contracted the same way
+  // (docs/ale_design.md §11 A11; measured 0.005 and 0.07 eps on CUDA, exactly 0 with --fmad=false
+  // and on the host). It is compared to 16 eps absolute on every backend; the count stays exact.
+  const double diagSine = m.generatorDiag.maxNormalConnSine;
+  const int diagNeg = m.generatorDiag.numNegativeHeight;
+  const double dSineUlp = std::abs(diagSine - sine) / std::numeric_limits<real_t>::epsilon();
+  const bool okDiag = dSineUlp <= 16 && diagNeg == nNeg;
   // the builder's own guarantees decide the exit code; |n x conn|/d measures the PUBLISHED area
   // vector's orientation (round-off of the polygon normal on small faces) and is judged by the
   // gate script from its own line
@@ -440,10 +447,12 @@ int checkGeometry(const char* tag, const Scene& s, const Built<Weighted>& b, con
       "RESULT b %-7s %s faces=%d closure=%.2e moment=%.2e hsum_ulp=%.1f centroid=%.2e "
       "mesh_sine=%.2e (%.1f ulp) pub_sine=%.2e cellcentroid=%.2e diag=%s negh=%d "
       "negh_centroid=%.2e negh_closure=%.2e "
-      "negh_moment=%.2e nodet=%.2e nodet_flipped=%d nodet_missing=%d anti_normal=%d\n",
+      "negh_moment=%.2e nodet=%.2e nodet_flipped=%d nodet_missing=%d anti_normal=%d "
+      "diag_sine_dev=%.17e diag_sine_host=%.17e diag_dsine_ulp=%.3g diag_negh_dev=%d "
+      "diag_negh_host=%d\n",
       tag, pass ? "PASS" : "FAIL", m.nFaces, clos, mom, hsum, cen, meshSine, meshSineUlp, sine,
       ccen, okDiag ? "match" : "MISMATCH", nNeg, cenNeg, closNeg, momNeg, noDet, noDetFlipped,
-      noDetMissing, nAntiNormal);
+      noDetMissing, nAntiNormal, diagSine, sine, dSineUlp, diagNeg, nNeg);
   std::printf(
       "RESULT b_sine %-7s %s published-normal max |n x conn|/d = %.2e on A_f > 1e-2 h^2 "
       "(criterion 1e-12)\n",
