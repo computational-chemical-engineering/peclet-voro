@@ -43,9 +43,10 @@
  * (τ by the static rule of the case, from the start field's Φ). `rest` runs the static path beside
  * it in the same process and compares U and p bitwise after every step (gate V0.2). Extra RESULT
  * keys at the end: motion, gcl (max over the run of max_i |τ(DΦᵐ_c)_i − ΔV_i|/V_i), s3_restarts
- * (max over the run of the S3 correction's re-solves for its true residual), rebuilt,
- * frames, t_frames, t_setup (per step), B1_absmax (|B1|/K), mom_def (the booked defect momentum
- * over Σ M|U|), v02_maxdiff, v02_bitwise_steps (rest only).
+ * (max over the run of the S3 correction's re-solves for its true residual), rounds_max (the most
+ * forced rounds of a frame), cold_frames (frames the repair built cold: its gate or fallback),
+ * rebuilt, frames, t_frames, t_setup (per step), B1_absmax (|B1|/K), mom_def (the booked defect
+ * momentum over Σ M|U|), v02_maxdiff, v02_bitwise_steps (rest only).
  *  ... --dump-on-error DIR (diagnostic, brief ALE_S1_3A_R): the frames record their rounds; on a
  * frame error the last frames' positions, the weights and the forced sets are written to DIR
  * (dumpFrameError; replay: test_ale_frame --replay DIR), with the open cells' closure terms, the
@@ -1079,7 +1080,8 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
   double resMom[3] = {0, 0, 0}, Kprev = K0, defMom[3] = {0, 0, 0};
   double gcl = 0, B1max = 0, momDef = 0, v02diff = 0, tFrames = 0, tFrameSetup = 0;
   long rebuilt = 0, frames = 0, v02bitwise = 0;
-  int s3Restarts = 0;
+  int s3Restarts = 0, roundsMax = 0;
+  long coldFrames = 0;
   const Real gbar[3] = {0, 0, -1};
   bool blowup = false;
   const auto tLoop0 = std::chrono::steady_clock::now();
@@ -1109,6 +1111,8 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
       }
       gcl = std::max(gcl, rr.gcl);
       s3Restarts = std::max(s3Restarts, rr.sweptRestarts);
+      roundsMax = std::max({roundsMax, mm.half.reciprocity.rounds, mm.full.reciprocity.rounds});
+      coldFrames += (mm.half.coldBuild ? 1 : 0) + (mm.full.coldBuild ? 1 : 0);
       rebuilt += rr.rebuiltHalf + rr.rebuiltFull;
       frames += 2;
       tFrames += rr.timeFrames;
@@ -1307,6 +1311,7 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
   o << " stokes=" << (stokes ? 1 : 0);
   // the moving mesh (brief ALE_S1_3A): gcl = max over the run of A18 item 3's measure
   o << " motion=" << motion << " gcl=" << gcl << " s3_restarts=" << s3Restarts
+    << " rounds_max=" << roundsMax << " cold_frames=" << (double)coldFrames
     << " rebuilt=" << (double)rebuilt << " frames=" << (double)frames
     << " t_frames=" << tFrames / ns << " t_setup=" << tFrameSetup / ns << " B1_absmax=" << B1max
     << " mom_def=" << momDef;

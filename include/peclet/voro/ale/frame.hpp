@@ -70,8 +70,11 @@ namespace peclet::voro::ale {
 /// a/h² of V_i at CFL 1, against the geometric conservation bar of 1e-14 V_i of stage 1. Smaller
 /// facets are still forced (any area > 0) but tolerated if they remain.
 inline constexpr double kOneSidedFacetAreaFrac = 1e-14;
-/// At most this many forced rebuild + publish rounds per frame.
-inline constexpr int kMaxReciprocityRounds = 2;
+/// At most this many forced rebuild + publish rounds per frame; a round runs only when one is
+/// due. Two (WO-S0.6, frames moved 0.05 h) did not suffice at Courant number 0.4 (moves up to
+/// 0.2 h per frame, WO-S1.3a-r): at 64³ a one-sided facet survived two rounds and a third closed
+/// it (build_s2/gate_logs/S1_3a_r.catch64_1.tg_Z64_F.gpu.log).
+inline constexpr int kMaxReciprocityRounds = 8;
 /// Closure bar of a published cell (WO-S0.6): |Σ_g A_g| + Σ_g |A_g + A_recip(g)| over the cell's
 /// facets, against this fraction of Σ_g |A_g|. The first term is the cell's own closure, the
 /// second the disagreement with its neighbours' facets, which the face mesh uses for the faces
