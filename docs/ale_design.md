@@ -1094,3 +1094,77 @@ cheaper per step than mode R at 32³ and differs from it by 1 % of the error the
 
 **Open for S1.2b.** The reference estimates μ̂ with the exact L_ρ solve; §4.3's estimate with a 1e-2 solve is
 tested on the device. The form without the explicit upwind part was not run (the stop rule did not fire).
+
+### A16 (2026-11-18): the device time step on a static mesh (work orders S1.2b, S1.2c; gate G1.2; replaces §4.2 "PCG" and the solver file of §4.5)
+**What exists.** `ale/transport.hpp` (T in skew form, Q, R − Δ, δ, explicit transport), `ale/krylov.hpp` (device PCG
+and right-preconditioned GMRES, matrix-free), `ale/laplacian_solver.hpp` (`LaplacianSolver`: the matrix of
+`assembleLaplacian` handed to core's `GraphAMGDevice` with the MIS-2 device setup and no label, PCG with mean
+removal, warm start, relative or absolute test), `ale/stepper.hpp` (stages S1–S6 as functions of frame and state,
+modes F and R, the budget of energy and momentum with the residuals booked, one pair `applyMass` /
+`applyInverseMass`), `tests/kokkos/test_ale_stepper.cpp` with `tests/python/test_ale_stepper.py`,
+`tools/ale_gates/G1_2.sh`. The reference got a `trace` subcommand; its judge applies R2′, R6 (ii′)′ and R4 at 32³.
+
+**Bindings (they hold for the stages that follow):**
+- The predictor is solved by GMRES(30), right-preconditioned with the scalar diagonal of §4.2; 11 operator
+  applications per step at 32³ and 64³. (§4.2's "PCG" is void: the operator is not symmetric, A15.)
+- There is no `fv/aggregation_amg.hpp`. The MIS-2 setup lives in core (`solver/graph_amg_setup.hpp`), today only
+  on core branch `amgpar` (9e0f881). Until that is on core main, `ale-s0` is built with
+  `-DPECLET_VENDOR_SIBLINGS=ON -DFETCHCONTENT_SOURCE_DIR_PECLET_SIB_PECLET-CORE=<checkout of amgpar>` (and the
+  same for morton); no source line of voro depends on the path. **`ale-s0` cannot land before `amgpar` has.**
+- Reductions (dot products, budget) are plain `parallel_reduce`: bitwise equal run to run at a fixed launch on
+  both backends, 6e-16 between 1 and 8 threads. A step is therefore reproducible, not thread-count independent.
+- The 20 cold iterations of μ̂ use the 1e-2 solve as well. Mode R's absolute floor is 4ε times a bound of |C′||U|.
+- The comparison with the reference is made at ω = 1 (mesh Z at 16³ in mode F, mesh W in mode R), because the
+  reference seeds μ̂ with numpy's generator; μ̂ itself is gated in R3.
+
+**Gate G1.2 as fixed before the run: FAIL (R5 (b) misses; B missed in the first run).** Logs
+`build_s2/gate_logs/S1_2b.*`, `S1_2c.*`; all measured, host (OpenMP, 8 threads) and GPU unless stated.
+| id | result |
+|---|---|
+| B **MISS** | host: G1.1 with K1–K6 equal to the record, battery 46/46 with the same hash, `S0.2'`, `G0.3'` PASS: amgpar's headers change no digit. GPU: `G0.3'` and G1.1 K8 PASS; three first measurements miss (below) |
+| L PASS | PCG to 1e-10, L_ρ of M1 with the sphere of G0.4, 32³ / 64³: density ratio 1 12 / 15, ratio 1000 16 / 26; GPU the same counts and level sizes; GPU setup at 64³ 609 MiB; setup 224 ms host, 110 ms GPU |
+| C0 PASS | new operators against the reference 4.6e-16 (host), 5.0e-16 (GPU) |
+| C1 PASS | one step: F 1.2e-15, U* 1.9e-14, U¹ 1.8e-14, p 4.5e-14 |
+| C2 PASS | ten steps: U 1.1e-13, p 2.1e-13; W in mode R 2.6e-13 |
+| C3 PASS | GPU against host 2.0e-15; repeated runs bitwise; 1 against 8 threads 6.1e-16 |
+| R0 PASS | rest exactly 0; uniform flow 2.9e-15 |
+| R1 PASS | budget closure 5.5e-17 K at the default tolerances; residual work 2.6e-13 of the dissipation |
+| R2′ PASS | momentum with the residual booked 6.0e-16 (1.7e-12 without); τ\|DΦ₁\|/V 9.8e-15 |
+| R3 PASS | 2000 steps (W 16³) and 500 (W 32³): K never rises; μ̂ ≥ 0.951 μ_exact with the 1e-2 solve; ω μ_exact ≤ 1.023; μ_exact Z / W 0.897 / 0.919, 0.986 / 0.999, 1.009 / 1.023, 1.014 / 1.026 at 8³ … 64³ |
+| R4 PASS | mode F against mode R 1.08 % at 32³ (3.43 % at 16³) |
+| R5 (a) PASS | 16³ equal to the reference in every printed digit, 32³ to 4.6e-5 |
+| R5 (b) **MISS** | error at 16³ / 32³ / 64³ and order: TG Z 3.329e-2 / 1.029e-2 / 3.409e-3 (1.69, 1.59); ABC Z 3.191e-2 / 5.586e-3 / 1.727e-3 (2.51, 1.69); TG W 3.532e-2 / 1.073e-2 / 3.577e-3 (1.72, 1.58); ABC W 3.565e-2 / 6.701e-3 / 2.05e-3 (2.41, 1.71); asked ≥ 1.8 between 32³ and 64³ |
+| R6 PASS | (i) 5.3e-16; (ii′)′ fall from rest 1.49e-11 against 2e-11; mean velocity from the TG start 1.2e-15 |
+| T PASS | per step, mode F: 32³ host 91 ms, GPU 19 ms; 64³ host 972 ms (predictor 555), GPU 102 ms (predictor 47, each Laplacian solve 11–13); predictor 10.6 / 11.3 applications; Laplacian 8.5 / 9.0 / 8.5 iterations (S3 / S5 / S6, 64³). Measured at load 19 to 110 with the GPU shared: upper figures |
+
+**B on the GPU (first runs there; none comes from S1.2b, none is diagnosed).** `test_ale_facemesh.cpp` did not
+compile with nvcc until 9b58bce, so G0.1′ and the whole-tree `G0_2.sh` had never run on CUDA.
+- `test_ale_facemesh`, case b (power and Voronoi): `diag=MISMATCH`, every other number of the case at rounding
+  (closure 6e-16, moment 3e-15); the host passes. Candidate [estimate]: contraction, as A11.
+- `S0.2'`: (i)–(iv), empty cells, V0.1 a and b PASS; **(v′) fails: two identical launches of the 500-frame moving
+  mesh differ on CUDA** (sha differs, volumes to 9.3e-16), Z and W. On the host two launches at one thread agree
+  bitwise. A static mesh is bitwise on the GPU (C3). This bears on V0.2 and G1.5 of the moving mesh.
+- `python/state_hash.py` aborts on CUDA (host access to the device View `sph.cen`): shared voro code, not ALE.
+- `G1_1.sh:142` fixes the battery at 46 ctests; with `test_ale_stepper` there are 47.
+
+**The order (S1.2c, criterion D-τ fixed before the run: error at Courant 0.2 over error at 0.4, at 64³, ≤ 0.80
+means time, ≥ 0.95 means space).** GPU, mode F, Courant 0.4 / 0.2 / 0.1:
+| case | error | ratio 0.2 / 0.4 |
+|---|---|---|
+| TG Z 32³ | 1.02943e-2 / 1.00771e-2 / 1.00249e-2 | 0.979 |
+| TG Z 64³ | 3.40907e-3 / 3.37037e-3 / 3.36086e-3 | 0.989 |
+| ABC Z 32³ | 5.58572e-3 / 5.58041e-3 / 5.57907e-3 | 0.999 |
+| ABC Z 64³ | 1.72739e-3 / 1.72604e-3 / 1.72570e-3 | 0.999 |
+| TG W 64³ | 3.57698e-3 / 3.55073e-3 / 3.54428e-3 | 0.993 |
+**The first-order part is spatial.** The step is second order in τ here (successive differences fall by 4.0 to
+4.2), and at Courant 0.4 the time error is 1.5 % (TG) and 0.1 % (ABC) of the error at 64³. Extrapolated to τ = 0
+the order between 32³ and 64³ is 1.58 (TG) and 1.69 (ABC) [derived from the table]. What in space is not shown by
+these runs. Candidate [estimate]: the lumped mass with the adjoint pressure force (decision 8 of the campaign: on
+these meshes a cell-valued gradient leaves 9 % of itself after projection at every h, zero weights, 3D statics),
+which the consistent mass removed in the 2D oracle at the price of momentum and an energy theorem. Not tested: a
+lattice (jitter 0), the friction and the transport operators one by one.
+
+**What this fixes for S1.3.** The stepper's stages are the ones S1.3 wraps with two frames. The order bound of
+G1.3 (≥ 1.8 on the moving mesh) will miss for the same reason unless the bulk scheme changes; S1.3 gates the
+moving mesh against the static one at equal resolution, and the order is carried as a recorded miss of the bulk
+scheme, with decision 8.
