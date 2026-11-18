@@ -31,8 +31,9 @@
  * .p0), rebuilds the frame of its mesh from DIR, runs K steps at the tight tolerances (predictor
  * 1e-13, Laplacian 1e-12) and writes ODIR/CASE.dev_{Ustar,F,U,p}_k and ODIR/CASE.dev_scalars.
  *
- *  test_ale_stepper --run CASE [--steps K] [--default-tol]   the runs of gate G1.2 R0–R6 and T, at
- * the default tolerances of §4.9: one RESULT line with the keys of the reference's run_case (and a
+ *  test_ale_stepper --run CASE [--steps K] [--courant C] [--default-tol]   the runs of gate G1.2
+ * R0–R6 and T, at the default tolerances of §4.9 (C: the flux Courant number of the time step, 0.4
+ * by default): one RESULT line with the keys of the reference's run_case (and a
  * few more), timings per stage. Cases: <tg|abc>_<Z|W><n>_<F|R>, r0_<zero|unif>_<F|R> (W 8³),
  * r3_tg_W16_F (2000 steps), r3_tg_W32_F (500 steps), r6i_W16, r6ii_rest_W16, r6ii_tg_W16.
  */
@@ -684,7 +685,7 @@ struct Stats {
   double Bsum[11] = {0};
 };
 
-int runCase(const std::string& name, int stepsOverride, bool tight) {
+int runCase(const std::string& name, int stepsOverride, bool tight, double courant) {
   RunSpec r;
   if (!parseCase(name, r)) {
     std::printf("RESULT case=%s status=UNKNOWN_CASE\n", name.c_str());
@@ -713,7 +714,8 @@ int runCase(const std::string& name, int stepsOverride, bool tight) {
     Vsum += v;
   const double h = std::cbrt(Vsum / N);
   // start field and time step (run_case of the reference): the start field (Taylor–Green for the
-  // fields at rest) projected exactly; τ from the flux Courant number 0.4 of its compact flux
+  // fields at rest) projected exactly; τ from the flux Courant number `courant` (default 0.4) of
+  // its compact flux
   auto U0h = fieldOf(r.field, xh, N, nu, 0.0);
   std::vector<Real> Uch = r.field == "zero" ? taylorGreen(xh, N, nu, 0.0) : U0h;
   DV Uc = up(Uch, "Uc"), dp0("dp0", N), t3("t3", 3 * N), t3b("t3b", 3 * N), sF("sF", m.nFaces),
@@ -724,7 +726,7 @@ int runCase(const std::string& name, int stepsOverride, bool tight) {
   kry::axpy(Uc, Real(1), t3b, 3 * N);
   stp.compactFluxOf(fd, Uc, Real(1), phi, Phi);
   const double c1 = ale::detail::courant(m, Phi, 1.0);
-  const int nst1 = (int)std::ceil(c1 / 0.4);
+  const int nst1 = (int)std::ceil(c1 / courant);
   const double tau = 1.0 / nst1;
   const int nst = stepsOverride > 0 ? stepsOverride : (r.steps > 0 ? r.steps : nst1);
   DV body, pStart;
@@ -936,6 +938,7 @@ int runCase(const std::string& name, int stepsOverride, bool tight) {
   if (r.force == "gbar")
     o << " gt_dev=" << S.gtDev << " mean_dev=" << S.meanDev
       << " mean_dev_booked=" << S.meanDevBooked;
+  o << " courant=" << courant;
   const char* bn[11] = {"B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8a", "B8b", "B9", "Bres"};
   std::printf("TERMS %s run_sum", name.c_str());
   for (int q = 0; q < 11; ++q)
@@ -1017,6 +1020,7 @@ int main(int argc, char** argv) {
   {
     std::string applyDir, outDir, which = "all", runCaseName, traceDir, traceCaseName;
     int cells = 16, lapN = 0, steps = -1;
+    double courant = 0.4;
     bool tight = false;
     for (int a = 1; a < argc; ++a) {
       const std::string s = argv[a];
@@ -1037,6 +1041,8 @@ int main(int argc, char** argv) {
         traceCaseName = argv[++a];
       } else if (s == "--steps" && a + 1 < argc)
         steps = std::atoi(argv[++a]);
+      else if (s == "--courant" && a + 1 < argc)
+        courant = std::atof(argv[++a]);
       else if (s == "--tight")
         tight = true;
     }
@@ -1050,7 +1056,7 @@ int main(int argc, char** argv) {
     } else if (lapN > 0) {
       rc = laplacianGate(lapN);
     } else if (!runCaseName.empty()) {
-      rc = runCase(runCaseName, steps, tight);
+      rc = runCase(runCaseName, steps, tight, courant);
     } else if (!traceDir.empty()) {
       if (outDir.empty())
         outDir = traceDir;
