@@ -32,6 +32,10 @@ Linear solves: L_rho by a grounded sparse LU (exact on the mean-zero subspace); 
 residual work booked; mode R by preconditioned CG to a relative 1e-13 (floor: the rounding level of C'U*).
 The mu_hat power iteration uses the exact L_rho solve (the device uses a loose one, §4.3).
 
+moving_step (work order S1.3a, docs/ale_design.md §11 A18): the same step on a MOVING mesh with two frames per step
+(Fh, F1 exported by test_ale_stepper --trace-moving), written from the items of A18; driven by test_ale_stepper.py
+trace-moving.
+
 Usage: python ale_reference_stepper.py run EXPORT_DIR CASE [--log FILE]   one run, RESULT line at the end
        python ale_reference_stepper.py judge LOG_DIR                       gate G1.2r from the RESULT lines
        python ale_reference_stepper.py trace EXPORT_DIR CASE OUT_DIR [--steps K] [--pred-rtol X]
@@ -340,6 +344,107 @@ class Stepper:
 
 BOOKED = ('B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8a', 'B8b', 'B9', 'Bres')
 UNSIGNED = ('B2', 'B3', 'B5', 'B6', 'B8b', 'B9', 'Bres')     # B4, B7, B8a <= 0 by construction
+
+
+# -------------------------------------------------------------------------------- the step on a moving mesh
+MOVING_PRED_RTOL = 1e-14
+
+
+def moving_step(mh, m1, U, Uext, p, Vn, xdot, tau, mode, rho=1.0, nu=0.01, omega=None,
+                pred_rtol=MOVING_PRED_RTOL):
+    """One step on a MOVING mesh, one phase, no body force (docs/ale_design.md §11 A18, written from its items, not
+    from the device code). Frames: mh = Fh (the mesh at x^n + tau xdot/2), m1 = F1 (at x^n + tau xdot); of frame n
+    only its volumes Vn. Lumped masses Mn = rho Vn, M1 = rho V1, dM = M1 - Mn; the weights do not move (wdot = 0).
+      S3 on Fh: Phi^m = swept flux; psi = L_rho^+ (D Phi^m - (V1 - Vn)/tau), Phi^m_c = Phi^m + a (Delta_n psi), so
+         that tau D Phi^m_c = V1 - Vn; Phi = compact projection of I_F U_ext; F = Phi - Phi^m_c, Fm = rho F.
+      S4 on Fh: (M1 - dM/4 + tau/2 (S + Q + zeta)) U* = (Mn + dM/4 - tau/2 (S + Q + zeta)) U^n + tau (e6 + e8 + C'^T p^n)
+         (S the skew transport, the flux form with D Fm = -dM/tau).
+      S5, S6 on F1 with the mass M1, as on a static mesh. In mode F omega is an INPUT (the device's): the device's
+         mu_hat comes from loose solves and its own seed and is gated on its own (§4.3), as in gate G1.2 C1.
+    Budget: K = 1/2 U.MU with the mass of its frame; B1 = +1/8 sum dM |U* - U^n|^2, the other terms with Fh's
+    operators in S4 and F1's in S5. Momentum: dP_def = +1/2 sum [tau (D Fm)_i + dM_i] Ubar_i (the defect of item 3 and
+    of D Phi = 0); P1 - Pn = dP_def - sum res (+ tau sum of the explicit forces, zero here).
+    U, Uext, xdot (N, 3); p, Vn (N). Returns U1, p1 and a dict (F, Ustar, budget terms, gcl, momentum)."""
+    N = mh.N
+    sh, s1 = Stepper(mh, rho=rho, nu=nu), Stepper(m1, rho=rho, nu=nu)
+    Mn, M1 = rho * Vn, rho * m1.V
+    dM = M1 - Mn
+    r = {}
+    # S3
+    Phim = ar.swept_mf(mh, xdot, np.zeros(N))
+    dV = m1.V - Vn
+    psi = sh.Lsolve(sh.D @ Phim - dV / tau)
+    Phimc = Phim + sh.a * ar.dn_mf(mh, psi)
+    r['gcl'] = np.max(np.abs(tau * (sh.D @ Phimc) - dV) / mh.V)
+    F = sh.project_flux(sh.IF @ Uext.ravel()) - Phimc
+    Fm = rho * F
+    r['cfl'] = sh.courant(F, tau)
+    # S4
+    T = sh.tm.T(Fm)
+    Wd = 0.5 * np.abs(Fm)
+    Q = (sh.tm.DeltaT @ sp.diags(np.repeat(Wd, 3)) @ sh.tm.Delta).tocsr()
+    K = (T + Q + sh.zeta).tocsr()
+    ue, u0 = Uext.ravel(), U.ravel()
+    e6 = -(sh.tm.DeltaT @ (np.repeat(Fm, 3) * (sh.tm.Delta_c @ ue)))
+    e8 = -(sh.tm.DeltaT @ (np.repeat(Wd, 3) * (sh.tm.Jump @ ue)))
+    fp = sh.CpT @ p
+    mL, mR = M1 - 0.25 * dM, Mn + 0.25 * dM
+
+    def Aop(x):
+        return apply_mass(mL, x.reshape(N, 3)).ravel() + 0.5 * tau * (K @ x)
+
+    rhs = apply_mass(mR, U).ravel() - 0.5 * tau * (K @ u0) + tau * (e6 + e8 + fp)
+    if 3 * N <= PREDICTOR_DIRECT_MAX:
+        us = splu((mass_matrix(mL) + 0.5 * tau * K).tocsc()).solve(rhs)
+    else:
+        qd = np.zeros(N)
+        np.add.at(qd, mh.A, Wd)
+        np.add.at(qd, mh.B, Wd)
+        binv = np.linalg.inv(mL[:, None, None] * np.eye(3)
+                             + 0.5 * tau * (qd[:, None, None] * np.eye(3) + sh.zeta_blocks))
+
+        def prec(v):
+            return np.einsum('iab,ib->ia', binv, v.reshape(N, 3)).ravel()
+
+        us, _ = gmres(Aop, rhs, ue.copy(), prec, pred_rtol)
+    res = rhs - Aop(us)
+    ub = 0.5 * (us + u0)
+    r['B1'] = 0.125 * np.sum(dM * np.sum((us - u0).reshape(N, 3) ** 2, axis=1))
+    r['B2'] = -tau * ub @ (T @ ub)
+    r['B3'] = tau * ub @ fp
+    r['B6'] = tau * ub @ e6
+    r['B7'] = -tau * ub @ (sh.zeta @ ub)
+    r['B8a'] = -tau * ub @ (Q @ ub)
+    r['B8b'] = tau * ub @ e8
+    r['B9'] = 0.0
+    r['Bres'] = -ub @ res
+    r['res_mom'] = res.reshape(N, 3).sum(0)
+    r['def_mom'] = 0.5 * ((tau * (sh.D @ Fm) + dM)[:, None] * ub.reshape(N, 3)).sum(0)
+    # S5 on F1, mass M1
+    Us = us.reshape(N, 3)
+    if mode == 'R':
+        dp, _ = s1.exact_projection(Us, tau)
+        omega = 1.0
+    else:
+        dp = -omega * s1.Lsolve((s1.Cp @ us) / tau)
+    U1 = Us + tau * apply_inverse_mass(M1, (s1.CpT @ dp).reshape(N, 3))
+    p1 = p + dp
+    dU = U1 - Us
+    r['B4'] = -0.5 * np.sum(dU * apply_mass(M1, dU))
+    r['B5'] = tau * dp @ (s1.Cp @ U1.ravel())
+    r['dK'] = kinetic_energy(M1, U1) - kinetic_energy(Mn, U)
+    r['K1'] = kinetic_energy(M1, U1)
+    r['booked'] = sum(r[k] for k in BOOKED)
+    r['closure'] = r['dK'] - r['booked']
+    # S6
+    Phi1 = s1.project_flux(s1.IF @ U1.ravel())
+    r['divPhi1'] = tau * np.max(np.abs(s1.D @ Phi1) / m1.V)
+    P1, Pn = apply_mass(M1, U1).sum(0), apply_mass(Mn, U).sum(0)
+    r['P1'] = P1
+    r['absP1'] = np.abs(apply_mass(M1, U1)).sum()
+    r['mom_booked_step'] = P1 - Pn - r['def_mom'] + r['res_mom']
+    r['F'], r['Ustar'], r['omega'] = F, Us, omega
+    return U1, p1, r
 
 
 # ----------------------------------------------------------------------------------------------- the cases
