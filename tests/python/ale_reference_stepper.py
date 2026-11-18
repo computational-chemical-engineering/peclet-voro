@@ -573,7 +573,7 @@ def trace_case(export_dir, name, out_dir, nsteps, pred_rtol):
             Uprev, U, p = U, U1, p1
             for key, arr in (('Ustar', r['Ustar']), ('F', r['F']), ('U', U), ('p', p)):
                 np.asarray(arr, dtype='<f8').tofile(pre + f'ref_{key}_{k}')
-            sc.write(f"{k} {r['omega']!r} {r.get('mu_hat', float('nan'))!r}\n")
+            sc.write(f"{k} {float(r['omega'])!r} {float(r.get('mu_hat', float('nan')))!r}\n")
     print(f'TRACE {name} mesh={mesh_name(fam, n)} mode={mode} tau={tau:.6e} steps={nsteps} written to {out_dir}')
     return 0
 

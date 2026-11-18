@@ -3,7 +3,7 @@
 # criteria B, L, C0-C3, R0-R6, T fixed 2026-11-17 in the brief ALE_S1_2B): the device time step of
 # include/peclet/voro/ale/stepper.hpp (one phase, static mesh) on the host (OpenMP, 8 threads) and the GPU (CUDA).
 #
-#   tools/ale_gates/G1_2.sh [--configure] [--base] [--judge-only] [--cases "LIST"] [--no-gpu]
+#   tools/ale_gates/G1_2.sh [--configure] [--base] [--judge-only] [--no-runs] [--cases "LIST"] [--no-gpu]
 #
 # Trees (core headers from ../core-ale-amg, the amgpar branch; morton from ../morton; nothing downloaded):
 #   build_s2       prefix ../extern/install/host-openmp     build_s2_cuda  prefix ../extern/install/nvidia-cuda
@@ -13,12 +13,14 @@
 #       default their outputs S1_2b.base_*.out are read, as written by the base run before test_ale_stepper was
 #       registered: G1_1.sh's battery counts exactly 46 ctests) + every ALE ctest (ctest -R ^test_ale_) on the host
 #       and the GPU. K1-K6 must equal the record build_s0/gate_logs/S1_1c.G1_1.out (the G1.1 PASS of A11) field by field.
-#   C0  test_ale_frame --export (16^3, M1-M3) -> test_ale_stepper.py inputs -> test_ale_stepper --apply (host, GPU)
-#       -> test_ale_stepper.py compare.
+#   C0  test_ale_frame --export (16^3, M1-M3; on each backend: the CUDA frame differs from the host's in the last
+#       bits, A11) -> test_ale_stepper.py inputs -> test_ale_stepper --apply -> test_ale_stepper.py compare.
 #   C1, C2  ale_reference_stepper.py trace (tg_Z16_F, tg_W16_R, 10 steps, predictor rtol 1e-13) -> test_ale_stepper
 #       --trace (tight tolerances) on the host (8 threads, twice; 1 thread) and the GPU (twice) -> test_ale_stepper.py
 #       trace.
-#   C3  GPU against host (tg_Z16_F, U after 10 steps, <= 1e-9); host 8 threads run twice and GPU run twice bitwise;
+#       The reference trace runs on each backend's own export.
+#   C3  GPU against host (tg_Z16_F, U after 10 steps, <= 1e-9; each from the reference start state on its own
+#       export, so the two runs start ulps apart); host 8 threads run twice and GPU run twice bitwise;
 #       1 thread against 8 threads reported.
 #   L   test_ale_stepper --laplacian 32 / 64 on the host and the GPU.
 #   R0-R6, T  test_ale_stepper --run CASE on the host and the GPU (default tolerances), judged by
@@ -36,6 +38,7 @@ LOCK=/home/frankp/Codes/bubble_column_perf/gpu_diag/mgd/heavy.lock
 CONFIGURE=0
 BASE=0
 JUDGE_ONLY=0
+RUNS=1
 GPU=1
 CASES="r0_zero_F r0_zero_R r0_unif_F r0_unif_R tg_Z16_F tg_Z16_R tg_W16_F tg_W16_R r3_tg_W16_F r3_tg_W32_F
        tg_Z32_R tg_Z8_F tg_W8_F abc_Z16_F abc_W16_F tg_Z32_F tg_W32_F abc_Z32_F abc_W32_F
@@ -45,6 +48,7 @@ while [[ $# -gt 0 ]]; do
     --configure) CONFIGURE=1 ;;
     --base) BASE=1 ;;
     --judge-only) JUDGE_ONLY=1 ;;
+    --no-runs) RUNS=0 ;;   # B, C0-C3 only; L, R, T judged from the existing logs
     --cases) CASES="$2"; shift ;;
     --no-gpu) GPU=0 ;;
   esac
@@ -146,61 +150,88 @@ else
 fi
 
 # ------------------------------------------------------------------------------------------------ C0
-E="$L/S1_2b.export16"
+# Each backend is compared on its OWN export: the CUDA frame differs from the host's in the last bits of
+# its geometry (nvcc contracts a*b + c differently; docs/ale_design.md §11 A11), and --apply / --trace assert
+# that the frame they rebuild is bitwise the exported one. As G1_1.sh K8.
+declare -A EXP=([host]="$L/S1_2b.export16" [gpu]="$L/S1_2b.export16_gpu")
 if [[ $JUDGE_ONLY -eq 0 ]]; then
-  rm -rf "$E" && mkdir -p "$E" "$E/host" "$E/gpu"
-  OMP_NUM_THREADS=1 "$B/tests/kokkos/test_ale_frame" --export "$E" --cells 16 --mesh all > "$L/S1_2b.export16.log" 2>&1
-  OMP_NUM_THREADS=1 python "$PY" inputs "$E" --cells 16 > "$L/S1_2b.c0_inputs.log" 2>&1
-  OMP_NUM_THREADS=8 "$TH" --apply "$E" --cells 16 --out "$E/host" > "$L/S1_2b.c0_apply.host.log" 2>&1
-  [[ $GPU -eq 1 ]] && OMP_NUM_THREADS=8 gpu "$TG" --apply "$E" --cells 16 --out "$E/gpu" > "$L/S1_2b.c0_apply.gpu.log" 2>&1
+  for be in host gpu; do
+    [[ $be == gpu && $GPU -eq 0 ]] && continue
+    E="${EXP[$be]}"
+    rm -rf "$E" && mkdir -p "$E/out"
+    if [[ $be == host ]]; then
+      OMP_NUM_THREADS=1 "$B/tests/kokkos/test_ale_frame" --export "$E" --cells 16 --mesh all > "$L/S1_2b.export16.$be.log" 2>&1
+    else
+      OMP_NUM_THREADS=8 gpu "$C/tests/kokkos/test_ale_frame" --export "$E" --cells 16 --mesh all > "$L/S1_2b.export16.$be.log" 2>&1
+    fi
+    OMP_NUM_THREADS=1 python "$PY" inputs "$E" --cells 16 > "$L/S1_2b.c0_inputs.$be.log" 2>&1
+    if [[ $be == host ]]; then
+      OMP_NUM_THREADS=8 "$TH" --apply "$E" --cells 16 --out "$E/out" > "$L/S1_2b.c0_apply.$be.log" 2>&1
+    else
+      OMP_NUM_THREADS=8 gpu "$TG" --apply "$E" --cells 16 --out "$E/out" > "$L/S1_2b.c0_apply.$be.log" 2>&1
+    fi
+  done
 fi
-c0ref=$(grep -E '^C0ref (PASS|FAIL)' "$L/S1_2b.c0_inputs.log" 2>/dev/null)
 for be in host gpu; do
   [[ $be == gpu && $GPU -eq 0 ]] && continue
-  python "$PY" compare "$E" "$E/$be" --cells 16 > "$L/S1_2b.c0_compare.$be.log" 2>&1
+  E="${EXP[$be]}"
+  c0ref=$(grep -E '^C0ref (PASS|FAIL)' "$L/S1_2b.c0_inputs.$be.log" 2>/dev/null)
+  python "$PY" compare "$E" "$E/out" --cells 16 > "$L/S1_2b.c0_compare.$be.log" 2>&1
   l=$(grep -E '^C0 (PASS|FAIL)' "$L/S1_2b.c0_compare.$be.log")
   grep -q '=== S1.2b apply PASS ===' "$L/S1_2b.c0_apply.$be.log" 2>/dev/null || l="C0 FAIL apply ($be)"
   say "${l:-C0 FAIL nofinish} [$be] [${c0ref:-C0ref missing}]"
 done
 
 # ------------------------------------------------------------------------------------------------ C1-C3
+# the reference trace runs on each backend's export (host: T, GPU: TG_); the device runs: host 8 threads twice
+# (h8a, h8b) and 1 thread (h1) in T, GPU twice (ga, gb) in TG_
 T="$L/S1_2b.trace"
+TG_="$L/S1_2b.trace_gpu"
 if [[ $JUDGE_ONLY -eq 0 ]]; then
-  rm -rf "$T" && mkdir -p "$T"/{h8a,h8b,h1,ga,gb}
-  for m in M1 M2; do cp "$E/${m}_16."* "$T/"; done
+  rm -rf "$T" "$TG_" && mkdir -p "$T"/{h8a,h8b,h1} "$TG_"/{ga,gb}
+  : > "$L/S1_2b.trace_ref.log"
+  for be in host gpu; do
+    [[ $be == gpu && $GPU -eq 0 ]] && continue
+    D=$([[ $be == host ]] && echo "$T" || echo "$TG_")
+    for m in M1 M2; do cp "${EXP[$be]}/${m}_16."* "$D/"; done
+    for cs in tg_Z16_F tg_W16_R; do
+      OMP_NUM_THREADS=1 python "$RPY" trace "$D" "$cs" "$D" --steps 10 --pred-rtol 1e-13 >> "$L/S1_2b.trace_ref.log" 2>&1
+    done
+  done
+  : > "$L/S1_2b.trace.dev.log"
   for cs in tg_Z16_F tg_W16_R; do
-    OMP_NUM_THREADS=1 python "$RPY" trace "$T" "$cs" "$T" --steps 10 --pred-rtol 1e-13 >> "$L/S1_2b.trace_ref.log" 2>&1
-    OMP_NUM_THREADS=8 "$TH" --trace "$T" "$cs" --out "$T/h8a" >> "$L/S1_2b.trace.h8a.log" 2>&1
-    OMP_NUM_THREADS=8 "$TH" --trace "$T" "$cs" --out "$T/h8b" >> "$L/S1_2b.trace.h8b.log" 2>&1
-    OMP_NUM_THREADS=1 "$TH" --trace "$T" "$cs" --out "$T/h1" >> "$L/S1_2b.trace.h1.log" 2>&1
+    for r in h8a h8b; do OMP_NUM_THREADS=8 "$TH" --trace "$T" "$cs" --out "$T/$r" >> "$L/S1_2b.trace.dev.log" 2>&1; done
+    OMP_NUM_THREADS=1 "$TH" --trace "$T" "$cs" --out "$T/h1" >> "$L/S1_2b.trace.dev.log" 2>&1
     if [[ $GPU -eq 1 ]]; then
-      OMP_NUM_THREADS=8 gpu "$TG" --trace "$T" "$cs" --out "$T/ga" >> "$L/S1_2b.trace.ga.log" 2>&1
-      OMP_NUM_THREADS=8 gpu "$TG" --trace "$T" "$cs" --out "$T/gb" >> "$L/S1_2b.trace.gb.log" 2>&1
+      for r in ga gb; do
+        OMP_NUM_THREADS=8 gpu "$TG" --trace "$TG_" "$cs" --out "$TG_/$r" >> "$L/S1_2b.trace.dev.log" 2>&1
+      done
     fi
   done
 fi
-for be in h8a ga; do
-  [[ $be == ga && $GPU -eq 0 ]] && continue
-  python "$PY" trace "$T" "$T/$be" > "$L/S1_2b.c12.$be.log" 2>&1
+for be in host gpu; do
+  [[ $be == gpu && $GPU -eq 0 ]] && continue
+  if [[ $be == host ]]; then rd="$T"; dd="$T/h8a"; else rd="$TG_"; dd="$TG_/ga"; fi
+  python "$PY" trace "$rd" "$dd" > "$L/S1_2b.c12.$be.log" 2>&1
   for c in C1 C2; do
     l=$(grep -E "^$c (PASS|FAIL)" "$L/S1_2b.c12.$be.log")
-    say "${l:-$c FAIL nofinish} [$([[ $be == h8a ]] && echo host || echo gpu)]"
+    say "${l:-$c FAIL nofinish} [$be]"
   done
 done
-pair() { python "$PY" c3 "$T/$1" "$T/$2" ${3:-} 2>&1 | grep -E '^C3pair'; }
+pair() { python "$PY" c3 "$1" "$2" 2>&1 | grep -E '^C3pair'; }
 if [[ $GPU -eq 1 ]]; then
-  gh=$(pair ga h8a); hh=$(pair h8a h8b); gg=$(pair ga gb); h1=$(pair h1 h8a)
+  gh=$(pair "$TG_/ga" "$T/h8a"); hh=$(pair "$T/h8a" "$T/h8b"); gg=$(pair "$TG_/ga" "$TG_/gb"); h1=$(pair "$T/h1" "$T/h8a")
   ok=1
   [[ "$gh" == "C3pair PASS"* ]] || ok=0
   [[ "$hh" == *"bitwise=1"* && "$gg" == *"bitwise=1"* ]] || ok=0
   say "C3 $([[ $ok == 1 ]] && echo PASS || echo FAIL) GPU vs host: ${gh#C3pair } | host 8 vs 8: ${hh#C3pair } | GPU vs GPU: ${gg#C3pair } | reported host 1 vs 8: ${h1#C3pair }"
 else
-  hh=$(pair h8a h8b); h1=$(pair h1 h8a)
+  hh=$(pair "$T/h8a" "$T/h8b"); h1=$(pair "$T/h1" "$T/h8a")
   say "C3 FAIL GPU not run | host 8 vs 8: ${hh#C3pair } | host 1 vs 8: ${h1#C3pair }"
 fi
 
 # ------------------------------------------------------------------------------------------------ L, runs
-if [[ $JUDGE_ONLY -eq 0 ]]; then
+if [[ $JUDGE_ONLY -eq 0 && $RUNS -eq 1 ]]; then
   host_jobs() {
     for n in 32 64; do OMP_NUM_THREADS=8 "$TH" --laplacian $n > "$L/S1_2b.lap.$n.host.log" 2>&1; done
     for cs in $CASES; do
