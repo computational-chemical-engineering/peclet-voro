@@ -147,13 +147,15 @@ void build(const Scene& s, Built<Weighted>& b) {
       "oracle", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
         Cell c;
         st.load(i, c, Lx, Ly, Lz);
+        // capture P and W outside the constexpr-if (nvcc extended-lambda rule)
         const real_t* wPtr = W.data();
+        const real_t* pPtr = P.data();
+        const real_t sx = pPtr[3 * i], sy = pPtr[3 * i + 1], sz = pPtr[3 * i + 2];
         (void)wPtr;
         if constexpr (Policy::kHasWeightDof)
-          c.template reevalGeometry<Policy>(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx,
-                                            wPtr[i], wPtr);
+          c.template reevalGeometry<Policy>(sx, sy, sz, pPtr, Lx, wPtr[i], wPtr);
         else
-          c.reevalGeometry(P(3 * i), P(3 * i + 1), P(3 * i + 2), P.data(), Lx);
+          c.reevalGeometry(sx, sy, sz, pPtr, Lx);
         int idx = 0;
         const int b0 = view.facetBegin(i);
         real_t vol = 0, mx = 0, my = 0, mz = 0;
