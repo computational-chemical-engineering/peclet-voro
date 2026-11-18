@@ -54,6 +54,9 @@
  * (elements, max ulp, max relative), the frames 2.. that differ from frame 1, and hashes of
  * frame 0, frame 1 and the last frame (to compare two runs).
  * Without --full (the ctest): (a) 20 frames, (b) 20 steps, (g) variant Z, 60 frames.
+ *        test_ale_frame --replay DIR [--repeat R] [--cell C]
+ * (diagnostic, brief ALE_S1_3A_R) replays the dump of `test_ale_stepper --dump-on-error DIR`
+ * R times (default 3): replayDump() documents the output; runs nothing else.
  *        test_ale_frame --export DIR [--mesh M1|M2|M3|all]
  * writes the meshes of WO-S0.3 (gate G0.3, tools/ale_gates/G0_3.sh) for the Python reference
  * tests/python/ale_reference.py and runs nothing else (exportMesh() documents the files).
@@ -71,6 +74,7 @@
 #include <cstring>
 #include <Kokkos_Core.hpp>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <random>
 #include <string>
@@ -1582,6 +1586,149 @@ int exportMeshes(const std::string& dir, const std::string& which) {
 
 }  // namespace
 
+// ---- --replay DIR (diagnostic, brief ALE_S1_3A_R) ----------------------------------------------
+std::vector<Real> readReals(const std::string& path) {
+  std::vector<Real> v;
+  FILE* fp = std::fopen(path.c_str(), "rb");
+  if (!fp)
+    return v;
+  std::fseek(fp, 0, SEEK_END);
+  const long bytes = std::ftell(fp);
+  std::fseek(fp, 0, SEEK_SET);
+  v.resize(bytes / sizeof(Real));
+  if (std::fread(v.data(), sizeof(Real), v.size(), fp) != v.size())
+    v.clear();
+  std::fclose(fp);
+  return v;
+}
+
+void printRoundLog(const char* tag, int q, const Frame& f) {
+  std::printf(
+      "%s q=%d rounds=%d route=%d fellBack=%d numRebuilt=%d numRoundRebuilt=%d open=%d "
+      "oneSided=%d empty=%d open_per_publish=",
+      tag, q, f.reciprocity.rounds, (int)f.stats.route, (int)f.stats.fellBack, f.numRebuilt,
+      f.reciprocity.numRoundRebuilt, f.reciprocity.numOpenCells, f.numOneSidedFacets,
+      f.numEmptyCells);
+  for (int o : f.roundLog.open)
+    std::printf("%d,", o);
+  std::printf(" forced_per_round=");
+  for (const auto& l : f.roundLog.forced)
+    std::printf("%zu,", l.size());
+  std::printf("\n");
+}
+
+void printClosure(const char* tag, const std::vector<ale::CellClosure>& oc) {
+  for (const auto& c : oc)
+    std::printf(
+        "%s cell=%d own_rel=%.3e dis_rel=%.3e worst_nbr=%ld worst_rel=%.3e facets=%d "
+        "nonrecip=%d\n",
+        tag, c.cell, c.own / c.sum, c.dis / c.sum, c.worstNbr, c.worstDis / c.sum, c.facets,
+        c.nonRecip);
+}
+
+/// --replay DIR [--repeat R]: the dump of `test_ale_stepper --dump-on-error DIR`. Per repeat: a
+/// fresh power engine, initialFrame at chain_0, advanceFrame through chain_1 .. chain_last (the
+/// failing target), every frame's rounds printed (REPLAYFRAME); at the target its open cells
+/// (REPLAYOPEN) and, if any remain, the rounds continued to 8 (REPLAYMORE). Then a cold build of
+/// the target (REPLAYCOLD). One line `REPLAY reproduced=k/R ...` (k: repeats whose target kept an
+/// open cell after its rounds; the empty-cell / one-sided errors counted apart). Exit 0.
+int replayDump(const std::string& dir, int repeat, long cell) {
+  std::map<std::string, std::string> meta;
+  {
+    FILE* fp = std::fopen((dir + "/meta").c_str(), "r");
+    if (!fp) {
+      std::printf("REPLAY status=NO_DUMP dir=%s\n", dir.c_str());
+      return 1;
+    }
+    char buf[4096];
+    std::string all;
+    while (std::fgets(buf, sizeof buf, fp))
+      all += buf;
+    std::fclose(fp);
+    std::size_t a = 0;
+    while (a < all.size()) {
+      const std::size_t b = all.find_first_of(" \n", a);
+      const std::string kv = all.substr(a, b - a);
+      const std::size_t e = kv.find('=');
+      if (e != std::string::npos)
+        meta[kv.substr(0, e)] = kv.substr(e + 1);
+      a = b == std::string::npos ? all.size() : b + 1;
+    }
+  }
+  const int N = std::atoi(meta["N"].c_str()), nch = std::atoi(meta["chain"].c_str());
+  const Real Lb = (Real)std::atof(meta["L"].c_str()), h = (Real)std::atof(meta["h"].c_str());
+  const Real L[3] = {Lb, Lb, Lb};
+  const DV w = up(readReals(dir + "/weight"), "w");
+  std::vector<DV> chain;
+  for (int q = 0; q < nch; ++q)
+    chain.push_back(up(readReals(dir + "/chain_" + std::to_string(q)), "chain"));
+  std::printf("REPLAYMETA %s exec=%s threads=%d\n", meta["case"].c_str(), Exec::name(),
+              Exec().concurrency());
+  FrameOpts o;
+  o.recordRounds = true;
+  int reproduced = 0, maxRounds = 0, maxMore = 0, unclosed = 0, otherErrors = 0;
+  for (int r = 0; r < repeat; ++r) {
+    Engine<true> mt;
+    allocEngine<true>(mt, N, L, h, w);
+    Frame f = ale::initialFrame(mt, chain[0], L, o);
+    for (int q = 1; q < nch; ++q) {
+      f = ale::advanceFrame(mt, chain[q], L, o);
+      printRoundLog("REPLAYFRAME", q, f);
+    }
+    maxRounds = std::max(maxRounds, f.reciprocity.rounds);
+    otherErrors += frameErrors(f) > 0 ? 1 : 0;
+    if (f.reciprocity.numOpenCells > 0) {
+      ++reproduced;
+      printClosure("REPLAYOPEN", ale::openCellsOf(mt, f.pos, f.weight, L));
+      const auto more = ale::continueRounds(mt, f, L, o, 8);
+      std::printf("REPLAYMORE rounds_total=%d open_per_publish=", f.reciprocity.rounds);
+      for (int x : more.open)
+        std::printf("%d,", x);
+      std::printf("\n");
+      maxMore = std::max(maxMore, f.reciprocity.rounds);
+      unclosed += f.reciprocity.numOpenCells > 0 ? 1 : 0;
+    }
+  }
+  Engine<true> cold;
+  allocEngine<true>(cold, N, L, h, w);
+  cold.rebuild(chain[nch - 1]);
+  cold.step(chain[nch - 1]);
+  const auto co = ale::openCellsOf(cold, chain[nch - 1], w, L);
+  printClosure("REPLAYCOLD", co);
+  {  // the tail of the cold build's closure distribution, and the cell of --cell
+    const auto tail = ale::openCellsOf(cold, chain[nch - 1], w, L, 2.5e-14);
+    int n50 = 0, n100 = 0;
+    double mx = 0;
+    long arg = -1;
+    for (const auto& c : tail) {
+      const double r = (c.own + c.dis) / c.sum;
+      n50 += r > 5e-14 ? 1 : 0;
+      n100 += r > ale::kClosureFrac ? 1 : 0;
+      if (r > mx)
+        mx = r, arg = c.cell;
+    }
+    std::printf(
+        "REPLAYTAIL cold cells=%d above_2.5e-14=%zu above_5e-14=%d above_1e-13=%d "
+        "max=%.4e at cell %ld\n",
+        N, tail.size(), n50, n100, mx, arg);
+    if (cell >= 0) {
+      const auto all = ale::openCellsOf(cold, chain[nch - 1], w, L, 1e-300);
+      for (const auto& c : all)
+        if (c.cell == cell)
+          std::printf(
+              "REPLAYCELL cold cell=%d own_rel=%.4e dis_rel=%.4e sum_rel=%.4e worst_nbr=%ld "
+              "worst_rel=%.4e\n",
+              c.cell, c.own / c.sum, c.dis / c.sum, (c.own + c.dis) / c.sum, c.worstNbr,
+              c.worstDis / c.sum);
+    }
+  }
+  std::printf(
+      "REPLAY reproduced=%d/%d target_rounds_max=%d continued_rounds_max=%d "
+      "unclosed_after_8=%d cold_open=%zu target_empty_or_one_sided=%d/%d\n",
+      reproduced, repeat, maxRounds, maxMore, unclosed, co.size(), otherErrors, repeat);
+  return 0;
+}
+
 int main(int argc, char** argv) {
   Kokkos::initialize(argc, argv);
   setvbuf(stdout, nullptr, _IOLBF, 0);
@@ -1590,7 +1737,9 @@ int main(int argc, char** argv) {
     int n = 16;
     std::string part = "all", opts = "auto", dumpDir, exportDir, exportWhich = "all";
     bool full = false, timeIt = false, meshGiven = false, diag = false;
-    int gframes = 0, exportCells = 0;
+    int gframes = 0, exportCells = 0, repeat = 3;
+    std::string replayDir;
+    long replayCell = -1;
     for (int a = 1; a < argc; ++a) {
       const std::string s = argv[a];
       if (s == "--part" && a + 1 < argc)
@@ -1620,8 +1769,19 @@ int main(int argc, char** argv) {
         timeIt = true;
       else if (s == "--diag")
         diag = true;
+      else if (s == "--replay" && a + 1 < argc)
+        replayDir = argv[++a];
+      else if (s == "--repeat" && a + 1 < argc)
+        repeat = std::atoi(argv[++a]);
+      else if (s == "--cell" && a + 1 < argc)
+        replayCell = std::atol(argv[++a]);
       else if (s.rfind("--", 0) != 0)
         n = std::atoi(s.c_str());
+    }
+    if (!replayDir.empty()) {
+      rc = replayDump(replayDir, repeat, replayCell);
+      Kokkos::finalize();
+      return rc;
     }
     if (!exportDir.empty()) {
       if (exportCells > 0) {

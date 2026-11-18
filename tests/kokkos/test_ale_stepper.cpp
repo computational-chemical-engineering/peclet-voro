@@ -46,6 +46,10 @@
  * (max over the run of the S3 correction's re-solves for its true residual), rebuilt,
  * frames, t_frames, t_setup (per step), B1_absmax (|B1|/K), mom_def (the booked defect momentum
  * over Σ M|U|), v02_maxdiff, v02_bitwise_steps (rest only).
+ *  ... --dump-on-error DIR (diagnostic, brief ALE_S1_3A_R): the frames record their rounds; on a
+ * frame error the last frames' positions, the weights and the forced sets are written to DIR
+ * (dumpFrameError; replay: test_ale_frame --replay DIR), with the open cells' closure terms, the
+ * rounds continued to 8 and a cold build of the target printed. Numerics unchanged.
  *
  *  test_ale_stepper --trace-moving DIR CASE [--motion M] [--steps K]   gate T of G1.3a: K = 5
  * moving steps (motion follow by default) at the tight tolerances of --trace; per step the frames
@@ -814,6 +818,119 @@ struct Stats {
   double Bsum[11] = {0};
 };
 
+// ---- --dump-on-error DIR (diagnostic, brief ALE_S1_3A_R) ---------------------------------------
+/// The directory of --dump-on-error (empty: off).
+std::string g_dumpDir;
+/// The frames kept for the dump: the last kDumpChain frame positions (the oldest first).
+constexpr std::size_t kDumpChain = 8;
+
+void printOpenCells(const char* tag, const std::vector<ale::CellClosure>& oc) {
+  for (const auto& c : oc)
+    std::printf(
+        "%s cell=%d own=%.3e dis=%.3e sum=%.6e own_rel=%.3e dis_rel=%.3e bar=%.3e worst_nbr=%ld "
+        "worst_rel=%.3e facets=%d nonrecip=%d\n",
+        tag, c.cell, c.own, c.dis, c.sum, c.own / c.sum, c.dis / c.sum, ale::kClosureFrac * c.sum,
+        c.worstNbr, c.worstDis / c.sum, c.facets, c.nonRecip);
+}
+
+bool inList(const std::vector<int>& l, long i) {
+  return std::binary_search(l.begin(), l.end(), (int)i);
+}
+
+/// A frame error of the moving step k (1-based): writes DIR/meta, DIR/weight (N), DIR/chain_<q>
+/// (3N, q = 0 oldest; the last is the failing target, the one before it the last good frame),
+/// DIR/forced_<r> (the slots forced in round r); prints the open cells of the failing frame with
+/// their closure terms (OPEN), whether each and its neighbours were forced in each round
+/// (OPENFORCED), the rounds continued on the same engine to 8 (MORE), and the open cells of a
+/// cold build of the target (COLD).
+void dumpFrameError(const std::string& dir, const std::string& name, int k, Case& c,
+                    ale::MovingMesh<Real>& mm, std::vector<std::vector<Real>> chain) {
+  const bool hFail = mm.half.numEmptyCells > 0 || mm.half.numOneSidedFacets > 0 ||
+                     mm.half.reciprocity.numOpenCells > 0;
+  Frame& f = hFail ? mm.half : mm.full;
+  if (!hFail)
+    chain.push_back(down(mm.half.pos));
+  chain.push_back(down(f.pos));
+  while (chain.size() > kDumpChain)
+    chain.erase(chain.begin());
+  Engine& eng = *c.engine;
+  const int N = c.s.N;
+  for (std::size_t q = 0; q < chain.size(); ++q)
+    writeVec(dir + "/chain_" + std::to_string(q), chain[q]);
+  writeVec(dir + "/weight", down(eng.weight));
+  for (std::size_t r = 0; r < f.roundLog.forced.size(); ++r) {
+    FILE* fp = std::fopen((dir + "/forced_" + std::to_string(r + 1)).c_str(), "w");
+    for (int i : f.roundLog.forced[r])
+      std::fprintf(fp, "%d\n", i);
+    std::fclose(fp);
+  }
+  {
+    FILE* fp = std::fopen((dir + "/meta").c_str(), "w");
+    std::fprintf(fp,
+                 "case=%s step=%d frame=%s N=%d L=%.17g h=%.17g tol_h=1e-4 skin_h=0.25 chain=%zu "
+                 "rounds=%d numOpenCells=%d numOneSidedFacets=%d numEmptyCells=%d numRebuilt=%d "
+                 "numRoundRebuilt=%d route=%d fellBack=%d pass1=%d pass1Raw=%d pass2=%d extra=%d "
+                 "verifyPasses=%d exec=%s threads=%d\n",
+                 name.c_str(), k, hFail ? "Fh" : "F1", N, (double)c.s.L[0], (double)c.s.h,
+                 chain.size(), f.reciprocity.rounds, f.reciprocity.numOpenCells,
+                 f.numOneSidedFacets, f.numEmptyCells, f.numRebuilt, f.reciprocity.numRoundRebuilt,
+                 (int)f.stats.route, (int)f.stats.fellBack, f.stats.pass1, f.stats.pass1Raw,
+                 f.stats.pass2, f.stats.extra, f.stats.verifyPasses, Exec::name(),
+                 Exec().concurrency());
+    std::fclose(fp);
+  }
+  std::printf(
+      "DUMP dir=%s frame=%s step=%d rounds=%d route=%d fellBack=%d pass1=%d pass2=%d "
+      "numRebuilt=%d numRoundRebuilt=%d open_per_publish=",
+      dir.c_str(), hFail ? "Fh" : "F1", k, f.reciprocity.rounds, (int)f.stats.route,
+      (int)f.stats.fellBack, f.stats.pass1, f.stats.pass2, f.numRebuilt,
+      f.reciprocity.numRoundRebuilt);
+  for (int o : f.roundLog.open)
+    std::printf("%d,", o);
+  std::printf(" forced_per_round=");
+  for (const auto& l : f.roundLog.forced)
+    std::printf("%zu,", l.size());
+  std::printf("\n");
+  const auto oc = ale::openCellsOf(eng, f.pos, f.weight, c.s.L);
+  printOpenCells("OPEN", oc);
+  for (const auto& o : oc)
+    for (std::size_t r = 0; r < f.roundLog.forced.size(); ++r) {
+      const auto& l = f.roundLog.forced[r];
+      int nf = 0;
+      for (long j : o.nbrs)
+        nf += inList(l, j) ? 1 : 0;
+      std::printf(
+          "OPENFORCED cell=%d round=%zu cell_forced=%d worst_nbr_forced=%d nbrs_forced=%d/%zu\n",
+          o.cell, r + 1, (int)inList(l, o.cell), (int)inList(l, o.worstNbr), nf, o.nbrs.size());
+    }
+  // the rounds continued on the same engine up to 8
+  Frame g = f;
+  const auto more = ale::continueRounds(eng, g, c.s.L, mm.frameOptions, 8);
+  std::printf("MORE rounds_total=%d open_per_publish=", g.reciprocity.rounds);
+  for (int o : more.open)
+    std::printf("%d,", o);
+  std::printf(" forced_per_round=");
+  for (const auto& l : more.forced)
+    std::printf("%zu,", l.size());
+  std::printf(" oneSided=%d empty=%d\n", g.numOneSidedFacets, g.numEmptyCells);
+  printOpenCells("MOREOPEN", ale::openCellsOf(eng, g.pos, g.weight, c.s.L));
+  // a cold build of the target in a fresh engine
+  Engine cold;
+  cold.alloc(N, c.s.L, Real(1e-4) * c.s.h, Real(0.25) * c.s.h, 4, N);
+  cold.setWeights(eng.weight);
+  cold.rebuild(f.pos);
+  cold.step(f.pos);
+  const auto co = ale::openCellsOf(cold, f.pos, f.weight, c.s.L);
+  std::printf("COLD open=%zu\n", co.size());
+  printOpenCells("COLDOPEN", co);
+  for (const auto& o : oc) {  // the open cell in the cold build
+    const auto hr = down(eng.vol), hc = down(cold.vol);
+    std::printf("COLDCELL cell=%d V_repair=%.17g V_cold=%.17g rel=%.3e\n", o.cell,
+                (double)hr[o.cell], (double)hc[o.cell],
+                std::fabs((double)hr[o.cell] - hc[o.cell]) / hc[o.cell]);
+  }
+}
+
 int runCase(const std::string& name, int stepsOverride, bool tight, double courant, bool stokes,
             const std::string& motion = "none", double tend = -1,
             const std::string& traceDir = std::string()) {
@@ -907,8 +1024,13 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
   ale::MovingMesh<Real> mm;
   ale::FlowState<Real> st0;
   DV xdotP;
+  std::vector<std::vector<Real>> chain;  // --dump-on-error: the last frames' positions
   if (moving) {
     mm.start(c.fr, c.s.L);
+    if (!g_dumpDir.empty()) {
+      mm.frameOptions.recordRounds = true;
+      chain.push_back(down(mm.pos));
+    }
     if (mot == ale::MeshMotion::Prescribed)
       xdotP = DV("xdotP", 3 * N);
     if (mot == ale::MeshMotion::Rest) {
@@ -973,9 +1095,17 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
         rr = mstp.step(*c.engine, mm, st, fl.rho, Real(r.rho * nu), Real(tau), r.mode, mot, xdotP,
                        body);
       } catch (const std::exception& e) {
+        if (!g_dumpDir.empty())
+          dumpFrameError(g_dumpDir, name, k + 1, c, mm, chain);
         std::printf("RESULT case=%s status=FRAME_ERROR step=%d motion=%s what=\"%s\"\n",
                     name.c_str(), k + 1, motion.c_str(), e.what());
         return 1;
+      }
+      if (!g_dumpDir.empty()) {
+        chain.push_back(down(mm.half.pos));
+        chain.push_back(down(mm.full.pos));
+        while (chain.size() > kDumpChain)
+          chain.erase(chain.begin());
       }
       gcl = std::max(gcl, rr.gcl);
       s3Restarts = std::max(s3Restarts, rr.sweptRestarts);
@@ -1297,6 +1427,8 @@ int main(int argc, char** argv) {
         g_predRtol = std::atof(argv[++a]);
       else if (s == "--exact-rtol" && a + 1 < argc)
         g_exactRtol = std::atof(argv[++a]);
+      else if (s == "--dump-on-error" && a + 1 < argc)
+        g_dumpDir = argv[++a];
       else if (s == "--tend" && a + 1 < argc)
         tend = std::atof(argv[++a]);
       else if (s == "--trace-moving" && a + 2 < argc) {

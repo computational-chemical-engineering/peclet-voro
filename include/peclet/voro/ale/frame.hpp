@@ -53,6 +53,7 @@
 #include <Kokkos_Core.hpp>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "peclet/core/common/view.hpp"
 #include "peclet/voro/dynamic_validate.hpp"
@@ -97,6 +98,9 @@ struct FrameOptions {
   /// stale within the repair's certificate tolerance publishes facets that do not close.
   bool enforceClosure = true;
   bool timed = false;  ///< fence and time the phases into MeshFrame::timings (diagnostic)
+  /// Diagnostic (WO-S1.3a-r): record each round's forced cells and the open-cell count after each
+  /// publish into MeshFrame::roundLog (host copies; the frame itself is unchanged bitwise).
+  bool recordRounds = false;
 };
 
 /// Reciprocity of the published view of a frame (after the rounds, if any).
@@ -109,6 +113,14 @@ struct ReciprocityReport {
   int rounds = 0;              ///< forced rebuild + publish rounds used
   int numRoundRebuilt = 0;     ///< cells the rounds' steps rebuilt, summed over rounds (N if cold)
   int numOpenCells = 0;  ///< cells above the closure bar kClosureFrac (after the rounds, if any)
+};
+
+/// The rounds of a frame (only with FrameOptions::recordRounds): `open[k]`, `maxNonRecipArea[k]`
+/// after publish k (k = 0 before any round), `forced[k]` the ascending slots forced in round k + 1.
+struct RoundLog {
+  std::vector<int> open;
+  std::vector<double> maxNonRecipArea;
+  std::vector<std::vector<int>> forced;
 };
 
 /// Wall time of the phases of the last frame build, seconds (only with FrameOptions::timed).
@@ -134,6 +146,7 @@ struct MeshFrame {
   int numOneSidedFacets = 0;
   ReciprocityReport reciprocity;
   FrameTimings timings;
+  RoundLog roundLog;  ///< only with FrameOptions::recordRounds
 };
 
 namespace detail {
@@ -364,6 +377,13 @@ void publishWithReciprocity(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>&
     forcedMask = Kokkos::View<int*, Mem>(
         view_alloc(std::string("ale.frame.forcedMask"), WithoutInitializing), N);
   publish(engine, f, L, opt, forcedMask);
+  auto record = [&] {
+    if (opt.recordRounds) {
+      f.roundLog.open.push_back(f.reciprocity.numOpenCells);
+      f.roundLog.maxNonRecipArea.push_back(f.reciprocity.maxNonRecipArea);
+    }
+  };
+  record();
   if (!opt.enforceReciprocity && !opt.enforceClosure)
     return;
   Kokkos::View<int*, Mem> changed, list;
@@ -384,6 +404,11 @@ void publishWithReciprocity(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>&
           view_alloc(std::string("ale.frame.forced"), WithoutInitializing), N);
     }
     const int nF = maskToList(forcedMask, N, list);
+    if (opt.recordRounds) {
+      auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                                                   Kokkos::subview(list, std::make_pair(0, nF)));
+      f.roundLog.forced.emplace_back(h.data(), h.data() + nF);
+    }
     Clock clk(opt.timed);
     const RepairStats st = engine.step(pos, list, nF);
     if (isCold(st))
@@ -405,6 +430,7 @@ void publishWithReciprocity(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>&
     }
     f.reciprocity.rounds = round + 1;
     publish(engine, f, L, opt, forcedMask);
+    record();
   }
   if (changed.extent(0) > 0)
     f.numRebuilt = countNonzero(changed, N);
@@ -417,6 +443,142 @@ void checkSingleDomain(const MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>
 }
 
 }  // namespace detail
+
+/// The closure terms of one cell of a published view (diagnostic, WO-S1.3a-r): its own closure
+/// |Σ_g A_g|, the disagreement Σ_g |A_g + A_recip(g)|, the surface Σ_g |A_g|, the facet with the
+/// largest disagreement (its neighbour and |A_g + A_recip(g)|), the facet count and the facets
+/// without a reciprocal.
+struct CellClosure {
+  int cell = -1;
+  double own = 0, dis = 0, sum = 0;
+  long worstNbr = -1;
+  double worstDis = 0;
+  int facets = 0, nonRecip = 0;
+  std::vector<long> nbrs;  ///< the neighbour of each facet, in facet order
+};
+
+/// Diagnostic (WO-S1.3a-r): publish the engine's present tessellation at `pos` (with `weight`,
+/// the engine's power weights or empty), as `publish` of a frame does, and return the cells above
+/// the closure bar kClosureFrac with their terms (ascending slots); with `frac` > 0, the cells
+/// with own + dis > frac · sum instead (the tail of the closure distribution). Re-evaluates the
+/// engine's cell volumes from its unchanged store (the values `publish` leaves).
+template <class Real, int MAXP, int MAXT, bool Weighted, class Sdf>
+std::vector<CellClosure> openCellsOf(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine,
+                                     const Kokkos::View<Real*, peclet::core::MemSpace>& pos,
+                                     const Kokkos::View<Real*, peclet::core::MemSpace>& weight,
+                                     const Real L[3], double frac = -1) {
+  using Engine = MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>;
+  using Policy = typename Engine::PlanePolicy;
+  using Exec = peclet::core::ExecSpace;
+  using Mem = peclet::core::MemSpace;
+  const int N = engine.N;
+  TessellationView<Real> view = reevalPublish<Real, MAXP, MAXT, Policy>(
+      engine.store, pos, engine.vol, N, L, engine.wall, engine.xRef, false, false, weight);
+  AuxMaps<Real> aux = buildAuxMaps(view);
+  auto recip = aux.recip;
+  const detail::OpenCell<Real> isOpen{view, recip};
+  Kokkos::View<double* [5], Mem> t("ale.diag.closure", N);
+  Kokkos::View<int* [4], Mem> k("ale.diag.closureIdx", N);
+  Kokkos::parallel_for(
+      "ale.diag.closure", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        double v[3] = {0, 0, 0}, sum = 0, dis = 0, worst = 0;
+        long wn = -1;
+        int nr = 0;
+        for (int g = view.facetBegin(i); g < view.facetEnd(i); ++g) {
+          double a2 = 0, d2 = 0;
+          const int r = recip(g);
+          nr += r >= 0 ? 0 : 1;
+          for (int d = 0; d < 3; ++d) {
+            const double a = (double)view.area(g, d);
+            v[d] += a;
+            a2 += a * a;
+            if (r >= 0) {
+              const double e = a + (double)view.area(r, d);
+              d2 += e * e;
+            }
+          }
+          sum += Kokkos::sqrt(a2);
+          const double dg = Kokkos::sqrt(d2);
+          dis += dg;
+          if (dg > worst || wn < 0) {
+            worst = dg;
+            wn = (long)view.facetNbr(g);
+          }
+        }
+        t(i, 0) = Kokkos::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+        t(i, 1) = dis;
+        t(i, 2) = sum;
+        t(i, 3) = worst;
+        t(i, 4) = (double)wn;
+        k(i, 0) = (frac > 0 ? t(i, 0) + dis > frac * sum : isOpen(i)) ? 1 : 0;
+        k(i, 1) = view.facetEnd(i) - view.facetBegin(i);
+        k(i, 2) = nr;
+      });
+  auto th = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), t);
+  auto kh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), k);
+  // the neighbours of every cell, MAXP per cell (a cell has at most MAXP planes, so facets)
+  Kokkos::View<long*, Mem> nb("ale.diag.nbrs", (std::size_t)N * MAXP);
+  Kokkos::parallel_for(
+      "ale.diag.nbrs", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        int q = 0;
+        for (int g = view.facetBegin(i); g < view.facetEnd(i) && q < MAXP; ++g, ++q)
+          nb((std::size_t)i * MAXP + q) = (long)view.facetNbr(g);
+      });
+  auto nbh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), nb);
+  std::vector<CellClosure> out;
+  for (int i = 0; i < N; ++i)
+    if (kh(i, 0)) {
+      CellClosure c;
+      c.cell = i;
+      c.own = th(i, 0);
+      c.dis = th(i, 1);
+      c.sum = th(i, 2);
+      c.worstDis = th(i, 3);
+      c.worstNbr = (long)th(i, 4);
+      c.facets = kh(i, 1);
+      c.nonRecip = kh(i, 2);
+      for (int q = 0; q < c.facets && q < MAXP; ++q)
+        c.nbrs.push_back(nbh((std::size_t)i * MAXP + q));
+      out.push_back(c);
+    }
+  return out;
+}
+
+/// Diagnostic (WO-S1.3a-r): continue the forced rounds of a finished frame `f` on the engine that
+/// built it (standing at `f.pos`) until no round is due or `f.reciprocity.rounds` reaches
+/// `maxRounds`; `f` is published again after each round and holds the last state. Returns the
+/// log of the continued rounds (open[0] = the frame as it was). The rounds are those of
+/// `publishWithReciprocity`; the frame's changed set is not tracked.
+template <class Real, int MAXP, int MAXT, bool Weighted, class Sdf>
+RoundLog continueRounds(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine,
+                        MeshFrame<Real>& f, const Real L[3], const FrameOptions<Real>& opt,
+                        int maxRounds) {
+  using Mem = peclet::core::MemSpace;
+  const int N = engine.N;
+  Kokkos::View<int*, Mem> mask("ale.diag.forcedMask", N), list("ale.diag.forced", N);
+  detail::publish(engine, f, L, opt, mask);
+  RoundLog log;
+  log.open.push_back(f.reciprocity.numOpenCells);
+  log.maxNonRecipArea.push_back(f.reciprocity.maxNonRecipArea);
+  while (f.reciprocity.rounds < maxRounds) {
+    const bool recipDue = opt.enforceReciprocity && f.reciprocity.maxNonRecipArea > 0;
+    const bool closureDue = opt.enforceClosure && f.reciprocity.numOpenCells > 0;
+    if (!recipDue && !closureDue)
+      break;
+    const int nF = detail::maskToList(mask, N, list);
+    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(),
+                                                 Kokkos::subview(list, std::make_pair(0, nF)));
+    log.forced.emplace_back(h.data(), h.data() + nF);
+    const RepairStats st = engine.step(f.pos, list, nF);
+    if (detail::isCold(st))
+      detail::stepAtRest(engine, f.pos);
+    f.reciprocity.rounds += 1;
+    detail::publish(engine, f, L, opt, mask);
+    log.open.push_back(f.reciprocity.numOpenCells);
+    log.maxNonRecipArea.push_back(f.reciprocity.maxNonRecipArea);
+  }
+  return log;
+}
 
 /// The frame after a cold `engine.rebuild(pos)`: every cell changed. The power weights are the
 /// engine's (`setWeights` before the call).
