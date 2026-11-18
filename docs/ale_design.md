@@ -1190,7 +1190,7 @@ a cubic lattice built in Python, Z (M1) and W (M2), at 16³, 32³, 64³. Table: 
 - **Lattice control (E1 PASS):** raw residues of transport, friction and pressure force fall by 0.248–0.255 per
   doubling (second order), the upwind part by 0.126 (third); T′ and G′ vanish to rounding (on a lattice the
   transport of these fields is a discrete gradient).
-- **Norms on Z, Taylor–Green, 16³ / 32³ / 64³** (ABC and W within a few percent of these): T′ 6.3 / 3.2 / 1.6 % and
+- **Norms on Z, Taylor–Green, 16³ / 32³ / 64³** (ABC on Z at 64³: T′ 1.5 %, G′ 9.2 %, Q′ 0.8 %, Z′ 33 %): T′ 6.3 / 3.2 / 1.6 % and
   Q′ 2.9 / 1.4 / 0.7 % of ‖G‖ (first order); **G′ 12.1 / 9.9 / 9.3 % (W: 12.0 % at 64³): does not fall**, the
   numbers of decision 8 (D5) on a dynamic field; **Z′ 17 / 20 / 30 % of ‖νΔu‖: grows.**
 - **Why the friction residue grows [measured twice, mechanism derived]:** ζ is the adjoint of U → G_f applied to
