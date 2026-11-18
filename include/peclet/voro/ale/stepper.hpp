@@ -447,11 +447,28 @@ class Stepper {
   Workspace ws;
 
   void reserve(const fv::FaceMesh<Real>& m) {
-    if (ws.nCombined == m.nCombined && ws.nFaces == m.nFaces)
-      return;
-    const int NC = m.nCombined, F = m.nFaces;
+    if (ws.nCombined != m.nCombined)
+      allocateCells(m.nCombined);
+    if (ws.nFaces != m.nFaces)
+      allocateFaces(m.nFaces);
+  }
+
+  /// Scratch for a sequence of frames whose face count varies (the moving step, ale/
+  /// moving_stepper.hpp): cell scratch for `nCombined`, face scratch for at least `nFaces` (grown
+  /// with a quarter in hand when it must grow). The kernels run over the frame's own face range.
+  void reserveAtLeast(int nCombined, int nFaces) {
+    if (ws.nCombined != nCombined)
+      allocateCells(nCombined);
+    if (ws.nFaces < nFaces)
+      allocateFaces(nFaces + nFaces / 4);
+  }
+
+  /// The wall time of the L_ρ solve of the last `compactFluxOf` (StepOptions::timed).
+  double lastSolveSeconds() const { return lastSolveSeconds_; }
+
+ private:
+  void allocateCells(int NC) {
     ws.nCombined = NC;
-    ws.nFaces = F;
     auto v3 = [NC](const char* s) { return DV<Real>(s, 3 * NC); };
     ws.Uext = v3("ale.ws.Uext");
     ws.rhs = v3("ale.ws.rhs");
@@ -469,15 +486,19 @@ class Stepper {
     ws.b = DV<Real>("ale.ws.b", NC);
     ws.x = DV<Real>("ale.ws.x", NC);
     ws.tN = DV<Real>("ale.ws.tN", NC);
+    ws.G = DV<Real>("ale.ws.G", 9 * NC);
+    ws.s9 = DV<Real>("ale.ws.s9", 9 * NC);
+  }
+  void allocateFaces(int F) {
+    ws.nFaces = F;
     ws.Phi = DV<Real>("ale.ws.Phi", F);
     ws.Fm = DV<Real>("ale.ws.Fm", F);
     ws.sF = DV<Real>("ale.ws.sF", F);
     ws.s6F = DV<Real>("ale.ws.s6F", 6 * F);
-    ws.G = DV<Real>("ale.ws.G", 9 * NC);
-    ws.s9 = DV<Real>("ale.ws.s9", 9 * NC);
     ws.sF12 = DV<Real>("ale.ws.sF12", 12 * F);
   }
 
+ public:
   // ---------------------------------------------------------------- operators (on a frame)
   /// out = M x + sign · ½τ ((T + Q)x + ζx): the predictor operator (sign = +1) or the explicit
   /// half of the Crank–Nicolson pair (sign = −1). Uses ws.G, ws.t3c, ws.sF12, ws.s9.

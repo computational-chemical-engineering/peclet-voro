@@ -36,7 +36,20 @@
  * tolerances of §4.9 (C: the flux Courant number of the time step, 0.4 by default): one RESULT line
  * with the keys of the reference's run_case (and a few more), timings per stage. Cases:
  * <tg|abc>_<Z|W><n>_<F|R>, r0_<zero|unif>_<F|R> (W 8³), r3_tg_W16_F (2000 steps), r3_tg_W32_F (500
- * steps), r6i_W16, r6ii_rest_W16, r6ii_tg_W16.
+ * steps), r6i_W16, r6ii_rest_W16, r6ii_tg_W16, unif_Z16_<F|R> (uniform flow, τ = 1/400, 400 steps).
+ *  ... --motion rest|follow|prescribed [--tend T]: the same run on a MOVING mesh (ale/
+ * moving_stepper.hpp, §11 A18, brief ALE_S1_3A; the default, no --motion, is the static path,
+ * unchanged); `prescribed` is ẋ = 0.3 (sin 2πy, sin 2πz, sin 2πx). --tend T: lround(T/τ) steps
+ * (τ by the static rule of the case, from the start field's Φ). `rest` runs the static path beside
+ * it in the same process and compares U and p bitwise after every step (gate V0.2). Extra RESULT
+ * keys at the end: motion, gcl (max over the run of max_i |τ(DΦᵐ_c)_i − ΔV_i|/V_i), rebuilt,
+ * frames, t_frames, t_setup (per step), B1_absmax (|B1|/K), mom_def (the booked defect momentum
+ * over Σ M|U|), v02_maxdiff, v02_bitwise_steps (rest only).
+ *
+ *  test_ale_stepper --trace-moving DIR CASE [--motion M] [--steps K]   gate T of G1.3a: K = 5
+ * moving steps (motion follow by default) at the tight tolerances of --trace; per step the frames
+ * Fh, F1, the inputs and outputs and a line of scalars in DIR (see traceStep), for
+ * `test_ale_stepper.py trace-moving`.
  */
 #include <algorithm>
 #include <chrono>
@@ -47,6 +60,7 @@
 #include <cstring>
 #include <Kokkos_Core.hpp>
 #include <map>
+#include <memory>
 #include <random>
 #include <sstream>
 #include <string>
@@ -55,6 +69,7 @@
 #include "fv_test_util.hpp"
 #include "peclet/voro/ale/frame.hpp"
 #include "peclet/voro/ale/laplacian_solver.hpp"
+#include "peclet/voro/ale/moving_stepper.hpp"
 #include "peclet/voro/ale/operators.hpp"
 #include "peclet/voro/ale/stepper.hpp"
 #include "peclet/voro/ale/transport.hpp"
@@ -74,6 +89,11 @@ namespace kry = peclet::voro::ale::krylov;
 namespace {
 
 constexpr double kTwoPi = 6.283185307179586;
+/// --exact-rtol X (diagnostic): the relative tolerance of mode R in --run / --trace-moving
+/// (StepOptions::exactRtol; default: the StepOptions default).
+double g_exactRtol = -1;
+/// --pred-rtol X (diagnostic): the predictor's relative tolerance (overrides --tight's 1e-13).
+double g_predRtol = -1;
 
 // ---- scenes: the generator of test_ale_frame's export (same seeds, same draw order) ----------
 struct Scene {
@@ -117,18 +137,28 @@ Frame coldFrame(const Scene& s, const DV& pos, const DV& weight) {
 }
 
 /// Mesh family Z (= M1), W (= M2) or M3 at n³.
+/// With `keepEngine` the engine of the frame is kept (the moving step advances it); the frame is
+/// the same either way.
 struct Case {
   std::string name;
   Scene s;
   Frame fr;
+  std::unique_ptr<Engine> engine;
 };
-Case makeCase(const std::string& type, int n) {
+Case makeCase(const std::string& type, int n, bool keepEngine = false) {
   Case c;
   c.name = type;
   const bool w = type == "W" || type == "M2";
   c.s = exportScene(n, Real(type == "M3" ? 0.45 : 0.3));
   const DV wt = w ? c.s.weight : DV("w0", c.s.N);
-  c.fr = coldFrame(c.s, c.s.pos, wt);
+  if (keepEngine) {
+    c.engine = std::make_unique<Engine>();
+    c.engine->alloc(c.s.N, c.s.L, Real(1e-4) * c.s.h, Real(0.25) * c.s.h, 4, c.s.N);
+    c.engine->setWeights(wt);
+    c.fr = ale::initialFrame(*c.engine, c.s.pos, c.s.L, FrameOpts{});
+  } else {
+    c.fr = coldFrame(c.s, c.s.pos, wt);
+  }
   if (c.fr.numEmptyCells > 0) {
     std::printf("SCENE %s n=%d FAIL numEmptyCells=%d\n", type.c_str(), n, c.fr.numEmptyCells);
     std::exit(1);
@@ -587,6 +617,7 @@ struct RunSpec {
   int n = 16, steps = -1, sample = 1;
   ale::Projection mode = ale::Projection::Damped;
   double rho = 1.0;
+  double tauFixed = 0;  ///< > 0: τ of the case (unif_Z16_*), not the Courant rule
 };
 
 bool parseCase(const std::string& name, RunSpec& r) {
@@ -597,6 +628,11 @@ bool parseCase(const std::string& name, RunSpec& r) {
     r.field = name.substr(3, 4);
     r.mode = name.back() == 'R' ? ale::Projection::Exact : ale::Projection::Damped;
     r.steps = r.field == "zero" ? 10 : 100;
+    return true;
+  }
+  if (name == "unif_Z16_F" || name == "unif_Z16_R") {  // gate G1.3 b (brief ALE_S1_3A)
+    r.fam = "Z", r.n = 16, r.field = "unif", r.steps = 400, r.tauFixed = 1.0 / 400;
+    r.mode = name.back() == 'R' ? ale::Projection::Exact : ale::Projection::Damped;
     return true;
   }
   if (name == "r3_tg_W16_F") {
@@ -675,6 +711,97 @@ void bodyForce(const RunSpec& r, const FM& m, const Scene& s, const DV& rho, DV&
   }
 }
 
+/// The prescribed mesh velocity of gate G1.3 b (brief ALE_S1_3A, box [0, 1)³): ẋ = 0.3 (sin 2πy,
+/// sin 2πz, sin 2πx) at the generator's present position `pos`.
+void prescribedVelocity(const DV& pos, int N, const DV& out) {
+  Kokkos::parallel_for(
+      "t.xdotP", Kokkos::RangePolicy<Exec>(0, N), KOKKOS_LAMBDA(const int i) {
+        const Real k = Real(kTwoPi);
+        out(3 * i) = Real(0.3) * Kokkos::sin(k * pos(3 * i + 1));
+        out(3 * i + 1) = Real(0.3) * Kokkos::sin(k * pos(3 * i + 2));
+        out(3 * i + 2) = Real(0.3) * Kokkos::sin(k * pos(3 * i));
+      });
+}
+
+/// A frame as `<dir>/<name>.<array>` in the layout ale_reference.Mesh reads (test_ale_frame's
+/// export: counts, the FaceMesh arrays, pos, weight, L).
+void writeMesh(const std::string& dir, const std::string& name, const Frame& f, const Real L[3]) {
+  const FM& m = f.mesh;
+  const std::string p = dir + "/" + name + ".";
+  auto put = [&](const char* nm, const std::vector<char>& b) {
+    FILE* fp = std::fopen((p + nm).c_str(), "wb");
+    if (!fp) {
+      std::fprintf(stderr, "cannot write %s%s\n", p.c_str(), nm);
+      std::exit(2);
+    }
+    if (!b.empty())
+      std::fwrite(b.data(), 1, b.size(), fp);
+    std::fclose(fp);
+  };
+  const long counts[6] = {m.nCells,    m.nFaces,   m.nInterior,
+                          m.nCombined, m.nDropped, m.generatorDiag.numNegativeHeight};
+  const Real sine = m.generatorDiag.maxNormalConnSine;
+  std::vector<char> cb(reinterpret_cast<const char*>(counts),
+                       reinterpret_cast<const char*>(counts) + sizeof(counts));
+  cb.insert(cb.end(), reinterpret_cast<const char*>(&sine),
+            reinterpret_cast<const char*>(&sine) + sizeof(Real));
+  put("counts", cb);
+  put("faceCellA", bytesOf(m.faceCellA));
+  put("faceCellB", bytesOf(m.faceCellB));
+  put("faceArea", bytesOf(m.faceArea));
+  put("faceNormal", bytesOf(m.faceNormal));
+  put("faceDist", bytesOf(m.faceDist));
+  put("faceHa", bytesOf(m.faceHa));
+  put("faceHb", bytesOf(m.faceHb));
+  put("faceCentroid", bytesOf(m.faceCentroid));
+  put("faceConn", bytesOf(m.faceConn));
+  put("cellFaceOffset", bytesOf(m.cellFaceOffset));
+  put("cellFace", bytesOf(m.cellFace));
+  put("cellFaceSign", bytesOf(m.cellFaceSign));
+  put("cellVolume", bytesOf(m.cellVolume));
+  put("pos", bytesOf(f.pos));
+  put("weight", bytesOf(f.weight));
+  writeVec(p + "L", std::vector<Real>(L, L + 3));
+}
+
+std::vector<Real> downN(const DV& v, std::size_t n) {
+  auto h = down(v);
+  h.resize(n);
+  return h;
+}
+
+/// --trace-moving: step k's frames Fh, F1 (`<case>.Fh_k`, `<case>.F1_k`), its inputs (Uⁿ, U_ext,
+/// pⁿ, Vⁿ, ẋ: `<case>.in_<q>_k`), outputs (F on Fh, U*, U¹, p¹: `<case>.dev_<q>_k`) and one line
+/// of scalars (k, ω, μ̂, gcl, closure, the B terms, dK, K¹, ΔP_def, residual momentum).
+void traceStep(const std::string& dir, const std::string& cs, int k,
+               const ale::MovingMesh<Real>& mm, const ale::MovingStepper<Real>& mstp,
+               const std::vector<Real>& Un, const std::vector<Real>& pn,
+               const std::vector<Real>& Vn, const ale::FlowState<Real>& st,
+               const ale::MovingStepReport& r, FILE* sc) {
+  const int N = mm.half.mesh.nCells;
+  const std::string ks = std::to_string(k), p = dir + "/" + cs + ".";
+  writeMesh(dir, cs + ".Fh_" + ks, mm.half, mm.L);
+  writeMesh(dir, cs + ".F1_" + ks, mm.full, mm.L);
+  writeVec(p + "in_U_" + ks, Un);
+  writeVec(p + "in_Uext_" + ks, downN(mstp.base.ws.Uext, 3 * (std::size_t)N));
+  writeVec(p + "in_p_" + ks, pn);
+  writeVec(p + "in_Vn_" + ks, Vn);
+  writeVec(p + "in_xdot_" + ks, downN(mstp.lastMeshVelocity(), 3 * (std::size_t)N));
+  writeVec(p + "dev_F_" + ks, downN(mstp.lastTransportFlux(), mm.half.mesh.nFaces));
+  writeVec(p + "dev_Ustar_" + ks, downN(mstp.lastUstar(), 3 * (std::size_t)N));
+  writeVec(p + "dev_U_" + ks, downN(st.U, 3 * (std::size_t)N));
+  writeVec(p + "dev_p_" + ks, downN(st.p, N));
+  std::fprintf(sc,
+               "%d %.17g %.17g %.17g %.17g B1=%.17g B2=%.17g B3=%.17g B4=%.17g B5=%.17g B6=%.17g "
+               "B7=%.17g B8a=%.17g B8b=%.17g Bres=%.17g dK=%.17g K1=%.17g def=%.17g,%.17g,%.17g "
+               "res=%.17g,%.17g,%.17g pred_apps=%d swept_its=%d rebuilt=%d,%d\n",
+               k, r.omega, r.muHat, r.gcl, r.closure, r.B1, r.B2, r.B3, r.B4, r.B5, r.B6, r.B7,
+               r.B8a, r.B8b, r.Bres, r.dK, r.K1, r.defectMomentum[0], r.defectMomentum[1],
+               r.defectMomentum[2], r.residualMomentum[0], r.residualMomentum[1],
+               r.residualMomentum[2], r.predictor.applications, r.swept.iterations, r.rebuiltHalf,
+               r.rebuiltFull);
+}
+
 struct Stats {
   double closure = 0, excess = -1e300, mom = 0, momBooked = 0, divPhi1 = 0, divF = 0, cfl = 0,
          predRes = 0, maxU = 0, omegaMu = 0, muRatio = 1e300, unifDev = 0, gtDev = 0, meanDev = 0,
@@ -686,15 +813,27 @@ struct Stats {
   double Bsum[11] = {0};
 };
 
-int runCase(const std::string& name, int stepsOverride, bool tight, double courant, bool stokes) {
+int runCase(const std::string& name, int stepsOverride, bool tight, double courant, bool stokes,
+            const std::string& motion = "none", double tend = -1,
+            const std::string& traceDir = std::string()) {
   RunSpec r;
   if (!parseCase(name, r)) {
     std::printf("RESULT case=%s status=UNKNOWN_CASE\n", name.c_str());
     return 1;
   }
+  const bool moving = motion != "none";
+  ale::MeshMotion mot = ale::MeshMotion::Rest;
+  if (motion == "follow")
+    mot = ale::MeshMotion::Follow;
+  else if (motion == "prescribed")
+    mot = ale::MeshMotion::Prescribed;
+  else if (moving && motion != "rest") {
+    std::printf("RESULT case=%s status=UNKNOWN_MOTION motion=%s\n", name.c_str(), motion.c_str());
+    return 1;
+  }
   const double nu = 0.01;
   const auto tSetup0 = std::chrono::steady_clock::now();
-  Case c = makeCase(r.fam, r.n);
+  Case c = makeCase(r.fam, r.n, moving);
   const FM& m = c.fr.mesh;
   const int N = m.nCells;
   Fluid fl = fluidOf(m, r.rho, nu);
@@ -706,6 +845,10 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
     opt.predictorRtol = 1e-13;
     opt.laplacianRtol = 1e-12;
   }
+  if (g_exactRtol > 0)
+    opt.exactRtol = g_exactRtol;
+  if (g_predRtol > 0)
+    opt.predictorRtol = g_predRtol;
   opt.timed = true;
   ale::Stepper<Real> stp(opt);
   stp.reserve(m);
@@ -729,8 +872,10 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
   stp.compactFluxOf(fd, Uc, Real(1), phi, Phi);
   const double c1 = ale::detail::courant(m, Phi, 1.0);
   const int nst1 = (int)std::ceil(c1 / courant);
-  const double tau = 1.0 / nst1;
-  const int nst = stepsOverride > 0 ? stepsOverride : (r.steps > 0 ? r.steps : nst1);
+  const double tau = r.tauFixed > 0 ? r.tauFixed : 1.0 / nst1;
+  const int nst = stepsOverride > 0 ? stepsOverride
+                  : tend > 0        ? (int)std::lround(tend / tau)
+                                    : (r.steps > 0 ? r.steps : nst1);
   DV body, pStart;
   bodyForce(r, m, c.s, fl.rho, body, pStart);
   double muEx = std::nan("");
@@ -756,6 +901,31 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
   Kokkos::fence();
   const double tSetup =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - tSetup0).count();
+  // the moving mesh (A18): its engine, frame n and, at rest, the static path beside it (V0.2)
+  ale::MovingStepper<Real> mstp(opt);
+  ale::MovingMesh<Real> mm;
+  ale::FlowState<Real> st0;
+  DV xdotP;
+  if (moving) {
+    mm.start(c.fr, c.s.L);
+    if (mot == ale::MeshMotion::Prescribed)
+      xdotP = DV("xdotP", 3 * N);
+    if (mot == ale::MeshMotion::Rest) {
+      st0.allocate(m.nCombined);
+      Kokkos::deep_copy(st0.U, st.U);
+      Kokkos::deep_copy(st0.p, st.p);
+    }
+  }
+  if (!traceDir.empty()) {
+    FILE* mf = std::fopen((traceDir + "/" + name + ".meta").c_str(), "w");
+    std::fprintf(mf, "case=%s tau=%.17g rho=%.17g nu=%.17g mode=%s steps=%d motion=%s\n",
+                 name.c_str(), tau, r.rho, nu, r.mode == ale::Projection::Exact ? "R" : "F", nst,
+                 motion.c_str());
+    std::fclose(mf);
+  }
+  FILE* traceScalars = traceDir.empty()
+                           ? nullptr
+                           : std::fopen((traceDir + "/" + name + ".dev_scalars").c_str(), "w");
   const auto U0 = down(st.U);
   double norm0 = 0, P0[3], absP0 = 0, Mtot = 0;
   for (int i = 0; i < N; ++i)
@@ -783,12 +953,53 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
       tau * nu / (h * h), muEx, rep0.iterations, tSetup, fd.setupSeconds, Exec::name(),
       Exec().concurrency(), (int)tight);
   Stats S;
-  double resMom[3] = {0, 0, 0}, Kprev = K0;
+  double resMom[3] = {0, 0, 0}, Kprev = K0, defMom[3] = {0, 0, 0};
+  double gcl = 0, B1max = 0, momDef = 0, v02diff = 0, tFrames = 0, tFrameSetup = 0;
+  long rebuilt = 0, frames = 0, v02bitwise = 0;
   const Real gbar[3] = {0, 0, -1};
   bool blowup = false;
   const auto tLoop0 = std::chrono::steady_clock::now();
   for (int k = 0; k < nst; ++k) {
-    const auto rr = stp.step(fd, st, Real(tau), r.mode, body);
+    ale::MovingStepReport rr;
+    std::vector<Real> trU, trP, trV;
+    if (!traceDir.empty())
+      trU = down(st.U), trP = down(st.p), trV = down(mm.volume);
+    if (moving) {
+      if (mot == ale::MeshMotion::Prescribed)
+        prescribedVelocity(mm.pos, N, xdotP);
+      try {
+        rr = mstp.step(*c.engine, mm, st, fl.rho, Real(r.rho * nu), Real(tau), r.mode, mot, xdotP,
+                       body);
+      } catch (const std::exception& e) {
+        std::printf("RESULT case=%s status=FRAME_ERROR step=%d motion=%s what=\"%s\"\n",
+                    name.c_str(), k + 1, motion.c_str(), e.what());
+        return 1;
+      }
+      gcl = std::max(gcl, rr.gcl);
+      rebuilt += rr.rebuiltHalf + rr.rebuiltFull;
+      frames += 2;
+      tFrames += rr.timeFrames;
+      tFrameSetup += rr.timeSetup;
+      for (int d = 0; d < 3; ++d)
+        defMom[d] += rr.defectMomentum[d];
+      if (mot == ale::MeshMotion::Rest) {  // V0.2: the static path on the same start, same process
+        stp.step(fd, st0, Real(tau), r.mode, body);
+        const auto a = down(st.U), b = down(st0.U), pa = down(st.p), pb = down(st0.p);
+        double dmax = 0;
+        for (std::size_t q = 0; q < a.size(); ++q)
+          dmax = std::max(dmax, std::fabs((double)a[q] - b[q]));
+        for (std::size_t q = 0; q < pa.size(); ++q)
+          dmax = std::max(dmax, std::fabs((double)pa[q] - pb[q]));
+        const bool bit = std::memcmp(a.data(), b.data(), a.size() * sizeof(Real)) == 0 &&
+                         std::memcmp(pa.data(), pb.data(), pa.size() * sizeof(Real)) == 0;
+        v02diff = std::max(v02diff, dmax);
+        v02bitwise += bit ? 1 : 0;
+      }
+    } else {
+      static_cast<ale::StepReport&>(rr) = stp.step(fd, st, Real(tau), r.mode, body);
+    }
+    if (!traceDir.empty())
+      traceStep(traceDir, name, k + 1, mm, mstp, trU, trP, trV, st, rr, traceScalars);
     const double t = tau * (k + 1);
     const double Kref = std::max(rr.K1, Kprev);
     if (Kref > 0) {
@@ -805,8 +1016,12 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
       for (int d = 0; d < 3; ++d) {
         S.mom = std::max(S.mom, std::fabs(rr.momentum[d] - P0[d]) / rr.absMomentum);
         S.momBooked =
-            std::max(S.momBooked, std::fabs(rr.momentum[d] - P0[d] + resMom[d]) / rr.absMomentum);
+            std::max(S.momBooked,
+                     std::fabs(rr.momentum[d] - P0[d] + resMom[d] - defMom[d]) / rr.absMomentum);
+        momDef = std::max(momDef, std::fabs(defMom[d]) / rr.absMomentum);
       }
+    if (moving && Kref > 0)
+      B1max = std::max(B1max, std::fabs(rr.B1) / Kref);
     S.divPhi1 = std::max(S.divPhi1, rr.divPhi1);
     S.divF = std::max(S.divF, rr.divF);
     S.cfl = std::max(S.cfl, rr.cfl);
@@ -830,7 +1045,7 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
     S.tBudget += rr.timeBudget;
     S.tSolveS3 += rr.timeSolveTransportFlux;
     S.tSolveS6 += rr.timeSolveCompactFlux;
-    const double Bs[11] = {0,     rr.B2,  rr.B3,  rr.B4, rr.B5,  rr.B6,
+    const double Bs[11] = {rr.B1, rr.B2,  rr.B3,  rr.B4, rr.B5,  rr.B6,
                            rr.B7, rr.B8a, rr.B8b, rr.B9, rr.Bres};
     for (int q = 0; q < 11; ++q)
       S.Bsum[q] += Bs[q];
@@ -893,6 +1108,8 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
       }
     }
   }
+  if (traceScalars)
+    std::fclose(traceScalars);
   if (blowup)
     return 1;
   const double wall =
@@ -921,16 +1138,20 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
   double parOut = 0, perpOut = 0;
   if (r.field == "tg" || r.field == "abc") {
     const auto Uh = down(st.U);
-    const auto ex = fieldOf(r.field, xh, N, nu, tau * nst);
+    // on a moving mesh the exact field at the generators' present positions, the volumes of the
+    // present frame
+    const auto xe = moving ? down(mm.pos) : xh;
+    const auto Ve = moving ? down(mm.volume) : Vh;
+    const auto ex = fieldOf(r.field, xe, N, nu, tau * nst);
     const double dec = r.field == "tg" ? std::exp(-2.0 * nu * kTwoPi * kTwoPi * tau * nst)
                                        : std::exp(-nu * kTwoPi * kTwoPi * tau * nst);
     double e = 0, ue = 0, ee = 0;
     for (int i = 0; i < N; ++i)
       for (int d = 0; d < 3; ++d) {
         const double q = Uh[3 * i + d] - ex[3 * i + d];
-        e += Vh[i] * q * q;
-        ue += Vh[i] * q * ex[3 * i + d];
-        ee += Vh[i] * (double)ex[3 * i + d] * ex[3 * i + d];
+        e += Ve[i] * q * q;
+        ue += Ve[i] * q * ex[3 * i + d];
+        ee += Ve[i] * (double)ex[3 * i + d] * ex[3 * i + d];
       }
     const double err = std::sqrt(e) / norm0 / dec;
     const double errPar = (ue / ee) * std::sqrt(ee) / norm0 / dec;
@@ -951,6 +1172,12 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
   if (r.field == "tg" || r.field == "abc")
     o << " err_par=" << parOut << " err_perp=" << perpOut;
   o << " stokes=" << (stokes ? 1 : 0);
+  // the moving mesh (brief ALE_S1_3A): gcl = max over the run of A18 item 3's measure
+  o << " motion=" << motion << " gcl=" << gcl << " rebuilt=" << (double)rebuilt
+    << " frames=" << (double)frames << " t_frames=" << tFrames / ns
+    << " t_setup=" << tFrameSetup / ns << " B1_absmax=" << B1max << " mom_def=" << momDef;
+  if (moving && mot == ale::MeshMotion::Rest)
+    o << " v02_maxdiff=" << v02diff << " v02_bitwise_steps=" << (double)v02bitwise;
   const char* bn[11] = {"B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8a", "B8b", "B9", "Bres"};
   std::printf("TERMS %s run_sum", name.c_str());
   for (int q = 0; q < 11; ++q)
@@ -1031,8 +1258,9 @@ int main(int argc, char** argv) {
   int rc = 0;
   {
     std::string applyDir, outDir, which = "all", runCaseName, traceDir, traceCaseName;
+    std::string motion = "none", traceMovingDir, traceMovingCase;
     int cells = 16, lapN = 0, steps = -1;
-    double courant = 0.4;
+    double courant = 0.4, tend = -1;
     bool tight = false, stokes = false;
     for (int a = 1; a < argc; ++a) {
       const std::string s = argv[a];
@@ -1059,6 +1287,18 @@ int main(int argc, char** argv) {
         tight = true;
       else if (s == "--stokes")
         stokes = true;
+      else if (s == "--motion" && a + 1 < argc)
+        motion = argv[++a];
+      else if (s == "--pred-rtol" && a + 1 < argc)
+        g_predRtol = std::atof(argv[++a]);
+      else if (s == "--exact-rtol" && a + 1 < argc)
+        g_exactRtol = std::atof(argv[++a]);
+      else if (s == "--tend" && a + 1 < argc)
+        tend = std::atof(argv[++a]);
+      else if (s == "--trace-moving" && a + 2 < argc) {
+        traceMovingDir = argv[++a];
+        traceMovingCase = argv[++a];
+      }
     }
     if (!applyDir.empty()) {
       if (outDir.empty())
@@ -1069,8 +1309,12 @@ int main(int argc, char** argv) {
       std::printf("=== S1.2b apply %s ===\n", rc ? "FAIL" : "PASS");
     } else if (lapN > 0) {
       rc = laplacianGate(lapN);
+    } else if (!traceMovingDir.empty()) {
+      // 5 steps at the tight tolerances of --trace (default motion: follow)
+      rc = runCase(traceMovingCase, steps > 0 ? steps : 5, true, courant, stokes,
+                   motion == "none" ? std::string("follow") : motion, -1, traceMovingDir);
     } else if (!runCaseName.empty()) {
-      rc = runCase(runCaseName, steps, tight, courant, stokes);
+      rc = runCase(runCaseName, steps, tight, courant, stokes, motion, tend);
     } else if (!traceDir.empty()) {
       if (outDir.empty())
         outDir = traceDir;
