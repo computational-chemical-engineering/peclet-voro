@@ -15,6 +15,11 @@ entries of |a - b| over the max over entries of |b| (the reference).
       tg_W16_R 10 steps U <= 1e-8.
   python test_ale_stepper.py c3 DIR_A DIR_B [--tol 1e-9]
       the U of the C2 run (tg_Z16_F, 10 steps) of two device runs: max relative difference (and whether bitwise).
+  python test_ale_stepper.py trace-moving DIR CASE [CASE ...] [--tol 1e-12]
+      gate T of G1.3a (brief ALE_S1_3A, docs/ale_design.md §11 A18): each step of a moving-mesh trace
+      (test_ale_stepper --trace-moving DIR CASE) recomputed by ale_reference_stepper.moving_step from the device's
+      inputs (U^n, U_ext, p^n, V^n, xdot, the frames Fh and F1 as exported, tau, mode; omega of mode F is the
+      device's) and compared per step: F, U*, U^1, p^1 relative <= tol; gcl and closure of both printed.
   python test_ale_stepper.py judge LOG_DIR REF_LOG_DIR
       R0-R6, L and T from the RESULT / LAP lines of LOG_DIR/S1_2b.run.<case>.<host|gpu>.log and
       LOG_DIR/S1_2b.lap.<n>.<host|gpu>.log; the reference's numbers from REF_LOG_DIR/S1_2a.<case>.log.
@@ -28,6 +33,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ale_reference as ar  # noqa: E402
+import ale_reference_stepper as ars  # noqa: E402
 
 MESHES = ('M1', 'M2', 'M3')
 C0_OUTPUTS = ('T', 'Q', 'TQ', 'RmD', 'delta', 'explicit', 'pred')
@@ -168,6 +174,52 @@ def cmd_c3(da, db, tol):
     bit = bool(np.array_equal(a.view(np.uint64), b.view(np.uint64)))
     print(f"C3pair {'PASS' if e <= tol else 'FAIL'} U after 10 steps rel={e:.2e} (<={tol:.0e}) bitwise={int(bit)}")
     return 0 if e <= tol else 1
+
+
+def cmd_trace_moving(d, cases, tol):
+    ok_all = True
+    for c in cases:
+        meta = {}
+        with open(os.path.join(d, f'{c}.meta')) as f:
+            for tok in f.read().split():
+                if '=' in tok:
+                    k, v = tok.split('=', 1)
+                    meta[k] = v
+        tau, rho, nu, mode = float(meta['tau']), float(meta['rho']), float(meta['nu']), meta['mode']
+        rows = {}
+        with open(os.path.join(d, f'{c}.dev_scalars')) as f:
+            for line in f:
+                t = line.split()
+                rows[int(t[0])] = {'omega': float(t[1]), 'gcl': float(t[3]), 'closure': float(t[4]),
+                                   **{kv.split('=')[0]: kv.split('=')[1] for kv in t[5:]}}
+        worst = {q: 0.0 for q in ('F', 'Ustar', 'U', 'p')}
+        for k in sorted(rows):
+            def rd(q):
+                return np.fromfile(os.path.join(d, f'{c}.{q}_{k}'))
+            mh, m1 = ar.Mesh(d, f'{c}.Fh_{k}'), ar.Mesh(d, f'{c}.F1_{k}')
+            N = mh.N
+            U, Uext, xdot = (rd(q).reshape(N, 3) for q in ('in_U', 'in_Uext', 'in_xdot'))
+            p, Vn = rd('in_p'), rd('in_Vn')
+            U1, p1, r = ars.moving_step(mh, m1, U, Uext, p, Vn, xdot, tau, mode, rho=rho, nu=nu,
+                                        omega=rows[k]['omega'])
+            e = {'F': rel(rd('dev_F'), r['F']), 'Ustar': rel(rd('dev_Ustar'), r['Ustar']),
+                 'U': rel(rd('dev_U'), U1), 'p': rel(rd('dev_p'), p1)}
+            for q in worst:
+                worst[q] = max(worst[q], e[q])
+            dev = rows[k]
+            K1 = max(r['K1'], 1e-300)
+            print(f"Tstep {c} k={k} F={e['F']:.2e} U*={e['Ustar']:.2e} U1={e['U']:.2e} p={e['p']:.2e} "
+                  f"omega={dev['omega']:.6f} gcl ref={r['gcl']:.2e} dev={dev['gcl']:.2e} "
+                  f"closure/K ref={abs(r['closure']) / K1:.2e} dev={abs(dev['closure']) / K1:.2e} "
+                  f"B1 ref={r['B1']:.6e} dev={float(dev['B1']):.6e} "
+                  f"mom_booked/|P| ref={np.abs(r['mom_booked_step']).max() / r['absP1']:.2e} "
+                  f"rebuilt={dev['rebuilt']} Fh={mh.F} F1={m1.F} faces")
+        ok = all(v <= tol for v in worst.values())
+        ok_all = ok_all and ok
+        print(f"Tcase {'PASS' if ok else 'FAIL'} {c} {len(rows)} steps: F={worst['F']:.2e} U*={worst['Ustar']:.2e} "
+              f"U1={worst['U']:.2e} p={worst['p']:.2e} (<={tol:.0e})")
+    print(f"T {'PASS' if ok_all else 'FAIL'} {' '.join(cases)} (per step against moving_step, <={tol:.0e})")
+    return 0 if ok_all else 1
 
 
 # ------------------------------------------------------------------------------------------- the runs
@@ -376,6 +428,10 @@ def main():
     c3.add_argument('da')
     c3.add_argument('db')
     c3.add_argument('--tol', type=float, default=1e-9)
+    tm = sub.add_parser('trace-moving')
+    tm.add_argument('dir')
+    tm.add_argument('cases', nargs='+')
+    tm.add_argument('--tol', type=float, default=1e-12)
     j = sub.add_parser('judge')
     j.add_argument('log_dir')
     j.add_argument('ref_dir')
@@ -386,6 +442,8 @@ def main():
         return cmd_compare(args.dir, args.odir, args.cells)
     if args.cmd == 'trace':
         return cmd_trace(args.refdir, args.devdir)
+    if args.cmd == 'trace-moving':
+        return cmd_trace_moving(args.dir, args.cases, args.tol)
     if args.cmd == 'c3':
         return cmd_c3(args.da, args.db, args.tol)
     return cmd_judge(args.log_dir, args.ref_dir)

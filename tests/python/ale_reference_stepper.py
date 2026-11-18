@@ -423,7 +423,12 @@ def moving_step(mh, m1, U, Uext, p, Vn, xdot, tau, mode, rho=1.0, nu=0.01, omega
     # S5 on F1, mass M1
     Us = us.reshape(N, 3)
     if mode == 'R':
-        dp, _ = s1.exact_projection(Us, tau)
+        # mode R solved exactly: (C' M1^-1 C'^T)^+ by a grounded sparse LU (constants are its null space), mean removed
+        S = (s1.Cp @ sp.diags(1.0 / np.repeat(M1, 3)) @ s1.CpT).tocsc()
+        e0 = sp.csc_matrix(([1.0], ([0], [0])), shape=(N, N))
+        b = (s1.Cp @ us) / tau
+        x = splu((S + e0).tocsc()).solve(b - b.mean())
+        dp = -(x - x.mean())
         omega = 1.0
     else:
         dp = -omega * s1.Lsolve((s1.Cp @ us) / tau)
