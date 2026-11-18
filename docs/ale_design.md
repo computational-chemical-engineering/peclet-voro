@@ -1218,3 +1218,75 @@ a cubic lattice built in Python, Z (M1) and W (M2), at 16³, 32³, 64³. Table: 
 response to mesh-scale residues of the two adjoint forces, not split between them. The falsifier for friction is a
 Stokes decay ladder on the stepper (transport off; exact solution the decaying Taylor–Green field, p = 0). Not
 measured: the pressure error; a moving mesh; two phases.
+
+### A18 (2026-11-18): the time step on a moving mesh, one phase (work order S1.3a; answers Q-MESH, Q-FRAME, Q-MASS of §9; replaces the S3 and S4 rows of §4.1 for stage 1 and the gates of WO-S1.3)
+One phase, uniform ρ and μ, periodic box, no body force. Masses are lumped: Mⁿ = ρVⁿ, M¹ = ρV¹, ΔM = M¹ − Mⁿ.
+1. **Mesh rule (Q-MESH), evaluated in S1 from U_ext.** `Rest`: ẋ = 0, ẇ = 0. `Follow`: ẋ_i = U_ext,i, ẇ = 0.
+   `Prescribed`: ẋ given by the caller per step (a view), ẇ = 0. Weights never change in stage 1.
+   x^h = xⁿ + ½τẋ, x¹ = xⁿ + τẋ (positions wrapped into the periodic box as `test_ale_frame` does).
+2. **Frames (S2).** Fh = `advanceFrame` at x^h, then F1 = `advanceFrame` at x¹, each followed by `setupFrame`.
+   Both exist before S3. A frame error (empty cell, one-sided facet, open cell) is an error of the step: no
+   retry, no smaller step. Of frame n only Vⁿ is kept. U_ext = Uⁿ at the first step, as in the static step.
+3. **S3 on Fh.** Φᵐ = `sweptFlux`(Fh, ẋ, ẇ). Correction to the exact volume change, with the frame's L_ρ and
+   a_f, the same operator pair as `compactFluxOf`: solve L_ρ ψ = D Φᵐ − (V¹ − Vⁿ)/τ in the sign convention of
+   `compactFluxOf`, Φᵐ_c = Φᵐ − (its correction), so that max_i |τ(DΦᵐ_c)_i − (V¹_i − Vⁿ_i)| ≤ `compactTol`·V_i
+   (1e-14; V_i of Fh). A right-hand side that is exactly zero returns ψ = 0 exactly, without iterating. Then
+   Φ = `compactFluxOf`(Fh, U_ext) as now, F = Φ − Φᵐ_c, Fm = ρF. The Courant number reported is that of F.
+   (With one density the frame's L_ρ is the unit-density Laplacian up to a factor; which one two phases need is
+   open and is not decided here.)
+4. **S4 on Fh.** With S, Q, e6, e8 from Fm and ζ, C′ᵀ from Fh (the existing kernels):
+   (M¹ − ¼ΔM + ½τ(S + Q + ζ)) U* = (Mⁿ + ¼ΔM − ½τ(S + Q + ζ)) Uⁿ + τ(e6 + e8 + C′ᵀpⁿ).
+   This is the flux-form transport of the oracle, (T x)_i = Σ_f s_if Fm_f ½(x_i + x_o) = (S x)_i + ½(D Fm)_i x_i,
+   with (D Fm)_i replaced by its value −ΔM_i/τ under item 3. Written so, a mesh at rest gives ΔM = 0 exactly and
+   the static operator bit for bit. The preconditioner diagonal uses M¹ − ¼ΔM where it used M.
+5. **S5, S6 on F1** exactly as the static step on the frame F1 with the mass M¹ (μ̂, mode F or R, compact flux).
+6. **S8.** Vⁿ ← V¹; Uⁿ⁻¹ ← Uⁿ; the engine stays at x¹.
+7. **Budget.** K = ½U·MU with the mass of its frame. K* − Kⁿ gains exactly one term over the static budget:
+   **B1 = +⅛ Σ_i ΔM_i |U*_i − Uⁿ_i|²** (derived: multiply item 4 by Ū = ½(U* + Uⁿ); S is skew). The other terms
+   keep their formulas with Fh's operators in S4 and F1's in S5. If `B1` in the code is not identically zero on
+   a static mesh today, stop and report.
+8. **Momentum.** Per step the scheme conserves Σ_i M_i U_i up to the predictor's residual (booked today, R2′) and
+   up to the defect of item 3 and of DΦ = 0, which changes the momentum by
+   ΔP_def = +½ Σ_i ρ[τ(DF)_i + (V¹_i − Vⁿ_i)] Ū_i per step (derived: column sums of S are −½ D Fm). Book it
+   as the residual's momentum is booked (`mom_booked` keeps its meaning: drift minus everything booked).
+9. **Not in this work order:** a body force on a moving mesh (a non-empty `body` in the moving step is an
+   error; the mean part needs ½(Mⁿ + M¹), work order S1.3c), power weights that change, two phases, MPI, Python
+   bindings, public names.
+
+**Gates (fixed before any run; brief `ALE_S1_3A`).** V0.2: `--motion rest` against the static path, U and p bit for
+bit after each of 100 steps (Z and W, host and GPU). T: each of 5 steps against a Python reference written from
+the items above, ≤ 1e-12. G1.3 a: volume change, item 3's measure ≤ 1e-14. b: uniform flow under the prescribed
+motion ẋ = 0.3 (sin 2πy, sin 2πz, sin 2πx), ≤ 1e-12 |U| after ≥ 1000 rebuilt cells. c: budget closure ≤ 1e-13 K
+per step with B1. d: momentum with the booked parts ≤ 1e-13 Σ M|U|. The order bound of §7 is replaced (A16): the
+moving mesh is gated against the static one at equal resolution in work order S1.3b, error ratio at t = 0.5
+≤ 5 (follow) and ≤ 3.5 (prescribed) at 32³ and 64³, order ≥ the static order − 0.3 [2D oracle, A4e: ratios
+3.5–4.3 and 2.4–2.6]. Stability at weight spread 0.15 h² is not gated on a moving mesh: a power cell that empties
+is a frame error (A5).
+
+### A19 (2026-11-18): the Stokes ladder; the friction operator carries the order-1.7 part (work order S1.2g, gates D-S, D-S′; closes the open item of A17)
+`StepOptions::transport = false` sets the mass flux of S4 to zero (Stokes flow; exact solution the decaying
+Taylor–Green field, p = 0; time step of the full run). The runs print the error along the exact field (`err_par`,
+signed) and orthogonal to it (`err_perp`). Commit e84a8ac; logs `build_s2/gate_logs/S1_2g.*`; without the option
+every digit on record is reproduced (host, GPU, reference); device against reference in Stokes flow ≤ 3.8e-6.
+
+| TG, GPU | error | along u | orthogonal |
+|---|---|---|---|
+| full, Z 32³ / 64³ | 1.029e-2 / 3.409e-3 | 6.84e-3 / 2.407e-3 | 7.70e-3 / 2.414e-3 |
+| Stokes, Z 16³ / 32³ / 64³ | 5.857e-2 / 1.530e-2 / 4.326e-3 | 5.223e-2 / 1.363e-2 / 3.680e-3 | 2.651e-2 / 6.95e-3 / 2.274e-3 |
+| full, W 32³ / 64³ | 1.073e-2 / 3.577e-3 | 6.37e-3 / 2.318e-3 | 8.63e-3 / 2.724e-3 |
+| Stokes, W 16³ / 32³ / 64³ | 5.985e-2 / 1.568e-2 / 4.519e-3 | 5.292e-2 / 1.382e-2 / 3.787e-3 | 2.797e-2 / 7.40e-3 / 2.466e-3 |
+
+- **D-S′ (measured): friction carries it.** Orthogonal part, Stokes / full, at 32³ / 64³: 0.90 / 0.94 (Z),
+  0.86 / 0.91 (W), against ≥ ½. D-S (with the a-priori rate of A17): 1.01 / 1.22 (Z), 1.02 / 1.21 (W). They agree.
+- Orders in Stokes flow, 16³ → 32³ → 64³: error 1.94, 1.82 (Z), 1.93, 1.79 (W); along u 1.94, 1.89 (Z); orthogonal
+  1.93, 1.61 (Z), 1.92, 1.59 (W). The part along u is second order (the h² rate of A17; measured 3 % and 10 %
+  above the a-priori rate). The orthogonal part loses order with refinement.
+- The transport side adds little: if the two parts add in quadrature it is 3.3e-3 / 0.81e-3 (Z) at 32³ / 64³
+  [estimate], 43 % / 34 % of the orthogonal part, and it falls faster than the friction part.
+
+**What this fixes.** R5 (b) of G1.2 is the friction operator: its adjoint force is consistent only in the weak
+sense (A17: a uniform stress σ gives the force σ·b_i, ‖b_i/V_i‖ = 0.042/h), and the solution's response to that
+mesh-scale force is the part of order 1.6. The cell-valued gradient of the transport (decision 8) is second in
+size. A repair of the friction force is a formulation question (F14 of the campaign state): no operator changes
+before a checked derivation. Not measured: ABC in Stokes flow is not an exact solution with p = 0 and was not
+run; the pressure error; a moving mesh.
