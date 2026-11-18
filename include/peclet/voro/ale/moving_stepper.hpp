@@ -15,7 +15,10 @@
  *  S3  on Fh: Φᵐ = sweptFlux(Fh, ẋ, 0); ψ from L_ρψ = DΦᵐ − (V¹ − Vⁿ)/τ (the operator pair of
  *      `compactFluxOf`, its stopping test max_i τ|r_i|/V_i ≤ compactTol, V of Fh), Φᵐ_c = Φᵐ +
  *      a ⊙ Δ_nψ, so that τDΦᵐ_c = V¹ − Vⁿ to compactTol V_i; a right-hand side that is exactly
- *      zero gives ψ = 0 without a solve. Φ = compactFluxOf(Fh, U_ext); F = Φ − Φᵐ_c; Fm = ρF.
+ *      zero gives ψ = 0 without a solve. The solve stops on its recursive residual; while the
+ *      recomputed measure max_i |τ(DΦᵐ_c)_i − (V¹_i − Vⁿ_i)|/V_i exceeds compactTol, the
+ *      correction is solved again for that true residual and added (at most kMaxSweptRestarts).
+ *      Φ = compactFluxOf(Fh, U_ext); F = Φ − Φᵐ_c; Fm = ρF.
  *  S4  on Fh: (M¹ − ¼ΔM + ½τ(S + Q + ζ)) U* = (Mⁿ + ¼ΔM − ½τ(S + Q + ζ)) Uⁿ + τ(e6 + e8 + C′ᵀpⁿ),
  *      S the skew transport, i.e. the flux form Σ_f s_if Fm_f ½(x_i + x_o) with (DFm)_i = −ΔM_i/τ.
  *      GMRES as on a static mesh; the preconditioner's mass is M¹ − ¼ΔM.
@@ -50,6 +53,11 @@
 
 namespace peclet::voro::ale {
 
+/// At most this many re-solves of the S3 correction for its true residual (brief ALE_S1_3A_R):
+/// the solver stops on its recursive residual, which may sit just below compactTol while the
+/// recomputed measure of A18 item 3 lands just above it.
+inline constexpr int kMaxSweptRestarts = 3;
+
 /// The mesh rule of S1 (Q-MESH, §11 A18 item 1).
 enum class MeshMotion { Rest, Follow, Prescribed };
 
@@ -58,8 +66,9 @@ struct MovingStepReport : StepReport {
   double B1 = 0;   ///< ⅛ Σ ΔM |U* − Uⁿ|²
   double gcl = 0;  ///< max_i |τ(DΦᵐ_c)_i − (V¹_i − Vⁿ_i)|/V_i (V of Fh)
   double defectMomentum[3] = {0, 0, 0};  ///< ΔP_def per component
-  krylov::SolveReport swept;             ///< the S3 correction solve
-  bool sweptZero = false;                ///< the correction's right-hand side was exactly zero
+  krylov::SolveReport swept;  ///< the S3 correction solve (restarts' iterations included)
+  int sweptRestarts = 0;      ///< re-solves of the S3 correction for its true residual
+  bool sweptZero = false;     ///< the correction's right-hand side was exactly zero
   int rebuiltHalf = 0, rebuiltFull = 0;  ///< MeshFrame::numRebuilt of Fh, F1
   double timeFrames = 0, timeSetup = 0;  ///< the two advanceFrame, the two setupFrame (timed)
 };
@@ -327,9 +336,30 @@ class MovingStepper {
       fh.solver.maxIterations = opt.laplacianMaxIterations;
       rep.swept = fh.solver.solve(ws.b, mm.psi, test);
       detail::compactCorrect(mh, fh.aFace, mm.psi, phiM_);
+      ale::divergence(mh, phiM_, ws.tN);
+      rep.gcl = detail::gclDefect(nc, ws.tN, dV_, mh.cellVolume, tau);
+      // the true measure above the bar: solve for the true residual from zero, add the correction
+      for (int r = 0; r < kMaxSweptRestarts && rep.gcl > opt.compactTol; ++r) {
+        Kokkos::deep_copy(Kokkos::subview(ws.b, std::make_pair(0, nc)),
+                          Kokkos::subview(ws.tN, std::make_pair(0, nc)));
+        detail::sweptRhs(nc, ws.b, dV_, tau);
+        Kokkos::deep_copy(dpsi_, Real(0));
+        const krylov::SolveReport sr = fh.solver.solve(ws.b, dpsi_, test);
+        rep.swept.iterations += sr.iterations;
+        rep.swept.applications += sr.applications;
+        rep.swept.residual = sr.residual;
+        rep.swept.converged = sr.converged;
+        detail::compactCorrect(mh, fh.aFace, dpsi_, phiM_);
+        krylov::axpy(mm.psi, Real(1), dpsi_, nc);
+        ale::divergence(mh, phiM_, ws.tN);
+        rep.gcl = detail::gclDefect(nc, ws.tN, dV_, mh.cellVolume, tau);
+        rep.sweptRestarts = r + 1;
+      }
     }
-    ale::divergence(mh, phiM_, ws.tN);
-    rep.gcl = detail::gclDefect(nc, ws.tN, dV_, mh.cellVolume, tau);
+    if (rep.sweptZero) {
+      ale::divergence(mh, phiM_, ws.tN);
+      rep.gcl = detail::gclDefect(nc, ws.tN, dV_, mh.cellVolume, tau);
+    }
     rep.transportFlux = base.compactFluxOf(fh, ws.Uext, tau, s.phiTransport, ws.Phi);
     detail::combine(Real(1), ws.Phi, Real(-1), phiM_, ws.Phi, mh.nFaces);
     ale::divergence(mh, ws.Phi, ws.tN);
@@ -455,6 +485,7 @@ class MovingStepper {
     U1_ = DV<Real>("ale.mv.U1", 3 * nc);
     dp_ = DV<Real>("ale.mv.dp", nc);
     C1_ = DV<Real>("ale.mv.C1", nc);
+    dpsi_ = DV<Real>("ale.mv.dpsi", nc);
   }
   void allocateFaces(int nf) {
     if ((int)phiM_.extent(0) >= nf)
@@ -463,7 +494,7 @@ class MovingStepper {
     phi1_ = DV<Real>("ale.mv.phi1", nf + nf / 4);
   }
 
-  DV<Real> xdot_, wdot_, xh_, x1_, dV_, dM_, mL_, mR_, Ustar_, U1_, dp_, C1_, phiM_, phi1_;
+  DV<Real> xdot_, wdot_, xh_, x1_, dV_, dM_, mL_, mR_, Ustar_, U1_, dp_, C1_, dpsi_, phiM_, phi1_;
 };
 
 }  // namespace peclet::voro::ale

@@ -9,10 +9,11 @@
 # build_s2/gate_logs/S1_3a.*:
 #   V0.2  test_ale_stepper --run tg_Z16_F|tg_W16_F --motion rest --steps 100: the static path beside it in the same
 #         process; U and p bit for bit after every step (v02_maxdiff = 0, v02_bitwise_steps = 100).
-#   T     test_ale_stepper --trace-moving (tg_Z16_F, tg_Z16_R, follow, 5 steps, the tight tolerances of --trace)
-#         -> test_ale_stepper.py trace-moving: F, U*, U1, p per step against ale_reference_stepper.moving_step,
-#         relative <= 1e-12. Reported beside it (INFO T'): the same at the predictor tolerance 1e-14.
-#   a     gcl <= 1e-14 in every moving run (V0.2, b, c, and the T traces).
+#   T     test_ale_stepper --trace-moving --pred-rtol 1e-14 (tg_Z16_F, tg_Z16_R, follow, 5 steps, the tight
+#         tolerances of --trace with the predictor at 1e-14; brief ALE_S1_3A_R) -> test_ale_stepper.py
+#         trace-moving: F, U*, U1, p per step against ale_reference_stepper.moving_step, relative <= 1e-12.
+#         Reported beside it (INFO T13): the same at the trace's predictor tolerance 1e-13.
+#   a     gcl <= 1e-14 in every moving run (V0.2, b, c, and the traces); s3_restarts <= 3, 0 at rest.
 #   b     unif_Z16_F|R --motion prescribed (tau = 1/400, 400 steps): unif_dev <= 1e-12, rebuilt >= 1000.
 #   c     tg_Z16_F --motion follow to t = 1: closure <= 1e-13 K per step; B1 != 0 reported.
 #   d     the runs of b and c: mom_booked <= 1e-13 sum M|U| (R2'); the unbooked drift (mom) and mom_def reported.
@@ -182,7 +183,7 @@ for be in bes:
 say(f"V0.2 {'PASS' if ok else 'FAIL'} {'; '.join(txt)} (U and p after every step, against the static path)")
 
 # T (and T' as INFO)
-for x, cid in (('tm', 'T'), ('tmx', "T'")):
+for x, cid in (('tmx', 'T'), ('tm', 'T13')):
     txt, ok = [], True
     for be in bes:
         p = os.path.join(L, f'S1_3a.{x}.judge.{be}.log')
@@ -195,24 +196,25 @@ for x, cid in (('tm', 'T'), ('tmx', "T'")):
     if cid == 'T':
         say(f"T {'PASS' if ok else 'FAIL'} {' '.join(txt)}")
     else:
-        say(f"T' INFO predictor rtol 1e-14: {'pass' if ok else 'miss'} {' '.join(txt)}")
+        say(f"T13 INFO predictor rtol 1e-13: {'pass' if ok else 'miss'} {' '.join(txt)}")
 
 # a: gcl of every moving run, and of the trace steps
 txt, ok, worst = [], True, 0.0
 for be in bes:
     for tag in ('v02.tg_Z16_F', 'v02.tg_W16_F', 'b.unif_Z16_F', 'b.unif_Z16_R', 'c.tg_Z16_F'):
-        g = num(runs[be].get(tag), 'gcl')
-        ok = ok and g <= 1e-14
+        g, nr = num(runs[be].get(tag), 'gcl'), num(runs[be].get(tag), 's3_restarts')
+        rest = tag.startswith('v02')
+        ok = ok and g <= 1e-14 and (nr == 0 if rest else nr <= 3)
         worst = max(worst, g) if g == g else worst
-        txt.append(f'{be} {tag.split(".", 1)[1]}{"(rest)" if tag.startswith("v02") else ""}={g:.2e}')
-    for x in ('tm',):
+        txt.append(f'{be} {tag.split(".", 1)[1]}{"(rest)" if rest else ""}={g:.2e} r={nr:.0f}')
+    for x in ('tmx', 'tm'):
         for cs in ('tg_Z16_F', 'tg_Z16_R'):
             p = os.path.join(L, f'S1_3a.{x}.{be}', f'{cs}.dev_scalars')
             gs = [float(ln.split()[3]) for ln in open(p)] if os.path.exists(p) else [float('nan')]
             g = max(gs)
             ok = ok and g <= 1e-14
-            txt.append(f'{be} trace {cs}={g:.2e}')
-say(f"a {'PASS' if ok else 'FAIL'} gcl max {worst:.2e} (<=1e-14): {', '.join(txt)}")
+            txt.append(f'{be} {x} {cs}={g:.2e}')
+say(f"a {'PASS' if ok else 'FAIL'} gcl max {worst:.2e} (<=1e-14; r = s3_restarts <=3, rest 0): {', '.join(txt)}")
 
 # b
 txt, ok = [], True
