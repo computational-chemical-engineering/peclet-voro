@@ -139,7 +139,7 @@ if [[ $DO_BATTERY -eq 1 ]]; then
   OMP_NUM_THREADS=1 PYTHONPATH="$B" python python/state_hash.py > "$L/G1_1.state_hash" 2> "$L/G1_1.state_hash.err"
   hash="differs"
   if [[ -s "$L/G1_1.state_hash" ]] && cmp -s "$L/G0_1.state_hash" "$L/G1_1.state_hash"; then hash="same"; fi
-  if [[ $n_all -eq 46 && $n_pass -eq 46 && $hash == same ]]; then
+  if [[ $n_all -eq 47 && $n_pass -eq 47 && $hash == same ]]; then
     base="PASS(ctest=$n_pass/$n_all,hash=$hash)"
   else
     base="FAIL(ctest=$n_pass/$n_all,hash=$hash)"

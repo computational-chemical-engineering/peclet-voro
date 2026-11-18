@@ -10,8 +10,8 @@
 #   --configure re-runs the two configure lines below (the trees are configured once by hand otherwise).
 # Parts (logs in build_s2/gate_logs/S1_2b.*):
 #   B   G1_1.sh build_s2 --cuda-dir build_s2_cuda, G0_2.sh and G0_3.sh on both trees (--base runs them; by
-#       default their outputs S1_2b.base_*.out are read, as written by the base run before test_ale_stepper was
-#       registered: G1_1.sh's battery counts exactly 46 ctests) + every ALE ctest (ctest -R ^test_ale_) on the host
+#       default their outputs S1_2b.base_*.out are read, as written by the last base run; G1_1.sh's battery
+#       counts exactly 47 ctests, test_ale_stepper included, since S1.2d) + every ALE ctest (ctest -R ^test_ale_) on the host
 #       and the GPU. K1-K6 must equal the record build_s0/gate_logs/S1_1c.G1_1.out (the G1.1 PASS of A11) field by field.
 #   C0  test_ale_frame --export (16^3, M1-M3; on each backend: the CUDA frame differs from the host's in the last
 #       bits, A11) -> test_ale_stepper.py inputs -> test_ale_stepper --apply -> test_ale_stepper.py compare.
