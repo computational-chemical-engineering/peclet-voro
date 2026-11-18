@@ -1168,3 +1168,53 @@ lattice (jitter 0), the friction and the transport operators one by one.
 G1.3 (≥ 1.8 on the moving mesh) will miss for the same reason unless the bulk scheme changes; S1.3 gates the
 moving mesh against the static one at equal resolution, and the order is carried as a recorded miss of the bulk
 scheme, with decision 8.
+
+### A17 (2026-11-18): the GPU base of the ALE tests; what each bulk operator leaves on exact fields (work orders S1.2d, S1.2e; gates G1.2d, D-h)
+
+**S1.2d (GPU base).** `test_ale_facemesh` case b compared the builder's `maxNormalConnSine` (device) with a host
+recomputation by `==`. On CUDA the two differ by 0.005 ε (power) and 0.069 ε (Voronoi), and by exactly 0 with
+`--fmad=false` and on the host [measured]: nvcc contracts the cross product, as in A11. The test now compares to
+16 ε and prints both values; the builder is unchanged. `ctest -LE bench` is 47/47 on the host and on CUDA
+(`G1_1.sh` counts 47). Left open on CUDA, both outside this branch's code: two launches of the 500-frame moving
+mesh differ (volumes 9.3e-16; fixed on `repair-det`, not on main), and `python/state_hash.py` aborts.
+
+**S1.2e (a-priori test, `tests/python/ale_apriori.py`).** Exact Taylor–Green and ABC fields (ρ = 1, ν = 0.01,
+t = 0) at the generators go into the matrix-free reference operators of the static step. With G = ∇p/ρ = −(u·∇)u
+at the points and P_h the discrete projection (M-orthogonal, onto ker C′), the truncation of the step is exactly
+T′ + G′ + Q′ + Z′ + U′ with T′ = P_h(a_T − G) (central transport with the centroid correction), G′ = P_h G (a
+gradient carried as cell values), Q′ = P_h a_Q (upwind part with the reconstruction jump), Z′ = P_h(a_Z − νΔu)
+(friction), U′ = (P_h − 1)νΔu. Each part is measured by its cell norm, by its rate along the solution
+coh = ⟨X, u⟩/‖u‖², and by its content in the Fourier modes max|k_i| ≤ 2·2π with the part along u removed. Meshes:
+a cubic lattice built in Python, Z (M1) and W (M2), at 16³, 32³, 64³. Table: `build_s2/gate_logs/S1_2e.table`.
+
+- **Lattice control (E1 PASS):** raw residues of transport, friction and pressure force fall by 0.248–0.255 per
+  doubling (second order), the upwind part by 0.126 (third); T′ and G′ vanish to rounding (on a lattice the
+  transport of these fields is a discrete gradient).
+- **Norms on Z, Taylor–Green, 16³ / 32³ / 64³** (ABC and W within a few percent of these): T′ 6.3 / 3.2 / 1.6 % and
+  Q′ 2.9 / 1.4 / 0.7 % of ‖G‖ (first order); **G′ 12.1 / 9.9 / 9.3 % (W: 12.0 % at 64³): does not fall**, the
+  numbers of decision 8 (D5) on a dynamic field; **Z′ 17 / 20 / 30 % of ‖νΔu‖: grows.**
+- **Why the friction residue grows [measured twice, mechanism derived]:** ζ is the adjoint of U → G_f applied to
+  the face stress. For a uniform stress σ its two-point (normal) part vanishes by closure (3e-15), its tangential
+  part does not: the force on cell i is σ·b_i with a mesh vector b_i, Σ_i b_i = 0, ‖b_i/V_i‖ = 0.0421/h on Z
+  and 0.0469/h on W (16³, 32³, 64³: 0.04212, 0.04195, 0.04192). The cell weight of the tangential stress,
+  Σ_f ½V_f(I − n nᵀ), is not ⅔V_i I per cell because the face centroids are offset from the connectors (q_f ≠ 0).
+  For Taylor–Green this predicts a residue 2.65e-3 n; the fit raw_Z² = A + B n² gives 2.6e-3 n. So the friction
+  force is consistent only in the weak sense, like the pressure force (A6, decision 8): one family of defect, the
+  adjoint of a linearly exact reconstruction is not linearly exact where q_f ≠ 0.
+- **Rates along u (Taylor–Green, Z):** friction +5.10e-2 / +1.32e-2 / +3.35e-3 (second order; 1.3 × the
+  lattice's), upwind −4.79e-2 / −6.28e-3 / −7.93e-4 (third order), all others ≤ 1.1e-5 at 64³. Total +2.78e-3 /
+  +6.97e-3 / +2.56e-3 against the run's errors 3.33e-2 / 1.03e-2 / 3.41e-3 (A16): at 32³ and 64³ the amplitude
+  error is a h² term and a h³ term of opposite sign (ratio 0.367, the error's 0.331; criterion E3 PASS). **No
+  operator is first order along the solution.**
+- **Not attributed (criterion E4 MISS):** for ABC the total rate (+4.2e-4 at 64³) is a quarter of the error
+  (1.73e-3). In both flows a part (error² − rate²)^½ remains, 7.6e-3 / 2.25e-3 (TG) and 5.57e-3 / 1.67e-3 (ABC) at
+  32³ / 64³, of order 1.7. The low-mode content does not predict it: it is 3.8e-2 ‖u‖ at every h, and it is all in
+  G′. That content is an identity, not a free forcing: P_h is an orthogonal projector, so the component of G′
+  along G is ‖G′‖²/‖G‖² = 0.86 % (Z), 1.43 % (W) of G exactly [derived; measured 0.862 %, 1.431 %], tied to mesh
+  noise ten times larger. What the mesh-scale parts (G′, Z′) leave in the solution after damping is a response, and
+  an a-priori test does not measure it.
+
+**What this fixes.** R5 (b) of G1.2 is not a first-order operator. It is (i) the cancellation above and (ii) a
+response to mesh-scale residues of the two adjoint forces, not split between them. The falsifier for friction is a
+Stokes decay ladder on the stepper (transport off; exact solution the decaying Taylor–Green field, p = 0). Not
+measured: the pressure error; a moving mesh; two phases.
