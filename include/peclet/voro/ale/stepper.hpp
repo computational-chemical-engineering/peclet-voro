@@ -99,8 +99,10 @@ struct StepOptions {
   double exactRtol = 1e-13;  ///< mode R, relative (floor: rounding of C′U*, see exactProjection)
   int exactMaxIterations = 5000;
   int laplacianMaxIterations = 1000;
-  bool budget = true;  ///< evaluate the energy budget (B-terms)
-  bool timed = false;  ///< fence and time the stages into StepReport::time*
+  bool budget = true;     ///< evaluate the energy budget (B-terms)
+  bool timed = false;     ///< fence and time the stages into StepReport::time*
+  bool transport = true;  ///< false: the Stokes step (mass flux of S4 set to zero; the Courant
+                          ///< number of S3 is still reported)
 };
 
 /// The operators of one frame: mesh, density per cell, viscosity per face, the compact-projection
@@ -615,6 +617,8 @@ class Stepper {
         tau * krylov::maxScaled(ws.tN, DV<Real>(), fr.mesh.nCells) / detail::minVolume(fr.mesh);
     rep.cfl = detail::courant(fr.mesh, ws.Phi, tau);
     detail::massFlux(fr.mesh, fr.rho, ws.Phi, ws.Fm);
+    if (!opt.transport)
+      Kokkos::deep_copy(ws.Fm, Real(0));
   }
 
   /// S4: the predictor into `Ustar`, the explicit terms kept in ws (e6, e8, fp) for the budget.

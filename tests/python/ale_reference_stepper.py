@@ -177,8 +177,9 @@ FIELDS = {'tg': taylor_green, 'abc': abc_flow}
 class Stepper:
     """One phase (rho, nu uniform) on the static mesh m."""
 
-    def __init__(self, m, rho=1.0, nu=0.01, upwind=1.0, pred_rtol=PREDICTOR_RTOL):
+    def __init__(self, m, rho=1.0, nu=0.01, upwind=1.0, pred_rtol=PREDICTOR_RTOL, transport=True):
         self.m = m
+        self.transport = transport
         N, F = m.N, m.F
         self.rho, self.nu, self.upwind, self.pred_rtol = rho, nu, upwind, pred_rtol
         rho_c = np.full(N, rho)
@@ -255,7 +256,7 @@ class Stepper:
         F = self.project_flux(Phi_raw)
         r['divF'] = tau * np.abs(self.D @ F).max() / m.V.min()
         r['cfl'] = self.courant(F, tau)
-        Fm = self.rho * F
+        Fm = self.rho * F if self.transport else np.zeros_like(F)
         # S4: predictor
         T = self.tm.T(Fm)
         Wd = self.upwind * 0.5 * np.abs(Fm)
@@ -398,14 +399,14 @@ def body_force(st, kind):
     raise ValueError(kind)
 
 
-def run_case(export_dir, name, log):
+def run_case(export_dir, name, log, stokes=False):
     fam, n, fld, mode, nsteps, opt = case_table()[name]
     t_start = time.time()
     m = ar.Mesh(export_dir, mesh_name(fam, n))
     rho = opt.get('rho', 1.0)
     nu = 0.01
     st = Stepper(m, rho=rho, nu=nu, upwind=opt.get('upwind', 1.0),
-                 pred_rtol=opt.get('pred_rtol', PREDICTOR_RTOL))
+                 pred_rtol=opt.get('pred_rtol', PREDICTOR_RTOL), transport=not stokes)
     t_setup = time.time() - t_start
     # time step: flux Courant number 0.4 of the start field (Taylor-Green for the fields at rest), rounded so that
     # an integer number of steps reaches t = 1; the same rule at every resolution
@@ -522,6 +523,11 @@ def run_case(export_dir, name, log):
         e = U - FIELDS[fld](m.pos, nu, tau * nst)
         dec = {'tg': np.exp(-2.0 * nu * TWO_PI ** 2 * tau * nst), 'abc': np.exp(-nu * TWO_PI ** 2 * tau * nst)}[fld]
         out['err'] = np.sqrt(np.sum(m.V[:, None] * e ** 2)) / norm0 / dec
+        ex = FIELDS[fld](m.pos, nu, tau * nst)
+        ee = np.sum(m.V[:, None] * ex ** 2)
+        out['err_par'] = np.sum(m.V[:, None] * e * ex) / ee * np.sqrt(ee) / norm0 / dec
+        out['err_perp'] = np.sqrt(max(out['err'] ** 2 - out['err_par'] ** 2, 0.0))
+    out['stokes'] = int(stokes)
     if fld == 'unif':
         out['unif_dev'] = S['unif_dev']
     if opt.get('force') in ('psi_face', 'psi_cell'):
@@ -717,6 +723,7 @@ def main():
     a.add_argument('export_dir')
     a.add_argument('case')
     a.add_argument('--log')
+    a.add_argument('--stokes', action='store_true')
     j = sub.add_parser('judge')
     j.add_argument('log_dir')
     sub.add_parser('cases')
@@ -742,7 +749,7 @@ def main():
             fh.write(s + '\n')
             fh.flush()
 
-    run_case(args.export_dir, args.case, log)
+    run_case(args.export_dir, args.case, log, stokes=args.stokes)
     return 0
 
 

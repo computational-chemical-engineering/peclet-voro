@@ -31,11 +31,12 @@
  * .p0), rebuilds the frame of its mesh from DIR, runs K steps at the tight tolerances (predictor
  * 1e-13, Laplacian 1e-12) and writes ODIR/CASE.dev_{Ustar,F,U,p}_k and ODIR/CASE.dev_scalars.
  *
- *  test_ale_stepper --run CASE [--steps K] [--courant C] [--default-tol]   the runs of gate G1.2
- * R0–R6 and T, at the default tolerances of §4.9 (C: the flux Courant number of the time step, 0.4
- * by default): one RESULT line with the keys of the reference's run_case (and a
- * few more), timings per stage. Cases: <tg|abc>_<Z|W><n>_<F|R>, r0_<zero|unif>_<F|R> (W 8³),
- * r3_tg_W16_F (2000 steps), r3_tg_W32_F (500 steps), r6i_W16, r6ii_rest_W16, r6ii_tg_W16.
+ *  test_ale_stepper --run CASE [--steps K] [--courant C] [--default-tol] [--stokes]   the runs of
+ * gate G1.2 R0–R6 and T (--stokes: the transport switched off, same τ and steps), at the default
+ * tolerances of §4.9 (C: the flux Courant number of the time step, 0.4 by default): one RESULT line
+ * with the keys of the reference's run_case (and a few more), timings per stage. Cases:
+ * <tg|abc>_<Z|W><n>_<F|R>, r0_<zero|unif>_<F|R> (W 8³), r3_tg_W16_F (2000 steps), r3_tg_W32_F (500
+ * steps), r6i_W16, r6ii_rest_W16, r6ii_tg_W16.
  */
 #include <algorithm>
 #include <chrono>
@@ -685,7 +686,7 @@ struct Stats {
   double Bsum[11] = {0};
 };
 
-int runCase(const std::string& name, int stepsOverride, bool tight, double courant) {
+int runCase(const std::string& name, int stepsOverride, bool tight, double courant, bool stokes) {
   RunSpec r;
   if (!parseCase(name, r)) {
     std::printf("RESULT case=%s status=UNKNOWN_CASE\n", name.c_str());
@@ -700,6 +701,7 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
   ale::FrameData<Real> fd;
   ale::setupFrame(fd, m, fl.rho, fl.mu);
   ale::StepOptions opt;
+  opt.transport = !stokes;
   if (tight) {
     opt.predictorRtol = 1e-13;
     opt.laplacianRtol = 1e-12;
@@ -916,18 +918,25 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
     << " mu_exact=" << muEx << " maxU=" << S.maxU << " K0=" << K0 << " K1=" << Kprev;
   if (r.mode == ale::Projection::Damped)
     o << " omega_mu=" << S.omegaMu << " mu_ratio=" << S.muRatio << " mu_samples=" << S.muSamples;
+  double parOut = 0, perpOut = 0;
   if (r.field == "tg" || r.field == "abc") {
     const auto Uh = down(st.U);
     const auto ex = fieldOf(r.field, xh, N, nu, tau * nst);
     const double dec = r.field == "tg" ? std::exp(-2.0 * nu * kTwoPi * kTwoPi * tau * nst)
                                        : std::exp(-nu * kTwoPi * kTwoPi * tau * nst);
-    double e = 0;
+    double e = 0, ue = 0, ee = 0;
     for (int i = 0; i < N; ++i)
       for (int d = 0; d < 3; ++d) {
         const double q = Uh[3 * i + d] - ex[3 * i + d];
         e += Vh[i] * q * q;
+        ue += Vh[i] * q * ex[3 * i + d];
+        ee += Vh[i] * (double)ex[3 * i + d] * ex[3 * i + d];
       }
-    o << " err=" << std::sqrt(e) / norm0 / dec;
+    const double err = std::sqrt(e) / norm0 / dec;
+    const double errPar = (ue / ee) * std::sqrt(ee) / norm0 / dec;
+    o << " err=" << err;
+    parOut = errPar;
+    perpOut = std::sqrt(std::max(err * err - errPar * errPar, 0.0));
   }
   if (r.field == "unif")
     o << " unif_dev=" << S.unifDev;
@@ -939,6 +948,9 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
     o << " gt_dev=" << S.gtDev << " mean_dev=" << S.meanDev
       << " mean_dev_booked=" << S.meanDevBooked;
   o << " courant=" << courant;
+  if (r.field == "tg" || r.field == "abc")
+    o << " err_par=" << parOut << " err_perp=" << perpOut;
+  o << " stokes=" << (stokes ? 1 : 0);
   const char* bn[11] = {"B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8a", "B8b", "B9", "Bres"};
   std::printf("TERMS %s run_sum", name.c_str());
   for (int q = 0; q < 11; ++q)
@@ -1021,7 +1033,7 @@ int main(int argc, char** argv) {
     std::string applyDir, outDir, which = "all", runCaseName, traceDir, traceCaseName;
     int cells = 16, lapN = 0, steps = -1;
     double courant = 0.4;
-    bool tight = false;
+    bool tight = false, stokes = false;
     for (int a = 1; a < argc; ++a) {
       const std::string s = argv[a];
       if (s == "--apply" && a + 1 < argc)
@@ -1045,6 +1057,8 @@ int main(int argc, char** argv) {
         courant = std::atof(argv[++a]);
       else if (s == "--tight")
         tight = true;
+      else if (s == "--stokes")
+        stokes = true;
     }
     if (!applyDir.empty()) {
       if (outDir.empty())
@@ -1056,7 +1070,7 @@ int main(int argc, char** argv) {
     } else if (lapN > 0) {
       rc = laplacianGate(lapN);
     } else if (!runCaseName.empty()) {
-      rc = runCase(runCaseName, steps, tight, courant);
+      rc = runCase(runCaseName, steps, tight, courant, stokes);
     } else if (!traceDir.empty()) {
       if (outDir.empty())
         outDir = traceDir;
