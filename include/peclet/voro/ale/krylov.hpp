@@ -147,6 +147,8 @@ struct PcgTest {
   Real atol = 0;    ///< |r|₂ ≤ atol
   Real maxTol = 0;  ///< max_i |r_i| w_i ≤ maxTol
   DV<Real> weight;  ///< w of the max test (empty: 1)
+  /// The tests are not applied before this many iterations (0: also to the initial residual).
+  int minIterations = 0;
 };
 
 /// Scratch of `pcg` (sized on first use, reallocated when n grows).
@@ -202,7 +204,7 @@ SolveReport pcg(const Operator<Real>& A, const Operator<Real>& M, const DV<Real>
   };
   Real rn = norm2(r, n);
   rep.residual0 = rep.residual = rn;
-  if (rn == Real(0) || done(rn)) {
+  if (rn == Real(0) || (test.minIterations <= 0 && done(rn))) {
     rep.converged = true;
     if (deflate)
       removeMean(x, n);
@@ -226,7 +228,7 @@ SolveReport pcg(const Operator<Real>& A, const Operator<Real>& M, const DV<Real>
     rep.iterations = it + 1;
     rn = norm2(r, n);
     rep.residual = rn;
-    if (done(rn)) {
+    if (rep.iterations >= test.minIterations && done(rn)) {
       rep.converged = true;
       break;
     }

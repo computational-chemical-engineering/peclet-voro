@@ -338,13 +338,17 @@ class MovingStepper {
       detail::compactCorrect(mh, fh.aFace, mm.psi, phiM_);
       ale::divergence(mh, phiM_, ws.tN);
       rep.gcl = detail::gclDefect(nc, ws.tN, dV_, mh.cellVolume, tau);
-      // the true measure above the bar: solve for the true residual from zero, add the correction
+      // the true measure above the bar: solve for the true residual from zero, add the correction.
+      // The solver's own measure of that residual (τ|D_i − dV_i/τ|·(1/V_i), another rounding of
+      // the same difference) may already pass compactTol, so a restart takes at least one step.
+      krylov::PcgTest<Real> again = test;
+      again.minIterations = 1;
       for (int r = 0; r < kMaxSweptRestarts && rep.gcl > opt.compactTol; ++r) {
         Kokkos::deep_copy(Kokkos::subview(ws.b, std::make_pair(0, nc)),
                           Kokkos::subview(ws.tN, std::make_pair(0, nc)));
         detail::sweptRhs(nc, ws.b, dV_, tau);
         Kokkos::deep_copy(dpsi_, Real(0));
-        const krylov::SolveReport sr = fh.solver.solve(ws.b, dpsi_, test);
+        const krylov::SolveReport sr = fh.solver.solve(ws.b, dpsi_, again);
         rep.swept.iterations += sr.iterations;
         rep.swept.applications += sr.applications;
         rep.swept.residual = sr.residual;
