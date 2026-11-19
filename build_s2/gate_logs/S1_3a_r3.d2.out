@@ -1,0 +1,3 @@
+D2 RESULT case=tg_Z64_F status=DONE N=262144 tau=2.666667e-03 steps=375 t=1.000000e+00 closure=3.964658e-18 mom=1.533392e-13 mom_booked=1.008057e-17 divPhi1=1.005504e-14 divF=1.708085e-13 cfl=3.759916e-01 excess=-4.197625e-03 pred_its_mean=5.486933e+01 pred_apps_mean=5.815733e+01 pred_apps_max=9.300000e+01 pred_res=8.925584e-13 projR_its_mean=1.136267e+01 projR_its_max=1.400000e+01 s3_its_mean=1.8498
+ctest host: 100% tests passed, 0 tests failed out of 4 gpu: 100% tests passed, 0 tests failed out of 4
+EXIT

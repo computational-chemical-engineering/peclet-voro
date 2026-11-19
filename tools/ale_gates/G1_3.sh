@@ -116,7 +116,9 @@ if [[ $JUDGE_ONLY -eq 0 ]]; then
     else
       for f2 in tg_Z32_F.1 tg_Z32_F.2 tg_Z32_F.3 abc_Z32_F.1 tg_Z64_F.1; do
         mkdir -p "$L/$P.f2.$f2.dump"
-        run gpu "f2.$f2" --run "${f2%.*}" --motion follow --tend 1 --dump-on-error "$L/$P.f2.$f2.dump"
+        # --window 6 (brief ALE_S1_3A_R3): the follow mesh at 64^3 has cells with 2 r_max = 4.70 h,
+        # beyond the default gather window of 4 blocks (kIncomplete, a missed neighbour pair)
+        run gpu "f2.$f2" --run "${f2%.*}" --motion follow --tend 1 --window 6 --dump-on-error "$L/$P.f2.$f2.dump"
         rmdir "$L/$P.f2.$f2.dump" 2>/dev/null
       done
       # H: one 64^3 frame after follow motion, then the GPU cold builds of it and of the four dumps

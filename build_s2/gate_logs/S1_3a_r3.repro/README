@@ -19,3 +19,10 @@ Cause: the cold build gathers candidates within kSearchWindow = 4 blocks (includ
 passed as `sw` to MovingTessellation::alloc by the tests); a cell with 2 r_max >= 4 blocks is flagged kIncomplete
 (include/peclet/voro/tessellator.hpp:417, 464-465, covSq at :704) in MovingTessellation::lastStatus / report()
 (include/peclet/voro/repair.hpp:164-178, 312), which ale/frame.hpp does not read.
+
+Cure (option, no engine change): --window 6 for the follow runs (tools/ale_gates/G1_3.sh F2). Rerun of
+tg_Z64_F --motion follow --tend 1 --window 6 on the GPU: DONE, 375 steps, gcl 9.93e-15, open_max 3.17e-13,
+closure 3.96e-18, mom_booked 1.01e-17 (../S1_3a_r3.d2.tg_Z64_F.gpu.log). Time per frame, host 8 threads, load 47-50
+(test_ale_frame N --part g --time --window W, ../S1_3a_r3.time.n*.w*.host.log): 32^3 w4 314-341 ms, w6 314-317 ms;
+64^3 w4 2394-2465 ms, w6 2381-2435 ms: no difference above the noise. The window is not bitwise inert:
+--part g at 32^3 rebuilt 866134 cells at w6 against 866136 at w4 (rounding-level differences).
