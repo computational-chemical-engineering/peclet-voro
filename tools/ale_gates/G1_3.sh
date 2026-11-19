@@ -21,9 +21,18 @@
 #         verdicts of its B and C lines equal to the record build_s2/gate_logs/S1_2c.G1_2.out.
 #   S     --run tg_Z16_F (no --motion), host: tau, steps, err character for character those of
 #         build_s2/gate_logs/S1_2b.run.tg_Z16_F.host.log.
-#   F2    (GPU) --motion follow --tend 1: tg_Z32_F three times, abc_Z32_F once, tg_Z64_F once (brief ALE_S1_3A_R):
-#         status DONE in all five, gcl <= 1e-14; rounds_max and cold_frames reported (--dump-on-error: a frame error
+#   F2    (GPU) --motion follow --tend 1: tg_Z32_F three times, abc_Z32_F once, tg_Z64_F once (brief ALE_S1_3A_R;
+#         criteria of S1.3a-r2, docs/ale_design.md §11 A21): status DONE in all five, gcl <= 1e-14,
+#         open_max <= 1e-9 (kClosureErrorFrac), closure <= 1e-13 K and mom_booked <= 1e-13 sum M|U| in each;
+#         open_tol, open_max, onesided_max, rounds_max and cold_frames reported (--dump-on-error: a frame error
 #         leaves its reproduction in <PREFIX>.f2.<run>.dump/).
+#   H     (GPU, A21: the reading "what stays open is rounding") tg_Z64_F --motion follow --tend 0.25
+#         --dump-final <PREFIX>.H.tg_Z64_F.dump (its last frame), then test_ale_frame --replay --repeat 1 on it and on
+#         the four dumps S1_3a_r.repro/gpu64_{1,2}, S1_3a_r.f2.{abc_Z32_F,tg_Z64_F}.1.dump (the GPU cold build of
+#         each target: REPLAYTAILCELL), then tools/ale_gates/H_rounding.py: every cell above 2.5e-14 has q < 1e-2
+#         on its worst facet and closure * q / eps <= 1 (table in <PREFIX>.H.log). INFO: the rounds of the replayed
+#         target of gpu64_2 (early stop) against the 8 of the cap; time per frame of test_ale_frame 32 --part g
+#         --time (host, 8 threads) with uptime.
 #   INFO  (GPU) err of tg_Z16_F, tg_Z32_F with --motion follow, prescribed and static at --tend 0.5 and 1; the wall
 #         time per step and its split at 32^3 (follow, t = 0.5); uptime and GPU load at the start and the end.
 # GPU work runs under `flock -w 3600` on the shared heavy.lock; the host runs beside it. Prints one line per
@@ -102,11 +111,21 @@ if [[ $JUDGE_ONLY -eq 0 ]]; then
     done
     if [[ $be == host ]]; then
       run host S.tg_Z16_F --run tg_Z16_F
+      { uptime; OMP_NUM_THREADS=8 "$B/tests/kokkos/test_ale_frame" 32 --part g --time; uptime; } \
+        > "$L/$P.H.frame_time.host.log" 2>&1
     else
       for f2 in tg_Z32_F.1 tg_Z32_F.2 tg_Z32_F.3 abc_Z32_F.1 tg_Z64_F.1; do
         mkdir -p "$L/$P.f2.$f2.dump"
         run gpu "f2.$f2" --run "${f2%.*}" --motion follow --tend 1 --dump-on-error "$L/$P.f2.$f2.dump"
         rmdir "$L/$P.f2.$f2.dump" 2>/dev/null
+      done
+      # H: one 64^3 frame after follow motion, then the GPU cold builds of it and of the four dumps
+      mkdir -p "$L/$P.H.tg_Z64_F.dump"
+      run gpu H.tg_Z64_F --run tg_Z64_F --motion follow --tend 0.25 --dump-final "$L/$P.H.tg_Z64_F.dump"
+      for hd in "H.tg_Z64_F:$L/$P.H.tg_Z64_F.dump" "gpu64_1:$L/S1_3a_r.repro/gpu64_1" "gpu64_2:$L/S1_3a_r.repro/gpu64_2" \
+                "abc_Z32_F.1:$L/S1_3a_r.f2.abc_Z32_F.1.dump" "tg_Z64_F.1:$L/S1_3a_r.f2.tg_Z64_F.1.dump"; do
+        OMP_NUM_THREADS=8 gpu "$C/tests/kokkos/test_ale_frame" --replay "${hd#*:}" --repeat 1 \
+          > "$L/$P.H.replay.${hd%%:*}.gpu.log" 2>&1
       done
       for cs in tg_Z16_F tg_Z32_F; do
         for te in 0.5 1; do
@@ -135,6 +154,13 @@ if [[ $JUDGE_ONLY -eq 0 ]]; then
   fi
   if [[ $G12 -eq 1 ]]; then
     bash tools/ale_gates/G1_2.sh --no-runs > "$L/$P.G1_2.out" 2>&1
+  fi
+  if [[ $GPU -eq 1 ]]; then
+    python tools/ale_gates/H_rounding.py "H.tg_Z64_F:$L/$P.H.tg_Z64_F.dump:$L/$P.H.replay.H.tg_Z64_F.gpu.log" \
+      "gpu64_1:$L/S1_3a_r.repro/gpu64_1:$L/$P.H.replay.gpu64_1.gpu.log" \
+      "gpu64_2:$L/S1_3a_r.repro/gpu64_2:$L/$P.H.replay.gpu64_2.gpu.log" \
+      "abc_Z32_F.1:$L/S1_3a_r.f2.abc_Z32_F.1.dump:$L/$P.H.replay.abc_Z32_F.1.gpu.log" \
+      "tg_Z64_F.1:$L/S1_3a_r.f2.tg_Z64_F.1.dump:$L/$P.H.replay.tg_Z64_F.1.gpu.log" > "$L/$P.H.log" 2>&1
   fi
 fi
 
@@ -310,12 +336,37 @@ if gpu:
     for f2 in ('tg_Z32_F.1', 'tg_Z32_F.2', 'tg_Z32_F.3', 'abc_Z32_F.1', 'tg_Z64_F.1'):
         r = runs['gpu'].get(f'f2.{f2}') or {}
         st, g = r.get('status'), num(r, 'gcl')
-        ok = ok and st == 'DONE' and g <= 1e-14
+        om, cl, mb = num(r, 'open_max'), num(r, 'closure'), num(r, 'mom_booked')
+        ok = ok and st == 'DONE' and g <= 1e-14 and om <= 1e-9 and cl <= 1e-13 and mb <= 1e-13
         txt.append(f"{f2} {st}" + (f" step={r.get('step')} {r.get('what', '')}" if st != 'DONE' else
-                                  f" steps={r.get('steps')} gcl={g:.2e} rounds_max={num(r, 'rounds_max'):.0f} "
+                                  f" steps={r.get('steps')} gcl={g:.2e} open_max={om:.2e} closure={cl:.2e} "
+                                  f"mom_booked={mb:.2e} open_tol={num(r, 'open_tol'):.0f} "
+                                  f"onesided_max={num(r, 'onesided_max'):.2e} rounds_max={num(r, 'rounds_max'):.0f} "
                                   f"cold_frames={num(r, 'cold_frames'):.0f}"))
-    say(f"F2 {'PASS' if ok else 'FAIL'} {'; '.join(txt)} (GPU, follow, t = 1: DONE, gcl<=1e-14; cold_fallbacks=0: "
-        f"no cold fallback in the frame pipeline)")
+    say(f"F2 {'PASS' if ok else 'FAIL'} {'; '.join(txt)} (GPU, follow, t = 1: DONE, gcl<=1e-14, open_max<=1e-9, "
+        f"closure<=1e-13 K, mom_booked<=1e-13 sum M|U|)")
+
+# H
+if gpu:
+    p = os.path.join(L, f'{P}.H.log')
+    lines = open(p).read().splitlines() if os.path.exists(p) else []
+    fin = [ln for ln in lines if ln.startswith('H ')]
+    good = bool(fin) and fin[-1].split()[1] == 'PASS'
+    r = result('H.tg_Z64_F', 'gpu') or {}
+    cases = '; '.join(ln[6:] for ln in lines if ln.startswith('HCASE'))
+    say(f"H {'PASS' if good else 'FAIL'} {fin[-1][2:] if fin else 'missing'} [{cases}] (64^3 frame: last frame of "
+        f"tg_Z64_F follow t={r.get('t')} steps={r.get('steps')} status={r.get('status')} open_max={num(r, 'open_max'):.2e}; "
+        f"table in {P}.H.log)")
+    p = os.path.join(L, f'{P}.H.replay.gpu64_2.gpu.log')
+    tl = [ln.strip() for ln in open(p) if ln.startswith(('REPLAYTARGET', 'REPLAYMORE'))] if os.path.exists(p) else []
+    rt = [ln for ln in tl if ln.startswith('REPLAYTARGET')]
+    rounds = int(re.search(r'rounds=(\d+)', rt[-1]).group(1)) if rt else -1
+    say(f"INFO early stop, replay of gpu64_2 (GPU): target rounds={rounds} of the cap 8 (saved {8 - rounds}) [{' | '.join(tl)}]")
+p = os.path.join(L, f'{P}.H.frame_time.host.log')
+if os.path.exists(p):
+    ft = open(p).read().splitlines()
+    say('INFO time per frame test_ale_frame 32 --part g --time (host, 8 threads): ' +
+        ' | '.join(ln.strip() for ln in ft if ln.startswith('TIME') or 'load average' in ln))
 
 # S
 r = runs['host'].get('S.tg_Z16_F')

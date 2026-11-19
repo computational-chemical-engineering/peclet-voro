@@ -1,0 +1,18 @@
+REPLAYMETA tg_Z64_F exec=Cuda threads=129024
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=40183 numRoundRebuilt=1492 open=0 oneSided=0 empty=0 open_per_publish=1386,95,0, forced_per_round=1397,95,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=122912 numRoundRebuilt=872 open=0 oneSided=0 empty=0 open_per_publish=837,30,0, forced_per_round=842,30,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=165510 numRoundRebuilt=670 open=0 oneSided=0 empty=0 open_per_publish=613,50,0, forced_per_round=620,50,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=150624 numRoundRebuilt=714 open=0 oneSided=0 empty=0 open_per_publish=689,20,0, forced_per_round=694,20,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=50346 numRoundRebuilt=1369 open=0 oneSided=0 empty=0 open_per_publish=1289,70,0, forced_per_round=1299,70,
+REPLAYFRAME q=6 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=1 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=1 open=1 oneSided=0 empty=0 open_per_publish=1,1, forced_per_round=1,
+REPLAYTARGET rounds=1 open=1 tolerated=1 maxOpenFrac=1.0380e-13 maxNonRecipArea/h2=0.000e+00 error=0
+REPLAYOPEN cell=210569 own_rel=8.205e-17 dis_rel=1.037e-13 worst_nbr=210570 worst_rel=6.536e-14 facets=14 nonrecip=0
+REPLAYMORE rounds_total=8 open_per_publish=1,1,1,1,1,1,1,1,
+REPLAYCOLD cell=210569 own_rel=8.619e-17 dis_rel=1.037e-13 worst_nbr=210570 worst_rel=6.536e-14 facets=14 nonrecip=0
+REPLAYTAIL cold cells=262144 above_2.5e-14=4 above_5e-14=4 above_1e-13=1 max=1.0383e-13 at cell 210569
+REPLAYTAILCELL cold cell=206473 closure_rel=7.017418e-14 own_rel=3.3611e-17 dis_rel=7.0141e-14 worst_nbr=210569 worst_rel=4.1400e-14 facets=14 nonrecip=0
+REPLAYTAILCELL cold cell=206474 closure_rel=5.757872e-14 own_rel=3.2857e-17 dis_rel=5.7546e-14 worst_nbr=210570 worst_rel=3.0111e-14 facets=12 nonrecip=0
+REPLAYTAILCELL cold cell=210569 closure_rel=1.038346e-13 own_rel=8.6195e-17 dis_rel=1.0375e-13 worst_nbr=210570 worst_rel=6.5363e-14 facets=14 nonrecip=0
+REPLAYTAILCELL cold cell=210570 closure_rel=9.531028e-14 own_rel=4.9509e-17 dis_rel=9.5261e-14 worst_nbr=210569 worst_rel=6.5778e-14 facets=15 nonrecip=0
+REPLAY reproduced=1/1 target_rounds_max=1 continued_rounds_max=8 unclosed_after_8=1 cold_open=1 target_empty_or_one_sided=0/1

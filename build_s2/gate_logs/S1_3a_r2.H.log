@@ -1,0 +1,18 @@
+HCASE H.tg_Z64_F PASS cells_above_2.5e-14=0 N=262144
+HCASE gpu64_1 PASS cells_above_2.5e-14=0 N=262144
+HCELL gpu64_2 cell=206473 closure=7.017e-14 worst_nbr=210569 worst_rel=4.140e-14 facet_vertices=7 q_min=1.415e-04 defect_q_over_eps=4.471e-02 ok
+HCELL gpu64_2 cell=206474 closure=5.758e-14 worst_nbr=210570 worst_rel=3.011e-14 facet_vertices=7 q_min=1.415e-04 defect_q_over_eps=3.669e-02 ok
+HCELL gpu64_2 cell=210569 closure=1.038e-13 worst_nbr=210570 worst_rel=6.536e-14 facet_vertices=7 q_min=1.415e-04 defect_q_over_eps=6.616e-02 ok
+HCELL gpu64_2 cell=210570 closure=9.531e-14 worst_nbr=210569 worst_rel=6.578e-14 facet_vertices=7 q_min=1.415e-04 defect_q_over_eps=6.073e-02 ok
+HCASE gpu64_2 PASS cells_above_2.5e-14=4 N=262144
+HCELL abc_Z32_F.1 cell=21450 closure=1.252e-13 worst_nbr=23500 worst_rel=9.117e-14 facet_vertices=8 q_min=2.657e-05 defect_q_over_eps=1.499e-02 ok
+HCELL abc_Z32_F.1 cell=21483 closure=7.638e-14 worst_nbr=21450 worst_rel=4.724e-14 facet_vertices=6 q_min=2.657e-05 defect_q_over_eps=9.142e-03 ok
+HCELL abc_Z32_F.1 cell=22508 closure=8.212e-14 worst_nbr=23500 worst_rel=5.599e-14 facet_vertices=9 q_min=2.657e-05 defect_q_over_eps=9.829e-03 ok
+HCELL abc_Z32_F.1 cell=23500 closure=1.600e-13 worst_nbr=21450 worst_rel=1.069e-13 facet_vertices=8 q_min=2.657e-05 defect_q_over_eps=1.915e-02 ok
+HCASE abc_Z32_F.1 PASS cells_above_2.5e-14=4 N=32768
+HCELL tg_Z64_F.1 cell=47091 closure=9.049e-14 worst_nbr=51188 worst_rel=7.707e-14 facet_vertices=6 q_min=1.231e-04 defect_q_over_eps=5.017e-02 ok
+HCELL tg_Z64_F.1 cell=47092 closure=2.977e-14 worst_nbr=51190 worst_rel=1.990e-14 facet_vertices=8 q_min=1.231e-04 defect_q_over_eps=1.650e-02 ok
+HCELL tg_Z64_F.1 cell=51188 closure=1.972e-13 worst_nbr=51190 worst_rel=1.017e-13 facet_vertices=6 q_min=1.231e-04 defect_q_over_eps=1.094e-01 ok
+HCELL tg_Z64_F.1 cell=51190 closure=8.462e-14 worst_nbr=51188 worst_rel=6.345e-14 facet_vertices=6 q_min=1.231e-04 defect_q_over_eps=4.691e-02 ok
+HCASE tg_Z64_F.1 PASS cells_above_2.5e-14=4 N=262144
+H PASS cases=5 cells=12 misses=0 (q_min < 0.01 on the worst facet and closure * q_min / eps <= 1, eps = 2.22e-16)

@@ -1,0 +1,14 @@
+Internal ctest changing into directory: /home/frankp/Codes/suite/voro-ale-s0/build_s2
+Test project /home/frankp/Codes/suite/voro-ale-s0/build_s2
+    Start  8: test_ale_facemesh
+1/4 Test  #8: test_ale_facemesh ................   Passed    0.69 sec
+    Start  9: test_ale_frame
+2/4 Test  #9: test_ale_frame ...................   Passed   10.27 sec
+    Start 10: test_ale_operators
+3/4 Test #10: test_ale_operators ...............   Passed    0.11 sec
+    Start 11: test_ale_stepper
+4/4 Test #11: test_ale_stepper .................   Passed    0.25 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =  11.33 sec

@@ -1,0 +1,31 @@
+## RUN tg_Z64_F mesh=Z64 N=262144 F=2022841 field=tg mode=F rho=1 nu=0.01 tau=2.666667e-03 steps=375 courant_start=0.3992 beta=0.1092 mu_exact=1.013718 exact_proj_its=101 setup=6.94s frame_setup=0.104s exec=Cuda threads=129024 tight=0
+first_step omega=1.000000 mu_hat=0.956604 lambda=0.956604 pred_apps=12 S3_its=18 S5_its=12 S6_its=13 mu_its=58
+DUMP dir=/home/frankp/Codes/suite/voro-ale-s0/build_s2/gate_logs/S1_3a_r2.f2.tg_Z64_F.1.dump frame=Fh step=150 rounds=1 route=2 fellBack=0 pass1=0 pass2=0 numRebuilt=262144 numRoundRebuilt=5 open_per_publish=5,5, forced_per_round=5,
+OPEN cell=1994 own=2.138e-19 dis=2.759e-06 sum=2.895816e-03 own_rel=7.382e-17 dis_rel=9.528e-04 bar=2.896e-16 worst_nbr=2106 worst_rel=7.221e-04 facets=22 nonrecip=0
+OPEN cell=2106 own=1.608e-19 dis=4.225e-06 sum=2.959962e-03 own_rel=5.434e-17 dis_rel=1.427e-03 bar=2.960e-16 worst_nbr=1994 worst_rel=7.064e-04 facets=24 nonrecip=0
+OPEN cell=6191 own=1.368e-19 dis=2.810e-06 sum=3.268324e-03 own_rel=4.185e-17 dis_rel=8.599e-04 bar=3.268e-16 worst_nbr=10177 worst_rel=4.695e-04 facets=25 nonrecip=0
+OPEN cell=10177 own=3.101e-19 dis=3.362e-06 sum=2.694611e-03 own_rel=1.151e-16 dis_rel=1.248e-03 bar=2.695e-16 worst_nbr=6191 worst_rel=5.695e-04 facets=21 nonrecip=0
+OPEN cell=10244 own=1.613e-19 dis=2.017e-06 sum=2.167374e-03 own_rel=7.442e-17 dis_rel=9.305e-04 bar=2.167e-16 worst_nbr=10177 worst_rel=5.349e-04 facets=22 nonrecip=0
+OPENFORCED cell=1994 round=1 cell_forced=1 worst_nbr_forced=1 nbrs_forced=4/22
+OPENFORCED cell=2106 round=1 cell_forced=1 worst_nbr_forced=1 nbrs_forced=3/24
+OPENFORCED cell=6191 round=1 cell_forced=1 worst_nbr_forced=1 nbrs_forced=4/25
+OPENFORCED cell=10177 round=1 cell_forced=1 worst_nbr_forced=1 nbrs_forced=3/21
+OPENFORCED cell=10244 round=1 cell_forced=1 worst_nbr_forced=1 nbrs_forced=4/22
+MORE rounds_total=8 open_per_publish=5,5,5,5,5,5,5,5, forced_per_round=5,5,5,5,5,5,5, oneSided=0 empty=0
+MOREOPEN cell=1994 own=2.138e-19 dis=2.759e-06 sum=2.895816e-03 own_rel=7.382e-17 dis_rel=9.528e-04 bar=2.896e-16 worst_nbr=2106 worst_rel=7.221e-04 facets=22 nonrecip=0
+MOREOPEN cell=2106 own=1.608e-19 dis=4.225e-06 sum=2.959962e-03 own_rel=5.434e-17 dis_rel=1.427e-03 bar=2.960e-16 worst_nbr=1994 worst_rel=7.064e-04 facets=24 nonrecip=0
+MOREOPEN cell=6191 own=1.368e-19 dis=2.810e-06 sum=3.268324e-03 own_rel=4.185e-17 dis_rel=8.599e-04 bar=3.268e-16 worst_nbr=10177 worst_rel=4.695e-04 facets=25 nonrecip=0
+MOREOPEN cell=10177 own=3.101e-19 dis=3.362e-06 sum=2.694611e-03 own_rel=1.151e-16 dis_rel=1.248e-03 bar=2.695e-16 worst_nbr=6191 worst_rel=5.695e-04 facets=21 nonrecip=0
+MOREOPEN cell=10244 own=1.613e-19 dis=2.017e-06 sum=2.167374e-03 own_rel=7.442e-17 dis_rel=9.305e-04 bar=2.167e-16 worst_nbr=10177 worst_rel=5.349e-04 facets=22 nonrecip=0
+COLD open=5
+COLDOPEN cell=1994 own=1.989e-19 dis=2.759e-06 sum=2.895816e-03 own_rel=6.868e-17 dis_rel=9.528e-04 bar=2.896e-16 worst_nbr=2106 worst_rel=7.221e-04 facets=22 nonrecip=0
+COLDOPEN cell=2106 own=2.196e-19 dis=4.225e-06 sum=2.959962e-03 own_rel=7.421e-17 dis_rel=1.427e-03 bar=2.960e-16 worst_nbr=1994 worst_rel=7.064e-04 facets=24 nonrecip=0
+COLDOPEN cell=6191 own=1.983e-19 dis=2.810e-06 sum=3.268324e-03 own_rel=6.066e-17 dis_rel=8.599e-04 bar=3.268e-16 worst_nbr=10177 worst_rel=4.695e-04 facets=25 nonrecip=0
+COLDOPEN cell=10177 own=3.101e-19 dis=3.362e-06 sum=2.694611e-03 own_rel=1.151e-16 dis_rel=1.248e-03 bar=2.695e-16 worst_nbr=6191 worst_rel=5.695e-04 facets=21 nonrecip=0
+COLDOPEN cell=10244 own=2.014e-19 dis=2.017e-06 sum=2.167374e-03 own_rel=9.293e-17 dis_rel=9.305e-04 bar=2.167e-16 worst_nbr=10177 worst_rel=5.349e-04 facets=22 nonrecip=0
+COLDCELL cell=1994 V_repair=1.0369925311957966e-05 V_cold=1.0369925311957966e-05 rel=0.000e+00
+COLDCELL cell=2106 V_repair=1.1679699228676344e-05 V_cold=1.1679699228676339e-05 rel=4.351e-16
+COLDCELL cell=6191 V_repair=1.2734175431114907e-05 V_cold=1.2734175431114904e-05 rel=2.661e-16
+COLDCELL cell=10177 V_repair=8.207026089817782e-06 V_cold=8.2070260898177803e-06 rel=2.064e-16
+COLDCELL cell=10244 V_repair=5.5767966674353008e-06 V_cold=5.5767966674353008e-06 rel=0.000e+00
+RESULT case=tg_Z64_F status=FRAME_ERROR step=150 motion=follow what="ale::MovingStepper: frame error in Fh: numEmptyCells=0 numOneSidedFacets=0 numOpenCells=5 numToleratedOpenCells=0 maxOpenFrac=1.427e-03"

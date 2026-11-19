@@ -1,0 +1,1 @@
+case=tg_Z64_F step=150 frame=Fh N=262144 L=1 h=0.015625 tol_h=1e-4 skin_h=0.25 chain=8 rounds=1 numOpenCells=5 numOneSidedFacets=0 numEmptyCells=0 numRebuilt=262144 numRoundRebuilt=5 route=2 fellBack=0 pass1=0 pass1Raw=31983 pass2=0 extra=0 verifyPasses=0 exec=Cuda threads=129024

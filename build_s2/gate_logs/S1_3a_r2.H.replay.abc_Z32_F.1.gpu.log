@@ -1,0 +1,17 @@
+REPLAYMETA abc_Z32_F exec=Cuda threads=129024
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=7316 numRoundRebuilt=196 open=0 oneSided=0 empty=0 open_per_publish=186,10,0, forced_per_round=186,10,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=14318 numRoundRebuilt=116 open=0 oneSided=0 empty=0 open_per_publish=105,10,0, forced_per_round=106,10,
+REPLAYFRAME q=3 rounds=1 route=0 fellBack=0 numRebuilt=21223 numRoundRebuilt=85 open=0 oneSided=0 empty=0 open_per_publish=84,0, forced_per_round=85,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=18883 numRoundRebuilt=97 open=0 oneSided=0 empty=0 open_per_publish=90,5,0, forced_per_round=92,5,
+REPLAYFRAME q=5 rounds=1 route=0 fellBack=0 numRebuilt=9172 numRoundRebuilt=155 open=0 oneSided=0 empty=0 open_per_publish=154,0, forced_per_round=155,
+REPLAYFRAME q=6 rounds=0 route=2 fellBack=0 numRebuilt=32768 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=1 route=2 fellBack=0 numRebuilt=32768 numRoundRebuilt=2 open=0 oneSided=0 empty=0 open_per_publish=2,0, forced_per_round=2,
+REPLAYTARGET rounds=1 open=0 tolerated=0 maxOpenFrac=9.4438e-14 maxNonRecipArea/h2=0.000e+00 error=0
+REPLAYCOLD cell=21450 own_rel=8.472e-17 dis_rel=1.252e-13 worst_nbr=23500 worst_rel=9.117e-14 facets=22 nonrecip=0
+REPLAYCOLD cell=23500 own_rel=4.590e-17 dis_rel=1.599e-13 worst_nbr=21450 worst_rel=1.069e-13 facets=19 nonrecip=0
+REPLAYTAIL cold cells=32768 above_2.5e-14=4 above_5e-14=4 above_1e-13=2 max=1.5995e-13 at cell 23500
+REPLAYTAILCELL cold cell=21450 closure_rel=1.252472e-13 own_rel=8.4719e-17 dis_rel=1.2516e-13 worst_nbr=23500 worst_rel=9.1170e-14 facets=22 nonrecip=0
+REPLAYTAILCELL cold cell=21483 closure_rel=7.637635e-14 own_rel=3.5788e-17 dis_rel=7.6341e-14 worst_nbr=21450 worst_rel=4.7244e-14 facets=14 nonrecip=0
+REPLAYTAILCELL cold cell=22508 closure_rel=8.211560e-14 own_rel=3.6586e-17 dis_rel=8.2079e-14 worst_nbr=23500 worst_rel=5.5987e-14 facets=21 nonrecip=0
+REPLAYTAILCELL cold cell=23500 closure_rel=1.599545e-13 own_rel=4.5902e-17 dis_rel=1.5991e-13 worst_nbr=21450 worst_rel=1.0691e-13 facets=19 nonrecip=0
+REPLAY reproduced=0/1 target_rounds_max=1 continued_rounds_max=0 unclosed_after_8=0 cold_open=2 target_empty_or_one_sided=0/1

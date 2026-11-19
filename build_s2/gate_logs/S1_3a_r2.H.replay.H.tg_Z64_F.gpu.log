@@ -1,0 +1,11 @@
+REPLAYMETA tg_Z64_F exec=Cuda threads=129024
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=36445 numRoundRebuilt=1399 open=0 oneSided=0 empty=0 open_per_publish=1273,120,0, forced_per_round=1279,120,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=94160 numRoundRebuilt=1069 open=0 oneSided=0 empty=0 open_per_publish=1024,40,0, forced_per_round=1029,40,
+REPLAYFRAME q=3 rounds=3 route=0 fellBack=0 numRebuilt=180028 numRoundRebuilt=516 open=2 oneSided=0 empty=0 open_per_publish=467,42,2,2, forced_per_round=472,42,2,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=133563 numRoundRebuilt=929 open=0 oneSided=0 empty=0 open_per_publish=862,60,0, forced_per_round=869,60,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=43557 numRoundRebuilt=1216 open=0 oneSided=0 empty=0 open_per_publish=1118,90,0, forced_per_round=1126,90,
+REPLAYFRAME q=6 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYTARGET rounds=0 open=0 tolerated=0 maxOpenFrac=1.0674e-14 maxNonRecipArea/h2=0.000e+00 error=0
+REPLAYTAIL cold cells=262144 above_2.5e-14=0 above_5e-14=0 above_1e-13=0 max=0.0000e+00 at cell -1
+REPLAY reproduced=0/1 target_rounds_max=0 continued_rounds_max=0 unclosed_after_8=0 cold_open=0 target_empty_or_one_sided=0/1
