@@ -1,0 +1,16 @@
+REPLAYMETA tg_W16_F exec=OpenMP threads=4
+REPLAYFRAME q=1 rounds=1 route=0 fellBack=0 numRebuilt=2124 numRoundRebuilt=25 open=0 oneSided=0 empty=0 open_per_publish=25,0, forced_per_round=25,
+REPLAYFRAME q=2 rounds=0 route=0 fellBack=0 numRebuilt=3823 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=3 rounds=1 route=0 fellBack=0 numRebuilt=2162 numRoundRebuilt=10 open=0 oneSided=0 empty=0 open_per_publish=10,0, forced_per_round=10,
+REPLAYFRAME q=4 rounds=0 route=0 fellBack=0 numRebuilt=3860 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=5 rounds=1 route=0 fellBack=0 numRebuilt=2325 numRoundRebuilt=5 open=0 oneSided=0 empty=0 open_per_publish=5,0, forced_per_round=5,
+REPLAYFRAME q=6 rounds=0 route=0 fellBack=0 numRebuilt=3808 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=2 route=0 fellBack=0 numRebuilt=2287 numRoundRebuilt=75 open=0 oneSided=28 empty=2 open_per_publish=14,0,0, forced_per_round=45,30,
+REPLAYFRAME q=1 rounds=1 route=0 fellBack=0 numRebuilt=2124 numRoundRebuilt=25 open=0 oneSided=0 empty=0 open_per_publish=25,0, forced_per_round=25,
+REPLAYFRAME q=2 rounds=0 route=0 fellBack=0 numRebuilt=3823 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=3 rounds=1 route=0 fellBack=0 numRebuilt=2162 numRoundRebuilt=10 open=0 oneSided=0 empty=0 open_per_publish=10,0, forced_per_round=10,
+REPLAYFRAME q=4 rounds=0 route=0 fellBack=0 numRebuilt=3860 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=5 rounds=1 route=0 fellBack=0 numRebuilt=2325 numRoundRebuilt=5 open=0 oneSided=0 empty=0 open_per_publish=5,0, forced_per_round=5,
+REPLAYFRAME q=6 rounds=0 route=0 fellBack=0 numRebuilt=3808 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=2 route=0 fellBack=0 numRebuilt=2287 numRoundRebuilt=75 open=0 oneSided=28 empty=2 open_per_publish=14,0,0, forced_per_round=45,30,
+REPLAY reproduced=0/2 target_rounds_max=2 continued_rounds_max=0 unclosed_after_8=0 cold_open=0

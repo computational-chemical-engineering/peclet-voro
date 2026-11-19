@@ -1,0 +1,12 @@
+## RUN tg_Z64_F mesh=Z64 N=262144 F=2022841 field=tg mode=F rho=1 nu=0.01 tau=2.666667e-03 steps=375 courant_start=0.3992 beta=0.1092 mu_exact=1.013718 exact_proj_its=101 setup=6.83s frame_setup=0.111s exec=Cuda threads=129024 tight=0
+first_step omega=1.000000 mu_hat=0.956604 lambda=0.956604 pred_apps=12 S3_its=18 S5_its=12 S6_its=13 mu_its=58
+DUMP dir=build_s2/gate_logs/S1_3a_r.repro/gpu64_2 frame=Fh step=58 rounds=2 route=0 fellBack=0 pass1=103880 pass2=62548 numRebuilt=166748 numRoundRebuilt=637 open_per_publish=589,41,1, forced_per_round=596,41,
+OPEN cell=210569 own=1.152e-19 dis=1.456e-16 sum=1.404671e-03 own_rel=8.205e-17 dis_rel=1.037e-13 bar=1.405e-16 worst_nbr=210570 worst_rel=6.531e-14 facets=14 nonrecip=0
+OPENFORCED cell=210569 round=1 cell_forced=1 worst_nbr_forced=0 nbrs_forced=0/14
+OPENFORCED cell=210569 round=2 cell_forced=1 worst_nbr_forced=0 nbrs_forced=0/14
+MORE rounds_total=8 open_per_publish=1,1,1,1,1,1,1, forced_per_round=1,1,1,1,1,1, oneSided=0 empty=0
+MOREOPEN cell=210569 own=1.152e-19 dis=1.456e-16 sum=1.404671e-03 own_rel=8.205e-17 dis_rel=1.037e-13 bar=1.405e-16 worst_nbr=210570 worst_rel=6.531e-14 facets=14 nonrecip=0
+COLD open=1
+COLDOPEN cell=210569 own=1.211e-19 dis=1.457e-16 sum=1.404671e-03 own_rel=8.619e-17 dis_rel=1.037e-13 bar=1.405e-16 worst_nbr=210570 worst_rel=6.536e-14 facets=14 nonrecip=0
+COLDCELL cell=210569 V_repair=3.6021347142215424e-06 V_cold=3.6021347142215424e-06 rel=0.000e+00
+RESULT case=tg_Z64_F status=FRAME_ERROR step=58 motion=follow what="ale::MovingStepper: frame error in Fh: numEmptyCells=0 numOneSidedFacets=0 numOpenCells=1"

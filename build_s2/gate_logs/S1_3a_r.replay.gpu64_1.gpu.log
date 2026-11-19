@@ -1,0 +1,23 @@
+REPLAYMETA tg_Z64_F exec=Cuda threads=129024
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=34000 numRoundRebuilt=1447 open=0 oneSided=0 empty=0 open_per_publish=1296,145,0, forced_per_round=1302,145,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=64386 numRoundRebuilt=1171 open=0 oneSided=0 empty=0 open_per_publish=1116,50,0, forced_per_round=1121,50,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=188581 numRoundRebuilt=547 open=0 oneSided=0 empty=0 open_per_publish=523,20,0, forced_per_round=527,20,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=111155 numRoundRebuilt=960 open=0 oneSided=0 empty=0 open_per_publish=888,65,0, forced_per_round=895,65,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=44155 numRoundRebuilt=1431 open=0 oneSided=0 empty=0 open_per_publish=1348,75,0, forced_per_round=1356,75,
+REPLAYFRAME q=6 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=33999 numRoundRebuilt=1444 open=0 oneSided=0 empty=0 open_per_publish=1298,140,0, forced_per_round=1304,140,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=64387 numRoundRebuilt=1171 open=0 oneSided=0 empty=0 open_per_publish=1116,50,0, forced_per_round=1121,50,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=188583 numRoundRebuilt=547 open=0 oneSided=0 empty=0 open_per_publish=523,20,0, forced_per_round=527,20,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=111156 numRoundRebuilt=960 open=0 oneSided=0 empty=0 open_per_publish=888,65,0, forced_per_round=895,65,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=44158 numRoundRebuilt=1428 open=0 oneSided=0 empty=0 open_per_publish=1350,70,0, forced_per_round=1358,70,
+REPLAYFRAME q=6 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=33999 numRoundRebuilt=1438 open=0 oneSided=0 empty=0 open_per_publish=1302,130,0, forced_per_round=1308,130,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=64384 numRoundRebuilt=1171 open=0 oneSided=0 empty=0 open_per_publish=1116,50,0, forced_per_round=1121,50,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=188580 numRoundRebuilt=547 open=0 oneSided=0 empty=0 open_per_publish=523,20,0, forced_per_round=527,20,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=111154 numRoundRebuilt=960 open=0 oneSided=0 empty=0 open_per_publish=888,65,0, forced_per_round=895,65,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=44156 numRoundRebuilt=1431 open=0 oneSided=0 empty=0 open_per_publish=1348,75,0, forced_per_round=1356,75,
+REPLAYFRAME q=6 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAY reproduced=0/3 target_rounds_max=0 continued_rounds_max=0 unclosed_after_8=0 cold_open=0 target_empty_or_one_sided=0/3

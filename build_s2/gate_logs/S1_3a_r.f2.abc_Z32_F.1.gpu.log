@@ -1,0 +1,41 @@
+## RUN abc_Z32_F mesh=Z32 N=32768 F=252638 field=abc mode=F rho=1 nu=0.01 tau=2.123142e-03 steps=471 courant_start=0.3994 beta=0.0217 mu_exact=1.008557 exact_proj_its=102 setup=1.91s frame_setup=0.111s exec=Cuda threads=129024 tight=0
+first_step omega=1.000000 mu_hat=0.957241 lambda=0.957241 pred_apps=8 S3_its=14 S5_its=10 S6_its=11 mu_its=58
+DUMP dir=/home/frankp/Codes/suite/voro-ale-s0/build_s2/gate_logs/S1_3a_r.f2.abc_Z32_F.1.dump frame=Fh step=249 rounds=8 route=0 fellBack=0 pass1=7346 pass2=1915 numRebuilt=9349 numRoundRebuilt=203 open_per_publish=167,18,3,3,3,3,3,3,3, forced_per_round=167,18,3,3,3,3,3,3,
+OPEN cell=21450 own=2.061e-19 dis=1.295e-15 sum=7.997306e-03 own_rel=2.577e-17 dis_rel=1.619e-13 bar=7.997e-16 worst_nbr=21483 worst_rel=1.254e-13 facets=22 nonrecip=0
+OPEN cell=21483 own=1.800e-19 dis=1.922e-15 sum=5.681955e-03 own_rel=3.167e-17 dis_rel=3.383e-13 bar=5.682e-16 worst_nbr=21450 worst_rel=1.766e-13 facets=14 nonrecip=0
+OPEN cell=22508 own=1.306e-19 dis=1.271e-15 sum=6.403317e-03 own_rel=2.039e-17 dis_rel=1.985e-13 bar=6.403e-16 worst_nbr=21483 worst_rel=1.431e-13 facets=21 nonrecip=0
+OPENFORCED cell=21450 round=1 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/22
+OPENFORCED cell=21450 round=2 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/22
+OPENFORCED cell=21450 round=3 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/22
+OPENFORCED cell=21450 round=4 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/22
+OPENFORCED cell=21450 round=5 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/22
+OPENFORCED cell=21450 round=6 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/22
+OPENFORCED cell=21450 round=7 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/22
+OPENFORCED cell=21450 round=8 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/22
+OPENFORCED cell=21483 round=1 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/14
+OPENFORCED cell=21483 round=2 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/14
+OPENFORCED cell=21483 round=3 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/14
+OPENFORCED cell=21483 round=4 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/14
+OPENFORCED cell=21483 round=5 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/14
+OPENFORCED cell=21483 round=6 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/14
+OPENFORCED cell=21483 round=7 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/14
+OPENFORCED cell=21483 round=8 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/14
+OPENFORCED cell=22508 round=1 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/21
+OPENFORCED cell=22508 round=2 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/21
+OPENFORCED cell=22508 round=3 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/21
+OPENFORCED cell=22508 round=4 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/21
+OPENFORCED cell=22508 round=5 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/21
+OPENFORCED cell=22508 round=6 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/21
+OPENFORCED cell=22508 round=7 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/21
+OPENFORCED cell=22508 round=8 cell_forced=1 worst_nbr_forced=1 nbrs_forced=2/21
+MORE rounds_total=8 open_per_publish=3, forced_per_round= oneSided=0 empty=0
+MOREOPEN cell=21450 own=2.061e-19 dis=1.295e-15 sum=7.997306e-03 own_rel=2.577e-17 dis_rel=1.619e-13 bar=7.997e-16 worst_nbr=21483 worst_rel=1.254e-13 facets=22 nonrecip=0
+MOREOPEN cell=21483 own=1.800e-19 dis=1.922e-15 sum=5.681955e-03 own_rel=3.167e-17 dis_rel=3.383e-13 bar=5.682e-16 worst_nbr=21450 worst_rel=1.766e-13 facets=14 nonrecip=0
+MOREOPEN cell=22508 own=1.306e-19 dis=1.271e-15 sum=6.403317e-03 own_rel=2.039e-17 dis_rel=1.985e-13 bar=6.403e-16 worst_nbr=21483 worst_rel=1.431e-13 facets=21 nonrecip=0
+COLD open=2
+COLDOPEN cell=21450 own=6.048e-19 dis=1.001e-15 sum=7.997306e-03 own_rel=7.563e-17 dis_rel=1.252e-13 bar=7.997e-16 worst_nbr=23500 worst_rel=9.117e-14 facets=22 nonrecip=0
+COLDOPEN cell=23500 own=2.685e-19 dis=1.091e-15 sum=6.820015e-03 own_rel=3.937e-17 dis_rel=1.600e-13 bar=6.820e-16 worst_nbr=21450 worst_rel=1.069e-13 facets=19 nonrecip=0
+COLDCELL cell=21450 V_repair=5.6541055815407797e-05 V_cold=5.6541055815407797e-05 rel=0.000e+00
+COLDCELL cell=21483 V_repair=2.9650253403104675e-05 V_cold=2.9650253403104675e-05 rel=0.000e+00
+COLDCELL cell=22508 V_repair=3.7019140638681838e-05 V_cold=3.7019140638681838e-05 rel=0.000e+00
+RESULT case=abc_Z32_F status=FRAME_ERROR step=249 motion=follow what="ale::MovingStepper: frame error in Fh: numEmptyCells=0 numOneSidedFacets=0 numOpenCells=3"

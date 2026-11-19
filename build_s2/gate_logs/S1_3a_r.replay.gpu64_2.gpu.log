@@ -1,0 +1,30 @@
+REPLAYMETA tg_Z64_F exec=Cuda threads=129024
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=40185 numRoundRebuilt=1498 open=0 oneSided=0 empty=0 open_per_publish=1382,105,0, forced_per_round=1393,105,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=122911 numRoundRebuilt=872 open=0 oneSided=0 empty=0 open_per_publish=837,30,0, forced_per_round=842,30,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=165510 numRoundRebuilt=670 open=0 oneSided=0 empty=0 open_per_publish=613,50,0, forced_per_round=620,50,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=150626 numRoundRebuilt=711 open=0 oneSided=0 empty=0 open_per_publish=691,15,0, forced_per_round=696,15,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=50344 numRoundRebuilt=1366 open=0 oneSided=0 empty=0 open_per_publish=1291,65,0, forced_per_round=1301,65,
+REPLAYFRAME q=6 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=2 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=2 open=1 oneSided=0 empty=0 open_per_publish=1,1,1, forced_per_round=1,1,
+REPLAYOPEN cell=210569 own_rel=8.205e-17 dis_rel=1.037e-13 worst_nbr=210570 worst_rel=6.536e-14 facets=14 nonrecip=0
+REPLAYMORE rounds_total=8 open_per_publish=1,1,1,1,1,1,1,
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=40185 numRoundRebuilt=1498 open=0 oneSided=0 empty=0 open_per_publish=1382,105,0, forced_per_round=1393,105,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=122911 numRoundRebuilt=872 open=0 oneSided=0 empty=0 open_per_publish=837,30,0, forced_per_round=842,30,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=165511 numRoundRebuilt=670 open=0 oneSided=0 empty=0 open_per_publish=613,50,0, forced_per_round=620,50,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=150624 numRoundRebuilt=714 open=0 oneSided=0 empty=0 open_per_publish=689,20,0, forced_per_round=694,20,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=50341 numRoundRebuilt=1360 open=0 oneSided=0 empty=0 open_per_publish=1295,55,0, forced_per_round=1305,55,
+REPLAYFRAME q=6 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=2 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=2 open=1 oneSided=0 empty=0 open_per_publish=1,1,1, forced_per_round=1,1,
+REPLAYOPEN cell=210569 own_rel=8.205e-17 dis_rel=1.037e-13 worst_nbr=210570 worst_rel=6.536e-14 facets=14 nonrecip=0
+REPLAYMORE rounds_total=8 open_per_publish=1,1,1,1,1,1,1,
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=40185 numRoundRebuilt=1492 open=0 oneSided=0 empty=0 open_per_publish=1386,95,0, forced_per_round=1397,95,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=122911 numRoundRebuilt=872 open=0 oneSided=0 empty=0 open_per_publish=837,30,0, forced_per_round=842,30,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=165510 numRoundRebuilt=673 open=0 oneSided=0 empty=0 open_per_publish=611,55,0, forced_per_round=618,55,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=150623 numRoundRebuilt=714 open=0 oneSided=0 empty=0 open_per_publish=689,20,0, forced_per_round=694,20,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=50345 numRoundRebuilt=1363 open=0 oneSided=0 empty=0 open_per_publish=1293,60,0, forced_per_round=1303,60,
+REPLAYFRAME q=6 rounds=0 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=0 open=0 oneSided=0 empty=0 open_per_publish=0, forced_per_round=
+REPLAYFRAME q=7 rounds=2 route=2 fellBack=0 numRebuilt=262144 numRoundRebuilt=2 open=1 oneSided=0 empty=0 open_per_publish=1,1,1, forced_per_round=1,1,
+REPLAYOPEN cell=210569 own_rel=8.205e-17 dis_rel=1.037e-13 worst_nbr=210570 worst_rel=6.536e-14 facets=14 nonrecip=0
+REPLAYMORE rounds_total=8 open_per_publish=1,1,1,1,1,1,1,
+REPLAYCOLD cell=210569 own_rel=8.619e-17 dis_rel=1.037e-13 worst_nbr=210570 worst_rel=6.536e-14 facets=14 nonrecip=0
+REPLAY reproduced=3/3 target_rounds_max=2 continued_rounds_max=8 unclosed_after_8=3 cold_open=1 target_empty_or_one_sided=0/3

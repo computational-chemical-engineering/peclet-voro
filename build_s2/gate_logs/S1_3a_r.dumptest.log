@@ -1,0 +1,6 @@
+## RUN tg_W16_F mesh=W16 N=4096 F=31588 field=tg mode=F rho=1 nu=0.01 tau=1.162791e-02 steps=86 courant_start=0.3987 beta=0.0298 mu_exact=0.999323 exact_proj_its=111 setup=1.63s frame_setup=0.013s exec=OpenMP threads=4 tight=0
+first_step omega=1.000000 mu_hat=0.972777 lambda=0.972777 pred_apps=9 S3_its=13 S5_its=9 S6_its=12 mu_its=57
+DUMP dir=build_s2/gate_logs/S1_3a_r.dumptest frame=F1 step=11 rounds=2 route=0 fellBack=0 pass1=2646 pass2=1116 numRebuilt=3766 numRoundRebuilt=65 open_per_publish=4,0,0, forced_per_round=35,30,
+MORE rounds_total=8 open_per_publish=0,0,0,0,0,0,0, forced_per_round=30,30,30,30,30,30, oneSided=28 empty=2
+COLD open=0
+RESULT case=tg_W16_F status=FRAME_ERROR step=11 motion=follow what="ale::MovingStepper: frame error in F1: numEmptyCells=2 numOneSidedFacets=28 numOpenCells=0"

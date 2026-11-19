@@ -1,0 +1,21 @@
+Reproductions of work order S1.3a-r (brief ALE_S1_3A_R), written by test_ale_stepper --dump-on-error.
+Each directory: meta, weight, chain_0..chain_7 (3N doubles each; chain_7 the failing target, chain_6 the last
+good frame), forced_<r> (the slots forced in round r of the failing frame).
+
+gpu64_1  tg_Z64_F --motion follow --tend 1, GPU, step 129, Fh: one-sided facet after 2 rounds (cap 2).
+         log ../S1_3a_r.catch64_1.tg_Z64_F.gpu.log. Reproduces on the HOST from the dump with cap 2:
+           OMP_NUM_THREADS=8 build_s2/tests/kokkos/test_ale_frame --replay build_s2/gate_logs/S1_3a_r.repro/gpu64_1
+         (cap 2: target_empty_or_one_sided=2/2, ../S1_3a_r.replay.gpu64_1.host.log; cap 8: rounds=3, clean,
+         ../S1_3a_r.replay_cure.gpu64_1.host.log).
+gpu64_2  tg_Z64_F --motion follow --tend 1, GPU, step 58, Fh: open cell 210569 (disagreement 1.037e-13 of its
+         surface, bar 1e-13; worst facet toward 210570). Reproduces on the GPU, 3/3, and the GPU cold build of the
+         target is open alike (host cold build: 6.74e-14, closed):
+           OMP_NUM_THREADS=8 build_s2_cuda/tests/kokkos/test_ale_frame --replay build_s2/gate_logs/S1_3a_r.repro/gpu64_2 --cell 210569
+         (../S1_3a_r.replay.gpu64_2.gpu.log, ../S1_3a_r.replay2.gpu64_2.{gpu,host}.log). Geometry: the facet's
+         vertex dual to generators 210570 210569 206474 206473 is a sliver Delaunay tetrahedron (shape quality
+         1.4e-4): python geom.py gpu64_2 210569 210570 (scipy).
+F2 runs of the gate after the cure (cap 8), same kind as gpu64_2 (open cell, own closure ~1e-17, disagreement
+above 1e-13, unchanged by rounds 3-8, the GPU cold build open too, a sliver tetrahedron at a vertex of the worst
+facet): ../S1_3a_r.f2.abc_Z32_F.1.dump (step 249, cells 21450 21483 22508; quality 2.7e-5) and
+../S1_3a_r.f2.tg_Z64_F.1.dump (step 92, cell 51188; quality 1.2e-4); logs ../S1_3a_r.f2.*.gpu.log.
+The chain_* and weight binaries (~50 MB per dump) are kept on disk, not committed.

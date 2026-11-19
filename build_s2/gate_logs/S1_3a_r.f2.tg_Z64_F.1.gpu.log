@@ -1,0 +1,18 @@
+## RUN tg_Z64_F mesh=Z64 N=262144 F=2022841 field=tg mode=F rho=1 nu=0.01 tau=2.666667e-03 steps=375 courant_start=0.3992 beta=0.1092 mu_exact=1.013718 exact_proj_its=101 setup=7.02s frame_setup=0.105s exec=Cuda threads=129024 tight=0
+first_step omega=1.000000 mu_hat=0.956604 lambda=0.956604 pred_apps=12 S3_its=18 S5_its=12 S6_its=13 mu_its=58
+DUMP dir=/home/frankp/Codes/suite/voro-ale-s0/build_s2/gate_logs/S1_3a_r.f2.tg_Z64_F.1.dump frame=F1 step=92 rounds=8 route=0 fellBack=0 pass1=71035 pass2=22157 numRebuilt=93713 numRoundRebuilt=985 open_per_publish=906,66,1,1,1,1,1,1,1, forced_per_round=913,66,1,1,1,1,1,1,
+OPEN cell=51188 own=3.440e-20 dis=1.032e-16 sum=9.568289e-04 own_rel=3.595e-17 dis_rel=1.079e-13 bar=9.568e-17 worst_nbr=51190 worst_rel=6.696e-14 facets=11 nonrecip=0
+OPENFORCED cell=51188 round=1 cell_forced=1 worst_nbr_forced=0 nbrs_forced=0/11
+OPENFORCED cell=51188 round=2 cell_forced=1 worst_nbr_forced=0 nbrs_forced=0/11
+OPENFORCED cell=51188 round=3 cell_forced=1 worst_nbr_forced=0 nbrs_forced=0/11
+OPENFORCED cell=51188 round=4 cell_forced=1 worst_nbr_forced=0 nbrs_forced=0/11
+OPENFORCED cell=51188 round=5 cell_forced=1 worst_nbr_forced=0 nbrs_forced=0/11
+OPENFORCED cell=51188 round=6 cell_forced=1 worst_nbr_forced=0 nbrs_forced=0/11
+OPENFORCED cell=51188 round=7 cell_forced=1 worst_nbr_forced=0 nbrs_forced=0/11
+OPENFORCED cell=51188 round=8 cell_forced=1 worst_nbr_forced=0 nbrs_forced=0/11
+MORE rounds_total=8 open_per_publish=1, forced_per_round= oneSided=0 empty=0
+MOREOPEN cell=51188 own=3.440e-20 dis=1.032e-16 sum=9.568289e-04 own_rel=3.595e-17 dis_rel=1.079e-13 bar=9.568e-17 worst_nbr=51190 worst_rel=6.696e-14 facets=11 nonrecip=0
+COLD open=1
+COLDOPEN cell=51188 own=3.321e-20 dis=1.887e-16 sum=9.568289e-04 own_rel=3.471e-17 dis_rel=1.972e-13 bar=9.568e-17 worst_nbr=51190 worst_rel=1.017e-13 facets=11 nonrecip=0
+COLDCELL cell=51188 V_repair=1.972637494584785e-06 V_cold=1.972637494584785e-06 rel=0.000e+00
+RESULT case=tg_Z64_F status=FRAME_ERROR step=92 motion=follow what="ale::MovingStepper: frame error in F1: numEmptyCells=0 numOneSidedFacets=0 numOpenCells=1"

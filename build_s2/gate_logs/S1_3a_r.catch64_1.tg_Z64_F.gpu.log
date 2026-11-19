@@ -1,0 +1,6 @@
+## RUN tg_Z64_F mesh=Z64 N=262144 F=2022841 field=tg mode=F rho=1 nu=0.01 tau=2.666667e-03 steps=375 courant_start=0.3992 beta=0.1092 mu_exact=1.013718 exact_proj_its=101 setup=7.01s frame_setup=0.124s exec=Cuda threads=129024 tight=0
+first_step omega=1.000000 mu_hat=0.956604 lambda=0.956604 pred_apps=12 S3_its=18 S5_its=12 S6_its=13 mu_its=58
+DUMP dir=build_s2/gate_logs/S1_3a_r.repro/gpu64_1 frame=Fh step=129 rounds=2 route=0 fellBack=0 pass1=33635 pass2=9042 numRebuilt=43317 numRoundRebuilt=1233 open_per_publish=1148,76,0, forced_per_round=1157,76,
+MORE rounds_total=3 open_per_publish=0,0, forced_per_round=2, oneSided=0 empty=0
+COLD open=0
+RESULT case=tg_Z64_F status=FRAME_ERROR step=129 motion=follow what="ale::MovingStepper: frame error in Fh: numEmptyCells=0 numOneSidedFacets=1 numOpenCells=0"

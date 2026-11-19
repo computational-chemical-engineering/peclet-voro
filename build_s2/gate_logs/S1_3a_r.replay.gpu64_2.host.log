@@ -1,0 +1,16 @@
+REPLAYMETA tg_Z64_F exec=OpenMP threads=8
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=40185 numRoundRebuilt=1492 open=0 oneSided=0 empty=0 open_per_publish=1386,95,0, forced_per_round=1397,95,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=122912 numRoundRebuilt=872 open=0 oneSided=0 empty=0 open_per_publish=837,30,0, forced_per_round=842,30,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=165511 numRoundRebuilt=673 open=0 oneSided=0 empty=0 open_per_publish=611,55,0, forced_per_round=618,55,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=150625 numRoundRebuilt=714 open=0 oneSided=0 empty=0 open_per_publish=689,20,0, forced_per_round=694,20,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=50342 numRoundRebuilt=1369 open=0 oneSided=0 empty=0 open_per_publish=1289,70,0, forced_per_round=1299,70,
+REPLAYFRAME q=6 rounds=2 route=0 fellBack=0 numRebuilt=237197 numRoundRebuilt=257 open=0 oneSided=0 empty=0 open_per_publish=250,5,0, forced_per_round=252,5,
+REPLAYFRAME q=7 rounds=2 route=0 fellBack=0 numRebuilt=48450 numRoundRebuilt=1406 open=0 oneSided=0 empty=0 open_per_publish=1316,85,0, forced_per_round=1321,85,
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=40185 numRoundRebuilt=1492 open=0 oneSided=0 empty=0 open_per_publish=1386,95,0, forced_per_round=1397,95,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=122912 numRoundRebuilt=872 open=0 oneSided=0 empty=0 open_per_publish=837,30,0, forced_per_round=842,30,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=165511 numRoundRebuilt=673 open=0 oneSided=0 empty=0 open_per_publish=611,55,0, forced_per_round=618,55,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=150625 numRoundRebuilt=714 open=0 oneSided=0 empty=0 open_per_publish=689,20,0, forced_per_round=694,20,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=50342 numRoundRebuilt=1369 open=0 oneSided=0 empty=0 open_per_publish=1289,70,0, forced_per_round=1299,70,
+REPLAYFRAME q=6 rounds=2 route=0 fellBack=0 numRebuilt=237197 numRoundRebuilt=257 open=0 oneSided=0 empty=0 open_per_publish=250,5,0, forced_per_round=252,5,
+REPLAYFRAME q=7 rounds=2 route=0 fellBack=0 numRebuilt=48450 numRoundRebuilt=1406 open=0 oneSided=0 empty=0 open_per_publish=1316,85,0, forced_per_round=1321,85,
+REPLAY reproduced=0/2 target_rounds_max=2 continued_rounds_max=0 unclosed_after_8=0 cold_open=0 target_empty_or_one_sided=0/2

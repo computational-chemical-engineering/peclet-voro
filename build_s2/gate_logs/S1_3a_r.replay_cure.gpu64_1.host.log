@@ -1,0 +1,10 @@
+REPLAYMETA tg_Z64_F exec=OpenMP threads=8
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=34001 numRoundRebuilt=1447 open=0 oneSided=0 empty=0 open_per_publish=1296,145,0, forced_per_round=1302,145,
+REPLAYFRAME q=2 rounds=8 route=0 fellBack=0 numRebuilt=64388 numRoundRebuilt=1179 open=1 oneSided=0 empty=0 open_per_publish=1117,51,1,1,1,1,1,1,1, forced_per_round=1122,51,1,1,1,1,1,1,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=188580 numRoundRebuilt=547 open=0 oneSided=0 empty=0 open_per_publish=523,20,0, forced_per_round=527,20,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=111150 numRoundRebuilt=960 open=0 oneSided=0 empty=0 open_per_publish=888,65,0, forced_per_round=895,65,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=44165 numRoundRebuilt=1428 open=0 oneSided=0 empty=0 open_per_publish=1350,70,0, forced_per_round=1358,70,
+REPLAYFRAME q=6 rounds=2 route=0 fellBack=0 numRebuilt=224520 numRoundRebuilt=353 open=0 oneSided=0 empty=0 open_per_publish=334,14,0, forced_per_round=339,14,
+REPLAYFRAME q=7 rounds=3 route=0 fellBack=0 numRebuilt=39306 numRoundRebuilt=1250 open=0 oneSided=0 empty=0 open_per_publish=1162,76,0,0, forced_per_round=1172,76,2,
+REPLAYTAIL cold cells=262144 above_2.5e-14=0 above_5e-14=0 above_1e-13=0 max=0.0000e+00 at cell -1
+REPLAY reproduced=0/1 target_rounds_max=3 continued_rounds_max=0 unclosed_after_8=0 cold_open=0 target_empty_or_one_sided=0/1

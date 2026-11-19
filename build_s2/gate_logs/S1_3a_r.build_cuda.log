@@ -1,0 +1,8 @@
+[ 50%] Linking CXX executable test_ale_stepper
+[100%] Built target test_ale_stepper
+[ 50%] Linking CXX executable test_ale_frame
+[100%] Built target test_ale_frame
+[ 50%] Linking CXX executable test_ale_operators
+[100%] Built target test_ale_operators
+[ 50%] Linking CXX executable test_ale_facemesh
+[100%] Built target test_ale_facemesh

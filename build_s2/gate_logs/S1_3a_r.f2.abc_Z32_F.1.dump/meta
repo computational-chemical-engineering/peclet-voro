@@ -1,0 +1,1 @@
+case=abc_Z32_F step=249 frame=Fh N=32768 L=1 h=0.03125 tol_h=1e-4 skin_h=0.25 chain=8 rounds=8 numOpenCells=3 numOneSidedFacets=0 numEmptyCells=0 numRebuilt=9349 numRoundRebuilt=203 route=0 fellBack=0 pass1=7346 pass1Raw=7346 pass2=1915 extra=0 verifyPasses=1 exec=Cuda threads=129024

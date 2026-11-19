@@ -3,10 +3,10 @@
 # F, S fixed 2026-11-18 in the brief ALE_S1_3A before any run): the time step on a moving mesh, one phase
 # (include/peclet/voro/ale/moving_stepper.hpp), on the host (OpenMP, 8 threads) and the GPU (CUDA), 16^3.
 #
-#   tools/ale_gates/G1_3.sh [--no-build] [--no-gpu] [--judge-only] [--no-g12]
+#   tools/ale_gates/G1_3.sh [--no-build] [--no-gpu] [--judge-only] [--no-g12] [--tag PREFIX]
 #
 # Trees build_s2 (host) and build_s2_cuda, configured as in G1_2.sh (core from ../core-ale-amg). Logs in
-# build_s2/gate_logs/S1_3a.*:
+# build_s2/gate_logs/<PREFIX>.* (default S1_3a_r, work order S1.3a-r; S1_3a.* is the record of S1.3a):
 #   V0.2  test_ale_stepper --run tg_Z16_F|tg_W16_F --motion rest --steps 100: the static path beside it in the same
 #         process; U and p bit for bit after every step (v02_maxdiff = 0, v02_bitwise_steps = 100).
 #   T     test_ale_stepper --trace-moving --pred-rtol 1e-14 (tg_Z16_F, tg_Z16_R, follow, 5 steps, the tight
@@ -21,6 +21,9 @@
 #         verdicts of its B and C lines equal to the record build_s2/gate_logs/S1_2c.G1_2.out.
 #   S     --run tg_Z16_F (no --motion), host: tau, steps, err character for character those of
 #         build_s2/gate_logs/S1_2b.run.tg_Z16_F.host.log.
+#   F2    (GPU) --motion follow --tend 1: tg_Z32_F three times, abc_Z32_F once, tg_Z64_F once (brief ALE_S1_3A_R):
+#         status DONE in all five, gcl <= 1e-14; rounds_max and cold_frames reported (--dump-on-error: a frame error
+#         leaves its reproduction in <PREFIX>.f2.<run>.dump/).
 #   INFO  (GPU) err of tg_Z16_F, tg_Z32_F with --motion follow, prescribed and static at --tend 0.5 and 1; the wall
 #         time per step and its split at 32^3 (follow, t = 0.5); uptime and GPU load at the start and the end.
 # GPU work runs under `flock -w 3600` on the shared heavy.lock; the host runs beside it. Prints one line per
@@ -35,8 +38,10 @@ BUILD=1
 GPU=1
 JUDGE_ONLY=0
 G12=1
+P=S1_3a_r  # log prefix (--tag): this work order's; S1_3a.* is the record of S1.3a
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --tag) P=$2; shift ;;
     --no-build) BUILD=0 ;;
     --no-gpu) GPU=0 ;;
     --judge-only) JUDGE_ONLY=1 ;;
@@ -45,7 +50,7 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 mkdir -p "$L"
-echo $$ > "$L/S1_3a.gate.pid"
+echo $$ > "$L/$P.gate.pid"
 cd "$SRC"
 if [[ -f ../.venv/bin/activate ]]; then
   # shellcheck disable=SC1091
@@ -62,21 +67,21 @@ TARGETS="test_ale_stepper test_ale_frame test_ale_operators test_ale_facemesh"
 if [[ $JUDGE_ONLY -eq 0 ]]; then
   if [[ $BUILD -eq 1 ]]; then
     # shellcheck disable=SC2086
-    cmake --build "$B" --parallel 8 --target $TARGETS > "$L/S1_3a.build.log" 2>&1 \
-      || { echo "G1.3a FAIL host build (log $L/S1_3a.build.log)"; exit 1; }
+    cmake --build "$B" --parallel 8 --target $TARGETS > "$L/$P.build.log" 2>&1 \
+      || { echo "G1.3a FAIL host build (log $L/$P.build.log)"; exit 1; }
     if [[ $GPU -eq 1 ]]; then
       # shellcheck disable=SC2086
-      cmake --build "$C" --parallel 8 --target $TARGETS > "$L/S1_3a.build_cuda.log" 2>&1 \
-        || { echo "G1.3a FAIL cuda build (log $L/S1_3a.build_cuda.log)"; exit 1; }
+      cmake --build "$C" --parallel 8 --target $TARGETS > "$L/$P.build_cuda.log" 2>&1 \
+        || { echo "G1.3a FAIL cuda build (log $L/$P.build_cuda.log)"; exit 1; }
     fi
   fi
   { uptime; nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader; } \
-    > "$L/S1_3a.load_start.log" 2>&1
+    > "$L/$P.load_start.log" 2>&1
   # one run: $1 backend, $2 log tag, the rest the arguments of test_ale_stepper
   run() {
     local be=$1 tag=$2
     shift 2
-    local log="$L/S1_3a.$tag.$be.log"
+    local log="$L/$P.$tag.$be.log"
     if [[ $be == host ]]; then
       OMP_NUM_THREADS=8 "$TH" "$@" > "$log" 2>&1
     else
@@ -90,14 +95,19 @@ if [[ $JUDGE_ONLY -eq 0 ]]; then
     for cs in tg_Z16_F tg_W16_F; do run "$be" "v02.$cs" --run "$cs" --motion rest --steps 100; done
     for cs in unif_Z16_F unif_Z16_R; do run "$be" "b.$cs" --run "$cs" --motion prescribed; done
     run "$be" c.tg_Z16_F --run tg_Z16_F --motion follow
-    for x in tm tmx; do rm -rf "$L/S1_3a.$x.$be" && mkdir -p "$L/S1_3a.$x.$be"; done
+    for x in tm tmx; do rm -rf "$L/$P.$x.$be" && mkdir -p "$L/$P.$x.$be"; done
     for cs in tg_Z16_F tg_Z16_R; do
-      run "$be" "tm.$cs" --trace-moving "$L/S1_3a.tm.$be" "$cs"
-      run "$be" "tmx.$cs" --trace-moving "$L/S1_3a.tmx.$be" "$cs" --pred-rtol 1e-14
+      run "$be" "tm.$cs" --trace-moving "$L/$P.tm.$be" "$cs"
+      run "$be" "tmx.$cs" --trace-moving "$L/$P.tmx.$be" "$cs" --pred-rtol 1e-14
     done
     if [[ $be == host ]]; then
       run host S.tg_Z16_F --run tg_Z16_F
     else
+      for f2 in tg_Z32_F.1 tg_Z32_F.2 tg_Z32_F.3 abc_Z32_F.1 tg_Z64_F.1; do
+        mkdir -p "$L/$P.f2.$f2.dump"
+        run gpu "f2.$f2" --run "${f2%.*}" --motion follow --tend 1 --dump-on-error "$L/$P.f2.$f2.dump"
+        rmdir "$L/$P.f2.$f2.dump" 2>/dev/null
+      done
       for cs in tg_Z16_F tg_Z32_F; do
         for te in 0.5 1; do
           run gpu "info.$cs.none.$te" --run "$cs" --tend "$te"
@@ -111,30 +121,30 @@ if [[ $JUDGE_ONLY -eq 0 ]]; then
   [[ $GPU -eq 1 ]] && jobs_of gpu
   wait $hp
   { uptime; nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader; } \
-    > "$L/S1_3a.load_end.log" 2>&1
+    > "$L/$P.load_end.log" 2>&1
   for be in host gpu; do
     [[ $be == gpu && $GPU -eq 0 ]] && continue
     for x in tm tmx; do
-      OMP_NUM_THREADS=4 python "$PY" trace-moving "$L/S1_3a.$x.$be" tg_Z16_F tg_Z16_R > "$L/S1_3a.$x.judge.$be.log" 2>&1
+      OMP_NUM_THREADS=4 python "$PY" trace-moving "$L/$P.$x.$be" tg_Z16_F tg_Z16_R > "$L/$P.$x.judge.$be.log" 2>&1
     done
   done
   # F: the ALE ctests on both trees, then G1_2.sh --no-runs (B and C)
-  OMP_NUM_THREADS=8 ctest --test-dir "$B" -R '^test_ale_' --output-on-failure > "$L/S1_3a.ctest.host.log" 2>&1
+  OMP_NUM_THREADS=8 ctest --test-dir "$B" -R '^test_ale_' --output-on-failure > "$L/$P.ctest.host.log" 2>&1
   if [[ $GPU -eq 1 ]]; then
-    OMP_NUM_THREADS=8 gpu ctest --test-dir "$C" -R '^test_ale_' --output-on-failure > "$L/S1_3a.ctest.gpu.log" 2>&1
+    OMP_NUM_THREADS=8 gpu ctest --test-dir "$C" -R '^test_ale_' --output-on-failure > "$L/$P.ctest.gpu.log" 2>&1
   fi
   if [[ $G12 -eq 1 ]]; then
-    bash tools/ale_gates/G1_2.sh --no-runs > "$L/S1_3a.G1_2.out" 2>&1
+    bash tools/ale_gates/G1_2.sh --no-runs > "$L/$P.G1_2.out" 2>&1
   fi
 fi
 
 # ------------------------------------------------------------------------------------------------ judge
-python - "$L" "$GPU" > "$L/S1_3a.gate.lines" <<'EOF'
+python - "$L" "$GPU" "$P" > "$L/$P.gate.lines" <<'EOF'
 import os
 import re
 import sys
 
-L, gpu = sys.argv[1], sys.argv[2] == '1'
+L, gpu, P = sys.argv[1], sys.argv[2] == '1', sys.argv[3]
 bes = ['host', 'gpu'] if gpu else ['host']
 fail = False
 
@@ -148,7 +158,7 @@ def say(line):
 
 
 def result(tag, be):
-    p = os.path.join(L, f'S1_3a.{tag}.{be}.log')
+    p = os.path.join(L, f'{P}.{tag}.{be}.log')
     if not os.path.exists(p):
         return None
     rs = [x for x in open(p) if x.startswith('RESULT')]
@@ -167,7 +177,7 @@ def num(r, k, default=float('nan')):
 runs = {be: {} for be in bes}
 for be in bes:
     for f in sorted(os.listdir(L)):
-        m = re.match(rf'S1_3a\.((?:v02|b|c|S|info|tm|tmx)\..+)\.{be}\.log$', f)
+        m = re.match(rf'{P}\.((?:v02|b|c|S|info|tm|tmx|f2)\..+)\.{be}\.log$', f)
         if m:
             runs[be][m.group(1)] = result(m.group(1), be)
 
@@ -186,7 +196,7 @@ say(f"V0.2 {'PASS' if ok else 'FAIL'} {'; '.join(txt)} (U and p after every step
 for x, cid in (('tmx', 'T'), ('tm', 'T13')):
     txt, ok = [], True
     for be in bes:
-        p = os.path.join(L, f'S1_3a.{x}.judge.{be}.log')
+        p = os.path.join(L, f'{P}.{x}.judge.{be}.log')
         lines = open(p).read().splitlines() if os.path.exists(p) else []
         cases = [ln for ln in lines if ln.startswith('Tcase')]
         fin = [ln for ln in lines if ln.startswith('T ')]
@@ -209,11 +219,18 @@ for be in bes:
         txt.append(f'{be} {tag.split(".", 1)[1]}{"(rest)" if rest else ""}={g:.2e} r={nr:.0f}')
     for x in ('tmx', 'tm'):
         for cs in ('tg_Z16_F', 'tg_Z16_R'):
-            p = os.path.join(L, f'S1_3a.{x}.{be}', f'{cs}.dev_scalars')
+            p = os.path.join(L, f'{P}.{x}.{be}', f'{cs}.dev_scalars')
             gs = [float(ln.split()[3]) for ln in open(p)] if os.path.exists(p) else [float('nan')]
             g = max(gs)
             ok = ok and g <= 1e-14
             txt.append(f'{be} {x} {cs}={g:.2e}')
+    for tag, r in sorted(runs[be].items()):  # the other moving runs: F2 and INFO
+        if (tag.startswith('f2.') or tag.startswith('info.')) and '.none.' not in tag and r is not None \
+                and r.get('status') == 'DONE':
+            g = num(r, 'gcl')
+            ok = ok and g <= 1e-14
+            worst = max(worst, g) if g == g else worst
+            txt.append(f'{be} {tag}={g:.2e} r={num(r, "s3_restarts"):.0f}')
 say(f"a {'PASS' if ok else 'FAIL'} gcl max {worst:.2e} (<=1e-14; r = s3_restarts <=3, rest 0): {', '.join(txt)}")
 
 # b
@@ -248,8 +265,8 @@ for be in bes:
 say(f"d {'PASS' if ok else 'FAIL'} {'; '.join(txt)} (mom_booked<=1e-13 sum M|U|)")
 
 # F
-bad = [f'{be}:{t}={(r or {}).get("status")}' for be in bes for t, r in runs[be].items() if not t.startswith('tm')
-       and (r is None or r.get('status') != 'DONE')]
+bad = [f'{be}:{t}={(r or {}).get("status")}' for be in bes for t, r in runs[be].items()
+       if not t.startswith('tm') and not t.startswith('f2.') and (r is None or r.get('status') != 'DONE')]
 for be in bes:
     for x in ('tm', 'tmx'):
         for cs in ('tg_Z16_F', 'tg_Z16_R'):
@@ -258,7 +275,7 @@ for be in bes:
                 bad.append(f'{be}:{x}.{cs}={(r or {}).get("status")}')
 ct = {}
 for be in bes:
-    p = os.path.join(L, f'S1_3a.ctest.{be}.log')
+    p = os.path.join(L, f'{P}.ctest.{be}.log')
     m = re.search(r'\d+% tests passed, (\d+) tests failed out of (\d+)', open(p).read()) if os.path.exists(p) else None
     ct[be] = f'{int(m.group(2)) - int(m.group(1))}/{m.group(2)}' if m else 'missing'
 ctok = all(v != 'missing' and v.split('/')[0] == v.split('/')[1] for v in ct.values())
@@ -276,16 +293,29 @@ def verdicts(path):
     return out
 
 
-now, rec = verdicts(os.path.join(L, 'S1_3a.G1_2.out')), verdicts(os.path.join(L, 'S1_2c.G1_2.out'))
+now, rec = verdicts(os.path.join(L, f'{P}.G1_2.out')), verdicts(os.path.join(L, 'S1_2c.G1_2.out'))
 g12ok = now is not None and now == rec
 bline = ''
 if now is not None:
-    bl = [ln for ln in open(os.path.join(L, 'S1_3a.G1_2.out')) if ln.startswith('B ')]
+    bl = [ln for ln in open(os.path.join(L, f'{P}.G1_2.out')) if ln.startswith('B ')]
     bline = bl[0].strip()[:240] if bl else ''
 ok = not bad and ctok and g12ok
 say(f"F {'PASS' if ok else 'FAIL'} runs not DONE: {bad if bad else 'none'}; ctest ^test_ale_ passed "
     f"{', '.join(f'{k} {v}' for k, v in ct.items())}; G1_2.sh --no-runs verdicts {now} "
     f"{'= record' if g12ok else '!= record ' + str(rec)} (S1_2c.G1_2.out) [{bline}]")
+
+# F2
+if gpu:
+    txt, ok = [], True
+    for f2 in ('tg_Z32_F.1', 'tg_Z32_F.2', 'tg_Z32_F.3', 'abc_Z32_F.1', 'tg_Z64_F.1'):
+        r = runs['gpu'].get(f'f2.{f2}') or {}
+        st, g = r.get('status'), num(r, 'gcl')
+        ok = ok and st == 'DONE' and g <= 1e-14
+        txt.append(f"{f2} {st}" + (f" step={r.get('step')} {r.get('what', '')}" if st != 'DONE' else
+                                  f" steps={r.get('steps')} gcl={g:.2e} rounds_max={num(r, 'rounds_max'):.0f} "
+                                  f"cold_frames={num(r, 'cold_frames'):.0f}"))
+    say(f"F2 {'PASS' if ok else 'FAIL'} {'; '.join(txt)} (GPU, follow, t = 1: DONE, gcl<=1e-14; cold_fallbacks=0: "
+        f"no cold fallback in the frame pipeline)")
 
 # S
 r = runs['host'].get('S.tg_Z16_F')
@@ -311,11 +341,11 @@ if gpu:
     say('INFO err (GPU): ' + '; '.join(rows))
     r = runs['gpu'].get('info.tg_Z32_F.follow.0.5') or {}
     keys = ('wall_per_step', 't_frames', 't_setup', 't_s3', 't_pred', 't_mu', 't_s5', 't_s6', 't_budget')
-    load = ' | '.join(open(os.path.join(L, f'S1_3a.load_{w}.log')).read().replace('\n', ' ').strip()
-                      for w in ('start', 'end') if os.path.exists(os.path.join(L, f'S1_3a.load_{w}.log')))
+    load = ' | '.join(open(os.path.join(L, f'{P}.load_{w}.log')).read().replace('\n', ' ').strip()
+                      for w in ('start', 'end') if os.path.exists(os.path.join(L, f'{P}.load_{w}.log')))
     say('INFO 32^3 follow GPU (t = 0.5) per step [s]: ' + ' '.join(f'{k}={r.get(k)}' for k in keys) +
         f' rebuilt={r.get("rebuilt")} frames={r.get("frames")} [load start | end: {load}] (shared host: not a benchmark)')
-print(f"G1.3a {'FAIL' if fail else 'PASS'} (logs {L}/S1_3a.*)")
+print(f"G1.3a {'FAIL' if fail else 'PASS'} (logs {L}/{P}.*)")
 EOF
-cat "$L/S1_3a.gate.lines"
-grep -q '^G1.3a PASS' "$L/S1_3a.gate.lines"
+cat "$L/$P.gate.lines"
+grep -q '^G1.3a PASS' "$L/$P.gate.lines"
