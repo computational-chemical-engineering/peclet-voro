@@ -39,8 +39,10 @@
  * Builder options: `--opts default` (all off), `frame` (ale::frameMeshOptions), `det`
  * (deterministicOrder only); `auto` (the default) = default at one thread, else frame for (a)
  * and det for (b). (g) always uses the frame options.
- * Every frame of every part is checked for MeshFrame::numOneSidedFacets and numEmptyCells (an
- * error of the frame; in (g) recorded as INFO without enforcement), and (g) prints per frame the
+ * Every frame of every part is checked for MeshFrame::isError (an empty cell, a one-sided facet,
+ * an open cell above ale::kClosureErrorFrac after the rounds, §11 A21; in (g) the one-sided facets
+ * recorded as INFO without enforcement; RESULT g adds open_tol, open_max, onesided_max), and (g)
+ * prints per frame the
  * cells whose face list does not close, |Σ A_f n_f| > 1e-13 Σ A_f (WO-S0.5 item 5; a diagnostic:
  * `closure=MISS` does not fail the test).
  * Usage: test_ale_frame [n=16] [--part a|b|c|f|g|all] [--full] [--opts auto|default|frame|det]
@@ -319,7 +321,7 @@ int partA(const char* tag, const Scene& s, int frames, const std::string& opts, 
   const Frame f0 = ale::initialFrame(mt, s.pos, s.L, fo);
   const auto ref = meshArrays(f0.mesh);
   int badFrames = 0, changedFrames = 0, rounds = f0.reciprocity.rounds;
-  int errorFrames = f0.numOneSidedFacets > 0 || f0.numEmptyCells > 0 ? 1 : 0;
+  int errorFrames = f0.isError() ? 1 : 0;
   std::string first;
   std::vector<Arr> ref1;
   int notFixed = 0;  // --diag: frames k >= 2 that differ from frame 1
@@ -349,7 +351,7 @@ int partA(const char* tag, const Scene& s, int frames, const std::string& opts, 
     if (nz != 0 || f.numRebuilt != 0 || f.coldBuild)
       ++changedFrames;
     rounds += f.reciprocity.rounds;
-    errorFrames += f.numOneSidedFacets > 0 || f.numEmptyCells > 0 ? 1 : 0;
+    errorFrames += f.isError() ? 1 : 0;
   }
   const bool pass = badFrames == 0 && changedFrames == 0 && errorFrames == 0;
   if (diag)
@@ -399,12 +401,12 @@ int partB(int n, int steps, const std::string& opts, const std::string& dumpDir)
     for (int s = 0; s < steps; ++s)
       ns1.step(dt);
     int changed = 0, meshDiff = 0;
-    int errorFrames = f0.numOneSidedFacets > 0 || f0.numEmptyCells > 0 ? 1 : 0;
+    int errorFrames = f0.isError() ? 1 : 0;
     const auto ref = meshArrays(f0.mesh);
     for (int s = 0; s < steps; ++s) {
       const Frame f = ale::advanceFrame(mt, dpos, L, fo);
       changed += f.numRebuilt;
-      errorFrames += f.numOneSidedFacets > 0 || f.numEmptyCells > 0 ? 1 : 0;
+      errorFrames += f.isError() ? 1 : 0;
       if (!firstDiff(ref, meshArrays(f.mesh)).empty())
         ++meshDiff;
       ns2.m = f.mesh;
@@ -1131,6 +1133,11 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
     int maxRoundRebuilt = 0;
     long totalRoundRebuilt = 0;
     double maxClosureRel = 0;
+    // A21: tolerated open cells (summed over the frames, the initial one included), the largest
+    // closure measure and one-sided facet area over h² (maxima), frames with an open-cell error
+    long openTol = f.reciprocity.numToleratedOpenCells;
+    double openMax = f.reciprocity.maxOpenFrac, oneSidedMax = f.reciprocity.maxNonRecipAreaFrac;
+    int framesOpenError = 0;
     std::vector<Arr> lastArrs;
     int s06Done = 0;
     for (int k = 1; k <= frames; ++k) {
@@ -1167,6 +1174,10 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
         ++framesOver;
       framesOSF += f.numOneSidedFacets > 0 ? 1 : 0;
       maxOSF = std::max(maxOSF, f.numOneSidedFacets);
+      openTol += r.numToleratedOpenCells;
+      openMax = std::max(openMax, r.maxOpenFrac);
+      oneSidedMax = std::max(oneSidedMax, r.maxNonRecipAreaFrac);
+      framesOpenError += r.numOpenCells > r.numToleratedOpenCells ? 1 : 0;
       int nBad = 0;
       double clRel = 0;
       closureDefects(f.mesh, kClosureRel, nBad, clRel);
@@ -1239,7 +1250,9 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
     // closure is a diagnostic (gate G0.5 H2 reads it: MISS, not FAIL)
     const bool okOSF = enforce == 0 || framesOSF == 0;
     const bool okClosure = framesClosure == 0;
-    const bool pass = okI && (okII || !full) && okIII && okIV && okEmpty && okOSF;
+    // an open cell above kClosureErrorFrac after the rounds is an error of the frame (A21)
+    const bool okOpen = g_noClosure || framesOpenError == 0;
+    const bool pass = okI && (okII || !full) && okIII && okIV && okEmpty && okOSF && okOpen;
     rc |= pass ? 0 : 1;
     char firstEmptyStr[16];
     if (firstEmpty > 0)
@@ -1255,7 +1268,8 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
         "routes(two/dil/gate)=%d/%d/%d fellBack=%d negH(total/maxPerFrame)=%ld/%d "
         "empty=%s emptyFrames=%d firstEmpty=%s oneSided=%s framesOneSided=%d maxOneSided=%d "
         "closure=%s framesClosure=%d maxClosureCells=%d maxClosureRel=%.2e "
-        "roundRebuilt(mean/max)=%.1f/%d framesRound2=%d\n",
+        "roundRebuilt(mean/max)=%.1f/%d framesRound2=%d framesOpenError=%d open_tol=%ld "
+        "open_max=%.3e onesided_max=%.3e\n",
         vname, enforce, s.n, frames, evaluated, pass ? "PASS" : "FAIL", okI ? "PASS" : "FAIL",
         maxSumRel, full ? (okII ? "PASS" : "FAIL") : "INFO", totalRebuilt,
         evaluated > 0 ? (double)totalRebuilt / evaluated : 0.0, maxRebuilt,
@@ -1266,7 +1280,7 @@ int partGVariant(const Scene& s, bool weighted, int frames, bool full, bool time
         enforce == 0 ? "INFO" : (okOSF ? "PASS" : "FAIL"), framesOSF, maxOSF,
         enforce == 0 ? "INFO" : (okClosure ? "PASS" : "MISS"), framesClosure, maxClosureCells,
         maxClosureRel, evaluated > 0 ? (double)totalRoundRebuilt / evaluated : 0.0, maxRoundRebuilt,
-        framesRound2);
+        framesRound2, framesOpenError, openTol, openMax, oneSidedMax);
     if (timeIt && evaluated > 0)
       std::printf(
           "TIME g variant=%s enforce=%d threads=%d per-frame ms: repair %.2f publish %.2f "
@@ -1315,6 +1329,11 @@ int frameErrors(const Frame& f) {
   return f.numOneSidedFacets + f.numEmptyCells;
 }
 
+/// The frame's error flag (MeshFrame::isError, §11 A21) as a count.
+int frameError(const Frame& f) {
+  return f.isError() ? 1 : 0;
+}
+
 /// initialFrame at the scene's seeds, advanceFrame at the jumped seeds (must be a cold build),
 /// then two advanceFrame at rest. Every FaceMesh array of the three frames after the jump bitwise
 /// equal; the two frames at rest change nothing; no frame is an error. Also printed (INFO): what
@@ -1339,7 +1358,7 @@ int partC(const char* tag, const Scene& s, const std::string& opts) {
   const bool restQuiet = !f2.coldBuild && !f3.coldBuild && f2.numRebuilt == 0 &&
                          f3.numRebuilt == 0 && f2.reciprocity.rounds == 0 &&
                          f3.reciprocity.rounds == 0;
-  const int errors = frameErrors(f0) + frameErrors(f1) + frameErrors(f2) + frameErrors(f3);
+  const int errors = frameError(f0) + frameError(f1) + frameError(f2) + frameError(f3);
   const bool pass = f1.coldBuild && f1.numRebuilt == s.N && d12.empty() && d13.empty() &&
                     restQuiet && errors == 0;
   std::printf(
@@ -1676,6 +1695,11 @@ int replayDump(const std::string& dir, int repeat, long cell) {
       printRoundLog("REPLAYFRAME", q, f);
     }
     maxRounds = std::max(maxRounds, f.reciprocity.rounds);
+    std::printf(
+        "REPLAYTARGET rounds=%d open=%d tolerated=%d maxOpenFrac=%.4e "
+        "maxNonRecipArea/h2=%.3e error=%d\n",
+        f.reciprocity.rounds, f.reciprocity.numOpenCells, f.reciprocity.numToleratedOpenCells,
+        f.reciprocity.maxOpenFrac, f.reciprocity.maxNonRecipAreaFrac, (int)f.isError());
     otherErrors += frameErrors(f) > 0 ? 1 : 0;
     if (f.reciprocity.numOpenCells > 0) {
       ++reproduced;
@@ -1711,6 +1735,13 @@ int replayDump(const std::string& dir, int repeat, long cell) {
         "REPLAYTAIL cold cells=%d above_2.5e-14=%zu above_5e-14=%d above_1e-13=%d "
         "max=%.4e at cell %ld\n",
         N, tail.size(), n50, n100, mx, arg);
+    // every cell of the tail (criterion H of A21: tools/ale_gates/H_rounding.py reads these)
+    for (const auto& c : tail)
+      std::printf(
+          "REPLAYTAILCELL cold cell=%d closure_rel=%.6e own_rel=%.4e dis_rel=%.4e "
+          "worst_nbr=%ld worst_rel=%.4e facets=%d nonrecip=%d\n",
+          c.cell, (c.own + c.dis) / c.sum, c.own / c.sum, c.dis / c.sum, c.worstNbr,
+          c.worstDis / c.sum, c.facets, c.nonRecip);
     if (cell >= 0) {
       const auto all = ale::openCellsOf(cold, chain[nch - 1], w, L, 1e-300);
       for (const auto& c : all)

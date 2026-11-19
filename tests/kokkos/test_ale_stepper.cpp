@@ -51,6 +51,12 @@
  * frame error the last frames' positions, the weights and the forced sets are written to DIR
  * (dumpFrameError; replay: test_ale_frame --replay DIR), with the open cells' closure terms, the
  * rounds continued to 8 and a cold build of the target printed. Numerics unchanged.
+ *  ... --dump-final DIR (brief ALE_S1_3A_R2, criterion H): --dump-on-error DIR, and a run that
+ * ends DONE writes the same dump of its last frames (dumpFinal). Extra RESULT keys of a moving run
+ * (§11 A21): open_tol (tolerated open cells, between kClosureFrac and kClosureErrorFrac, summed
+ * over the frames of the run), open_max (the largest closure measure over the cell's surface),
+ * onesided_max (the largest one-sided facet area over h²), maxima over the run; the initial frame
+ * included.
  *
  *  test_ale_stepper --trace-moving DIR CASE [--motion M] [--steps K]   gate T of G1.3a: K = 5
  * moving steps (motion follow by default) at the tight tolerances of --trace; per step the frames
@@ -822,6 +828,9 @@ struct Stats {
 // ---- --dump-on-error DIR (diagnostic, brief ALE_S1_3A_R) ---------------------------------------
 /// The directory of --dump-on-error (empty: off).
 std::string g_dumpDir;
+/// --dump-final DIR (brief ALE_S1_3A_R2, criterion H): also write the dump of a moving run that
+/// ends DONE (the last frames' positions, the weights; replay: test_ale_frame --replay DIR).
+bool g_dumpFinal = false;
 /// The frames kept for the dump: the last kDumpChain frame positions (the oldest first).
 constexpr std::size_t kDumpChain = 8;
 
@@ -846,8 +855,7 @@ bool inList(const std::vector<int>& l, long i) {
 /// cold build of the target (COLD).
 void dumpFrameError(const std::string& dir, const std::string& name, int k, Case& c,
                     ale::MovingMesh<Real>& mm, std::vector<std::vector<Real>> chain) {
-  const bool hFail = mm.half.numEmptyCells > 0 || mm.half.numOneSidedFacets > 0 ||
-                     mm.half.reciprocity.numOpenCells > 0;
+  const bool hFail = mm.half.isError();
   Frame& f = hFail ? mm.half : mm.full;
   if (!hFail)
     chain.push_back(down(mm.half.pos));
@@ -930,6 +938,20 @@ void dumpFrameError(const std::string& dir, const std::string& name, int k, Case
                 (double)hr[o.cell], (double)hc[o.cell],
                 std::fabs((double)hr[o.cell] - hc[o.cell]) / hc[o.cell]);
   }
+}
+
+/// --dump-final: DIR/meta, DIR/weight and DIR/chain_<q> of a run that ended DONE after step k (the
+/// format of dumpFrameError; the last chain entry is the last frame F1).
+void dumpFinal(const std::string& dir, const std::string& name, int k, Case& c,
+               const std::vector<std::vector<Real>>& chain) {
+  for (std::size_t q = 0; q < chain.size(); ++q)
+    writeVec(dir + "/chain_" + std::to_string(q), chain[q]);
+  writeVec(dir + "/weight", down(c.engine->weight));
+  FILE* fp = std::fopen((dir + "/meta").c_str(), "w");
+  std::fprintf(fp, "case=%s step=%d frame=F1 status=DONE N=%d L=%.17g h=%.17g chain=%zu exec=%s\n",
+               name.c_str(), k, c.s.N, (double)c.s.L[0], (double)c.s.h, chain.size(), Exec::name());
+  std::fclose(fp);
+  std::printf("DUMPFINAL dir=%s step=%d chain=%zu\n", dir.c_str(), k, chain.size());
 }
 
 int runCase(const std::string& name, int stepsOverride, bool tight, double courant, bool stokes,
@@ -1082,6 +1104,15 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
   long rebuilt = 0, frames = 0, v02bitwise = 0;
   int s3Restarts = 0, roundsMax = 0;
   long coldFrames = 0;
+  // A21: tolerated open cells (summed over the frames of the run), the largest closure measure and
+  // the largest one-sided facet area over h² (maxima over the run); the initial frame included
+  long openTol = 0;
+  double openMax = 0, oneSidedMax = 0;
+  if (moving) {
+    openTol = c.fr.reciprocity.numToleratedOpenCells;
+    openMax = c.fr.reciprocity.maxOpenFrac;
+    oneSidedMax = c.fr.reciprocity.maxNonRecipAreaFrac;
+  }
   const Real gbar[3] = {0, 0, -1};
   bool blowup = false;
   const auto tLoop0 = std::chrono::steady_clock::now();
@@ -1113,6 +1144,12 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
       s3Restarts = std::max(s3Restarts, rr.sweptRestarts);
       roundsMax = std::max({roundsMax, mm.half.reciprocity.rounds, mm.full.reciprocity.rounds});
       coldFrames += (mm.half.coldBuild ? 1 : 0) + (mm.full.coldBuild ? 1 : 0);
+      openTol +=
+          mm.half.reciprocity.numToleratedOpenCells + mm.full.reciprocity.numToleratedOpenCells;
+      openMax =
+          std::max({openMax, mm.half.reciprocity.maxOpenFrac, mm.full.reciprocity.maxOpenFrac});
+      oneSidedMax = std::max({oneSidedMax, mm.half.reciprocity.maxNonRecipAreaFrac,
+                              mm.full.reciprocity.maxNonRecipAreaFrac});
       rebuilt += rr.rebuiltHalf + rr.rebuiltFull;
       frames += 2;
       tFrames += rr.timeFrames;
@@ -1249,6 +1286,8 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
     std::fclose(traceScalars);
   if (blowup)
     return 1;
+  if (moving && g_dumpFinal && !g_dumpDir.empty())
+    dumpFinal(g_dumpDir, name, nst, c, chain);
   const double wall =
       std::chrono::duration<double>(std::chrono::steady_clock::now() - tLoop0).count() / nst;
   const double ns = (double)S.steps;
@@ -1315,6 +1354,9 @@ int runCase(const std::string& name, int stepsOverride, bool tight, double coura
     << " rebuilt=" << (double)rebuilt << " frames=" << (double)frames
     << " t_frames=" << tFrames / ns << " t_setup=" << tFrameSetup / ns << " B1_absmax=" << B1max
     << " mom_def=" << momDef;
+  if (moving)
+    o << " open_tol=" << (double)openTol << " open_max=" << openMax
+      << " onesided_max=" << oneSidedMax;
   if (moving && mot == ale::MeshMotion::Rest)
     o << " v02_maxdiff=" << v02diff << " v02_bitwise_steps=" << (double)v02bitwise;
   const char* bn[11] = {"B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8a", "B8b", "B9", "Bres"};
@@ -1434,7 +1476,10 @@ int main(int argc, char** argv) {
         g_exactRtol = std::atof(argv[++a]);
       else if (s == "--dump-on-error" && a + 1 < argc)
         g_dumpDir = argv[++a];
-      else if (s == "--tend" && a + 1 < argc)
+      else if (s == "--dump-final" && a + 1 < argc) {
+        g_dumpDir = argv[++a];
+        g_dumpFinal = true;
+      } else if (s == "--tend" && a + 1 < argc)
         tend = std::atof(argv[++a]);
       else if (s == "--trace-moving" && a + 2 < argc) {
         traceMovingDir = argv[++a];

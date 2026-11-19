@@ -10,8 +10,9 @@
  *      ẋ = U_ext, Prescribed ẋ given per step by the caller; ẇ = 0 always (the weights never change
  *      in stage 1). x^h = xⁿ + ½τẋ, x¹ = xⁿ + τẋ, wrapped into the periodic box.
  *  S2  Fh = advanceFrame at x^h, then F1 = advanceFrame at x¹, each followed by `setupFrame`. A
- *      frame error (an empty cell, a one-sided facet, an open cell) is an error of the step: it
- *      throws; there is no retry and no smaller step.
+ *      frame error (MeshFrame::isError: an empty cell, a one-sided facet, an open cell above
+ *      kClosureErrorFrac, §11 A21) is an error of the step: it throws; there is no retry and no
+ *      smaller step.
  *  S3  on Fh: Φᵐ = sweptFlux(Fh, ẋ, 0); ψ from L_ρψ = DΦᵐ − (V¹ − Vⁿ)/τ (the operator pair of
  *      `compactFluxOf`, its stopping test max_i τ|r_i|/V_i ≤ compactTol, V of Fh), Φᵐ_c = Φᵐ +
  *      a ⊙ Δ_nψ, so that τDΦᵐ_c = V¹ − Vⁿ to compactTol V_i; a right-hand side that is exactly
@@ -43,6 +44,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <Kokkos_Core.hpp>
 #include <stdexcept>
 #include <string>
@@ -233,14 +235,20 @@ void defectMomentum(int n, const DV<Real>& DFm, const DV<Real>& dM, const DV<Rea
   out[2] = s2;
 }
 
-/// A frame the step must not use (§11 A5, A12, A14): throws with what is wrong.
+/// A frame the step must not use (MeshFrame::isError; §11 A5, A12, A14, A21): throws with what is
+/// wrong. Open cells at or below kClosureErrorFrac are tolerated (A21).
 template <class Real>
 void requireValidFrame(const MeshFrame<Real>& f, const char* which) {
-  if (f.numEmptyCells > 0 || f.numOneSidedFacets > 0 || f.reciprocity.numOpenCells > 0)
-    throw std::runtime_error(std::string("ale::MovingStepper: frame error in ") + which +
-                             ": numEmptyCells=" + std::to_string(f.numEmptyCells) +
-                             " numOneSidedFacets=" + std::to_string(f.numOneSidedFacets) +
-                             " numOpenCells=" + std::to_string(f.reciprocity.numOpenCells));
+  if (!f.isError())
+    return;
+  char frac[32];
+  std::snprintf(frac, sizeof frac, "%.3e", f.reciprocity.maxOpenFrac);
+  throw std::runtime_error(
+      std::string("ale::MovingStepper: frame error in ") + which +
+      ": numEmptyCells=" + std::to_string(f.numEmptyCells) +
+      " numOneSidedFacets=" + std::to_string(f.numOneSidedFacets) +
+      " numOpenCells=" + std::to_string(f.reciprocity.numOpenCells) + " numToleratedOpenCells=" +
+      std::to_string(f.reciprocity.numToleratedOpenCells) + " maxOpenFrac=" + frac);
 }
 
 }  // namespace detail

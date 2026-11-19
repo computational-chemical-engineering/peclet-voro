@@ -26,12 +26,20 @@
  * does not close (Σ A_f ≠ 0, up to 6e-5 of its surface at 1e-4 h); its neighbours' facets disagree
  * with it to second order. With `enforceClosure` (default on), every cell whose own closure plus
  * the disagreement of its reciprocal pairs exceeds kClosureFrac of its surface is forced in the
- * same rounds; a forced cell is rebuilt from its clip and closes like a cold one.
+ * same rounds; a forced cell is rebuilt from its clip and closes like a cold one. The rounds stop
+ * early when a round leaves the set of open cells and the set of one-sided facets (of nonzero
+ * area) unchanged: what a rebuild of a cell does not change is not a matter of topology (§11 A21).
  *
- * Two counts make a frame an error the caller must act on; the frame is built regardless:
- * `numEmptyCells`, the cells of the published view with zero volume or no facet (an empty power
- * cell, §11 A5), and `numOneSidedFacets`, the one-sided facets of area > kOneSidedFacetAreaFrac ·
- * h² (h³ = the mean cell volume) left after the rounds.
+ * Two bars for the closure (§11 A21): kClosureFrac forces a cell; after the rounds a cell is an
+ * error of the frame only above kClosureErrorFrac. The cells between the bars are rounding of the
+ * geometry at nearly degenerate vertices, which no rebuild changes; they are tolerated, counted
+ * (`ReciprocityReport::numToleratedOpenCells`) and reported (`maxOpenFrac`).
+ *
+ * Three counts make a frame an error the caller must act on (MeshFrame::isError); the frame is
+ * built regardless: `numEmptyCells`, the cells of the published view with zero volume or no facet
+ * (an empty power cell, §11 A5), `numOneSidedFacets`, the one-sided facets of area >
+ * kOneSidedFacetAreaFrac · h² (h³ = the mean cell volume) left after the rounds, and the open
+ * cells above kClosureErrorFrac left after the rounds (numOpenCells − numToleratedOpenCells).
  *
  * Weights: the frame snapshots the engine's own power weights (`engine.weight`), so the published
  * geometry and the repaired topology belong to one power diagram.
@@ -48,6 +56,7 @@
 #ifndef PECLET_VORO_ALE_FRAME_HPP
 #define PECLET_VORO_ALE_FRAME_HPP
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <Kokkos_Core.hpp>
@@ -81,6 +90,13 @@ inline constexpr int kMaxReciprocityRounds = 8;
 /// they own; together they bound the closure of the cell in the face mesh. A cell above it is
 /// forced (FrameOptions::enforceClosure). The bar of gate G0.5 H2 / G0.6 B1.
 inline constexpr double kClosureFrac = 1e-13;
+/// Error bar of the closure (§11 A21): after the rounds, a cell above this fraction of its surface
+/// makes the frame an error; a cell between kClosureFrac and this bar is tolerated and counted
+/// (ReciprocityReport::numToleratedOpenCells). A closure defect c is a relative consistency error
+/// of size c of the step (a uniform flow gets the divergence c S|U|/V in that cell), compared with
+/// the truncation error, not with rounding; at a sliver Delaunay tetrahedron (shape quality q) the
+/// two copies of a shared vertex differ by about ε h/q, so no fixed bar near rounding holds.
+inline constexpr double kClosureErrorFrac = 1e-9;
 
 /// The face-mesh options of a frame: deterministic order, gid orientation, generator geometry and
 /// cell centroids (gid empty: the slot index). The frame fills `pos`, `weight` and `L`.
@@ -116,6 +132,12 @@ struct ReciprocityReport {
   int rounds = 0;              ///< forced rebuild + publish rounds used
   int numRoundRebuilt = 0;     ///< cells the rounds' steps rebuilt, summed over rounds (N if cold)
   int numOpenCells = 0;  ///< cells above the closure bar kClosureFrac (after the rounds, if any)
+  /// Of numOpenCells, the cells at or below kClosureErrorFrac: tolerated (§11 A21).
+  int numToleratedOpenCells = 0;
+  /// Largest closure measure (own closure + disagreement, kClosureFrac's test) over all cells,
+  /// relative to the cell's surface.
+  double maxOpenFrac = 0;
+  double maxNonRecipAreaFrac = 0;  ///< maxNonRecipArea / h² (h³ = the mean cell volume)
 };
 
 /// The rounds of a frame (only with FrameOptions::recordRounds): `open[k]`, `maxNonRecipArea[k]`
@@ -150,6 +172,12 @@ struct MeshFrame {
   ReciprocityReport reciprocity;
   FrameTimings timings;
   RoundLog roundLog;  ///< only with FrameOptions::recordRounds
+  /// The frame is an error the caller must act on (the step must not use it): an empty cell, a
+  /// one-sided facet above its bar, or an open cell above kClosureErrorFrac (§11 A5, A14, A21).
+  bool isError() const {
+    return numEmptyCells > 0 || numOneSidedFacets > 0 ||
+           reciprocity.numOpenCells > reciprocity.numToleratedOpenCells;
+  }
 };
 
 namespace detail {
@@ -195,11 +223,17 @@ struct Clock {
 
 /// Closure test of one cell of a published view (WO-S0.6): its own closure |Σ_g A_g| plus the
 /// disagreement Σ_g |A_g + A_recip(g)| with its neighbours' facets, above kClosureFrac · Σ_g |A_g|.
+/// `measure` returns the two sides: m = own + disagreement and the surface Σ_g |A_g|.
 template <class Real>
 struct OpenCell {
   TessellationView<Real> view;
   Kokkos::View<int*, peclet::core::MemSpace> recip;
   KOKKOS_INLINE_FUNCTION bool operator()(const int i) const {
+    double m, sum;
+    measure(i, m, sum);
+    return m > kClosureFrac * sum;
+  }
+  KOKKOS_INLINE_FUNCTION void measure(const int i, double& m, double& surface) const {
     double v[3] = {0, 0, 0}, sum = 0, dis = 0;
     for (int g = view.facetBegin(i); g < view.facetEnd(i); ++g) {
       double a2 = 0, d2 = 0;
@@ -216,18 +250,54 @@ struct OpenCell {
       sum += Kokkos::sqrt(a2);
       dis += Kokkos::sqrt(d2);
     }
-    return Kokkos::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) + dis > kClosureFrac * sum;
+    m = Kokkos::sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) + dis;
+    surface = sum;
   }
+};
+
+/// The one-sided facets of nonzero area of cell i (the ones a round forces): their count, and with
+/// `out` their keys i · N + j in facet order.
+template <class Real>
+struct OneSidedKeys {
+  TessellationView<Real> view;
+  Kokkos::View<int*, peclet::core::MemSpace> recip;
+  int N;
+  KOKKOS_INLINE_FUNCTION void operator()(const int i, long* out, int& c) const {
+    for (int g = view.facetBegin(i); g < view.facetEnd(i); ++g) {
+      const long j = (long)view.facetNbr(g);
+      if (j < 0 || j >= N || recip(g) >= 0)
+        continue;
+      double a2 = 0;
+      for (int d = 0; d < 3; ++d)
+        a2 += (double)view.area(g, d) * (double)view.area(g, d);
+      if (a2 > 0) {
+        if (out)
+          out[c] = (long)i * N + j;
+        ++c;
+      }
+    }
+  }
+};
+
+/// The sets the early stop of the rounds compares (§11 A21): the open cells (above kClosureFrac,
+/// ascending) and the one-sided facets of nonzero area (the ones a round forces), each as the key
+/// i · N + j of its facet i → j, ascending.
+struct RoundSets {
+  std::vector<int> open;
+  std::vector<long> oneSided;
+  bool operator==(const RoundSets& o) const { return open == o.open && oneSided == o.oneSided; }
 };
 
 /// Publish the engine's tessellation at the frame's snapshot, build the face mesh, and measure the
 /// reciprocity and the closure. With a non-empty `forcedMask` (N), marks in it both cells of every
 /// non-reciprocal facet of nonzero area (enforceReciprocity) and every cell above the closure bar
-/// (enforceClosure); the mask is left untouched when there is none.
+/// (enforceClosure); the mask is left untouched when there is none. With `sets`, fills it with
+/// the open cells and one-sided facets when a round is due (marks were made), else clears it.
 template <class Real, int MAXP, int MAXT, bool Weighted, class Sdf>
 void publish(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine, MeshFrame<Real>& f,
              const Real L[3], const FrameOptions<Real>& opt,
-             const Kokkos::View<int*, peclet::core::MemSpace>& forcedMask) {
+             const Kokkos::View<int*, peclet::core::MemSpace>& forcedMask,
+             RoundSets* sets = nullptr) {
   using Engine = MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>;
   using Policy = typename Engine::PlanePolicy;
   using Exec = peclet::core::ExecSpace;
@@ -293,15 +363,78 @@ void publish(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>& engine, MeshFr
   f.reciprocity.nDropped = f.mesh.nDropped;
   f.reciprocity.maxNonRecipArea = maxA;
   f.reciprocity.areaThreshold = thr;
-  // closure (WO-S0.6): the cell's own closure plus the disagreement of its reciprocal pairs
+  f.reciprocity.maxNonRecipAreaFrac = maxA > 0 ? maxA / h2 : 0.0;  // the reducer's -inf: none
+  // closure (WO-S0.6): the cell's own closure plus the disagreement of its reciprocal pairs;
+  // above kClosureFrac open (forced), above kClosureErrorFrac an error, between tolerated (A21)
   const OpenCell<Real> isOpen{view, recip};
-  int nOpen = 0;
+  int nOpen = 0, nTol = 0;
+  double maxFrac = 0;
   Kokkos::parallel_reduce(
       "ale.frame.open", Kokkos::RangePolicy<Exec>(0, N),
-      KOKKOS_LAMBDA(const int i, int& a) { a += isOpen(i) ? 1 : 0; }, nOpen);
+      KOKKOS_LAMBDA(const int i, int& a, int& t, double& mf) {
+        double m, sum;
+        isOpen.measure(i, m, sum);
+        const bool open = m > kClosureFrac * sum;
+        a += open ? 1 : 0;
+        t += open && !(m > kClosureErrorFrac * sum) ? 1 : 0;
+        const double fr = sum > 0 ? m / sum : 0.0;
+        if (fr > mf)
+          mf = fr;
+      },
+      nOpen, nTol, Kokkos::Max<double>(maxFrac));
   f.reciprocity.numOpenCells = nOpen;
+  f.reciprocity.numToleratedOpenCells = nTol;
+  f.reciprocity.maxOpenFrac = maxFrac;
   const bool markRecip = opt.enforceReciprocity && maxA > 0;
   const bool markOpen = opt.enforceClosure && nOpen > 0;
+  if (sets) {
+    sets->open.clear();
+    sets->oneSided.clear();
+    if (markRecip || markOpen) {
+      // the open cells, ascending (deterministic scan)
+      Kokkos::View<int*, peclet::core::MemSpace> ol(
+          Kokkos::view_alloc(std::string("ale.frame.openList"), Kokkos::WithoutInitializing),
+          nOpen > 0 ? nOpen : 1);
+      int nO = 0;
+      Kokkos::parallel_scan(
+          "ale.frame.openList", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i, int& upd, const bool isFinal) {
+            if (isOpen(i)) {
+              if (isFinal)
+                ol(upd) = i;
+              ++upd;
+            }
+          },
+          nO);
+      auto oh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), ol);
+      sets->open.assign(oh.data(), oh.data() + nO);
+      // the one-sided facets of nonzero area as keys i · N + j, per cell in facet order, sorted
+      const OneSidedKeys<Real> oneSided{view, recip, N};
+      int nS = 0;
+      Kokkos::parallel_reduce(
+          "ale.frame.oneSidedCount", Kokkos::RangePolicy<Exec>(0, N),
+          KOKKOS_LAMBDA(const int i, int& a) { oneSided(i, nullptr, a); }, nS);
+      if (nS > 0) {
+        Kokkos::View<long*, peclet::core::MemSpace> sl(
+            Kokkos::view_alloc(std::string("ale.frame.oneSidedList"), Kokkos::WithoutInitializing),
+            nS);
+        Kokkos::parallel_scan(
+            "ale.frame.oneSidedList", Kokkos::RangePolicy<Exec>(0, N),
+            KOKKOS_LAMBDA(const int i, int& upd, const bool isFinal) {
+              int c = 0;
+              oneSided(i, nullptr, c);
+              if (isFinal && c > 0) {
+                int w = 0;
+                oneSided(i, &sl(upd), w);
+              }
+              upd += c;
+            });
+        auto sh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace(), sl);
+        sets->oneSided.assign(sh.data(), sh.data() + nS);
+        std::sort(sets->oneSided.begin(), sets->oneSided.end());
+      }
+    }
+  }
   if (forcedMask.extent(0) > 0 && (markRecip || markOpen)) {
     auto M = forcedMask;
     Kokkos::deep_copy(M, 0);
@@ -379,7 +512,8 @@ void publishWithReciprocity(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>&
   if (opt.enforceReciprocity || opt.enforceClosure)
     forcedMask = Kokkos::View<int*, Mem>(
         view_alloc(std::string("ale.frame.forcedMask"), WithoutInitializing), N);
-  publish(engine, f, L, opt, forcedMask);
+  RoundSets prev, cur;
+  publish(engine, f, L, opt, forcedMask, &prev);
   auto record = [&] {
     if (opt.recordRounds) {
       f.roundLog.open.push_back(f.reciprocity.numOpenCells);
@@ -432,8 +566,12 @@ void publishWithReciprocity(MovingTessellation<Real, MAXP, MAXT, Weighted, Sdf>&
           });
     }
     f.reciprocity.rounds = round + 1;
-    publish(engine, f, L, opt, forcedMask);
+    publish(engine, f, L, opt, forcedMask, &cur);
     record();
+    // early stop (§11 A21): the round left the open cells and the one-sided facets as they were
+    if (cur == prev)
+      break;
+    std::swap(prev, cur);
   }
   if (changed.extent(0) > 0)
     f.numRebuilt = countNonzero(changed, N);
