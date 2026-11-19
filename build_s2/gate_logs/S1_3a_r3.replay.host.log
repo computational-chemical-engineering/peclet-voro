@@ -1,0 +1,29 @@
+REPLAYMETA tg_Z64_F exec=OpenMP threads=8
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=32929 numRoundRebuilt=1416 open=0 oneSided=0 empty=0 open_per_publish=1317,95,0, forced_per_round=1321,95,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=45058 numRoundRebuilt=1502 open=0 oneSided=0 empty=0 open_per_publish=1370,130,0, forced_per_round=1372,130,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=191181 numRoundRebuilt=456 open=0 oneSided=0 empty=0 open_per_publish=445,10,0, forced_per_round=446,10,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=102908 numRoundRebuilt=1036 open=0 oneSided=0 empty=0 open_per_publish=985,40,0, forced_per_round=996,40,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=44953 numRoundRebuilt=1335 open=0 oneSided=0 empty=0 open_per_publish=1230,100,0, forced_per_round=1235,100,
+REPLAYFRAME q=6 rounds=2 route=0 fellBack=0 numRebuilt=214808 numRoundRebuilt=323 open=0 oneSided=0 empty=0 open_per_publish=298,23,0, forced_per_round=300,23,
+REPLAYFRAME q=7 rounds=3 route=0 fellBack=0 numRebuilt=38523 numRoundRebuilt=1334 open=5 oneSided=0 empty=0 open_per_publish=1204,119,5,5, forced_per_round=1210,119,5,
+REPLAYTARGET rounds=3 open=5 tolerated=0 maxOpenFrac=1.4272e-03 maxNonRecipArea/h2=0.000e+00 error=1
+REPLAYOPEN cell=1994 own_rel=2.997e-17 dis_rel=9.528e-04 worst_nbr=2106 worst_rel=7.221e-04 facets=22 nonrecip=0
+REPLAYOPEN cell=2106 own_rel=3.969e-17 dis_rel=1.427e-03 worst_nbr=1994 worst_rel=7.064e-04 facets=24 nonrecip=0
+REPLAYOPEN cell=6191 own_rel=4.660e-17 dis_rel=8.599e-04 worst_nbr=10177 worst_rel=4.695e-04 facets=25 nonrecip=0
+REPLAYOPEN cell=10177 own_rel=5.081e-17 dis_rel=1.248e-03 worst_nbr=6191 worst_rel=5.695e-04 facets=21 nonrecip=0
+REPLAYOPEN cell=10244 own_rel=8.905e-17 dis_rel=9.305e-04 worst_nbr=10177 worst_rel=5.349e-04 facets=22 nonrecip=0
+REPLAYMORE rounds_total=8 open_per_publish=5,5,5,5,5,5,
+REPLAYCOLD cell=1994 own_rel=4.053e-17 dis_rel=9.528e-04 worst_nbr=2106 worst_rel=7.221e-04 facets=22 nonrecip=0
+REPLAYCOLD cell=2106 own_rel=7.115e-17 dis_rel=1.427e-03 worst_nbr=1994 worst_rel=7.064e-04 facets=24 nonrecip=0
+REPLAYCOLD cell=6191 own_rel=3.897e-17 dis_rel=8.599e-04 worst_nbr=10177 worst_rel=4.695e-04 facets=25 nonrecip=0
+REPLAYCOLD cell=10177 own_rel=5.081e-17 dis_rel=1.248e-03 worst_nbr=6191 worst_rel=5.695e-04 facets=21 nonrecip=0
+REPLAYCOLD cell=10244 own_rel=2.713e-17 dis_rel=9.305e-04 worst_nbr=10177 worst_rel=5.349e-04 facets=22 nonrecip=0
+REPLAYTAIL cold cells=262144 above_2.5e-14=5 above_5e-14=5 above_1e-13=5 max=1.4272e-03 at cell 2106
+REPLAYTAILCELL cold cell=1994 closure_rel=9.528469e-04 own_rel=4.0530e-17 dis_rel=9.5285e-04 worst_nbr=2106 worst_rel=7.2208e-04 facets=22 nonrecip=0
+REPLAYTAILCELL cold cell=2106 closure_rel=1.427235e-03 own_rel=7.1146e-17 dis_rel=1.4272e-03 worst_nbr=1994 worst_rel=7.0643e-04 facets=24 nonrecip=0
+REPLAYTAILCELL cold cell=6191 closure_rel=8.599149e-04 own_rel=3.8968e-17 dis_rel=8.5991e-04 worst_nbr=10177 worst_rel=4.6951e-04 facets=25 nonrecip=0
+REPLAYTAILCELL cold cell=10177 closure_rel=1.247679e-03 own_rel=5.0811e-17 dis_rel=1.2477e-03 worst_nbr=6191 worst_rel=5.6947e-04 facets=21 nonrecip=0
+REPLAYTAILCELL cold cell=10244 closure_rel=9.305365e-04 own_rel=2.7133e-17 dis_rel=9.3054e-04 worst_nbr=10177 worst_rel=5.3486e-04 facets=22 nonrecip=0
+REPLAYCELL cold cell=1994 own_rel=4.0530e-17 dis_rel=9.5285e-04 sum_rel=9.5285e-04 worst_nbr=2106 worst_rel=7.2208e-04
+REPLAY reproduced=1/1 target_rounds_max=3 continued_rounds_max=8 unclosed_after_8=1 cold_open=5 target_empty_or_one_sided=0/1
+EXIT 0

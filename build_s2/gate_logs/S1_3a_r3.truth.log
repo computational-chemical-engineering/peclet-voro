@@ -1,0 +1,13 @@
+TRUTHCELL cell=1994 status=4 facets_true=22 facets_eng=22 missing=0 extra=0 r_max/h=2.340 max_nbr_dist/h=4.499 S/h2=11.8613 err_rel=1.0238e-14 missing_area_rel=0.0000e+00
+TRUTHDIS cell=1994 engine_dis_rel(listed facets)=9.5285e-04
+TRUTHCELL cell=2106 status=4 facets_true=25 facets_eng=24 missing=1 extra=0 r_max/h=2.348 max_nbr_dist/h=4.672 S/h2=12.1179 err_rel=2.3516e-03 missing_area_rel=9.2368e-04
+TRUTHNBR cell=2106 missing j=10177 dist/h=4.672 A/S=9.2368e-04 j_status=4 j_has_i=0 listed=1
+TRUTHDIS cell=2106 engine_dis_rel(listed facets)=1.4280e-03
+TRUTHCELL cell=6191 status=4 facets_true=25 facets_eng=25 missing=0 extra=0 r_max/h=2.348 max_nbr_dist/h=4.499 S/h2=13.3871 err_rel=2.3198e-15 missing_area_rel=0.0000e+00
+TRUTHDIS cell=6191 engine_dis_rel(listed facets)=8.5991e-04
+TRUTHCELL cell=10177 status=4 facets_true=22 facets_eng=21 missing=1 extra=0 r_max/h=2.348 max_nbr_dist/h=4.672 S/h2=11.0345 err_rel=2.2623e-03 missing_area_rel=1.0144e-03
+TRUTHNBR cell=10177 missing j=2106 dist/h=4.672 A/S=1.0144e-03 j_status=4 j_has_i=0 listed=1
+TRUTHDIS cell=10177 engine_dis_rel(listed facets)=1.2480e-03
+TRUTHCELL cell=10244 status=4 facets_true=22 facets_eng=22 missing=0 extra=0 r_max/h=2.348 max_nbr_dist/h=4.302 S/h2=8.8776 err_rel=1.2544e-14 missing_area_rel=0.0000e+00
+TRUTHDIS cell=10244 engine_dis_rel(listed facets)=9.3054e-04
+TRUTH cells_checked=73 listed=5 missing=2 extra=0 orientation=outward radius=12.0h

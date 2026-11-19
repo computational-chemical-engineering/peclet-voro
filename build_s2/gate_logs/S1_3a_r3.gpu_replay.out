@@ -1,0 +1,2 @@
+rc=0 REPLAYREPORT buried=0 reachExceeded=0 empty=0 overflow=0 incomplete=549 degenerate=0 overBufferRebuilds=0 caps planes=64 triangles=112 REPLAY reproduced=1/1 target_rounds_max=1 continued_rounds_max=8 unclosed_after_8=1 cold_open=5 target_empty_or_one_sided=0/1 
+EXIT

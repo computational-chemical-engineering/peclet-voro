@@ -1,0 +1,18 @@
+DISTORTION dump=S1_3a_r2.f2.tg_Z64_F.1.dump N=262144 step=150 max_nbr_dist/h(med/99%/max)=1.756/2.995/4.672 facets(med/99%/max)=15.000/22.000/36.000 r_max/h(med/99%/max)=0.971/1.686/2.348 window=4 coverage/h=4.0000 incomplete(2r_max>=cov)=549 nbr_beyond_cov=122 need_window=5 need_window_reach=5
+rc=0 41 s
+DISTORTION dump=S1_3a_r2.H.tg_Z64_F.dump N=262144 step=94 max_nbr_dist/h(med/99%/max)=1.753/2.580/3.219 facets(med/99%/max)=15.000/22.000/34.000 r_max/h(med/99%/max)=0.965/1.385/1.680 window=4 coverage/h=4.0000 incomplete(2r_max>=cov)=0 nbr_beyond_cov=0 need_window=4 need_window_reach=4
+rc=0 40 s
+Traceback (most recent call last):
+  File "/home/frankp/Codes/suite/voro-ale-s0/tests/python/ale_mesh_distortion.py", line 77, in <module>
+    main()
+    ~~~~^^
+  File "/home/frankp/Codes/suite/voro-ale-s0/tests/python/ale_mesh_distortion.py", line 45, in main
+    c = np.linalg.solve(A, b[..., None])[..., 0]
+        ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/frankp/Codes/suite/.venv/lib/python3.13/site-packages/numpy/linalg/_linalg.py", line 463, in solve
+    r = gufunc(a, b, signature=signature)
+  File "/home/frankp/Codes/suite/.venv/lib/python3.13/site-packages/numpy/linalg/_linalg.py", line 144, in _raise_linalgerror_singular
+    raise LinAlgError("Singular matrix")
+numpy.linalg.LinAlgError: Singular matrix
+DISTORTION dump=S1_3a_r3.final.tg_Z32_F.t0.45.dump N=32768 step=75 max_nbr_dist/h(med/99%/max)=1.772/3.036/3.773 facets(med/99%/max)=15.000/23.000/32.000 r_max/h(med/99%/max)=0.986/1.675/1.899 window=4 coverage/h=4.0000 incomplete(2r_max>=cov)=0 nbr_beyond_cov=0 need_window=4 need_window_reach=4
+DISTORTION dump=S1_3a_r3.final.tg_Z32_F.t1.dump N=32768 step=167 max_nbr_dist/h(med/99%/max)=1.810/2.429/2.951 facets(med/99%/max)=15.000/23.000/29.000 r_max/h(med/99%/max)=1.015/1.320/1.496 window=4 coverage/h=4.0000 incomplete(2r_max>=cov)=0 nbr_beyond_cov=0 need_window=3 need_window_reach=3 flat_tets=0

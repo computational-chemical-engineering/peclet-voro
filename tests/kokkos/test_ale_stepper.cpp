@@ -57,6 +57,7 @@
  * over the frames of the run), open_max (the largest closure measure over the cell's surface),
  * onesided_max (the largest one-sided facet area over h²), maxima over the run; the initial frame
  * included.
+ *  ... --window SW (brief ALE_S1_3A_R3): the engine's gather window in grid blocks (default 4).
  *
  *  test_ale_stepper --trace-moving DIR CASE [--motion M] [--steps K]   gate T of G1.3a: K = 5
  * moving steps (motion follow by default) at the tight tolerances of --trace; per step the frames
@@ -141,9 +142,15 @@ Scene exportScene(int n, Real jitter) {
   return s;
 }
 
+/// --window SW (brief ALE_S1_3A_R3): the gather window of the engine's cold build and repair, in
+/// blocks of the counting-sort grid (MovingTessellation::alloc's `sw`; default 4 = kSearchWindow,
+/// the value every run used before). A cell is complete when twice its farthest vertex lies inside
+/// SW blocks (tessellator.hpp kIncomplete); beyond that it can miss a neighbour.
+int g_window = 4;
+
 Frame coldFrame(const Scene& s, const DV& pos, const DV& weight) {
   Engine mt;
-  mt.alloc(s.N, s.L, Real(1e-4) * s.h, Real(0.25) * s.h, 4, s.N);
+  mt.alloc(s.N, s.L, Real(1e-4) * s.h, Real(0.25) * s.h, g_window, s.N);
   mt.setWeights(weight);
   return ale::initialFrame(mt, pos, s.L, FrameOpts{});
 }
@@ -165,7 +172,7 @@ Case makeCase(const std::string& type, int n, bool keepEngine = false) {
   const DV wt = w ? c.s.weight : DV("w0", c.s.N);
   if (keepEngine) {
     c.engine = std::make_unique<Engine>();
-    c.engine->alloc(c.s.N, c.s.L, Real(1e-4) * c.s.h, Real(0.25) * c.s.h, 4, c.s.N);
+    c.engine->alloc(c.s.N, c.s.L, Real(1e-4) * c.s.h, Real(0.25) * c.s.h, g_window, c.s.N);
     c.engine->setWeights(wt);
     c.fr = ale::initialFrame(*c.engine, c.s.pos, c.s.L, FrameOpts{});
   } else {
@@ -925,7 +932,7 @@ void dumpFrameError(const std::string& dir, const std::string& name, int k, Case
   printOpenCells("MOREOPEN", ale::openCellsOf(eng, g.pos, g.weight, c.s.L));
   // a cold build of the target in a fresh engine
   Engine cold;
-  cold.alloc(N, c.s.L, Real(1e-4) * c.s.h, Real(0.25) * c.s.h, 4, N);
+  cold.alloc(N, c.s.L, Real(1e-4) * c.s.h, Real(0.25) * c.s.h, g_window, N);
   cold.setWeights(eng.weight);
   cold.rebuild(f.pos);
   cold.step(f.pos);
@@ -1468,6 +1475,8 @@ int main(int argc, char** argv) {
         tight = true;
       else if (s == "--stokes")
         stokes = true;
+      else if (s == "--window" && a + 1 < argc)
+        g_window = std::atoi(argv[++a]);
       else if (s == "--motion" && a + 1 < argc)
         motion = argv[++a];
       else if (s == "--pred-rtol" && a + 1 < argc)

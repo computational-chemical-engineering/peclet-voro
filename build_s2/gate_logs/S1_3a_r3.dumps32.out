@@ -1,0 +1,3 @@
+t=0.45 rc=0 RESULT case=tg_Z32_F status=DONE N=32768 tau=5.988024e-03 steps=75 t=4.491018e-01 closure=3.988790e-17 mom=1.173270e-13 mom_booked=6.585094e-17 divPhi1=9.921198e-15 divF=5.127384e-14 cfl=1.259068e-01 
+t=1 rc=0 RESULT case=tg_Z32_F status=DONE N=32768 tau=5.988024e-03 steps=167 t=1.000000e+00 closure=4.077066e-17 mom=2.285930e-13 mom_booked=6.585094e-17 divPhi1=9.929144e-15 divF=1.074770e-13 cfl=1.259068e-01
+EXIT

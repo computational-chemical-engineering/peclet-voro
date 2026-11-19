@@ -58,14 +58,15 @@
  * Without --full (the ctest): (a) 20 frames, (b) 20 steps, (g) variant Z, 60 frames.
  *        test_ale_frame --replay DIR [--repeat R] [--cell C]
  * (diagnostic, brief ALE_S1_3A_R) replays the dump of `test_ale_stepper --dump-on-error DIR`
- * R times (default 3): replayDump() documents the output; runs nothing else.
- *        test_ale_frame --export DIR [--mesh M1|M2|M3|all]
- * writes the meshes of WO-S0.3 (gate G0.3, tools/ale_gates/G0_3.sh) for the Python reference
- * tests/python/ale_reference.py and runs nothing else (exportMesh() documents the files).
- *        test_ale_frame --export DIR --cells N [--mesh M1|M2|M3|all]
- * writes the base arrays only (no rate variants) of the G0.3 mesh family at N³ cells under the
- * name <mesh>_N; without --mesh, M1 only (jitter ±0.3h, zero weights), for the pressure-operator
- * export of WO-S0.4 (tools/ale_gates/export_lrho.py, gate G0.4).
+ * R times (default 3): replayDump() documents the output; runs nothing else. --facets: also the
+ * cold build's status bits and the facets of its open cells (replayFacets(), brief ALE_S1_3A_R3).
+ * --window SW (any part): the engine's gather window in grid blocks (default 4, brief
+ * ALE_S1_3A_R3). test_ale_frame --export DIR [--mesh M1|M2|M3|all] writes the meshes of WO-S0.3
+ * (gate G0.3, tools/ale_gates/G0_3.sh) for the Python reference tests/python/ale_reference.py and
+ * runs nothing else (exportMesh() documents the files). test_ale_frame --export DIR --cells N
+ * [--mesh M1|M2|M3|all] writes the base arrays only (no rate variants) of the G0.3 mesh family at
+ * N³ cells under the name <mesh>_N; without --mesh, M1 only (jitter ±0.3h, zero weights), for the
+ * pressure-operator export of WO-S0.4 (tools/ale_gates/export_lrho.py, gate G0.4).
  */
 #include <algorithm>
 #include <chrono>
@@ -140,12 +141,15 @@ Scene makeScene(int n) {
 
 /// --tol F (WO-S0.6, diagnostic): the repair's certificate tolerance in units of h (default 1e-4).
 double g_tolFactor = 1e-4;
+/// --window SW (brief ALE_S1_3A_R3): the engine's gather window in grid blocks (default 4 =
+/// kSearchWindow, the value of every run before; MovingTessellation::alloc's `sw`).
+int g_window = 4;
 /// --no-closure (WO-S0.6, diagnostic): parts (b) and (g) with FrameOptions::enforceClosure off.
 bool g_noClosure = false;
 
 template <bool W>
 void allocEngine(Engine<W>& mt, int N, const Real L[3], Real h, const DV& weight) {
-  mt.alloc(N, L, Real(g_tolFactor) * h, Real(0.25) * h, 4, N);
+  mt.alloc(N, L, Real(g_tolFactor) * h, Real(0.25) * h, g_window, N);
   if constexpr (W)
     mt.setWeights(weight);
 }
@@ -1645,13 +1649,62 @@ void printClosure(const char* tag, const std::vector<ale::CellClosure>& oc) {
         c.nonRecip);
 }
 
+/// --replay DIR --facets (diagnostic, brief ALE_S1_3A_R3): the cold build's status and facets.
+/// REPLAYREPORT: the BuildReport counts of the cold build (the status bits the engine keeps in
+/// `lastStatus`); REPLAYSTATUS per cell of `cells` and of their neighbours: status bits, plane and
+/// triangle high-water marks (store.np, store.nt; caps kMaxPlanes, kMaxTriangles), facet count;
+/// REPLAYFACET per facet of those cells: neighbour and area vector (the published view of
+/// `openCellsOf`, at full precision, for tests/python/ale_truth_cells.py).
+void replayFacets(Engine<true>& eng, const DV& pos, const DV& w, const Real L[3],
+                  const std::vector<int>& cells) {
+  using Policy = typename Engine<true>::PlanePolicy;
+  const int N = eng.N;
+  const auto rep = eng.report();
+  std::printf(
+      "REPLAYREPORT buried=%ld reachExceeded=%ld empty=%ld overflow=%ld incomplete=%ld "
+      "degenerate=%ld overBufferRebuilds=%d caps planes=%d triangles=%d\n",
+      rep.buried, rep.reachExceeded, rep.empty, rep.overflow, rep.incomplete, rep.degenerate,
+      rep.overBufferRebuilds, kP, kT);
+  const auto view = peclet::voro::reevalPublish<Real, kP, kT, Policy>(
+      eng.store, pos, eng.vol, N, L, eng.wall, eng.xRef, false, false, w);
+  auto off = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, view.cellFacetOffset);
+  auto cnt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, view.cellFacetCount);
+  auto nbr = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, view.facetNeighbor);
+  auto area = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, view.facetArea);
+  auto st = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, eng.lastStatus);
+  auto np = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, eng.store.np);
+  auto nt = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, eng.store.nt);
+  std::vector<int> all = cells;
+  for (int i : cells)
+    for (int g = off(i); g < off(i) + cnt(i); ++g)
+      if ((long)nbr(g) >= 0 && (long)nbr(g) < N)
+        all.push_back((int)nbr(g));
+  std::sort(all.begin(), all.end());
+  all.erase(std::unique(all.begin(), all.end()), all.end());
+  int maxNp = 0, maxNt = 0, maxF = 0;
+  for (int i = 0; i < N; ++i) {
+    maxNp = std::max(maxNp, np(i));
+    maxNt = std::max(maxNt, nt(i));
+    maxF = std::max(maxF, cnt(i));
+  }
+  std::printf("REPLAYCAPS all cells: max np=%d (cap %d) max nt=%d (cap %d) max facets=%d\n", maxNp,
+              kP, maxNt, kT, maxF);
+  for (int i : all) {
+    std::printf("REPLAYSTATUS cell=%d status=%d np=%d nt=%d facets=%d listed=%d\n", i, st(i), np(i),
+                nt(i), cnt(i), (int)(std::find(cells.begin(), cells.end(), i) != cells.end()));
+    for (int g = off(i); g < off(i) + cnt(i); ++g)
+      std::printf("REPLAYFACET %d %ld %.17e %.17e %.17e\n", i, (long)nbr(g), (double)area(3 * g),
+                  (double)area(3 * g + 1), (double)area(3 * g + 2));
+  }
+}
+
 /// --replay DIR [--repeat R]: the dump of `test_ale_stepper --dump-on-error DIR`. Per repeat: a
 /// fresh power engine, initialFrame at chain_0, advanceFrame through chain_1 .. chain_last (the
 /// failing target), every frame's rounds printed (REPLAYFRAME); at the target its open cells
 /// (REPLAYOPEN) and, if any remain, the rounds continued to 8 (REPLAYMORE). Then a cold build of
 /// the target (REPLAYCOLD). One line `REPLAY reproduced=k/R ...` (k: repeats whose target kept an
 /// open cell after its rounds; the empty-cell / one-sided errors counted apart). Exit 0.
-int replayDump(const std::string& dir, int repeat, long cell) {
+int replayDump(const std::string& dir, int repeat, long cell, bool facets) {
   std::map<std::string, std::string> meta;
   {
     FILE* fp = std::fopen((dir + "/meta").c_str(), "r");
@@ -1719,6 +1772,14 @@ int replayDump(const std::string& dir, int repeat, long cell) {
   cold.step(chain[nch - 1]);
   const auto co = ale::openCellsOf(cold, chain[nch - 1], w, L);
   printClosure("REPLAYCOLD", co);
+  if (facets) {
+    std::vector<int> cells;
+    for (const auto& c : co)
+      cells.push_back(c.cell);
+    if (cell >= 0)
+      cells.push_back((int)cell);
+    replayFacets(cold, chain[nch - 1], w, L, cells);
+  }
   {  // the tail of the cold build's closure distribution, and the cell of --cell
     const auto tail = ale::openCellsOf(cold, chain[nch - 1], w, L, 2.5e-14);
     int n50 = 0, n100 = 0;
@@ -1771,6 +1832,7 @@ int main(int argc, char** argv) {
     int gframes = 0, exportCells = 0, repeat = 3;
     std::string replayDir;
     long replayCell = -1;
+    bool replayFacetsOn = false;
     for (int a = 1; a < argc; ++a) {
       const std::string s = argv[a];
       if (s == "--part" && a + 1 < argc)
@@ -1792,6 +1854,8 @@ int main(int argc, char** argv) {
         g_s06Frames = std::atoi(argv[++a]);
       else if (s == "--no-closure")
         g_noClosure = true;
+      else if (s == "--window" && a + 1 < argc)
+        g_window = std::atoi(argv[++a]);
       else if (s == "--tol" && a + 1 < argc)
         g_tolFactor = std::atof(argv[++a]);
       else if (s == "--full")
@@ -1806,11 +1870,13 @@ int main(int argc, char** argv) {
         repeat = std::atoi(argv[++a]);
       else if (s == "--cell" && a + 1 < argc)
         replayCell = std::atol(argv[++a]);
+      else if (s == "--facets")
+        replayFacetsOn = true;
       else if (s.rfind("--", 0) != 0)
         n = std::atoi(s.c_str());
     }
     if (!replayDir.empty()) {
-      rc = replayDump(replayDir, repeat, replayCell);
+      rc = replayDump(replayDir, repeat, replayCell, replayFacetsOn);
       Kokkos::finalize();
       return rc;
     }

@@ -1,0 +1,14 @@
+REPLAYMETA tg_Z64_F exec=OpenMP threads=8
+REPLAYFRAME q=1 rounds=2 route=0 fellBack=0 numRebuilt=32928 numRoundRebuilt=1425 open=0 oneSided=0 empty=0 open_per_publish=1311,110,0, forced_per_round=1315,110,
+REPLAYFRAME q=2 rounds=2 route=0 fellBack=0 numRebuilt=45053 numRoundRebuilt=1508 open=0 oneSided=0 empty=0 open_per_publish=1366,140,0, forced_per_round=1368,140,
+REPLAYFRAME q=3 rounds=2 route=0 fellBack=0 numRebuilt=191180 numRoundRebuilt=456 open=0 oneSided=0 empty=0 open_per_publish=445,10,0, forced_per_round=446,10,
+REPLAYFRAME q=4 rounds=2 route=0 fellBack=0 numRebuilt=102913 numRoundRebuilt=1030 open=0 oneSided=0 empty=0 open_per_publish=989,30,0, forced_per_round=1000,30,
+REPLAYFRAME q=5 rounds=2 route=0 fellBack=0 numRebuilt=44937 numRoundRebuilt=1335 open=0 oneSided=0 empty=0 open_per_publish=1229,100,0, forced_per_round=1235,100,
+REPLAYFRAME q=6 rounds=2 route=0 fellBack=0 numRebuilt=214813 numRoundRebuilt=325 open=0 oneSided=0 empty=0 open_per_publish=305,18,0, forced_per_round=307,18,
+REPLAYFRAME q=7 rounds=2 route=0 fellBack=0 numRebuilt=38566 numRoundRebuilt=1296 open=0 oneSided=0 empty=0 open_per_publish=1207,84,0, forced_per_round=1212,84,
+REPLAYTARGET rounds=2 open=0 tolerated=0 maxOpenFrac=3.4570e-14 maxNonRecipArea/h2=0.000e+00 error=0
+REPLAYREPORT buried=0 reachExceeded=0 empty=0 overflow=0 incomplete=0 degenerate=0 overBufferRebuilds=0 caps planes=64 triangles=112
+REPLAYCAPS all cells: max np=58 (cap 64) max nt=68 (cap 112) max facets=36
+REPLAYTAIL cold cells=262144 above_2.5e-14=0 above_5e-14=0 above_1e-13=0 max=0.0000e+00 at cell -1
+REPLAY reproduced=0/1 target_rounds_max=2 continued_rounds_max=0 unclosed_after_8=0 cold_open=0 target_empty_or_one_sided=0/1
+EXIT 0

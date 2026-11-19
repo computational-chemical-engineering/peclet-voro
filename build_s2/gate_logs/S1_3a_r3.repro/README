@@ -1,0 +1,21 @@
+Work order S1.3a-r3 (brief ALE_S1_3A_R3): the five open cells of tg_Z64_F --motion follow, step 150, frame Fh.
+Dump: ../S1_3a_r2.f2.tg_Z64_F.1.dump (on disk, not committed).
+
+Reproduction (one command, host, about 1 min at load 40):
+  OMP_NUM_THREADS=8 OMP_PROC_BIND=false build_s2/tests/kokkos/test_ale_frame \
+      --replay build_s2/gate_logs/S1_3a_r2.f2.tg_Z64_F.1.dump --repeat 1 --facets
+  -> REPLAYCOLD: cells 1994 2106 6191 10177 10244 open (1.427e-03 max); REPLAYREPORT incomplete=549;
+     REPLAYSTATUS status=4 (kIncomplete) on all five. Log ../S1_3a_r3.facets.host.log (GPU: .gpu.log, identical).
+  The same with --window 5: open=0, maxOpenFrac 3.46e-14, incomplete=0 (../S1_3a_r3.facets.w5.host.log).
+
+Truth (scipy):
+  python tests/python/ale_truth_cells.py build_s2/gate_logs/S1_3a_r2.f2.tg_Z64_F.1.dump build_s2/gate_logs/S1_3a_r3.facets.host.log
+  -> 2106 and 10177 miss each other (distance 4.672 h, beyond the gather window 4 h); the other three cells are
+     exact to 1e-14 and open only through them (../S1_3a_r3.truth.log).
+Distortion of a frame:
+  python tests/python/ale_mesh_distortion.py DUMP   (../S1_3a_r3.distortion.log)
+
+Cause: the cold build gathers candidates within kSearchWindow = 4 blocks (include/peclet/voro/params.hpp:28,
+passed as `sw` to MovingTessellation::alloc by the tests); a cell with 2 r_max >= 4 blocks is flagged kIncomplete
+(include/peclet/voro/tessellator.hpp:417, 464-465, covSq at :704) in MovingTessellation::lastStatus / report()
+(include/peclet/voro/repair.hpp:164-178, 312), which ale/frame.hpp does not read.
