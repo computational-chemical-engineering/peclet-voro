@@ -1290,3 +1290,97 @@ mesh-scale force is the part of order 1.6. The cell-valued gradient of the trans
 size. A repair of the friction force is a formulation question (F14 of the campaign state): no operator changes
 before a checked derivation. Not measured: ABC in Stokes flow is not an exact solution with p = 0 and was not
 run; the pressure error; a moving mesh.
+
+### A20 (2026-11-18): a friction force that is consistent in the strong sense (work order S1.2h, gate D6-K; answers F14; claim D6 of the hub, accepted by derivation, independent check and falsifier)
+**Cause.** With the face gradient of Q-FRIC (called P0 here) the tangential stress of the faces of cell i is
+weighted by ⅔V_i I + E_i, E_i = ⅓Σ_{f∈i} s_if A_f n_f ⊗ q_f, q_f the offset of the face centroid from the foot of
+the connector. A stress that is the same tensor at every face then leaves a force ∝ 1/h on the cells (0.053/h on
+mesh Z), and the part of the error orthogonal to the exact field converges with order 1.46 (A19: 1.61 in the
+Stokes step). Requirement added to Q-FRIC, **R3: Σ_f V_f G_f(U) = 0 for every periodic U**, V_f = A_f d_f/3.
+
+**Notation.** Face f = (A, B), n from A to B, d = d_f, r_i = c_f − x_i for i = A, B in the image the face mesh
+uses in `gradientAdjointPass`, heights h_A = n·r_A, h_B = −n·r_B (h_A + h_B = d; either may be negative),
+s_A = +1, s_B = −1, dU = U_B − U_A, G_i the cell gradient of `cellGradient`, stored (c,k) → 3c + k, component
+(c,k) = ∂U_c/∂x_k, (a ⊗ b)_ck = a_c b_k, (G n)_c = Σ_k G_ck n_k.
+
+1. **Face gradient, three variants** (`enum class Friction { P0, KP, KJ }`):
+   - P0 (present, unchanged): G_f = Ḡ + (dU/d − Ḡ n) ⊗ n, Ḡ = ½(G_A + G_B).
+   - **KP: d G_f = h_A G_A + h_B G_B − (G_A n) ⊗ r_A + (G_B n) ⊗ r_B + dU ⊗ n.** Keeps G_f n = dU/d.
+   - **KJ: d G_f = h_A G_A + h_B G_B + 3 [dU + G_B r_B − G_A r_A] ⊗ n.** The Gauss gradient of the two pyramids
+     over f with the cell reconstructions on their lateral triangles.
+   All three: exact for a linear field, differences of U only, R ≥ 0. KP and KJ satisfy R3 for any heights.
+2. **Stress and force.** S_f = 2 μ_f V_f sym G_f for every variant (μ_f = `muFace` as now). ζU is the adjoint:
+   face vector g_f, cell moment T_i = Σ_{f∈i} t_if, then out_i = −Σ_{f∈i} s_if g_f and the adjoint of the cell
+   gradient applied to M_i = T_i/V_i (`gradientAdjointPass`), exactly as now, with
+   - P0: t_if = ½(S − (S n) ⊗ n), g = S n/d;
+   - KP: t_if = (h_i S − s_if (S r_i) ⊗ n)/d, g = S n/d;
+   - KJ: t_if = (h_i S − 3 s_if (S n) ⊗ r_i)/d, g = 3 S n/d.
+3. **Kernel.** Same passes, same arrays, same exchange: the face pass stores S_f (9) and g_f (3) in `scratchF12`
+   (P0 keeps storing ½τ_f), the cell gather forms t_if from S_f, r_i, n, d. `ale::friction(..., Friction)`;
+   `StepOptions::friction` (default P0) passed by the static and the moving step, the reference and the tests.
+   **The P0 path stays bit for bit** (its kernels are not touched; the variant is chosen outside the kernels).
+   P0, KP, KJ are working names inside `ale/`; after the gate one variant stays and the option is removed.
+4. **Expected** [derived on a cubic lattice, mode ŷ sin kx, D6 item 8]: eigenvalue over exact 1 − (kh)²/4 (P0 =
+   KP there), 1 + (kh)²/12 (KJ). At the mesh scale (kh = π) the eigenvalue is 4/(3h²) (P0, KP) and 12/h² (KJ);
+   the two-point Laplacian has 4/h². So KJ is the stiffer operator: the predictor's iteration count is part of
+   the gate. Measured on the vector Poisson problem (hub `pilots/fable/runs/f14_friction_*`), Z, 64³, error
+   total / orthogonal: P0 5.56e-3 / 2.33e-3, KP 4.48e-3 / 1.33e-3, KJ 6.04e-4 / 5.67e-4; order of the orthogonal
+   part 32³ → 64³: 1.46 / 2.02 / 2.03.
+5. **Conditions.** KP's R3 uses Σ_i V_i G_i = 0, which holds for `cellGradient` in the periodic box; KJ's holds
+   for any cell gradients. Walls, solids, free surfaces, two phases (cell gradients across a kink, harmonic μ_f)
+   are not covered and need their own amendment. The pressure force has a defect of the same family (decision 8)
+   that this does not cure, so the Stokes ladder may stay below second order; that is then recorded as the
+   pressure's share.
+6. **Gate D6-K** (criteria fixed 11-18 before any run; brief `ALE_S1_2H`): K0 the P0 path bit for bit; K1 each
+   variant's ζ against the reference ≤ 1e-12, and in the reference R1, R3, symmetry ≤ 1e-12; K2 five steps of the
+   static step against the reference ≤ 1e-12 per variant; K3 Stokes ladder Z, orthogonal part 32³ → 64³ ≥ 1.9
+   (KP, KJ); K4 static TG and ABC ladders, order ≥ P0's − 0.1, budget closure within its bar, every solve
+   converged. Choice (orchestrator): KJ if its error at 64³ (TG, t = 1) ≤ 0.5 × KP's, its predictor iterations
+   ≤ 1.5 × KP's and no run is unstable; otherwise KP.
+
+### A21 (2026-11-19): what remains open after the rounds is rounding of the geometry; two bars for the closure (work orders S1.3a-r, S1.3a-r2; amends A14 and item 2 of A18)
+**Measured (S1.3a-r; reproductions `build_s2/gate_logs/S1_3a_r.repro/README`).** With the mesh following the
+fluid at Courant number 0.4 a frame failed for two different reasons.
+1. A one-sided facet survived the two rounds; a third round forcing two cells closes it. Cured: at most 8 rounds
+   (278b74e), rounds only when due.
+2. A cell stays above the closure bar although nothing is wrong with its topology: its own closure is 1e-17, the
+   disagreement of one facet with the neighbour's copy is 1.04e-13 … 3.4e-13 of the cell's surface (bar 1e-13).
+   Rounds 3–8 and forcing the neighbour change nothing; the GPU cold build of the same generators is open alike
+   (volumes bitwise equal to the repaired frame); the host cold build gives 6.7e-14. In all cases (3 of 3) the
+   worst facet has a vertex dual to a sliver Delaunay tetrahedron, shape quality q = 1.4e-4, 1.2e-4, 2.7e-5.
+   Rate: about one frame in 500 at 32³ (ABC), every run at 64³.
+
+**Reading [estimate from three cases, to be tested in S1.3a-r2].** Each cell computes a shared vertex by itself.
+At a sliver the vertex is ill-conditioned, its position differs between the cells by about ε h/q, and the two
+copies of a facet differ by about 0.05 ε/q of h². This is unbounded as q → 0 and its largest value grows with
+the number of cells and frames: a fixed bar near rounding fails sooner or later at any resolution.
+
+**What a closure defect c (relative to the cell's surface) does to the step [derived].** The face mesh has one
+area vector per face and the operators act on differences, so mass, momentum and the budget are untouched; the
+volume change is exact by the solve of A18 item 3. What is lost is consistency: a uniform flow has the divergence
+c S|U|/V in that cell, and the projection answers with a local velocity change of about c|U|, which does not
+accumulate. So c is a relative consistency error of size c, to be compared with the truncation error (1e-3 to
+1e-2 at these resolutions), not with rounding.
+
+**Decision.** Two bars.
+- `kClosureFrac` = 1e-13 stays the bar above which a cell is forced; the rounds are as they are, with one
+  addition: they stop when a round leaves the set of open cells and of one-sided facets unchanged (what a cold
+  rebuild of a cell does not change is not a matter of topology).
+- After the rounds a cell is a **frame error only above `kClosureErrorFrac` = 1e-9**. Cells between the bars are
+  tolerated, counted and reported: `numToleratedOpenCells` and `maxOpenFrac` in the frame's reciprocity record,
+  `open_tol` (sum over the frames of a run) and `open_max` in the RESULT line of `test_ale_stepper` and
+  `test_ale_frame`. The bar for one-sided facets (`kOneSidedFacetAreaFrac`) is not changed; the largest
+  one-sided area left in a run is reported (`onesided_max`), because rounding at a sliver can produce that too.
+- Not chosen: a cap on the mesh Courant number or a retry (the cold build has the same defect); a cold-build
+  fallback (same); recalibrating the single bar from a distribution (it has no upper end).
+**Open, for the geometry code (outside `ale/`, another session's code; before stage 2):** the cure at the root is
+a vertex that has one value: evaluated once, or evaluated by each cell from the sorted set of its four generators
+in one fixed order of operations, so that the copies are bitwise equal. Then every facet has one area vector and
+the closure of a cell is a matter of topology only, in the sense of the project's rule for robustness.
+
+**Gate (criteria fixed 11-19 before any run; brief `ALE_S1_3A_R2`).** F2: the five runs of S1.3a-r (follow to
+t = 1, GPU: tg_Z32_F three times, abc_Z32_F, tg_Z64_F) end DONE with `gcl` ≤ 1e-14, `open_max` ≤ 1e-9,
+`onesided_max` reported; budget closure and booked momentum within the bars of G1.3 c, d in each. N: the static
+path and `--motion rest` bit for bit; G1.3a's other criteria unchanged. H (the reading): in one cold 64³ frame
+on the GPU and in the four dumps, every cell above 2.5e-14 has on its worst facet a vertex with q < 1e-2, and
+defect × q/ε ≤ 1 for all of them; otherwise the reading is refuted and recorded so.
