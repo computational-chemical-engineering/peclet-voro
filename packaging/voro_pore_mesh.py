@@ -78,7 +78,6 @@ def redistribute_pore_mesh(positions, sphere_centers, sphere_radii, extent, s_lo
     The sphere packing is the periodic wall geometry (sphere_centers (M,3), sphere_radii (M,)) in
     the cubic box `extent` = (L, L, L)."""
     L = _cubic_extent(extent, "redistribute_pore_mesh")
-    ext = (L, L, L)
     rng = np.random.default_rng(seed)
     centers = np.asarray(sphere_centers, dtype=np.float64).reshape(-1, 3)
     radii = np.asarray(sphere_radii, dtype=np.float64).ravel()
@@ -86,77 +85,16 @@ def redistribute_pore_mesh(positions, sphere_centers, sphere_radii, extent, s_lo
     if margin is None:
         margin = 0.4 * s_lo
     ni, nr, root = sphere_union_scene(centers, radii)
-
-    def size_of(phi):
-        # s(φ) = clip(s_lo + slope (φ − s_lo), s_lo, s_hi): slope 1 is the example's s = clip(φ);
-        # a Voronoi cell's size cannot change faster than its neighbours' — with slope 1 the
-        # targets of adjacent cells differ by up to 8x in volume, so the per-cell error floor is
-        # O(1); slope ≲ 0.3 makes the target field resolvable
-        return np.clip(s_lo + slope * (phi - s_lo), s_lo, s_hi)
+    scene = _PoreScene(centers, radii, L, ni, nr, root, s_lo, s_hi, slope)
 
     if wall_shell:
-        # the wall layers by construction (the example's graded-shell heuristic): drop the seeds
-        # closer than the outermost shell and lay concentric shells around every sphere at
-        # distances d_k (radial step = in-surface spacing = the local size s(d)), keeping each
-        # point near its own layer; the loop then handles the bulk
-        dists, d = [], 0.6 * s_lo
-        while d < 1.5 * s_hi:
-            dists.append(d)
-            d += float(size_of(d))
-        phi0 = sphere_union_sdf(pos, centers, radii, ext)
-        keep = phi0 >= dists[-1] + 0.5 * size_of(dists[-1])
-        shells = []
-        for d in dists:
-            h = float(size_of(d))
-            for c, r in zip(centers, radii):
-                R = r + d
-                n = max(6, int(4 * np.pi * R * R / (h * h)))
-                i = np.arange(n) + 0.5
-                th = np.arccos(1 - 2 * i / n)
-                ph = np.pi * (1 + 5 ** 0.5) * i
-                p = np.c_[np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)] * R + c
-                p += rng.normal(0, 0.15 * h, p.shape)
-                p %= L
-                pd = sphere_union_sdf(p, centers, radii, ext)
-                shells.append(p[np.abs(pd - d) < 0.5 * h])
-        pos = np.ascontiguousarray(np.vstack([pos[keep]] + shells) % L)
-
-    def measure(p):
-        t = Tessellation()
-        t.set_domain(extent=ext)
-        t.set_geometry(ni, nr, root=root)
-        if verbose:
-            print(f"    measure: build N={len(p)}", flush=True)
-        t.build(p, strict=False)
-        vol = t.get_volumes()
-        rep = t.diagnostics.build_report()
-        if verbose:
-            print(f"    measure: report {rep}", flush=True)
-        phi = sphere_union_sdf(p, centers, radii, ext)
-        dead = (vol <= 0) | (phi <= 0)
-        vref = size_of(phi) ** 3  # ABSOLUTE target: the seed count adjusts until Σ V_ref = fluid
-        live = ~dead
-        rel = np.where(live, vol / vref - 1.0, -1.0)
-        # centroids from the Lloyd gradient dE/dx = 2 V (x − c)
-        types, ten = np.zeros(len(p), dtype=np.int32), np.zeros((1, 1))
-        f = t.energy_forces(types, ten, lloyd=1.0)["force"]
-        cen = p.copy()
-        cen[live] = p[live] - f[live] / (2.0 * vol[live])[:, None]
-        # graded volume descent: E = Σ (V/V_ref − 1)², dE/dV = 2 r / V_ref → the gradient wrt the
-        # seeds through the published facet areas; Newton-like step −r·s along −grad
-        dEdV = np.where(live, 2.0 * rel / vref, 0.0)
-        g = t.energy_forces(types, ten, dEdV=np.ascontiguousarray(dEdV))["force"]
-        gn = np.linalg.norm(g, axis=1)
-        step = np.zeros_like(p)
-        ok = live & (gn > 0)
-        step[ok] = -(g[ok] / gn[ok][:, None]) * (np.minimum(np.abs(rel[ok]), 0.5) * size_of(phi[ok]))[:, None]
-        return vol, vref, rel, dead, cen, phi, rep, step
+        pos = _wall_shell_seeds(scene, pos, rng)
 
     history, n_added, n_removed = [], 0, 0
     rounds = 0
     best = None  # (max|r|, positions): the loop is a heuristic — return its best state
     for rounds in range(1, max_rounds + 1):
-        vol, vref, rel, dead, cen, phi, rep, step = measure(pos)
+        vol, vref, rel, dead, cen, phi, rep, step = _measure_pore_cells(scene, pos, verbose)
         n = len(pos)
         mx, rms = float(np.abs(rel[~dead]).max()) if (~dead).any() else np.inf, \
             float(np.sqrt(np.mean(rel[~dead] ** 2))) if (~dead).any() else np.inf
@@ -178,51 +116,20 @@ def redistribute_pore_mesh(positions, sphere_centers, sphere_radii, extent, s_lo
         # split: the largest cells beyond the threshold
         big = np.where(~dead & (rel > bk - 1.0))[0]
         big = big[np.argsort(-rel[big])][:cap]
-        new = []
-        for i in big:
-            s = size_of(phi[i])
-            off = cen[i] - pos[i]
-            if np.linalg.norm(off) < 0.2 * s:  # symmetric cell: a random direction
-                off = rng.standard_normal(3)
-            if phi[i] < s:  # wall cell: split ALONG the wall (outward seeds get merged away)
-                d = pos[i] - centers
-                d -= L * np.round(d / L)
-                nrm = d[np.argmin(np.linalg.norm(d, axis=1) - radii)]
-                nrm /= max(np.linalg.norm(nrm), 1e-300)
-                off -= np.dot(off, nrm) * nrm
-                if np.linalg.norm(off) < 1e-12:
-                    off = rng.standard_normal(3)
-                    off -= np.dot(off, nrm) * nrm
-            off *= 0.6 * s / max(np.linalg.norm(off), 1e-300)
-            q = (pos[i] + off) % L
-            if sphere_union_sdf(q[None, :], centers, radii, ext)[0] > margin:
-                new.append(q)
+        new = _split_seeds(scene, pos, cen, phi, big, margin, rng)
         keep = np.ones(n, dtype=bool)
         keep[remove] = False
         n_removed += int((~keep).sum())
         n_added += len(new)
         pos = np.vstack([pos[keep]] + ([np.array(new)] if new else []))
         pos = np.ascontiguousarray(pos % L)
-        # relax: a Lloyd blend (cell shape) + the graded volume descent (cell size), seeds kept
-        # off the wall
-        for _ in range(lloyd_steps):
-            vol, vref, rel, dead, cen, phi, rep, step = measure(pos)
-            live = ~dead
-            q = (pos + lloyd_weight * (cen - pos) + step) % L
-            ok = live & (sphere_union_sdf(q, centers, radii, ext) > margin)
-            pos[ok] = q[ok]
-            pos = np.ascontiguousarray(pos % L)
-    vol, vref, rel, dead, cen, phi, rep, step = measure(pos)
+        pos = _relax_seeds(scene, pos, lloyd_steps, lloyd_weight, margin, verbose)
+    vol, vref, rel, dead, cen, phi, rep, step = _measure_pore_cells(scene, pos, verbose)
     if best is not None and (dead.any() or best[0] < float(np.abs(rel[~dead]).max())):
         pos = best[1]
-        vol, vref, rel, dead, cen, phi, rep, step = measure(pos)
+        vol, vref, rel, dead, cen, phi, rep, step = _measure_pore_cells(scene, pos, verbose)
     if polish and not dead.any():
-        r = optimize_pore_mesh(pos, np.ascontiguousarray(vref), centers, radii, ext,
-                               search_window=4, max_iter=60, tol=1e-8, method="graphamg")
-        p2 = np.ascontiguousarray(np.asarray(r.positions) % L)
-        vol2, vref2, rel2, dead2, cen2, phi2, rep2, step2 = measure(p2)
-        if not dead2.any() and np.abs(rel2).max() < np.abs(rel).max():
-            pos, vol, vref, rel, dead = p2, vol2, vref2, rel2, dead2
+        pos, vol, vref, rel, dead = _polish_seeds(scene, pos, vol, vref, rel, dead, verbose)
     live = ~dead
     return RedistributeResult(
         positions=pos, volumes=vol, vref=vref, rel=rel,
@@ -230,3 +137,149 @@ def redistribute_pore_mesh(positions, sphere_centers, sphere_radii, extent, s_lo
         rms_rel=float(np.sqrt(np.mean(rel[live] ** 2))) if live.any() else float("inf"),
         rounds=rounds, num_added=n_added, num_removed=n_removed, num_dead=int(dead.sum()),
         history=history)
+
+
+# ---- the phases of redistribute_pore_mesh ------------------------------------------------------
+
+@dataclass(frozen=True)
+class _PoreScene:
+    """The periodic sphere packing and the graded size field s(φ) of redistribute_pore_mesh."""
+    centers: np.ndarray
+    radii: np.ndarray
+    L: float
+    ni: np.ndarray
+    nr: np.ndarray
+    root: int
+    s_lo: float
+    s_hi: float
+    slope: float
+
+    @property
+    def ext(self):
+        return (self.L, self.L, self.L)
+
+    def size_of(self, phi):
+        # s(φ) = clip(s_lo + slope (φ − s_lo), s_lo, s_hi): slope 1 is the example's s = clip(φ);
+        # a Voronoi cell's size cannot change faster than its neighbours' — with slope 1 the
+        # targets of adjacent cells differ by up to 8x in volume, so the per-cell error floor is
+        # O(1); slope ≲ 0.3 makes the target field resolvable
+        return np.clip(self.s_lo + self.slope * (phi - self.s_lo), self.s_lo, self.s_hi)
+
+    def sdf(self, p):
+        return sphere_union_sdf(p, self.centers, self.radii, self.ext)
+
+
+def _wall_shell_seeds(scene, pos, rng):
+    """The wall layers by construction (the example's graded-shell heuristic): drop the seeds
+    closer than the outermost shell and lay concentric shells around every sphere at distances
+    d_k (radial step = in-surface spacing = the local size s(d)), keeping each point near its own
+    layer; the redistribution loop then handles the bulk."""
+    s_lo, s_hi, L = scene.s_lo, scene.s_hi, scene.L
+    dists, d = [], 0.6 * s_lo
+    while d < 1.5 * s_hi:
+        dists.append(d)
+        d += float(scene.size_of(d))
+    phi0 = scene.sdf(pos)
+    keep = phi0 >= dists[-1] + 0.5 * scene.size_of(dists[-1])
+    shells = []
+    for d in dists:
+        h = float(scene.size_of(d))
+        for c, r in zip(scene.centers, scene.radii):
+            R = r + d
+            n = max(6, int(4 * np.pi * R * R / (h * h)))
+            i = np.arange(n) + 0.5
+            th = np.arccos(1 - 2 * i / n)
+            ph = np.pi * (1 + 5 ** 0.5) * i
+            p = np.c_[np.sin(th) * np.cos(ph), np.sin(th) * np.sin(ph), np.cos(th)] * R + c
+            p += rng.normal(0, 0.15 * h, p.shape)
+            p %= L
+            pd = scene.sdf(p)
+            shells.append(p[np.abs(pd - d) < 0.5 * h])
+    return np.ascontiguousarray(np.vstack([pos[keep]] + shells) % L)
+
+
+def _measure_pore_cells(scene, p, verbose):
+    """Tessellate the seeds p against the walls and return, per seed, (volume, V_ref, rel, dead,
+    Lloyd centroid, φ, the build report, the graded volume-descent step)."""
+    t = Tessellation()
+    t.set_domain(extent=scene.ext)
+    t.set_geometry(scene.ni, scene.nr, root=scene.root)
+    if verbose:
+        print(f"    measure: build N={len(p)}", flush=True)
+    t.build(p, strict=False)
+    vol = t.get_volumes()
+    rep = t.diagnostics.build_report()
+    if verbose:
+        print(f"    measure: report {rep}", flush=True)
+    phi = scene.sdf(p)
+    dead = (vol <= 0) | (phi <= 0)
+    vref = scene.size_of(phi) ** 3  # ABSOLUTE target: the seed count adjusts until Σ V_ref = fluid
+    live = ~dead
+    rel = np.where(live, vol / vref - 1.0, -1.0)
+    # centroids from the Lloyd gradient dE/dx = 2 V (x − c)
+    types, ten = np.zeros(len(p), dtype=np.int32), np.zeros((1, 1))
+    f = t.energy_forces(types, ten, lloyd=1.0)["force"]
+    cen = p.copy()
+    cen[live] = p[live] - f[live] / (2.0 * vol[live])[:, None]
+    # graded volume descent: E = Σ (V/V_ref − 1)², dE/dV = 2 r / V_ref → the gradient wrt the
+    # seeds through the published facet areas; Newton-like step −r·s along −grad
+    dEdV = np.where(live, 2.0 * rel / vref, 0.0)
+    g = t.energy_forces(types, ten, dEdV=np.ascontiguousarray(dEdV))["force"]
+    gn = np.linalg.norm(g, axis=1)
+    step = np.zeros_like(p)
+    ok = live & (gn > 0)
+    step[ok] = -(g[ok] / gn[ok][:, None]) * (np.minimum(np.abs(rel[ok]), 0.5) * scene.size_of(phi[ok]))[:, None]
+    return vol, vref, rel, dead, cen, phi, rep, step
+
+
+def _split_seeds(scene, pos, cen, phi, big, margin, rng):
+    """The second seed of every cell in `big`, offset from its centroid by ~s(φ) (along the wall
+    for a wall cell); a candidate closer to the wall than `margin` is dropped."""
+    centers, radii, L = scene.centers, scene.radii, scene.L
+    new = []
+    for i in big:
+        s = scene.size_of(phi[i])
+        off = cen[i] - pos[i]
+        if np.linalg.norm(off) < 0.2 * s:  # symmetric cell: a random direction
+            off = rng.standard_normal(3)
+        if phi[i] < s:  # wall cell: split ALONG the wall (outward seeds get merged away)
+            d = pos[i] - centers
+            d -= L * np.round(d / L)
+            nrm = d[np.argmin(np.linalg.norm(d, axis=1) - radii)]
+            nrm /= max(np.linalg.norm(nrm), 1e-300)
+            off -= np.dot(off, nrm) * nrm
+            if np.linalg.norm(off) < 1e-12:
+                off = rng.standard_normal(3)
+                off -= np.dot(off, nrm) * nrm
+        off *= 0.6 * s / max(np.linalg.norm(off), 1e-300)
+        q = (pos[i] + off) % L
+        if scene.sdf(q[None, :])[0] > margin:
+            new.append(q)
+    return new
+
+
+def _relax_seeds(scene, pos, lloyd_steps, lloyd_weight, margin, verbose):
+    """`lloyd_steps` sweeps of a Lloyd blend (cell shape) + the graded volume descent (cell
+    size), seeds kept off the wall."""
+    L = scene.L
+    for _ in range(lloyd_steps):
+        vol, vref, rel, dead, cen, phi, rep, step = _measure_pore_cells(scene, pos, verbose)
+        live = ~dead
+        q = (pos + lloyd_weight * (cen - pos) + step) % L
+        ok = live & (scene.sdf(q) > margin)
+        pos[ok] = q[ok]
+        pos = np.ascontiguousarray(pos % L)
+    return pos
+
+
+def _polish_seeds(scene, pos, vol, vref, rel, dead, verbose):
+    """The position-only optimiser from the feasible start; kept only if it lowers max |rel|
+    without killing a cell."""
+    L = scene.L
+    r = optimize_pore_mesh(pos, np.ascontiguousarray(vref), scene.centers, scene.radii, scene.ext,
+                           search_window=4, max_iter=60, tol=1e-8, method="graphamg")
+    p2 = np.ascontiguousarray(np.asarray(r.positions) % L)
+    vol2, vref2, rel2, dead2, cen2, phi2, rep2, step2 = _measure_pore_cells(scene, p2, verbose)
+    if not dead2.any() and np.abs(rel2).max() < np.abs(rel).max():
+        return p2, vol2, vref2, rel2, dead2
+    return pos, vol, vref, rel, dead
