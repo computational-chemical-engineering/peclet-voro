@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "peclet/voro/mesh_optimizer.hpp"  // meshVolumeOptimize, Precond, ConvexCell, buildConvexCell, clip
+#include "polyhedra_vtu.hpp"
 
 using Real = double;
 using Cell = peclet::voro::ConvexCell<Real, 128, 256>;
@@ -74,147 +75,55 @@ Real vrefOf(Real phi) {
   return s * s * s;
 }
 
-// Ordered alive-triangle indices forming face k (watertight face by triangle index). Ported from
-// sdf_voronoi_vtu.cpp.
-int faceOrderedIdx(const Cell& c, int k, int out[Cell::MAXFV]) {
-  int m = 0;
-  Real fx[Cell::MAXFV], fy[Cell::MAXFV], fz[Cell::MAXFV];
-  for (int t = 0; t < c.nt; ++t) {
-    if (!c.alive[t]) continue;
-    if (c.t0[t] != k && c.t1[t] != k && c.t2[t] != k) continue;
-    if (m < Cell::MAXFV) {
-      out[m] = t;
-      fx[m] = c.vx[t];
-      fy[m] = c.vy[t];
-      fz[m] = c.vz[t];
-      ++m;
-    }
+// The interstitial cell of seed i: built against its 80 nearest periodic (min-image) neighbours
+// and clipped to the sphere walls. `ord` is scratch.
+void buildSeedCell(Cell& c, const std::vector<Real>& seed, int N, int i, const SdfSpheres& sdf,
+                   Real L, std::vector<std::pair<Real, int>>& ord) {
+  const Real Lh = 0.5 * L;
+  const Real big = 4 * L;
+  const Real sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
+  ord.clear();
+  for (int j = 0; j < N; ++j) {
+    if (j == i) continue;
+    Real dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
+    dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
+    dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
+    dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
+    ord.emplace_back(dx * dx + dy * dy + dz * dz, j);
   }
-  if (m < 3) return m;
-  const Real nx = c.n[k][0], ny = c.n[k][1], nz = c.n[k][2];
-  const Real nlen = std::sqrt(nx * nx + ny * ny + nz * nz);
-  if (nlen == Real(0)) return 0;
-  const Real un[3] = {nx / nlen, ny / nlen, nz / nlen};
-  Real e1[3];
-  if (std::fabs(un[0]) <= std::fabs(un[1]) && std::fabs(un[0]) <= std::fabs(un[2])) {
-    e1[0] = 0; e1[1] = -un[2]; e1[2] = un[1];
-  } else if (std::fabs(un[1]) <= std::fabs(un[2])) {
-    e1[0] = -un[2]; e1[1] = 0; e1[2] = un[0];
-  } else {
-    e1[0] = -un[1]; e1[1] = un[0]; e1[2] = 0;
+  std::sort(ord.begin(), ord.end());
+  const int M = std::min((int)ord.size(), 80);
+  std::vector<Real> rx(M), ry(M), rz(M);
+  std::vector<int> ids(M);
+  for (int k = 0; k < M; ++k) {
+    const int j = ord[k].second;
+    Real dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
+    dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
+    dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
+    dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
+    rx[k] = dx; ry[k] = dy; rz[k] = dz; ids[k] = j;
   }
-  const Real e1l = std::sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
-  e1[0] /= e1l; e1[1] /= e1l; e1[2] /= e1l;
-  const Real e2[3] = {un[1] * e1[2] - un[2] * e1[1], un[2] * e1[0] - un[0] * e1[2],
-                      un[0] * e1[1] - un[1] * e1[0]};
-  Real cx = 0, cy = 0, cz = 0;
-  for (int i = 0; i < m; ++i) { cx += fx[i]; cy += fy[i]; cz += fz[i]; }
-  cx /= m; cy /= m; cz /= m;
-  Real ang[Cell::MAXFV];
-  for (int i = 0; i < m; ++i) {
-    const Real dx = fx[i] - cx, dy = fy[i] - cy, dz = fz[i] - cz;
-    const Real px = dx * e1[0] + dy * e1[1] + dz * e1[2];
-    const Real py = dx * e2[0] + dy * e2[1] + dz * e2[2];
-    const Real s = std::fabs(px) + std::fabs(py);
-    const Real tt = (s > Real(0)) ? py / s : Real(0);
-    ang[i] = (px < Real(0)) ? (Real(2) - tt) : (py < Real(0) ? Real(4) + tt : tt);
-  }
-  for (int i = 1; i < m; ++i) {
-    const Real ka = ang[i];
-    const int ki = out[i];
-    int j = i - 1;
-    while (j >= 0 && ang[j] > ka) {
-      ang[j + 1] = ang[j];
-      out[j + 1] = out[j];
-      --j;
-    }
-    ang[j + 1] = ka;
-    out[j + 1] = ki;
-  }
-  return m;
+  const Real Lbig[3] = {big, big, big};
+  peclet::voro::buildConvexCell(c, Lbig, rx.data(), ry.data(), rz.data(), ids.data(), M);
+  const Real seedW[3] = {sx, sy, sz};
+  peclet::voro::clipCellAgainstSdf<Real, 128, 256, false>(c, seedW, sdf);
 }
 
 // Reconstruct every interstitial cell (periodic min-image neighbours + SDF clip) and write a VTU of
 // clipped polyhedra, coloured by volume, V/V_ref (rel), and a wall-touch flag.
 void writeVtu(const std::vector<Real>& seed, int N, const SdfSpheres& sdf, Real L,
               const std::vector<Real>& vref, const char* fname) {
-  std::vector<Real> px, py, pz;
-  std::vector<long> conn, offs, faces, faceoffs;
+  PolyhedraVtu<Real> vtu;
   std::vector<Real> cellVol, cellRel, cellVref;
-  std::vector<int> cellBoundary;
   std::vector<std::pair<Real, int>> ord;
-  long connCursor = 0;
-  const Real Lh = 0.5 * L;
-  const Real big = 4 * L;
   for (int i = 0; i < N; ++i) {
-    const Real sx = seed[3 * i], sy = seed[3 * i + 1], sz = seed[3 * i + 2];
-    ord.clear();
-    for (int j = 0; j < N; ++j) {
-      if (j == i) continue;
-      Real dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
-      dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
-      dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
-      dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
-      ord.emplace_back(dx * dx + dy * dy + dz * dz, j);
-    }
-    std::sort(ord.begin(), ord.end());
-    const int M = std::min((int)ord.size(), 80);
-    std::vector<Real> rx(M), ry(M), rz(M);
-    std::vector<int> ids(M);
-    for (int k = 0; k < M; ++k) {
-      const int j = ord[k].second;
-      Real dx = seed[3 * j] - sx, dy = seed[3 * j + 1] - sy, dz = seed[3 * j + 2] - sz;
-      dx -= dx > Lh ? L : (dx < -Lh ? -L : 0);
-      dy -= dy > Lh ? L : (dy < -Lh ? -L : 0);
-      dz -= dz > Lh ? L : (dz < -Lh ? -L : 0);
-      rx[k] = dx; ry[k] = dy; rz[k] = dz; ids[k] = j;
-    }
     Cell c;
-    const Real Lbig[3] = {big, big, big};
-    peclet::voro::buildConvexCell(c, Lbig, rx.data(), ry.data(), rz.data(), ids.data(), M);
-    const Real seedW[3] = {sx, sy, sz};
-    peclet::voro::clipCellAgainstSdf<Real, 128, 256, false>(c, seedW, sdf);
+    buildSeedCell(c, seed, N, i, sdf, L, ord);
     if (c.empty() || c.overflow) continue;
-
-    const long base = (long)px.size();
-    std::vector<int> triToPt(c.nt, -1);
-    int np = 0;
-    for (int t = 0; t < c.nt; ++t) {
-      if (!c.alive[t]) continue;
-      triToPt[t] = np++;
-      px.push_back(sx + c.vx[t]);
-      py.push_back(sy + c.vy[t]);
-      pz.push_back(sz + c.vz[t]);
-    }
-    if (np < 4) continue;
-    std::vector<std::vector<long>> cellFaces;
-    bool touchesWall = false;
-    for (int k = 0; k < c.np; ++k) {
-      int fidx[Cell::MAXFV];
-      const int m = faceOrderedIdx(c, k, fidx);
-      if (m < 3) continue;
-      std::vector<long> face;
-      for (int q = 0; q < m; ++q)
-        if (triToPt[fidx[q]] >= 0) face.push_back(base + triToPt[fidx[q]]);
-      if ((int)face.size() >= 3) {
-        cellFaces.push_back(std::move(face));
-        if (c.pnbr[k] == peclet::voro::kBoundaryFacet) touchesWall = true;
-      }
-    }
-    if (cellFaces.size() < 4) continue;
-    for (int p = 0; p < np; ++p) conn.push_back(base + p);
-    connCursor += np;
-    offs.push_back(connCursor);
-    faces.push_back((long)cellFaces.size());
-    for (auto& f : cellFaces) {
-      faces.push_back((long)f.size());
-      for (long id : f) faces.push_back(id);
-    }
-    faceoffs.push_back((long)faces.size());
+    if (!vtu.append(c, seed[3 * i], seed[3 * i + 1], seed[3 * i + 2])) continue;
     const Real V = c.volumePerVertex();
     cellVol.push_back(V);
     cellVref.push_back(vref.empty() ? 1.0 : vref[i]);
-    cellBoundary.push_back(touchesWall ? 1 : 0);
   }
   // rel = V / V_ref, with V_ref renormalised to the actual total cell volume (Σ V_ref = Σ V), so
   // rel = 1 is exactly on target (the optimiser renormalises internally the same way).
@@ -226,40 +135,8 @@ void writeVtu(const std::vector<Real>& seed, int N, const SdfSpheres& sdf, Real 
     for (std::size_t k = 0; k < cellVol.size(); ++k)
       cellRel[k] = cellVol[k] / (cellVref[k] * scale);
   }
-
-  std::ofstream out(fname);
-  const long nPts = (long)px.size(), nCells = (long)offs.size();
-  out << "<?xml version=\"1.0\"?>\n<VTKFile type=\"UnstructuredGrid\" version=\"1.0\" "
-         "byte_order=\"LittleEndian\">\n  <UnstructuredGrid>\n";
-  out << "    <Piece NumberOfPoints=\"" << nPts << "\" NumberOfCells=\"" << nCells << "\">\n";
-  out << "      <Points>\n        <DataArray type=\"Float64\" NumberOfComponents=\"3\" "
-         "format=\"ascii\">\n";
-  for (long p = 0; p < nPts; ++p) out << px[p] << ' ' << py[p] << ' ' << pz[p] << '\n';
-  out << "        </DataArray>\n      </Points>\n      <Cells>\n";
-  out << "        <DataArray type=\"Int64\" Name=\"connectivity\" format=\"ascii\">\n";
-  for (long v : conn) out << v << ' ';
-  out << "\n        </DataArray>\n        <DataArray type=\"Int64\" Name=\"offsets\" "
-         "format=\"ascii\">\n";
-  for (long v : offs) out << v << ' ';
-  out << "\n        </DataArray>\n        <DataArray type=\"UInt8\" Name=\"types\" "
-         "format=\"ascii\">\n";
-  for (long ci = 0; ci < nCells; ++ci) out << "42 ";
-  out << "\n        </DataArray>\n        <DataArray type=\"Int64\" Name=\"faces\" "
-         "format=\"ascii\">\n";
-  for (long v : faces) out << v << ' ';
-  out << "\n        </DataArray>\n        <DataArray type=\"Int64\" Name=\"faceoffsets\" "
-         "format=\"ascii\">\n";
-  for (long v : faceoffs) out << v << ' ';
-  out << "\n        </DataArray>\n      </Cells>\n      <CellData Scalars=\"volume\">\n";
-  out << "        <DataArray type=\"Float64\" Name=\"volume\" format=\"ascii\">\n";
-  for (Real v : cellVol) out << v << ' ';
-  out << "\n        </DataArray>\n        <DataArray type=\"Float64\" Name=\"rel\" format=\"ascii\">\n";
-  for (Real v : cellRel) out << v << ' ';
-  out << "\n        </DataArray>\n        <DataArray type=\"Int32\" Name=\"boundary\" "
-         "format=\"ascii\">\n";
-  for (int v : cellBoundary) out << v << ' ';
-  out << "\n        </DataArray>\n      </CellData>\n    </Piece>\n  </UnstructuredGrid>\n</VTKFile>\n";
-  std::printf("  wrote %s: %ld cells\n", fname, nCells);
+  vtu.write(fname, {{"volume", &cellVol}, {"rel", &cellRel}});
+  std::printf("  wrote %s: %ld cells\n", fname, vtu.numCells());
 }
 
 // Reject-sample seeds; `graded` weights the acceptance by 1/V_ref (density ∝ 1/cell-size).

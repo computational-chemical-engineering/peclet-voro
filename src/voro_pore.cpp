@@ -164,9 +164,12 @@ struct PoreReconstructor {
   }
 };
 
-void bindPore(nb::module_& m) {
+// ---- pore-space (SDF-walled) family: bound here, exposed by peclet.voro.pore_mesh --------------
+
+namespace {
+
+void bindOptimizePoreMesh(nb::module_& m) {
   using namespace defaults;
-  // ---- pore-space (SDF-walled) family: bound here, exposed by peclet.voro.pore_mesh ------------
   m.def(
       "optimize_pore_mesh",
       [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> vref_in,
@@ -209,48 +212,51 @@ void bindPore(nb::module_& m) {
           " / " + fmt(kPoreCgIters) +
           ". Returns an\nOptimizeResult. Experimental (pore-space meshing; see the "
           "pore-mesh-voronoi example)."));
+}
 
-  // The pore-space export: the device path (pore_cells.hpp — the tessellator's own gather at the
-  // pore capacity, count -> scan -> fill in seed order) under the public names, and the host-serial
-  // PoreReconstructor under the `_host` names as its test oracle (python/test_voro.py
-  // test_pore_cells compares them). Both share the per-cell export rule + layout
-  // (peclet::voro::detail::poreCellCount / poreCellFill).
-  auto poreCellsDict = [](std::vector<real_t>&& pts, std::vector<int64_t>&& faces,
-                          std::vector<int64_t>&& faceOff, std::vector<real_t>&& vol,
-                          std::vector<int32_t>&& boundary, std::vector<int32_t>&& cellSeed,
-                          long numOverflow, long numIncomplete) {
-    const std::size_t nPts = pts.size() / 3, nCells = vol.size();
-    nb::dict d;
-    d["points"] = peclet::core::python::vector_to_ndarray(std::move(pts), {nPts, 3}, {3, 1});
-    d["faces"] = peclet::core::python::vector_to_ndarray(std::move(faces), {faces.size()}, {1});
-    d["face_offsets"] =
-        peclet::core::python::vector_to_ndarray(std::move(faceOff), {faceOff.size()}, {1});
-    d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nCells}, {1});
-    d["boundary"] = peclet::core::python::vector_to_ndarray(std::move(boundary), {nCells}, {1});
-    d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nCells}, {1});
-    d["num_overflow"] = numOverflow;
-    d["num_incomplete"] = numIncomplete;
-    return d;
-  };
-  auto poreSectionDict = [](std::vector<real_t>&& verts, std::vector<int64_t>&& off,
-                            std::vector<real_t>&& vol, std::vector<int32_t>&& cellSeed,
-                            long numOverflow, long numIncomplete) {
-    const std::size_t nV = verts.size() / 3, nP = vol.size();
-    nb::dict d;
-    d["verts"] = peclet::core::python::vector_to_ndarray(std::move(verts), {nV, 3}, {3, 1});
-    d["offsets"] = peclet::core::python::vector_to_ndarray(std::move(off), {off.size()}, {1});
-    d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nP}, {1});
-    d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nP}, {1});
-    d["num_overflow"] = numOverflow;
-    d["num_incomplete"] = numIncomplete;
-    return d;
-  };
+// The pore-space export: the device path (pore_cells.hpp — the tessellator's own gather at the
+// pore capacity, count -> scan -> fill in seed order) under the public names, and the host-serial
+// PoreReconstructor under the `_host` names as its test oracle (python/test_voro.py
+// test_pore_cells compares them). Both share the per-cell export rule + layout
+// (peclet::voro::detail::poreCellCount / poreCellFill).
+nb::dict poreCellsDict(std::vector<real_t>&& pts, std::vector<int64_t>&& faces,
+                       std::vector<int64_t>&& faceOff, std::vector<real_t>&& vol,
+                       std::vector<int32_t>&& boundary, std::vector<int32_t>&& cellSeed,
+                       long numOverflow, long numIncomplete) {
+  const std::size_t nPts = pts.size() / 3, nCells = vol.size();
+  nb::dict d;
+  d["points"] = peclet::core::python::vector_to_ndarray(std::move(pts), {nPts, 3}, {3, 1});
+  d["faces"] = peclet::core::python::vector_to_ndarray(std::move(faces), {faces.size()}, {1});
+  d["face_offsets"] =
+      peclet::core::python::vector_to_ndarray(std::move(faceOff), {faceOff.size()}, {1});
+  d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nCells}, {1});
+  d["boundary"] = peclet::core::python::vector_to_ndarray(std::move(boundary), {nCells}, {1});
+  d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nCells}, {1});
+  d["num_overflow"] = numOverflow;
+  d["num_incomplete"] = numIncomplete;
+  return d;
+}
+nb::dict poreSectionDict(std::vector<real_t>&& verts, std::vector<int64_t>&& off,
+                         std::vector<real_t>&& vol, std::vector<int32_t>&& cellSeed,
+                         long numOverflow, long numIncomplete) {
+  const std::size_t nV = verts.size() / 3, nP = vol.size();
+  nb::dict d;
+  d["verts"] = peclet::core::python::vector_to_ndarray(std::move(verts), {nV, 3}, {3, 1});
+  d["offsets"] = peclet::core::python::vector_to_ndarray(std::move(off), {off.size()}, {1});
+  d["volume"] = peclet::core::python::vector_to_ndarray(std::move(vol), {nP}, {1});
+  d["seed"] = peclet::core::python::vector_to_ndarray(std::move(cellSeed), {nP}, {1});
+  d["num_overflow"] = numOverflow;
+  d["num_incomplete"] = numIncomplete;
+  return d;
+}
+
+// The device pore-cell / section export under the public names.
+void bindPoreCells(nb::module_& m) {
+  using namespace defaults;
   m.def(
       "sdf_voronoi_cells",
-      [poreCellsDict](nb::ndarray<real_t, nb::c_contig> pos_in,
-                      nb::ndarray<real_t, nb::c_contig> sph_c,
-                      nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
-                      int search_window) {
+      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
+         nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent, int search_window) {
         auto seed = flatten3(pos_in);
         const int N = (int)(seed.size() / 3);
         const real_t L = cubicExtent(extent, "sdf_voronoi_cells");
@@ -286,10 +292,9 @@ void bindPore(nb::module_& m) {
           fmt(kPoreSearchWindow) + ") did not close — raise\nsearch_window if it is not 0."));
   m.def(
       "sdf_voronoi_section",
-      [poreSectionDict](
-          nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
-          nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
-          std::array<real_t, 3> point, std::array<real_t, 3> normal, int search_window) {
+      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
+         nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
+         std::array<real_t, 3> point, std::array<real_t, 3> normal, int search_window) {
         auto seed = flatten3(pos_in);
         const int N = (int)(seed.size() / 3);
         const real_t L = cubicExtent(extent, "sdf_voronoi_section");
@@ -323,11 +328,15 @@ void bindPore(nb::module_& m) {
           fmt(kPoreSearchWindow) +
           "). For a z=z0 slice pass\npoint=(0,0,z0), normal=(0,0,1) "
           "and plot verts[:, :2]."));
+}
+
+// The host-serial PoreReconstructor under the `_host` names: the test oracle of bindPoreCells.
+void bindPoreOracle(nb::module_& m) {
+  using namespace defaults;
   m.def(
       "_sdf_voronoi_cells_host",
-      [poreCellsDict](nb::ndarray<real_t, nb::c_contig> pos_in,
-                      nb::ndarray<real_t, nb::c_contig> sph_c,
-                      nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent) {
+      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
+         nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent) {
         auto seed = flatten3(pos_in);
         const int N = (int)(seed.size() / 3);
         const real_t L = cubicExtent(extent, "_sdf_voronoi_cells_host");
@@ -368,10 +377,9 @@ void bindPore(nb::module_& m) {
       "API.");
   m.def(
       "_sdf_voronoi_section_host",
-      [poreSectionDict](nb::ndarray<real_t, nb::c_contig> pos_in,
-                        nb::ndarray<real_t, nb::c_contig> sph_c,
-                        nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
-                        std::array<real_t, 3> point, std::array<real_t, 3> normal) {
+      [](nb::ndarray<real_t, nb::c_contig> pos_in, nb::ndarray<real_t, nb::c_contig> sph_c,
+         nb::ndarray<real_t, nb::c_contig> sph_r, std::array<real_t, 3> extent,
+         std::array<real_t, 3> point, std::array<real_t, 3> normal) {
         auto seed = flatten3(pos_in);
         const real_t L = cubicExtent(extent, "_sdf_voronoi_section_host");
         HView cenH, radH;
@@ -410,5 +418,13 @@ void bindPore(nb::module_& m) {
       nb::arg("point"), nb::arg("normal"),
       "The host-serial reconstruction of sdf_voronoi_section, kept as the TEST ORACLE of the "
       "device\npath; same result layout. Not part of the API.");
+}
+
+}  // namespace
+
+void bindPore(nb::module_& m) {
+  bindOptimizePoreMesh(m);
+  bindPoreCells(m);
+  bindPoreOracle(m);
 }
 }  // namespace peclet::voro::pybind
